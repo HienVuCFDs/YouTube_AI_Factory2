@@ -1745,7 +1745,7 @@
       <div class="storyboard-card">
         <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1}</span>${shot.status ? shotStatusTag(shot.status) : ''}</div>
         <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}<div class="storyboard-prompt">${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button></div></div>
+        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}<div class="storyboard-prompt">${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneProvider-${shot.id}" aria-label="Engine tạo cảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image">Gemini Image · ảnh</option><option value="gemini_veo">Google Veo · video</option><option value="openai_image">GPT Image · ảnh</option></select><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn small primary" type="button" onclick="generateStudioShotScene(${shot.id})">Tạo video/ảnh AI cho cảnh</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
       </div>`;
     }).join('')}</div>`;
   }
@@ -3250,46 +3250,109 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
-  async function generateShotVideo(projectId, shotId) {
-    const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
-    if (promptText.length < 3) return setMessage('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.', 'error');
-    const provider = $(`shotSceneProvider-${shotId}`)?.value || 'gemini_image';
-    const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
+  async function createSceneJob(projectId, shotId, promptText, provider, ratio) {
+    if (promptText.length < 3) throw new Error('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.');
     const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
     const usesSubscription = ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider);
+    const segment = await ensureSegmentForShot(projectId, shotId);
+    const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
+    const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return null;
+    setMessage(`Đang đưa cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
+    const response = await api(`/api/projects/${projectId}/scene-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        timeline_segment_id: segment.id, provider, prompt: promptText,
+        duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true,
+        reference_asset_id: referenceAssetId,
+      }),
+    });
+    setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
+    return response;
+  }
+
+  async function generateShotVideo(projectId, shotId) {
+    const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
+    const provider = $(`shotSceneProvider-${shotId}`)?.value || 'gemini_image';
+    const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
     try {
-      const segment = await ensureSegmentForShot(projectId, shotId);
-      const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
-      const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
-      if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
-      setMessage(`Đang đưa cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
-      const response = await api(`/api/projects/${projectId}/scene-jobs`, {
-        method: 'POST',
-        body: JSON.stringify({
-          timeline_segment_id: segment.id, provider, prompt: promptText,
-          duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true,
-          reference_asset_id: referenceAssetId,
-        }),
-      });
-      setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
       await openProjectDetail(projectId);
       if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
-  async function regenerateShotVoice(projectId, shotId) {
-    if (!confirm('Tạo lại giọng đọc riêng cho cảnh này? Sẽ ghi đè audio hiện có của cảnh (nếu có).')) return;
-    setMessage('Đang tạo lại giọng đọc cho cảnh này...');
+  async function generateStudioShotScene(shotId) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return;
+    const shot = state.shots?.find((item) => Number(item.id) === Number(shotId));
+    const promptText = (shot?.visual_prompt || '').trim();
+    const provider = $(`studioShotSceneProvider-${shotId}`)?.value || 'gemini_image';
+    const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
     try {
-      const segment = await ensureSegmentForShot(projectId, shotId);
-      const renderSettings = await api(`/api/projects/${projectId}/render-settings`);
-      const provider = renderSettings?.voice_provider || 'edge_tts';
-      await api(`/api/projects/${projectId}/jobs`, {
-        method: 'POST',
-        body: JSON.stringify({job_type: 'voiceover_segment', provider, confirmed: true, segment_id: segment.id}),
-      });
-      setMessage('Đã đưa việc tạo giọng đọc cho cảnh này vào hàng đợi.', 'success');
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+      if (response.job?.id) void watchStudioShotSceneJob(response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function watchStudioShotSceneJob(jobId) {
+    const projectId = state.studioProjectId;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      try {
+        const job = await api(`/api/scene-jobs/${jobId}`);
+        if (job.status === 'completed' || job.status === 'error') {
+          const bundle = await api(`/api/projects/${projectId}`);
+          state.shots = bundle.latest_shots || [];
+          renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+          setMessage(
+            job.status === 'completed' ? `Cảnh AI cho đoạn ${job.segment_index} đã tạo xong.` : `Tạo cảnh AI thất bại: ${job.error || 'Lỗi không xác định.'}`,
+            job.status === 'completed' ? 'success' : 'error',
+          );
+          return job;
+        }
+      } catch (error) { setMessage(`Không đọc được trạng thái tạo cảnh: ${error.message}`, 'error'); return null; }
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    setMessage('Tạo cảnh đang chạy lâu; hãy làm mới trang để kiểm tra trạng thái.', 'error');
+    return null;
+  }
+
+  async function createVoiceJob(projectId, shotId) {
+    if (!confirm('Tạo lại giọng đọc riêng cho cảnh này? Sẽ ghi đè audio hiện có của cảnh (nếu có).')) return false;
+    setMessage('Đang tạo lại giọng đọc cho cảnh này...');
+    const segment = await ensureSegmentForShot(projectId, shotId);
+    const renderSettings = await api(`/api/projects/${projectId}/render-settings`);
+    const provider = renderSettings?.voice_provider || 'edge_tts';
+    await api(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify({job_type: 'voiceover_segment', provider, confirmed: true, segment_id: segment.id}),
+    });
+    setMessage('Đã đưa việc tạo giọng đọc cho cảnh này vào hàng đợi.', 'success');
+    return true;
+  }
+
+  async function regenerateShotVoice(projectId, shotId) {
+    try {
+      const done = await createVoiceJob(projectId, shotId);
+      if (!done) return;
       await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function regenerateStudioShotVoice(shotId) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return;
+    try {
+      const done = await createVoiceJob(projectId, shotId);
+      if (!done) return;
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
