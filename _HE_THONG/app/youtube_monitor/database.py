@@ -3142,9 +3142,17 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    # Providers handled by an external pull-queue sidecar (Antigravity, Flow
-    # Veo browser sidecar, ...) instead of the in-process SceneGenerationWorker.
-    EXTERNAL_SIDECAR_PROVIDERS = ("antigravity_image", "flow_veo")
+    # Web apps driven by web_video_sidecar.py's generic Playwright automation
+    # (each site gets its own "driver" in that file, but shares the same
+    # queue/claim/complete/fail API surface — see /api/browser-scene-jobs/*).
+    # Add a new provider here (plus its Literal entry in main.py request
+    # models and its driver in web_video_sidecar.py) to support another site.
+    BROWSER_SIDECAR_PROVIDERS = ("flow_veo", "meta_ai_video")
+
+    # Providers handled by an external pull-queue sidecar (Antigravity's own
+    # built-in tool, or any BROWSER_SIDECAR_PROVIDERS) instead of the
+    # in-process SceneGenerationWorker.
+    EXTERNAL_SIDECAR_PROVIDERS = ("antigravity_image", *BROWSER_SIDECAR_PROVIDERS)
 
     def list_queued_scene_generation_job_ids(self, limit: int = 5000) -> list[int]:
         placeholders = ",".join("?" for _ in self.EXTERNAL_SIDECAR_PROVIDERS)
@@ -3158,9 +3166,6 @@ class Database:
 
     def claim_next_antigravity_scene_job(self) -> dict[str, Any] | None:
         return self.claim_next_scene_job_for_provider("antigravity_image")
-
-    def claim_next_flow_veo_scene_job(self) -> dict[str, Any] | None:
-        return self.claim_next_scene_job_for_provider("flow_veo")
 
     def claim_next_scene_job_for_provider(self, provider: str) -> dict[str, Any] | None:
         with self._connect() as connection:

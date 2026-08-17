@@ -80,6 +80,9 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             flow_job = database.create_scene_generation_job(
                 project["id"], segment["id"], "flow_veo", "A cinematic sunrise over mountains"
             )
+            meta_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "meta_ai_video", "A cinematic sunrise over mountains"
+            )
             runway_job = database.create_scene_generation_job(
                 project["id"], segment["id"], "runway", "A cinematic sunrise over mountains"
             )
@@ -89,6 +92,7 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertIn(runway_job["id"], queued_ids)
             self.assertNotIn(antigravity_job["id"], queued_ids)
             self.assertNotIn(flow_job["id"], queued_ids)
+            self.assertNotIn(meta_job["id"], queued_ids)
 
             # Each sidecar claim must only ever pick up its own provider's job.
             claimed_antigravity = database.claim_next_antigravity_scene_job()
@@ -96,18 +100,23 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertEqual(claimed_antigravity["status"], "running")
             self.assertIsNone(database.claim_next_antigravity_scene_job())  # none left
 
-            claimed_flow = database.claim_next_flow_veo_scene_job()
+            claimed_flow = database.claim_next_scene_job_for_provider("flow_veo")
             self.assertEqual(claimed_flow["id"], flow_job["id"])
             self.assertEqual(claimed_flow["status"], "running")
-            self.assertIsNone(database.claim_next_flow_veo_scene_job())  # none left
+            self.assertIsNone(database.claim_next_scene_job_for_provider("flow_veo"))  # none left
 
-    def test_flow_veo_job_completion_attaches_video_and_reports_failure(self):
+            claimed_meta = database.claim_next_scene_job_for_provider("meta_ai_video")
+            self.assertEqual(claimed_meta["id"], meta_job["id"])
+            self.assertEqual(claimed_meta["status"], "running")
+            self.assertIsNone(database.claim_next_scene_job_for_provider("meta_ai_video"))  # none left
+
+    def test_browser_provider_job_completion_attaches_video_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             database, project, segment = self._project_with_timeline(directory)
             job = database.create_scene_generation_job(
                 project["id"], segment["id"], "flow_veo", "A cinematic sunrise over mountains"
             )
-            database.claim_next_flow_veo_scene_job()
+            database.claim_next_scene_job_for_provider("flow_veo")
             completed = database.finish_scene_generation_job(
                 job["id"], "completed", output_path=str(Path(directory) / "flow-scene.mp4")
             )
@@ -118,7 +127,7 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             other_job = database.create_scene_generation_job(
                 project["id"], segment["id"], "flow_veo", "A second scene"
             )
-            database.claim_next_flow_veo_scene_job()
+            database.claim_next_scene_job_for_provider("flow_veo")
             failed = database.finish_scene_generation_job(
                 other_job["id"], "error", error="Flow timed out waiting for the clip"
             )

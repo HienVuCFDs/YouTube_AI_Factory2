@@ -515,7 +515,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -524,7 +524,7 @@ class CreateSceneGenerationRequest(BaseModel):
 
 
 class BatchSceneGenerationRequest(BaseModel):
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video"] = "gemini_image"
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
@@ -1757,25 +1757,29 @@ def fail_antigravity_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
     return {"status": "error", "job": finished}
 
 
-@app.get("/api/flow-veo/next-scene-job")
-def claim_flow_veo_scene_job() -> dict[str, Any]:
-    """Sidecar-only handoff: one queued video job becomes a Flow (Veo 3) task.
+@app.get("/api/browser-scene-jobs/next")
+def claim_browser_scene_job(provider: str) -> dict[str, Any]:
+    """Sidecar-only handoff: one queued job becomes a browser-automation task.
 
-    Mirrors /api/antigravity/next-scene-job — a local Playwright sidecar
-    (flow_veo_sidecar.py) polls this to claim work, drives labs.google/flow
-    with the caller's own logged-in subscription, then completes the job via
-    /api/flow-veo/scene-jobs/{job_id}/complete once the clip is uploaded.
+    Generic version of /api/antigravity/next-scene-job for any web-app
+    provider driven by web_video_sidecar.py (Flow/Veo 3, Meta AI Vibes, ...
+    see database.BROWSER_SIDECAR_PROVIDERS for the current allow-list). The
+    sidecar drives the site with the caller's own logged-in account/
+    subscription, then completes the job via
+    POST /api/browser-scene-jobs/{job_id}/complete once the clip is uploaded.
     """
-    job = database.claim_next_flow_veo_scene_job()
+    if provider not in database.BROWSER_SIDECAR_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider không hợp lệ: {provider}")
+    job = database.claim_next_scene_job_for_provider(provider)
     return {"job": job}
 
 
-@app.post("/api/flow-veo/scene-jobs/{job_id}/complete")
-def complete_flow_veo_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
+@app.post("/api/browser-scene-jobs/{job_id}/complete")
+def complete_browser_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
     asset = database.get_project_asset(asset_id)
-    if not job or str(job.get("provider")) != "flow_veo":
-        raise HTTPException(status_code=404, detail="Không tìm thấy job Flow Veo")
+    if not job or str(job.get("provider")) not in database.BROWSER_SIDECAR_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job trình duyệt")
     if not asset or int(asset["project_id"]) != int(job["project_id"]):
         raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
     attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
@@ -1785,11 +1789,11 @@ def complete_flow_veo_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
     return {"status": "completed", "job": finished, "asset": asset}
 
 
-@app.post("/api/flow-veo/scene-jobs/{job_id}/fail")
-def fail_flow_veo_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
+@app.post("/api/browser-scene-jobs/{job_id}/fail")
+def fail_browser_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
-    if not job or str(job.get("provider")) != "flow_veo":
-        raise HTTPException(status_code=404, detail="Không tìm thấy job Flow Veo")
+    if not job or str(job.get("provider")) not in database.BROWSER_SIDECAR_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job trình duyệt")
     finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
     return {"status": "error", "job": finished}
 
