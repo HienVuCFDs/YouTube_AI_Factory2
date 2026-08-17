@@ -195,9 +195,6 @@ CODEX_BRIDGE_HOME = Path(
 ) / "YouTubeAIFactory" / "codex_cli_profile"
 
 CLAUDE_CODE_CLI_PATH = _detect_claude_code_cli()
-CLAUDE_CODE_BRIDGE_HOME = Path(
-    os.getenv("LOCALAPPDATA", str(DATA_DIR / "local-app-data"))
-) / "YouTubeAIFactory" / "claude_code_cli_profile"
 
 ANTIGRAVITY_CLI_PATH = _detect_antigravity_cli()
 

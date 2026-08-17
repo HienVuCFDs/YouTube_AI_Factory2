@@ -14,11 +14,19 @@ class ClaudeCodeBridgeError(RuntimeError):
 
 
 def _local_claude_environment() -> dict[str, str]:
-    """Use this app's own Claude Code profile, never an inherited session."""
-    environment = os.environ.copy()
-    settings.CLAUDE_CODE_BRIDGE_HOME.mkdir(parents=True, exist_ok=True)
-    environment["CLAUDE_CONFIG_DIR"] = str(settings.CLAUDE_CODE_BRIDGE_HOME)
-    return environment
+    """Use the user's normal, already-logged-in Claude Code profile.
+
+    Unlike Codex CLI (CODEX_HOME fully redirects its profile, including
+    credentials — verified working), Claude Code CLI does not persist login
+    credentials under CLAUDE_CONFIG_DIR (verified empirically: after running
+    `claude auth login` with CLAUDE_CONFIG_DIR pointed at an isolated folder,
+    only a bare .claude.json appeared there — no .credentials.json; the real
+    credentials stayed in the default ~/.claude). So there is no working way
+    to give this bridge an isolated login the way Codex's bridge has one;
+    it just uses whatever account is already logged into Claude Code on this
+    machine, same as antigravity_bridge.py does for Antigravity.
+    """
+    return os.environ.copy()
 
 
 def claude_code_cli_status() -> dict[str, Any]:

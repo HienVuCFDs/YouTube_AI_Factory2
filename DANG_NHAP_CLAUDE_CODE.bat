@@ -2,8 +2,12 @@
 setlocal EnableExtensions
 title Dang nhap Claude Code CLI
 
-set "CLAUDE_CONFIG_DIR=%LOCALAPPDATA%\YouTubeAIFactory\claude_code_cli_profile"
-if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"
+rem Unlike Codex, Claude Code CLI does not persist login credentials under a
+rem redirected CLAUDE_CONFIG_DIR (verified: only a bare .claude.json shows up
+rem there, never .credentials.json). So this uses the SAME account/profile as
+rem your normal Claude Code CLI usage on this machine, not an isolated one.
+rem If you are already logged in for everyday Claude Code use, YT Factory is
+rem already logged in too - you likely do not need to run this at all.
 
 rem Version changes with every VS Code Claude Code extension update, so
 rem search for whatever version is currently installed instead of pinning one.
@@ -22,10 +26,13 @@ echo ==========================================
 echo       DANG NHAP CLAUDE CODE CLI
 echo ==========================================
 echo.
-echo Day la mot ho so dang nhap rieng cho YouTube AI Factory,
-echo tach biet voi Claude Code ban dang dung de sua code (neu co).
-echo Hoan tat dang nhap trong cua so/trinh duyet duoc mo ra.
-echo Sau do quay lai YouTube AI Factory va bam "Kiem tra lai".
+echo Day la CUNG mot tai khoan/ho so voi Claude Code ban dung hang ngay
+echo (khong tach rieng duoc nhu Codex). Neu da dang nhap Claude Code roi
+echo thi khong can chay file nay.
+echo.
+"%CLAUDE_EXE%" auth status
+echo.
+echo Neu o tren hien loggedIn: false, dang nhap ngay ben duoi:
 echo.
 "%CLAUDE_EXE%" auth login
 echo.

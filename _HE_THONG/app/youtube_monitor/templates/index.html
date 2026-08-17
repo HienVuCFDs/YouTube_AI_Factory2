@@ -1073,7 +1073,7 @@
       return `<div class="integration-card ${item.ready ? 'connected' : ''}">
         <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${item.ready ? 'ĐÃ ĐĂNG NHẬP' : 'CẦN ĐĂNG NHẬP'}</span></div>
         <div class="secondary-text">${esc(item.category)} · ${esc(item.detail)}</div>
-        ${item.ready ? '' : '<div class="secondary-text" style="margin-top:6px">Chạy <code>DANG_NHAP_CLAUDE_CODE.bat</code> trong thư mục gốc app một lần để đăng nhập.</div>'}
+        ${item.ready ? '' : '<div class="secondary-text" style="margin-top:6px">Dùng chung tài khoản với Claude Code bạn đang dùng hàng ngày. Nếu chưa đăng nhập, chạy <code>DANG_NHAP_CLAUDE_CODE.bat</code> trong thư mục gốc app.</div>'}
         <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadClaudeCodeStatus()">Kiểm tra lại</button></div>
       </div>`;
     }
