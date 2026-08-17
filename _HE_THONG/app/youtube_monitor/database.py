@@ -3258,15 +3258,24 @@ class Database:
         return self.get_scene_generation_job(job_id)
 
     def retry_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
-        """Requeue a failed/cancelled scene-generation job for another attempt."""
+        """Requeue a failed/cancelled scene-generation job for another attempt.
+
+        Also allows retrying a job stuck in 'running' when it belongs to an
+        external-sidecar provider (Antigravity/Flow/Meta AI): those never run
+        a thread in this process, so requeueing here can't race an in-process
+        worker — only the external CLI/browser session, which self-reports
+        via /complete or /fail and simply targets a job id that has already
+        moved on if it calls in late for a stale claim.
+        """
+        placeholders = ",".join("?" for _ in self.EXTERNAL_SIDECAR_PROVIDERS)
         with self._connect() as connection:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE scene_generation_jobs
                 SET status = 'queued', started_at = NULL, completed_at = NULL, updated_at = ?, error = ''
-                WHERE id = ? AND status IN ('error', 'cancelled')
+                WHERE id = ? AND (status IN ('error', 'cancelled') OR (status = 'running' AND provider IN ({placeholders})))
                 """,
-                (utc_now(), job_id),
+                (utc_now(), job_id, *self.EXTERNAL_SIDECAR_PROVIDERS),
             )
             if cursor.rowcount != 1:
                 return None

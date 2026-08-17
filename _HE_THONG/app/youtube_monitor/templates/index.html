@@ -2745,6 +2745,7 @@
       const sceneJobActions = sceneJob
         ? (sceneJob.status === 'queued' ? `<button class="btn small ghost" type="button" onclick="cancelSceneJob(${project.id}, ${sceneJob.id})">Hủy</button>`
           : ['error', 'cancelled'].includes(sceneJob.status) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Chạy lại</button>`
+          : (sceneJob.status === 'running' && ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(sceneJob.provider)) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Kẹt lâu? Chạy lại</button>`
           : '')
         : '';
       const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''} ${sceneJobActions}` : 'Chưa tạo ảnh AI cho đoạn này.';
