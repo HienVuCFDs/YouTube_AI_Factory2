@@ -242,9 +242,23 @@ def _run_voxcpm_batch(
     for item in requests:
         payload = dict(item)
         if reference:
+            # `reference_audio` alone selects VoxCPM's isolated voice-cloning
+            # mode (timbre only, no transcript needed) — the right mode here,
+            # since this app only has a free-text style description, not an
+            # accurate transcript of the sample clip.
+            #
+            # VoxCPM's `prompt_text` parameter is NOT a style description: per
+            # the model's own docs it must be the exact transcript of the
+            # reference audio, used to align audio features with language-
+            # model tokens. Sending our style text there previously broke
+            # that alignment and produced garbled/wrong-language speech
+            # (reported: Vietnamese input, Thai-sounding output). The style
+            # text instead goes through voxcpm_runner.py's `style` field,
+            # which is prepended to the narration as "(style) text" — a
+            # generation hint, not an audio/text alignment.
             payload["reference_audio"] = str(reference)
             if prompt_text.strip():
-                payload["prompt_text"] = prompt_text.strip()
+                payload["style"] = prompt_text.strip()
         manifest_requests.append(payload)
     manifest_path = cwd / "voxcpm-manifest.json"
     manifest_path.write_text(

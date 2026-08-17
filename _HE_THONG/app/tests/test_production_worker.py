@@ -3,9 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import json
+
 from youtube_monitor.database import Database
 from youtube_monitor.ffmpeg_renderer import ffmpeg_available
-from youtube_monitor.production_worker import ProductionJobError, ProductionWorker, run_director_production_job
+from youtube_monitor.production_worker import ProductionJobError, ProductionWorker, _run_voxcpm_batch, run_director_production_job
 
 
 class ProductionWorkerTests(unittest.TestCase):
@@ -76,6 +78,47 @@ class ProductionWorkerTests(unittest.TestCase):
             finished_premiere = database.get_project_job(premiere_job["id"])
             self.assertEqual(finished_premiere["status"], "completed")
             self.assertTrue(Path(finished_premiere["output_path"]).is_file())
+
+    def test_voxcpm_batch_sends_reference_style_not_prompt_text(self):
+        """Regression test: VoxCPM's `prompt_text` must be an exact transcript
+        of the reference clip (per the model's own docs) — sending our
+        free-text voice *description* there broke audio/text alignment and
+        produced wrong-language speech. It belongs in `style` instead, which
+        voxcpm_runner.py prepends to the narration as "(style) text"."""
+        with tempfile.TemporaryDirectory() as directory:
+            work_dir = Path(directory) / "work"
+            work_dir.mkdir()
+            reference = Path(directory) / "reference.wav"
+            reference.write_bytes(b"fake-wav-bytes")
+
+            captured = {}
+
+            def fake_prepare(ref, cwd, python_executable):
+                return ref
+
+            def fake_run(command, **kwargs):
+                manifest_path = Path(command[command.index("--manifest") + 1])
+                captured["manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+                class Result:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return Result()
+
+            with patch("youtube_monitor.production_worker._prepare_voxcpm_reference_audio", side_effect=fake_prepare), \
+                 patch("youtube_monitor.production_worker.subprocess.run", side_effect=fake_run):
+                _run_voxcpm_batch(
+                    "python.exe", "runner.py", "openbmb/VoxCPM2", "cuda",
+                    [{"text": "Xin chao", "output": str(work_dir / "out.wav")}],
+                    work_dir,
+                    reference_audio=str(reference),
+                    prompt_text="Giọng kể chuyện tiếng Việt tự nhiên, dùng mẫu Giọng mẫu 2.",
+                )
+
+            request = captured["manifest"][0]
+            self.assertEqual(request["style"], "Giọng kể chuyện tiếng Việt tự nhiên, dùng mẫu Giọng mẫu 2.")
+            self.assertNotIn("prompt_text", request)
+            self.assertEqual(request["reference_audio"], str(reference))
 
     def test_real_provider_requires_command(self):
         with tempfile.TemporaryDirectory() as directory:
