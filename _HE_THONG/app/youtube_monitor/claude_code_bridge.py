@@ -51,7 +51,7 @@ def claude_code_cli_status() -> dict[str, Any]:
             check=False,
             env=_local_claude_environment(),
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return {
             "installed": False,
             "logged_in": False,
@@ -60,16 +60,24 @@ def claude_code_cli_status() -> dict[str, Any]:
         }
     logged_in = False
     subscription = ""
+    parse_error = ""
+    # Slice out just the {...} block rather than assuming the whole stdout is
+    # pure JSON — some environments print an extra update-check/banner line
+    # before or after the JSON that a strict json.loads() would choke on.
+    stdout = result.stdout or ""
+    start, end = stdout.find("{"), stdout.rfind("}")
     try:
-        payload = json.loads(result.stdout.strip())
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("khong thay khoi JSON trong output")
+        payload = json.loads(stdout[start:end + 1])
         logged_in = bool(payload.get("loggedIn"))
         subscription = str(payload.get("subscriptionType") or "")
-    except (json.JSONDecodeError, AttributeError):
-        pass
+    except (json.JSONDecodeError, ValueError, AttributeError) as exc:
+        parse_error = f" (rc={result.returncode}, loi doc output: {exc}; stdout={stdout[:200]!r}; stderr={(result.stderr or '')[:200]!r})"
     detail = (
         f"Claude Code CLI da dang nhap (goi {subscription})" if logged_in and subscription
         else "Claude Code CLI da dang nhap" if logged_in
-        else "Claude Code CLI chua dang nhap"
+        else f"Claude Code CLI chua dang nhap{parse_error}"
     )
     return {"installed": True, "logged_in": logged_in, "path": executable, "detail": detail}
 
