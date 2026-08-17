@@ -978,4 +978,24 @@ Người dùng đã trả phí **Google AI Pro/Ultra** (không phải trả theo
 
 Đã kiểm thử: `pytest` 108/108 pass (thêm 5 test: claim/complete/fail cho cả 2 provider, cô lập khỏi worker queue); khởi động app thật bằng uvicorn, gọi trực tiếp 3 route mới — đều đúng như kỳ vọng (`{"job": null}` khi hàng đợi rỗng, 404 cho job không tồn tại).
 
-**Chưa làm, cần người dùng tự thực hiện tiếp**: chạy `python flow_veo_sidecar.py --login` để đăng nhập Google 1 lần, sau đó `--recon` để xác minh/sửa selector thật của Flow (ô nhập prompt, nút Generate, nút Download) trước khi chạy vòng lặp thật lần đầu.
+**Chưa làm, cần người dùng tự thực hiện tiếp**: chạy `python web_video_sidecar.py --provider flow_veo --login` để đăng nhập Google 1 lần, sau đó `--recon` để xác minh/sửa selector thật của Flow trước khi chạy vòng lặp thật lần đầu.
+
+## 42. Tổng quát hoá thành nhiều web app: thêm Meta AI (Vibes) (2026-08-17)
+
+Người dùng cần thêm web app khác ngoài Flow — Google hết quota thì cần chỗ dự phòng — và có nêu cụ thể "meta ai" và "gpt". Đã tra cứu trước khi làm:
+
+- **Meta AI (Vibes)**: tạo video **miễn phí hoàn toàn**, không cần gói trả phí, chỉ cần đăng nhập Facebook/Instagram, qua `meta.ai` (tối đa 16s/1080p/16fps). Đã thêm làm provider `meta_ai_video`.
+- **GPT/Sora**: đã loại — OpenAI đóng cửa app/web Sora tiêu dùng từ 26/4/2026, API cũng sunset 24/9/2026, ChatGPT Plus/Pro hiện không còn đường nào tạo video được nữa. Không có gì để tự động hoá.
+
+Thay vì lặp lại nguyên bộ route + sidecar riêng cho từng web app mới (sẽ tái diễn đúng vấn đề monolith đã sửa ở mục 39), đã tổng quát hoá ngay lần thêm provider thứ 2 này:
+
+- `database.py`: `BROWSER_SIDECAR_PROVIDERS = ("flow_veo", "meta_ai_video")` — nơi duy nhất cần khai báo provider mới; `EXTERNAL_SIDECAR_PROVIDERS` suy ra từ đây + `antigravity_image`. Bỏ hàm chuyên biệt `claim_next_flow_veo_scene_job()`, dùng thẳng `claim_next_scene_job_for_provider()` (đã tổng quát sẵn từ mục 41).
+- `main.py`: thay 3 route `/api/flow-veo/*` bằng 3 route tổng quát `GET /api/browser-scene-jobs/next?provider=X`, `POST .../complete`, `POST .../fail` — validate theo `BROWSER_SIDECAR_PROVIDERS`. Thêm web app mới sau này chỉ cần thêm 1 giá trị Literal + 1 entry trong sidecar, không cần route mới. `/api/antigravity/*` giữ nguyên không đổi (Antigravity gọi tool built-in riêng, không phải browser, là tích hợp đã có tài liệu riêng).
+- `flow_veo_sidecar.py` → đổi tên/tổng quát thành `web_video_sidecar.py`: 1 script, `--provider flow_veo|meta_ai_video`, mỗi provider có `PROVIDERS` config riêng (URL + selector best-effort) và thư mục profile đăng nhập riêng (chạy song song 2 process nếu muốn dùng cả 2 web app cùng lúc, không đụng session nhau).
+- `templates/index.html`: thêm "Meta AI (Vibes)" vào cả 4 dropdown chọn provider; thay chuỗi `isAntigravity`/`isFlowVeo`/... đang phình dần bằng 1 bảng tra `SUBSCRIPTION_PROVIDER_HINTS`/`_SHORT` theo key provider — thêm provider thứ 4 sau này chỉ sửa 1 dòng thay vì mọi ternary chain.
+
+Cùng lưu ý minh bạch như Flow: selector chưa xác minh (không có tài khoản Meta đã đăng nhập để kiểm tra DOM thật), và tự động hoá web app tiêu dùng có rủi ro ToS người dùng tự chịu trên tài khoản của mình.
+
+Đã kiểm thử: `pytest` 109/109 pass; khởi động app thật, gọi `/api/browser-scene-jobs/next` cho cả 2 provider (đều `{"job": null}`), provider không hợp lệ trả 400, job không tồn tại trả 404.
+
+**Chưa làm, cần người dùng tự thực hiện tiếp**: `python web_video_sidecar.py --provider meta_ai_video --login` rồi `--recon` để xác minh/sửa selector thật của Meta AI, tương tự bước đã cần làm cho Flow.
