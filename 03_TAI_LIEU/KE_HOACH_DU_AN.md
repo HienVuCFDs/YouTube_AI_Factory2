@@ -950,3 +950,14 @@ Nguyên tắc an toàn: **không đổi bất kỳ route nào còn lại trong `
 Đã kiểm thử: `pytest` toàn bộ 103 test pass; **và khởi động app thật bằng `uvicorn` trên cổng phụ (8799, DB/project tách riêng khỏi dữ liệu thật)**, gọi thật `/`, `/api/health`, `/api/tool-status`, `/api/integrations`, `/api/oauth/youtube/status`, `/api/model-catalog`, `/api/summary` — toàn bộ trả 200 với dữ liệu đúng (bao gồm xác nhận lại `pyvideotrans_runtime_ready`/`voxcpm_runtime_ready` đều `true` qua route thật, khớp với điều tra mục 37).
 
 **Chưa làm, để lại cho phiên sau:** phần lớn route còn lại (~2.200 dòng: projects/scripts/shots/timeline/assets/thumbnails/scene-jobs/publish — pipeline sản xuất chính) chưa tách, vì đây là phần ghép chặt nhất và rủi ro cao nhất nếu tách vội. Gợi ý ranh giới cho lần sau: `routes_channels_videos.py` (channels/managed-channels/videos), `routes_projects.py` (script/shots/timeline/render-settings), `routes_assets.py` (assets/thumbnails/voice-library/scene-jobs), `routes_jobs_publish.py` (production jobs/publications/premiere export).
+
+## 40. Quyết định: không thêm Alembic cho migration DB (2026-08-17)
+
+Đề xuất ban đầu là cân nhắc công cụ migration có version tracking (Alembic) thay cho cách hiện tại (`Database.initialize()`: `CREATE TABLE IF NOT EXISTS` + helper `_ensure_column()` tự ALTER thêm cột thiếu, không bảng version, không rollback). Sau khi đọc kỹ `database.py`, quyết định **không thêm Alembic**:
+
+- `_ensure_column()` (dòng 546-549) chỉ làm đúng 1 việc, an toàn: đọc `PRAGMA table_info()`, chỉ `ADD COLUMN` khi cột chưa tồn tại — idempotent, đã dùng ổn định qua nhiều lần thêm cột thật trong lịch sử dự án (mục 14/16/19/25/26 ở trên), có test (`test_database.py`).
+- Toàn bộ thay đổi schema từ trước đến nay chỉ là **thêm cột/bảng**, chưa từng cần đổi kiểu dữ liệu, xoá cột, hay rollback — đúng loại thay đổi mà cách làm hiện tại xử lý tốt.
+- App chạy 1 máy, 1 người dùng, 1 file SQLite — không có nhiều môi trường (dev/staging/prod) cần đồng bộ version migration, vốn là lý do chính để dùng Alembic.
+- Tài liệu kế hoạch đã tự ghi "có thể thay SQLite bằng PostgreSQL về sau" là **chưa lên lịch** — thêm Alembic bây giờ là chuẩn bị cho một thay đổi kiến trúc chưa được quyết định, thêm phụ thuộc/độ phức tạp không tương xứng với lợi ích hiện tại.
+
+Rủi ro thật sự đã xác định (ALTER TABLE sai kiểu/xoá cột sẽ không rollback được) vẫn còn, nhưng mức độ thấp vì lịch sử thay đổi chỉ additive. Đã có sẵn `backup_to()` + nút "Sao lưu DB" trong Cài đặt làm lưới an toàn thủ công trước khi thử thay đổi schema rủi ro hơn — khuyến nghị: **bấm sao lưu DB thủ công trước khi merge bất kỳ thay đổi `database.py` nào không phải "thêm cột mới"**, thay vì đầu tư hạ tầng Alembic cho một nhu cầu chưa phát sinh.
