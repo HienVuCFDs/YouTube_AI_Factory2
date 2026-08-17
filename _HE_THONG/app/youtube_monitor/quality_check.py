@@ -211,15 +211,15 @@ def build_quality_report(
     if final_exists and not no_clipping:
         issues.append("Audio final có nguy cơ clipping hoặc không đo được true peak")
     if not final_exists:
-        issues.append("ChÆ°a cÃ³ final.mp4 Ä‘á»ƒ kiá»ƒm tra")
+        issues.append("Chưa có final.mp4 để kiểm tra")
     if not checks["has_thumbnail"]:
         issues.append("Chưa chọn thumbnail hợp lệ cho project")
     if final_exists and not technical_video:
         issues.append("Video cuối không đạt chuẩn MP4/HD/20–60 FPS/có audio")
     if not timestamped_subtitles:
-        issues.append("ChÆ°a cÃ³ SRT timestamp riÃªng cho tá»«ng segment")
+        issues.append("Chưa có SRT timestamp riêng cho từng segment")
     if final_exists and not checks["gpu_encoded"]:
-        issues.append("Final video khÃ´ng ghi nháº­n encoder NVENC")
+        issues.append("Final video không ghi nhận encoder NVENC")
     return {
         "status": "pass" if all(checks.values()) else "warning",
         "checks": checks,

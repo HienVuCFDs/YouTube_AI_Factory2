@@ -76,6 +76,15 @@ class TranscriptQueue:
             "force": force,
         }
 
+    def cancel_queued(self, job_id: int) -> dict[str, Any] | None:
+        return self.database.cancel_queued_analysis_job(job_id)
+
+    def retry(self, job_id: int) -> dict[str, Any] | None:
+        job = self.database.retry_analysis_job(job_id)
+        if job:
+            self._jobs.put(job_id)
+        return job
+
     def set_paused(self, paused: bool) -> dict[str, Any]:
         with self._lock:
             self._paused = paused

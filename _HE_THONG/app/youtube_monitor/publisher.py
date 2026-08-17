@@ -127,7 +127,7 @@ class YouTubePublisher:
     def upload_video(self, publication: dict[str, Any]) -> dict[str, Any]:
         path = Path(str(publication.get("local_file_path") or "")).expanduser()
         if not path.is_file():
-            raise PublisherError(f"KhÃ´ng tÃ¬m tháº¥y file video Ä‘á»ƒ upload: {path}")
+            raise PublisherError(f"Không tìm thấy file video để upload: {path}")
         try:
             token = get_access_token()
         except OAuthError as exc:
@@ -164,10 +164,10 @@ class YouTubePublisher:
                     json=payload,
                 )
                 if start.status_code >= 400:
-                    raise PublisherError(f"YouTube khÃ´ng táº¡o upload session: {start.status_code} {start.text[-1000:]}")
+                    raise PublisherError(f"YouTube không tạo upload session: {start.status_code} {start.text[-1000:]}")
                 upload_url = start.headers.get("location")
                 if not upload_url:
-                    raise PublisherError("YouTube khÃ´ng tráº£ upload session URL")
+                    raise PublisherError("YouTube không trả upload session URL")
                 with path.open("rb") as stream:
                     upload = client.put(
                         upload_url,
@@ -190,7 +190,7 @@ class YouTubePublisher:
                     result["thumbnail_uploaded"] = True
                 return result
         except httpx.HTTPError as exc:
-            raise PublisherError(f"KhÃ´ng káº¿t ná»‘i Ä‘Æ°á»£c YouTube Publisher: {exc}") from exc
+            raise PublisherError(f"Không kết nối được YouTube Publisher: {exc}") from exc
 
 
 class PublisherWorker:
@@ -235,7 +235,7 @@ class PublisherWorker:
                 result = self.publisher.upload_video(claimed)
                 video_id = str(result.get("id") or "")
                 if not video_id:
-                    raise PublisherError("YouTube upload khÃ´ng tráº£ video ID")
+                    raise PublisherError("YouTube upload không trả video ID")
                 self.database.finish_project_publication(
                     int(claimed["id"]), "completed", youtube_video_id=video_id,
                 )

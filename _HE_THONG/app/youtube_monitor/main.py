@@ -1088,7 +1088,7 @@ def duplicate_project_shot(shot_id: int) -> dict[str, Any]:
 def reorder_shots(project_id: int, payload: ReorderShotsRequest) -> dict[str, Any]:
     project = database.get_production_project(project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     script = database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để sắp xếp cảnh")
@@ -1106,7 +1106,7 @@ def delete_shot(shot_id: int) -> dict[str, Any]:
     if not shot:
         raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
     if not database.delete_project_shot(shot_id):
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y cáº£nh")
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
     project = database.get_production_project(int(shot["project_id"]))
     script = database.get_project_script(int(shot["script_id"]))
     if project and script:
@@ -1815,7 +1815,7 @@ def stream_timeline_visual_preview(project_id: int, segment_id: int) -> FileResp
 def stream_timeline_audio_preview(project_id: int, segment_id: int) -> FileResponse:
     segment = database.get_project_timeline_segment(segment_id)
     if not segment or int(segment["project_id"]) != project_id:
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y giọng đọc trong dá»± Ã¡n")
+        raise HTTPException(status_code=404, detail="Không tìm thấy giọng đọc trong dự án")
     path = Path(str(segment.get("audio_path") or ""))
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Cảnh này chưa có file giọng đọc để nghe")
@@ -1918,8 +1918,39 @@ def select_voxcpm_voice_preview(project_id: int, key: str) -> dict[str, Any]:
 def get_scene_generation_job(job_id: int) -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y job táº¡o cáº£nh")
+        raise HTTPException(status_code=404, detail="Không tìm thấy job tạo cảnh")
     return job
+
+
+@app.post("/api/scene-jobs/{job_id}/cancel")
+def cancel_scene_job(job_id: int) -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job tạo cảnh")
+    if job["status"] != "queued":
+        raise HTTPException(
+            status_code=409,
+            detail="Chỉ có thể hủy job đang chờ; job đang chạy sẽ hoàn tất an toàn.",
+        )
+    return {"job": scene_generation_worker.cancel_queued(job_id)}
+
+
+@app.post("/api/scene-jobs/{job_id}/retry")
+def retry_scene_job(job_id: int) -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job tạo cảnh")
+    if job["status"] not in {"error", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Chỉ có thể chạy lại job lỗi hoặc đã hủy")
+    provider = str(job.get("provider") or "")
+    if provider in database.EXTERNAL_SIDECAR_PROVIDERS:
+        # Not consumed by scene_generation_worker's in-process queue — the
+        # external sidecar (antigravity/web_video_sidecar.py) picks queued
+        # jobs up by polling, so resetting the DB row is enough.
+        retried = database.retry_scene_generation_job(job_id)
+    else:
+        retried = scene_generation_worker.retry(job_id)
+    return {"job": retried}
 
 
 @app.get("/api/scene-generation-queue")
@@ -2065,16 +2096,16 @@ def queue_project_publication(
     payload: CreatePublicationRequest,
 ) -> dict[str, Any]:
     if not payload.confirmed:
-        raise HTTPException(status_code=400, detail="Publish cáº§n confirmed=true sau khi ngÆ°á»i dÃ¹ng Ä‘Ã£ duyá»‡t video")
+        raise HTTPException(status_code=400, detail="Publish cần confirmed=true sau khi người dùng đã duyệt video")
     project = database.get_production_project(project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     script = database.get_latest_project_script(project_id)
     if not script or script.get("status") != "approved":
-        raise HTTPException(status_code=400, detail="KÃ­ch báº£n chÆ°a Ä‘Æ°á»£c duyá»‡t; hÃ£y duyá»‡t trÆ°á»›c khi Ä‘Æ°a vÃ o Publisher")
+        raise HTTPException(status_code=400, detail="Kích bản chưa được duyệt; hãy duyệt trước khi đưa vào Publisher")
     final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
     if not final_path.is_file():
-        raise HTTPException(status_code=400, detail="Project chÆ°a cÃ³ final.mp4; hÃ£y render vÃ  Quality Check trÆ°á»›c")
+        raise HTTPException(status_code=400, detail="Project chưa có final.mp4; hãy render và Quality Check trước")
 
     selected_thumbnail = next(
         (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
@@ -2084,14 +2115,14 @@ def queue_project_publication(
     if payload.thumbnail_asset_id:
         thumbnail_asset = database.get_project_asset(int(payload.thumbnail_asset_id))
         if not thumbnail_asset or int(thumbnail_asset.get("project_id") or 0) != project_id:
-            raise HTTPException(status_code=400, detail="Thumbnail asset khÃ´ng thuá»™c project nÃ y")
+            raise HTTPException(status_code=400, detail="Thumbnail asset không thuộc project này")
         if thumbnail_asset.get("asset_type") != "image":
-            raise HTTPException(status_code=400, detail="Asset thumbnail pháº£i lÃ  file áº£nh")
+            raise HTTPException(status_code=400, detail="Asset thumbnail phải là file ảnh")
         thumbnail_file = Path(str(thumbnail_asset.get("file_path") or "")).expanduser()
         if not thumbnail_file.is_file():
-            raise HTTPException(status_code=400, detail="KhÃ´ng tÃ¬m tháº¥y file thumbnail trÃªn mÃ¡y")
+            raise HTTPException(status_code=400, detail="Không tìm thấy file thumbnail trên máy")
         if thumbnail_file.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
-            raise HTTPException(status_code=400, detail="Thumbnail YouTube pháº£i lÃ  JPG hoáº·c PNG")
+            raise HTTPException(status_code=400, detail="Thumbnail YouTube phải là JPG hoặc PNG")
         thumbnail_path = str(thumbnail_file)
 
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
@@ -2106,7 +2137,7 @@ def queue_project_publication(
     managed_id = payload.managed_channel_id or project.get("managed_channel_id")
     channel = database.get_managed_channel(int(managed_id)) if managed_id else None
     if managed_id and not channel:
-        raise HTTPException(status_code=400, detail="KhÃ´ng tÃ¬m tháº¥y kÃªnh cá»§a tÃ´i")
+        raise HTTPException(status_code=400, detail="Không tìm thấy kênh của tôi")
     privacy = payload.privacy_status or str((channel or {}).get("default_privacy") or "private")
     scheduled_at = payload.scheduled_at.strip() if payload.scheduled_at else ""
     if scheduled_at:
@@ -2116,7 +2147,7 @@ def queue_project_publication(
                 parsed = parsed.replace(tzinfo=timezone.utc)
             scheduled_at = parsed.astimezone(timezone.utc).isoformat()
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="scheduled_at pháº£i lÃ  ISO datetime há»£p lá»‡") from exc
+            raise HTTPException(status_code=400, detail="scheduled_at phải là ISO datetime hợp lệ") from exc
     elif channel and channel.get("schedule_enabled"):
         scheduled_at = next_channel_schedule(channel) or ""
     if not scheduled_at:
@@ -2145,10 +2176,21 @@ def queue_project_publication(
 def cancel_publication(publication_id: int) -> dict[str, Any]:
     publication = database.get_project_publication(publication_id)
     if not publication:
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y publication")
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
     if publication.get("status") != "queued":
-        raise HTTPException(status_code=400, detail="Chá»‰ cÃ³ thá»ƒ há»§y publication Ä‘ang xáº¿p hÃ ng")
+        raise HTTPException(status_code=400, detail="Chỉ có thể hủy publication đang xếp hàng")
     return {"status": "cancelled", "publication": database.finish_project_publication(publication_id, "cancelled")}
+
+
+@app.post("/api/publications/{publication_id}/retry")
+def retry_publication(publication_id: int) -> dict[str, Any]:
+    publication = database.get_project_publication(publication_id)
+    if not publication:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    if publication.get("status") not in {"error", "cancelled"}:
+        raise HTTPException(status_code=400, detail="Chỉ có thể chạy lại publication lỗi hoặc đã hủy")
+    retried = database.retry_project_publication(publication_id)
+    return {"status": "queued", "publication": retried, "publisher": publisher_worker.status()}
 
 
 @app.get("/api/projects/{project_id}/quality-check")
@@ -2744,6 +2786,32 @@ def list_analysis_providers() -> list[dict[str, Any]]:
 @app.get("/api/analysis-jobs")
 def list_analysis_jobs(limit: int = Query(default=30, ge=1, le=100)) -> list[dict[str, Any]]:
     return database.list_analysis_jobs(limit)
+
+
+@app.post("/api/analysis-jobs/{job_id}/cancel")
+def cancel_analysis_job(job_id: int) -> dict[str, Any]:
+    """Covers both metadata analysis and Whisper transcript jobs (shared analysis_jobs table)."""
+    job = database.get_analysis_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job")
+    if job["status"] != "queued":
+        raise HTTPException(
+            status_code=409,
+            detail="Chỉ có thể hủy job đang chờ; job đang chạy sẽ hoàn tất an toàn.",
+        )
+    queue = transcript_queue if job.get("analysis_type") == "transcript" else metadata_queue
+    return {"job": queue.cancel_queued(job_id)}
+
+
+@app.post("/api/analysis-jobs/{job_id}/retry")
+def retry_analysis_job(job_id: int) -> dict[str, Any]:
+    job = database.get_analysis_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job")
+    if job["status"] not in {"error", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Chỉ có thể chạy lại job lỗi hoặc đã hủy")
+    queue = transcript_queue if job.get("analysis_type") == "transcript" else metadata_queue
+    return {"job": queue.retry(job_id)}
 
 
 @app.get("/api/analysis-queue")

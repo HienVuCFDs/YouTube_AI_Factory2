@@ -455,8 +455,8 @@ def run_voiceover_job(
             if last_error:
                 if "NoAudioReceived" in str(last_error) or "No audio was received" in str(last_error):
                     raise ProductionJobError(
-                        "Edge TTS khÃ´ng tráº£ audio tá»« dá»‹ch vá»¥c Edge trÃªn máº¡ng hiá»‡n táº¡i, "
-                        "khá»‘ng pháº£i lá»—i ká»‹ch báº£n. HÃ£y chá»n VoxCPM2 local GPU á»Ÿ bÆ°á»›c Giá»ng Ä‘á»c rá»“i thá»­ láº¡i."
+                        "Edge TTS không trả audio từ dịch vục Edge trên mạng hiện tại, "
+                        "không phải lỗi kịch bản. Hãy chọn VoxCPM2 local GPU ở bước Giọng đọc rồi thử lại."
                     ) from last_error
                 raise last_error
         elif provider in {"pyvideotrans", "py_video_trans"}:
@@ -773,7 +773,7 @@ def run_premiere_draft_job(
         project, script, timeline = _context(database, job)
     else:
         if provider not in {"pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"}:
-            raise ProductionJobError(f"Premiere draft provider khÃ´ng Ä‘Æ°á»£c há»— trá»£: {job['provider']}")
+            raise ProductionJobError(f"Premiere draft provider không được hỗ trợ: {job['provider']}")
         run_voiceover_job(
             database,
             job,

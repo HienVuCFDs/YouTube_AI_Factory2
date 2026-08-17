@@ -1745,10 +1745,10 @@ class Database:
             rows = connection.execute(query, params).fetchall()
             existing_ids = [int(row["id"]) for row in rows]
             if not requested or set(requested) != set(existing_ids) or len(requested) != len(existing_ids):
-                raise ValueError("Danh sÃ¡ch shot reorder khÃ´ng Ä‘á»§ hoáº·c khÃ´ng thuá»™c project")
+                raise ValueError("Danh sách shot reorder không đủ hoặc không thuộc project")
             script_ids = {int(row["script_id"]) for row in rows}
             if len(script_ids) != 1:
-                raise ValueError("Chá»‰ reorder shot trong cÃ¹ng má»™t phiÃªn báº£n kÃ­ch báº£n")
+                raise ValueError("Chỉ reorder shot trong cùng một phiên bản kích bản")
             selected_script_id = next(iter(script_ids))
             now = utc_now()
             # Move to temporary negative indexes first so UNIQUE(script_id,
@@ -2180,7 +2180,7 @@ class Database:
         if not self.get_production_project(project_id):
             return None
         if managed_channel_id is not None and not self.get_managed_channel(int(managed_channel_id)):
-            raise ValueError("KhÃ´ng tÃ¬m tháº¥y kÃªnh xuáº¥t báº£n Ä‘Ã£ chá»n")
+            raise ValueError("Không tìm thấy kênh xuất bản đã chọn")
         privacy = self._validate_privacy(privacy_status)
         now = utc_now()
         with self._connect() as connection:
@@ -2267,6 +2267,21 @@ class Database:
             result.append(item)
         return result
 
+    def retry_project_publication(self, publication_id: int) -> dict[str, Any] | None:
+        """Requeue a failed/cancelled publication for immediate re-upload."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE project_publications
+                SET status = 'queued', scheduled_at = NULL, error = '', updated_at = ?
+                WHERE id = ? AND status IN ('error', 'cancelled')
+                """,
+                (utc_now(), publication_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_project_publication(publication_id)
+
     def claim_project_publication(self, publication_id: int) -> dict[str, Any] | None:
         now = utc_now()
         with self._connect() as connection:
@@ -2290,7 +2305,7 @@ class Database:
         error: str = "",
     ) -> dict[str, Any] | None:
         if status not in {"completed", "error", "cancelled"}:
-            raise ValueError("Tráº¡ng thÃ¡i publication khÃ´ng há»£p lá»‡")
+            raise ValueError("Trạng thái publication không hợp lệ")
         now = utc_now()
         with self._connect() as connection:
             connection.execute(
@@ -2516,9 +2531,9 @@ class Database:
                 or int(reference_asset["project_id"]) != int(project_id)
                 or reference_asset["asset_type"] != "audio"
             ):
-                raise ValueError("File giÃ³ng máº«u pháº£i lÃ  asset audio thuá»™c cÃ¹ng project")
+                raise ValueError("File gióng mẫu phải là asset audio thuộc cùng project")
             if not Path(str(reference_asset.get("file_path") or "")).is_file():
-                raise ValueError("KhÃ´ng tÃ¬m tháº¥y file giÃ³ng máº«u trÃªn mÃ¡y")
+                raise ValueError("Không tìm thấy file gióng mẫu trên máy")
         prompt = voice_prompt_text.strip()
         if not model:
             raise ValueError("Hãy chọn model lồng tiếng")
@@ -3026,6 +3041,42 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_analysis_job(self, job_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM analysis_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def cancel_queued_analysis_job(self, job_id: int) -> dict[str, Any] | None:
+        """Cancel a metadata/transcript job which has not been claimed by the worker yet."""
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE analysis_jobs
+                SET status = 'cancelled', finished_at = ?, error = 'Đã hủy bởi người dùng.'
+                WHERE id = ? AND status = 'queued'
+                """,
+                (now, job_id),
+            )
+        return self.get_analysis_job(job_id)
+
+    def retry_analysis_job(self, job_id: int) -> dict[str, Any] | None:
+        """Requeue a failed/cancelled metadata or transcript job for another attempt."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE analysis_jobs
+                SET status = 'queued', started_at = NULL, finished_at = NULL, error = NULL
+                WHERE id = ? AND status IN ('error', 'cancelled')
+                """,
+                (job_id,),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_analysis_job(job_id)
+
     def start_sync_run(self, channel_id: str, trigger: str) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -3189,6 +3240,35 @@ class Database:
                 return None
         return self.get_scene_generation_job(job_id)
 
+    def cancel_queued_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
+        """Cancel a scene-generation job which has not been claimed by a worker yet."""
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET status = 'cancelled', updated_at = ?, completed_at = ?, error = 'Đã hủy bởi người dùng.'
+                WHERE id = ? AND status = 'queued'
+                """,
+                (now, now, job_id),
+            )
+        return self.get_scene_generation_job(job_id)
+
+    def retry_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
+        """Requeue a failed/cancelled scene-generation job for another attempt."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET status = 'queued', started_at = NULL, completed_at = NULL, updated_at = ?, error = ''
+                WHERE id = ? AND status IN ('error', 'cancelled')
+                """,
+                (utc_now(), job_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_scene_generation_job(job_id)
+
     def update_scene_generation_task(self, job_id: int, task_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -3259,6 +3339,7 @@ class Database:
             "running": counts.get("running", 0),
             "completed": counts.get("completed", 0),
             "error": counts.get("error", 0),
+            "cancelled": counts.get("cancelled", 0),
         }
 
     def summary(self) -> dict[str, int]:
