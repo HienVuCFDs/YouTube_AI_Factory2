@@ -96,6 +96,19 @@ class MainApiTests(unittest.TestCase):
             response.json()["detail"], "Cần xác nhận trước khi dọn bản sao lưu cũ"
         )
 
+    def test_flow_veo_next_job_is_null_on_an_empty_queue(self) -> None:
+        response = self.client.get("/api/flow-veo/next-scene-job")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["job"])
+
+    def test_flow_veo_complete_404s_for_an_unknown_job(self) -> None:
+        response = self.client.post("/api/flow-veo/scene-jobs/999999/complete?asset_id=1")
+        self.assertEqual(response.status_code, 404)
+
+    def test_flow_veo_fail_404s_for_an_unknown_job(self) -> None:
+        response = self.client.post("/api/flow-veo/scene-jobs/999999/fail?error=boom")
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

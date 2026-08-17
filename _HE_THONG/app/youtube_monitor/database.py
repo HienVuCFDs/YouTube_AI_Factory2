@@ -3142,18 +3142,31 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # Providers handled by an external pull-queue sidecar (Antigravity, Flow
+    # Veo browser sidecar, ...) instead of the in-process SceneGenerationWorker.
+    EXTERNAL_SIDECAR_PROVIDERS = ("antigravity_image", "flow_veo")
+
     def list_queued_scene_generation_job_ids(self, limit: int = 5000) -> list[int]:
+        placeholders = ",".join("?" for _ in self.EXTERNAL_SIDECAR_PROVIDERS)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id FROM scene_generation_jobs WHERE status = 'queued' AND provider != 'antigravity_image' ORDER BY id ASC LIMIT ?",
-                (max(1, min(limit, 5000)),),
+                f"SELECT id FROM scene_generation_jobs WHERE status = 'queued' "
+                f"AND provider NOT IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+                (*self.EXTERNAL_SIDECAR_PROVIDERS, max(1, min(limit, 5000))),
             ).fetchall()
         return [int(row["id"]) for row in rows]
 
     def claim_next_antigravity_scene_job(self) -> dict[str, Any] | None:
+        return self.claim_next_scene_job_for_provider("antigravity_image")
+
+    def claim_next_flow_veo_scene_job(self) -> dict[str, Any] | None:
+        return self.claim_next_scene_job_for_provider("flow_veo")
+
+    def claim_next_scene_job_for_provider(self, provider: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM scene_generation_jobs WHERE status = 'queued' AND provider = 'antigravity_image' ORDER BY id ASC LIMIT 1"
+                "SELECT id FROM scene_generation_jobs WHERE status = 'queued' AND provider = ? ORDER BY id ASC LIMIT 1",
+                (provider,),
             ).fetchone()
         return self.claim_scene_generation_job(int(row["id"])) if row else None
 

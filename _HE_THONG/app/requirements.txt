@@ -5,3 +5,4 @@ faster-whisper>=1.0,<2
 yt-dlp>=2024.8.6
 anthropic>=0.40
 python-multipart>=0.0.20,<1
+playwright>=1.45,<2

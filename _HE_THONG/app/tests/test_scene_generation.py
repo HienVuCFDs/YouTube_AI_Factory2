@@ -71,6 +71,60 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertEqual(timeline[0]["visual_path"], str(Path(directory) / "scene.mp4"))
             self.assertEqual(timeline[0]["status"], "asset_ready")
 
+    def test_external_sidecar_providers_are_isolated_from_each_other_and_the_worker_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            antigravity_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "antigravity_image", "A cinematic sunrise over mountains"
+            )
+            flow_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "A cinematic sunrise over mountains"
+            )
+            runway_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "runway", "A cinematic sunrise over mountains"
+            )
+
+            # The in-process worker queue must never pick up sidecar-only jobs.
+            queued_ids = database.list_queued_scene_generation_job_ids()
+            self.assertIn(runway_job["id"], queued_ids)
+            self.assertNotIn(antigravity_job["id"], queued_ids)
+            self.assertNotIn(flow_job["id"], queued_ids)
+
+            # Each sidecar claim must only ever pick up its own provider's job.
+            claimed_antigravity = database.claim_next_antigravity_scene_job()
+            self.assertEqual(claimed_antigravity["id"], antigravity_job["id"])
+            self.assertEqual(claimed_antigravity["status"], "running")
+            self.assertIsNone(database.claim_next_antigravity_scene_job())  # none left
+
+            claimed_flow = database.claim_next_flow_veo_scene_job()
+            self.assertEqual(claimed_flow["id"], flow_job["id"])
+            self.assertEqual(claimed_flow["status"], "running")
+            self.assertIsNone(database.claim_next_flow_veo_scene_job())  # none left
+
+    def test_flow_veo_job_completion_attaches_video_and_reports_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "A cinematic sunrise over mountains"
+            )
+            database.claim_next_flow_veo_scene_job()
+            completed = database.finish_scene_generation_job(
+                job["id"], "completed", output_path=str(Path(directory) / "flow-scene.mp4")
+            )
+            self.assertEqual(completed["status"], "completed")
+            timeline = database.list_project_timeline(project["id"])
+            self.assertEqual(timeline[0]["visual_path"], str(Path(directory) / "flow-scene.mp4"))
+
+            other_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "A second scene"
+            )
+            database.claim_next_flow_veo_scene_job()
+            failed = database.finish_scene_generation_job(
+                other_job["id"], "error", error="Flow timed out waiting for the clip"
+            )
+            self.assertEqual(failed["status"], "error")
+            self.assertEqual(failed["error"], "Flow timed out waiting for the clip")
+
     def test_scene_job_requires_segment_from_same_project(self):
         with tempfile.TemporaryDirectory() as directory:
             database, project, segment = self._project_with_timeline(directory)

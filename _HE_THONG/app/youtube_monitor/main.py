@@ -515,7 +515,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -524,7 +524,7 @@ class CreateSceneGenerationRequest(BaseModel):
 
 
 class BatchSceneGenerationRequest(BaseModel):
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo"] = "gemini_image"
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
@@ -1636,7 +1636,7 @@ def attach_asset_to_timeline(segment_id: int, payload: AttachAssetRequest) -> di
 @app.get("/api/projects/{project_id}/scene-jobs")
 def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
     if not database.get_production_project(project_id):
-        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     return database.list_scene_generation_jobs(project_id)
 
 
@@ -1679,9 +1679,10 @@ def queue_scene_generation_job(
     )
     if not job:
         raise HTTPException(status_code=400, detail="Segment timeline khong hop le hoac khong thuoc project")
-    if payload.provider != "antigravity_image":
+    if payload.provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
         scene_generation_worker.enqueue(int(job["id"]))
-    return {"status": "delegated" if payload.provider == "antigravity_image" else "queued", "job": job}
+    delegated = payload.provider in database.EXTERNAL_SIDECAR_PROVIDERS
+    return {"status": "delegated" if delegated else "queued", "job": job}
 
 
 @app.post("/api/projects/{project_id}/scene-jobs/batch")
@@ -1692,15 +1693,14 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         runway_key, _ = settings.runway_config()
         if not runway_key:
             raise HTTPException(status_code=400, detail="Chưa cấu hình Runway API trong Kết nối AI")
-    else:
-        if payload.provider == "openai_image":
-            openai_key, _ = settings.openai_config()
-            if not openai_key:
-                raise HTTPException(status_code=400, detail="Chưa cấu hình OPENAI_API_KEY trong Kết nối AI")
-        else:
-            gemini_key, _, _ = settings.gemini_config()
-            if not gemini_key:
-                raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
+    elif payload.provider == "openai_image":
+        openai_key, _ = settings.openai_config()
+        if not openai_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình OPENAI_API_KEY trong Kết nối AI")
+    elif payload.provider in {"gemini_image", "gemini_veo"}:
+        gemini_key, _, _ = settings.gemini_config()
+        if not gemini_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
     project = database.get_production_project(project_id)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
@@ -1720,7 +1720,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,
         )
         if job:
-            if payload.provider != "antigravity_image":
+            if payload.provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                 scene_generation_worker.enqueue(int(job["id"]))
             queued.append(job)
     return {"status": "queued", "jobs": queued, "queued_count": len(queued), "total_segments": len(timeline)}
@@ -1746,6 +1746,52 @@ def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
     return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.post("/api/antigravity/scene-jobs/{job_id}/fail")
+def fail_antigravity_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    if not job or str(job.get("provider")) != "antigravity_image":
+        raise HTTPException(status_code=404, detail="Không tìm thấy job Antigravity")
+    finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
+    return {"status": "error", "job": finished}
+
+
+@app.get("/api/flow-veo/next-scene-job")
+def claim_flow_veo_scene_job() -> dict[str, Any]:
+    """Sidecar-only handoff: one queued video job becomes a Flow (Veo 3) task.
+
+    Mirrors /api/antigravity/next-scene-job — a local Playwright sidecar
+    (flow_veo_sidecar.py) polls this to claim work, drives labs.google/flow
+    with the caller's own logged-in subscription, then completes the job via
+    /api/flow-veo/scene-jobs/{job_id}/complete once the clip is uploaded.
+    """
+    job = database.claim_next_flow_veo_scene_job()
+    return {"job": job}
+
+
+@app.post("/api/flow-veo/scene-jobs/{job_id}/complete")
+def complete_flow_veo_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    asset = database.get_project_asset(asset_id)
+    if not job or str(job.get("provider")) != "flow_veo":
+        raise HTTPException(status_code=404, detail="Không tìm thấy job Flow Veo")
+    if not asset or int(asset["project_id"]) != int(job["project_id"]):
+        raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
+    attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
+    if not attached:
+        raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
+    finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.post("/api/flow-veo/scene-jobs/{job_id}/fail")
+def fail_flow_veo_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    if not job or str(job.get("provider")) != "flow_veo":
+        raise HTTPException(status_code=404, detail="Không tìm thấy job Flow Veo")
+    finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
+    return {"status": "error", "job": finished}
 
 
 @app.get("/api/projects/{project_id}/timeline/{segment_id}/visual-preview")
