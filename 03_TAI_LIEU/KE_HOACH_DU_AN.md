@@ -961,3 +961,21 @@ Nguyên tắc an toàn: **không đổi bất kỳ route nào còn lại trong `
 - Tài liệu kế hoạch đã tự ghi "có thể thay SQLite bằng PostgreSQL về sau" là **chưa lên lịch** — thêm Alembic bây giờ là chuẩn bị cho một thay đổi kiến trúc chưa được quyết định, thêm phụ thuộc/độ phức tạp không tương xứng với lợi ích hiện tại.
 
 Rủi ro thật sự đã xác định (ALTER TABLE sai kiểu/xoá cột sẽ không rollback được) vẫn còn, nhưng mức độ thấp vì lịch sử thay đổi chỉ additive. Đã có sẵn `backup_to()` + nút "Sao lưu DB" trong Cài đặt làm lưới an toàn thủ công trước khi thử thay đổi schema rủi ro hơn — khuyến nghị: **bấm sao lưu DB thủ công trước khi merge bất kỳ thay đổi `database.py` nào không phải "thêm cột mới"**, thay vì đầu tư hạ tầng Alembic cho một nhu cầu chưa phát sinh.
+
+## 41. Thêm provider `flow_veo`: tạo video Veo 3 qua gói thuê bao Flow (2026-08-17)
+
+Người dùng đã trả phí **Google AI Pro/Ultra** (không phải trả theo API) và có quyền tạo video Veo 3 qua ứng dụng web **Flow** (`labs.google/flow`). Thay vì né phí, đây là dùng đúng quyền lợi gói đã mua — chỉ cần AI tự gửi prompt vào Flow thay vì copy tay từng cảnh.
+
+Đã tận dụng gần như nguyên vẹn cơ chế pull-queue có sẵn cho `antigravity_image` (bảng `scene_generation_jobs`, claim atomic, hoàn thành 2 bước qua asset upload) — chỉ thêm phần lái trình duyệt bằng Playwright:
+
+- `database.py`: tổng quát hoá `claim_next_antigravity_scene_job()` thành `claim_next_scene_job_for_provider()`, thêm `claim_next_flow_veo_scene_job()`, thêm hằng `EXTERNAL_SIDECAR_PROVIDERS = ("antigravity_image", "flow_veo")` dùng chung cho việc loại 2 provider này khỏi `SceneGenerationWorker`.
+- `main.py`: thêm `"flow_veo"` vào 2 Literal request; thêm route `GET /api/flow-veo/next-scene-job` + `POST /api/flow-veo/scene-jobs/{id}/complete` (nhân bản đúng cặp route antigravity). **Thêm mới `POST .../fail` cho cả 2 provider** — trước đó sidecar không có cách nào báo job thất bại về app, job sẽ kẹt ở `running` đến khi app restart mới được requeue. **Tiện sửa luôn 1 bug thật phát hiện được**: endpoint batch tạo cảnh (`queue_scene_generation_batch`) có nhánh if/else lồng nhau khiến mọi provider không phải `runway`/`openai_image` (kể cả `antigravity_image` từ trước) bị bắt buộc phải có `GEMINI_API_KEY` dù không dùng — sửa thành `elif` tường minh khớp với endpoint tạo 1 cảnh.
+- `flow_veo_sidecar.py` (mới): script độc lập mô phỏng `antigravity_scene_sidecar.py` nhưng dùng **Playwright** thay vì gọi CLI ngoài — vòng lặp poll job, mở Flow bằng browser context đã đăng nhập sẵn (lưu session cục bộ, chỉ cần đăng nhập tay 1 lần qua `--login`), điền prompt, chờ tạo xong, tải video, upload vào project, gọi complete/fail. **Selector DOM của Flow trong file là best-effort, chưa xác minh** (không ai trong phiên này có tài khoản Google đã đăng nhập để xem giao diện thật) — có sẵn chế độ `--recon` mở Playwright Inspector để tìm selector thật, cần làm bước này trước khi chạy vòng lặp thật.
+- `templates/index.html`: thêm option "Flow (Veo 3)" vào cả 4 dropdown chọn provider tạo cảnh, xử lý giống Antigravity (không cần API key, hiện hint về gói thuê bao).
+- `requirements.txt`/`requirements.lock.txt`: thêm `playwright`; đã cài + xác minh chromium chạy được trên môi trường Python thật của app.
+
+**Lưu ý minh bạch đã nói với người dùng**: điều khoản dịch vụ tiêu dùng của Google thường không cho phép truy cập tự động ngoài API chính thức, kể cả tài khoản trả phí hợp lệ — rủi ro tài khoản bị gắn cờ/giới hạn là rủi ro người dùng tự chịu trên tài khoản của mình. Sidecar cố tình chờ giữa các job (20s) để giả lập tốc độ thao tác người thật, không giảm hoàn toàn rủi ro này.
+
+Đã kiểm thử: `pytest` 108/108 pass (thêm 5 test: claim/complete/fail cho cả 2 provider, cô lập khỏi worker queue); khởi động app thật bằng uvicorn, gọi trực tiếp 3 route mới — đều đúng như kỳ vọng (`{"job": null}` khi hàng đợi rỗng, 404 cho job không tồn tại).
+
+**Chưa làm, cần người dùng tự thực hiện tiếp**: chạy `python flow_veo_sidecar.py --login` để đăng nhập Google 1 lần, sau đó `--recon` để xác minh/sửa selector thật của Flow (ô nhập prompt, nút Generate, nút Download) trước khi chạy vòng lặp thật lần đầu.
