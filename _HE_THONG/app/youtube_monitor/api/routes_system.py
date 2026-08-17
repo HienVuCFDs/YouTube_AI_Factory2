@@ -428,6 +428,8 @@ def model_catalog() -> list[dict[str, Any]]:
     whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
     return [
         {"stage": "LLM", "provider": "codex_cli", "model": "Codex local session", "mode": "local_handoff", "ready": bool(codex_cli_status()["logged_in"]), "vram": "—"},
+        {"stage": "LLM", "provider": "claude_code_cli", "model": "Claude Code local session", "mode": "local_handoff", "ready": bool(claude_code_cli_status()["logged_in"]), "vram": "—"},
+        {"stage": "LLM", "provider": "antigravity", "model": "Antigravity local session", "mode": "local_handoff", "ready": bool(antigravity_cli_status()["logged_in"]), "vram": "—"},
         {"stage": "LLM", "provider": "openai_gpt", "model": openai_model, "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "Image AI", "provider": "openai_image", "model": "gpt-image-1", "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "LLM", "provider": "anthropic_claude", "model": anthropic_model, "mode": "cloud", "ready": bool(anthropic_key), "vram": "Cloud"},

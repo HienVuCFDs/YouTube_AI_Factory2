@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .llm_client import LlmError, call_claude_json, call_codex_json, call_openai_json
+from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
 
 
 ReferenceAnalysisError = LlmError
@@ -88,6 +88,10 @@ def analyze_reference(video: dict[str, Any], transcript_text: str | None, provid
         result = call_openai_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
     elif name == "anthropic_claude":
         result = call_claude_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
+    elif name == "claude_code_cli":
+        result = call_claude_code_cli_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
+    elif name == "antigravity":
+        result = call_antigravity_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
     else:
         raise ReferenceAnalysisError(f"Provider không được hỗ trợ cho phân tích tham chiếu: {provider}")
     return {

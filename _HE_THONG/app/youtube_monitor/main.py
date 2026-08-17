@@ -486,7 +486,7 @@ class CreatePublicationRequest(BaseModel):
     confirmed: bool = False
 
 
-DirectorProvider = Literal["codex_cli", "openai_gpt", "anthropic_claude"]
+DirectorProvider = Literal["codex_cli", "openai_gpt", "anthropic_claude", "claude_code_cli", "antigravity"]
 
 
 class DirectorDraftRequest(BaseModel):
@@ -2757,12 +2757,18 @@ def enqueue_analysis(payload: QueueAnalysisRequest) -> dict[str, Any]:
     anthropic_key, _ = settings.anthropic_config()
     openai_key, _ = settings.openai_config()
     codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
     if provider == "anthropic_claude" and not anthropic_key:
         raise HTTPException(status_code=400, detail="Thiếu ANTHROPIC_API_KEY trong .env")
     if provider == "openai_gpt" and not openai_key:
         raise HTTPException(status_code=400, detail="Thiếu OPENAI_API_KEY trong .env")
     if provider == "codex_cli" and not codex["logged_in"]:
         raise HTTPException(status_code=400, detail="Codex CLI chua dang nhap")
+    if provider == "claude_code_cli" and not claude_code["logged_in"]:
+        raise HTTPException(status_code=400, detail="Claude Code CLI chua dang nhap")
+    if provider == "antigravity" and not antigravity["logged_in"]:
+        raise HTTPException(status_code=400, detail="Antigravity CLI chua dang nhap")
     try:
         resolve_analyzer(provider)
     except LlmAnalysisError as exc:

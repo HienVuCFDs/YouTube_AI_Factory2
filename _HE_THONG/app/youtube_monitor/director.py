@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from .codex_bridge import CodexBridgeError, call_codex_json
-from .llm_client import LlmError, call_claude_json, call_openai_json
+from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_openai_json
 
 
 class DirectorError(RuntimeError):
@@ -100,6 +100,10 @@ def _call(provider: str, prompt: str) -> dict[str, Any]:
             return call_openai_json(_SYSTEM_PROMPT, prompt, DIRECTOR_SCHEMA, max_tokens=4500)
         if name == "anthropic_claude":
             return call_claude_json(_SYSTEM_PROMPT, prompt, DIRECTOR_SCHEMA, max_tokens=4500)
+        if name == "claude_code_cli":
+            return call_claude_code_cli_json(_SYSTEM_PROMPT, prompt, DIRECTOR_SCHEMA, max_tokens=4500)
+        if name == "antigravity":
+            return call_antigravity_json(_SYSTEM_PROMPT, prompt, DIRECTOR_SCHEMA, max_tokens=4500)
     except (CodexBridgeError, LlmError) as exc:
         raise DirectorError(str(exc)) from exc
     raise DirectorError(f"Director provider không được hỗ trợ: {provider}")
