@@ -267,7 +267,26 @@ def generate_gemini_veo_scene(database: Database, job: dict[str, Any], artifact_
     prompt = str(job.get("prompt") or "").strip()
     if not prompt:
         raise SceneGenerationError("Prompt tao video canh dang trong")
-    payload = {"instances": [{"prompt": prompt}], "parameters": {"aspectRatio": _gemini_aspect_ratio(str(job.get("ratio") or "")), "durationSeconds": 8}}
+    instance: dict[str, Any] = {"prompt": prompt}
+    reference_asset_id = job.get("reference_asset_id")
+    if reference_asset_id:
+        # Image-to-video: reuse the scene's existing still as Veo's starting
+        # frame instead of generating a fresh clip from text alone, per
+        # Google's documented Veo image field (bytesBase64Encoded + mimeType).
+        asset = database.get_project_asset(int(reference_asset_id))
+        if not asset:
+            raise SceneGenerationError("Khong tim thay anh tham chieu")
+        image_path = Path(str(asset["file_path"]))
+        if not image_path.is_file():
+            raise SceneGenerationError("Anh tham chieu khong ton tai tren dia")
+        mime_type = str(asset.get("mime_type") or mimetypes.guess_type(image_path.name)[0] or "image/png")
+        if not mime_type.startswith("image/"):
+            raise SceneGenerationError("Chi ho tro anh lam khung hinh dau cho Veo (image-to-video)")
+        instance["image"] = {
+            "bytesBase64Encoded": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+            "mimeType": mime_type,
+        }
+    payload = {"instances": [instance], "parameters": {"aspectRatio": _gemini_aspect_ratio(str(job.get("ratio") or "")), "durationSeconds": 8}}
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     base_url = "https://generativelanguage.googleapis.com/v1beta"
     with httpx.Client(timeout=httpx.Timeout(90.0, connect=20.0), follow_redirects=True) as client:

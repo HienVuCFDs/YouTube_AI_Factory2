@@ -81,11 +81,15 @@ class ProviderConfig:
     prompt_selectors: list[str] = field(default_factory=list)
     submit_selectors: list[str] = field(default_factory=list)
     download_selectors: list[str] = field(default_factory=list)
+    # Opens a file chooser for attaching a starting image (image-to-video).
+    # Only used when the queued job carries a reference_asset_path.
+    image_upload_selectors: list[str] = field(default_factory=list)
     # Plain-language description of each target, used only when every
     # selector above fails to match — see "AI VISION FALLBACK" above.
     prompt_instruction: str = "O nhap prompt/mo ta video can tao (thuong la 1 textarea lon giua man hinh)"
     submit_instruction: str = "Nut gui/tao video (Generate, Create, hoac icon mui ten gui), thuong canh o nhap prompt"
     download_instruction: str = "Nut tai video vua tao xong (Download), xuat hien sau khi video render xong"
+    image_upload_instruction: str = "Nut them anh/tai anh len lam khung hinh dau cho video (Add image, Upload image, hoac icon ghep anh), thuong canh o nhap prompt"
 
 
 PROVIDERS: dict[str, ProviderConfig] = {
@@ -107,6 +111,11 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "a[download]",
             "[aria-label*='Download video' i]",
         ],
+        image_upload_selectors=[
+            "input[type='file']",
+            "button[aria-label*='Add image' i]",
+            "button[aria-label*='Upload image' i]",
+        ],
     ),
     "meta_ai_video": ProviderConfig(
         url=os.getenv("META_AI_VIDEO_URL", "https://www.meta.ai/"),
@@ -126,8 +135,15 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "a[download]",
             "[aria-label*='Save' i]",
         ],
+        image_upload_selectors=[
+            "input[type='file']",
+            "button[aria-label*='Add photo' i]",
+            "button[aria-label*='Upload' i]",
+        ],
     ),
 }
+
+_ASPECT_RATIO_HINT = {"1280:720": "16:9 landscape", "720:1280": "9:16 portrait", "1024:1024": "1:1 square"}
 
 
 class WebVideoError(RuntimeError):
@@ -255,11 +271,38 @@ def _click(page, kind: str, target) -> None:
         page.mouse.click(*target)
 
 
-def generate_video(page, config: ProviderConfig, prompt: str, download_dir: Path) -> Path:
+def _attach_reference_image(page, config: ProviderConfig, image_path: Path) -> None:
+    """Best-effort image-to-video: attach an existing scene image as the
+    starting frame before generating. Not yet verified against either site's
+    live DOM (see module docstring, step 4) — falls back to AI vision like
+    every other target here, and a failure here must not abort the whole
+    job, since a from-scratch text-to-video clip is still a useful result."""
+    if not config.image_upload_selectors:
+        return
+    try:
+        file_input = page.locator("input[type='file']").first
+        if file_input.count() > 0:
+            file_input.set_input_files(str(image_path))
+            return
+        kind, target = _resolve_target(page, config.image_upload_selectors, config.image_upload_instruction, timeout_ms=8_000)
+        with page.expect_file_chooser(timeout=8_000) as chooser_info:
+            _click(page, kind, target)
+        chooser_info.value.set_files(str(image_path))
+    except Exception as exc:  # noqa: BLE001 - image-to-video is a nice-to-have, not a hard requirement
+        print(f"Không đính kèm được ảnh tham chiếu ({image_path.name}), tiếp tục tạo video từ prompt: {exc}", flush=True)
+
+
+def generate_video(
+    page, config: ProviderConfig, prompt: str, download_dir: Path,
+    ratio: str = "", reference_image_path: Path | None = None,
+) -> Path:
     page.goto(config.url, wait_until="domcontentloaded")
+    if reference_image_path is not None and reference_image_path.is_file():
+        _attach_reference_image(page, config, reference_image_path)
     kind, target = _resolve_target(page, config.prompt_selectors, config.prompt_instruction)
     _click(page, kind, target)
-    page.keyboard.type(prompt)
+    ratio_hint = _ASPECT_RATIO_HINT.get(ratio, "")
+    page.keyboard.type(f"{prompt} ({ratio_hint})" if ratio_hint else prompt)
     kind, target = _resolve_target(page, config.submit_selectors, config.submit_instruction)
     _click(page, kind, target)
 
@@ -335,9 +378,15 @@ def run_loop(provider: str, config: ProviderConfig) -> None:
                 job_id = int(job["id"])
                 project_id = int(job["project_id"])
                 prompt = str(job.get("prompt") or "")
+                ratio = str(job.get("ratio") or "")
+                reference_asset_path = job.get("reference_asset_path")
+                reference_image_path = Path(str(reference_asset_path)) if reference_asset_path else None
                 print(f"[{provider}] job {job_id}: generating...", flush=True)
                 try:
-                    video_path = generate_video(page, config, prompt, _download_dir(provider))
+                    video_path = generate_video(
+                        page, config, prompt, _download_dir(provider),
+                        ratio=ratio, reference_image_path=reference_image_path,
+                    )
                     asset_id = _upload_asset(project_id, video_path)
                     complete_job(job_id, asset_id)
                     print(f"[{provider}] job {job_id}: done -> asset {asset_id}", flush=True)

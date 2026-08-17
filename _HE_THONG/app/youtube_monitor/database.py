@@ -3169,7 +3169,7 @@ class Database:
             row = connection.execute(
                 """
                 SELECT j.*, s.segment_index, s.visual_path AS timeline_visual_path,
-                       a.original_name AS reference_asset_name
+                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path
                 FROM scene_generation_jobs j
                 JOIN project_timeline_segments s ON s.id = j.timeline_segment_id
                 LEFT JOIN project_assets a ON a.id = j.reference_asset_id
@@ -3184,7 +3184,7 @@ class Database:
             rows = connection.execute(
                 """
                 SELECT j.*, s.segment_index, s.visual_path AS timeline_visual_path,
-                       a.original_name AS reference_asset_name
+                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path
                 FROM scene_generation_jobs j
                 JOIN project_timeline_segments s ON s.id = j.timeline_segment_id
                 LEFT JOIN project_assets a ON a.id = j.reference_asset_id

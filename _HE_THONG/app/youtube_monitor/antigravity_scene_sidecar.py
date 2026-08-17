@@ -22,12 +22,16 @@ def get_next() -> dict | None:
         return json.loads(response.read().decode("utf-8")).get("job")
 
 
+_ASPECT_RATIO_LABEL = {"1280:720": "16:9 ngang", "720:1280": "9:16 dọc", "1024:1024": "1:1 vuông"}
+
+
 def dispatch(job: dict) -> None:
     project_id, segment_id, job_id = int(job["project_id"]), int(job["timeline_segment_id"]), int(job["id"])
     prompt = str(job.get("prompt") or "")
+    ratio_label = _ASPECT_RATIO_LABEL.get(str(job.get("ratio") or ""), "16:9 ngang")
     text = f'''You are the YT Factory image worker. Complete exactly one job.
 Project ID: {project_id}; storyboard segment ID: {segment_id}; Antigravity job ID: {job_id}.
-Use youtube_factory_get_storyboard for this project. Create exactly ONE cinematic image using generate_image with this prompt:
+Use youtube_factory_get_storyboard for this project. Create exactly ONE cinematic image using generate_image with this prompt (aspect ratio {ratio_label}; pass that aspect ratio to generate_image if it accepts one):
 {prompt}
 No text, captions, logos or watermarks. Save the image in the returned import_folder. Then call youtube_factory_import_asset with project_id, segment_id and the saved file path. Finally call youtube_factory_complete_antigravity_scene with job_id {job_id} and the asset_id returned by import. Do not merely explain; execute these tools.'''
     if not AGY.is_file():

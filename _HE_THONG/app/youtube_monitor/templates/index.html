@@ -420,7 +420,7 @@
         <div id="studioStep4" class="studio-step" data-studio-step="4" hidden>
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneProviderSelect" aria-label="Loại cảnh AI"><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image">Google Gemini · tạo ảnh</option><option value="gemini_veo">Google Veo · tạo video thật</option><option value="openai_image">OpenAI GPT Image · tạo ảnh</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneProviderSelect" aria-label="Loại cảnh AI"><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image">Google Gemini · tạo ảnh</option><option value="gemini_veo">Google Veo · tạo video thật</option><option value="openai_image">OpenAI GPT Image · tạo ảnh</option></select><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:10px">Tạo storyboard trước. GPT Image sẽ tạo một ảnh kể chuyện cho mỗi cảnh; FFmpeg sẽ tạo chuyển động nhẹ khi dựng video.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
         </div>
@@ -1907,13 +1907,14 @@
     if (!confirm(`Tạo ${isVeo ? 'video Veo' : 'ảnh AI'} cho mọi cảnh chưa có hình? ${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
     const button = $('studioGenerateVideosButton');
     button.disabled = true;
-    setStudioProgress(5, `Đang tạo timeline trước khi gửi ${isVeo ? 'video Veo' : 'ảnh AI'}...`);
-    setMessage(`Đang tạo timeline và đưa các cảnh sang ${isVeo ? 'Google Veo' : provider === 'gemini_image' ? 'Google Gemini Image' : 'GPT Image'}...`);
+    setStudioProgress(5, `Đang tạo timeline trước khi gửi ${isVeo ? 'video' : 'ảnh'} sang ${sceneProviderLabel(provider)}...`);
+    setMessage(`Đang tạo timeline và đưa các cảnh sang ${sceneProviderLabel(provider)}...`);
     try {
       await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
       setStudioProgress(15, 'Timeline đã sẵn sàng, đang xếp hàng tạo cảnh...');
+      const ratio = $('studioSceneRatioSelect')?.value || '1280:720';
       const result = await api(`/api/projects/${state.studioProjectId}/scene-jobs/batch`, {
-        method: 'POST', body: JSON.stringify({provider, duration_seconds: isVeo ? 8 : 5, ratio: '1280:720', confirmed: true}),
+        method: 'POST', body: JSON.stringify({provider, duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true}),
       });
       const jobs = result.jobs || [];
       if (!jobs.length) {
@@ -1921,9 +1922,9 @@
         setMessage('Các cảnh đã có visual hoặc chưa có prompt. Kiểm tra lại ngay trong Storyboard.', 'success');
         return;
       }
-      state.studioSceneProgress = { total: jobs.length, finished: new Set(), failed: 0 };
+      state.studioSceneProgress = { total: jobs.length, finished: new Set(), failed: 0, providerLabel: sceneProviderLabel(provider) };
       setStudioProgress(15, `Đã xếp hàng 0/${jobs.length} cảnh AI...`);
-      setMessage(`Đã gửi ${jobs.length} cảnh sang ${isVeo ? 'Google Veo' : provider === 'gemini_image' ? 'Google Gemini Image' : 'GPT Image'}. Kết quả sẽ tự hiện trong storyboard.`, 'success');
+      setMessage(`Đã gửi ${jobs.length} cảnh sang ${sceneProviderLabel(provider)}. Kết quả sẽ tự hiện trong storyboard.`, 'success');
       jobs.forEach((job) => { if (job.id) void watchStudioSceneGenerationJob(job.id); });
     } catch (error) { setStudioProgress(0, `Tạo ảnh AI thất bại: ${error.message}`, 'error'); setMessage(`Không tạo được ảnh AI: ${error.message}`, 'error'); }
     finally { updateStudioSceneGenerationAvailability(); }
@@ -1941,7 +1942,7 @@
             const completed = progress.finished.size;
             const percent = Math.round(15 + (85 * completed / progress.total));
             const outcome = progress.failed ? ` · ${progress.failed} cảnh lỗi` : '';
-            setStudioProgress(percent, `Đã xử lý ${completed}/${progress.total} ảnh GPT${outcome}.`, progress.failed ? 'error' : '');
+            setStudioProgress(percent, `Đã xử lý ${completed}/${progress.total} cảnh ${progress.providerLabel || sceneProviderLabel(job.provider)}${outcome}.`, progress.failed ? 'error' : '');
           }
           const bundle = await api(`/api/projects/${state.studioProjectId}`);
           renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
@@ -1978,7 +1979,7 @@
       }
       if (missingVisuals.length) {
         setStudioStep(4);
-        throw new Error(`Còn ${missingVisuals.length}/${timeline.length} cảnh chưa có hình hoặc video thật. Hãy quay lại Storyboard, tạo ảnh GPT cho các cảnh hoặc gắn asset vào timeline rồi mới render.`);
+        throw new Error(`Còn ${missingVisuals.length}/${timeline.length} cảnh chưa có hình hoặc video thật. Hãy quay lại Storyboard, tạo ảnh/video AI cho các cảnh hoặc gắn asset vào timeline rồi mới render.`);
       }
       if (draftVisuals.length) {
         setStudioStep(4);
@@ -2696,6 +2697,7 @@
             <input id="shotImageFile-${shot.id}" type="file" accept="image/*,video/*" style="max-width:180px" onchange="uploadShotImage(${project.id}, ${shot.id}, this)" aria-label="Tải ảnh/video cho cảnh" />
             ${visualPath ? `<button class="btn small danger" type="button" onclick="deleteShotImage(${project.id}, ${segment.id})">Xóa ảnh/video</button>` : ''}
             <select id="shotSceneProvider-${shot.id}" aria-label="Engine tạo cảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image">Gemini Image · ảnh</option><option value="gemini_veo">Google Veo · video</option><option value="openai_image">GPT Image · ảnh</option></select>
+            <select id="shotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select>
             <button class="btn small primary" type="button" onclick="generateShotVideo(${project.id}, ${shot.id})">Tạo video/ảnh AI cho cảnh</button>
             <button class="btn small ghost" type="button" onclick="regenerateShotVoice(${project.id}, ${shot.id})">Tạo lại giọng đọc cảnh này</button>
           </div>
@@ -2753,7 +2755,7 @@
       </div>`;
     }).join('') : '<div class="empty">Chưa có timeline. Hãy tạo sau khi đã có shot list.</div>';
     const batchSceneAction = sceneReady && timeline.length
-      ? `<select id="batchSceneProvider-${project.id}" aria-label="Engine tạo tất cả cảnh"><option value="antigravity_image">Antigravity · tất cả ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · tất cả video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · tất cả video miễn phí</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image · tất cả ảnh</option><option value="gemini_veo">Google Veo · tất cả video</option>${openaiImageReady ? '<option value="openai_image">GPT Image · tất cả ảnh</option>' : ''}</select><button class="btn small primary" onclick="generateAllRunwayScenes(${project.id})">✦ Tạo tất cả cảnh AI</button>`
+      ? `<select id="batchSceneProvider-${project.id}" aria-label="Engine tạo tất cả cảnh"><option value="antigravity_image">Antigravity · tất cả ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · tất cả video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · tất cả video miễn phí</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image · tất cả ảnh</option><option value="gemini_veo">Google Veo · tất cả video</option>${openaiImageReady ? '<option value="openai_image">GPT Image · tất cả ảnh</option>' : ''}</select><select id="batchSceneRatio-${project.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn small primary" onclick="generateAllRunwayScenes(${project.id})">✦ Tạo tất cả cảnh AI</button>`
       : '';
     const timelineActions = shots.length ? `
       <button class="btn small primary" onclick="generateTimeline(${project.id}, ${timeline.length ? 'false' : 'true'})">${timeline.length ? 'Giữ timeline hiện tại' : 'Tạo timeline'}</button>
@@ -3188,6 +3190,27 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  function sceneProviderLabel(provider) {
+    return {
+      antigravity_image: 'Antigravity', flow_veo: 'Flow (Veo 3)', meta_ai_video: 'Meta AI (Vibes)',
+      gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
+    }[provider] || provider || 'AI';
+  }
+
+  const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'flow_veo', 'meta_ai_video', 'runway']);
+  const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
+
+  async function findReferenceImageAssetId(projectId, visualPath) {
+    if (!visualPath) return null;
+    const extension = visualPath.split('.').pop()?.toLowerCase() || '';
+    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    try {
+      const bundle = await api(`/api/projects/${projectId}`);
+      const match = (bundle.project_assets || []).find((asset) => asset.asset_type === 'image' && asset.file_path === visualPath);
+      return match ? match.id : null;
+    } catch { return null; }
+  }
+
   async function ensureSegmentForShot(projectId, shotId) {
     // force:false is a safe no-op if a timeline already exists — this only
     // creates one the first time a shot-level action is used before the
@@ -3231,17 +3254,21 @@
     const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
     if (promptText.length < 3) return setMessage('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.', 'error');
     const provider = $(`shotSceneProvider-${shotId}`)?.value || 'gemini_image';
-    const isVeo = ['gemini_veo', 'flow_veo', 'meta_ai_video'].includes(provider);
+    const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
+    const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
     const usesSubscription = ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider);
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI cho cảnh này? ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
-    setMessage('Đang đưa cảnh vào hàng đợi tạo ảnh/video AI...');
     try {
       const segment = await ensureSegmentForShot(projectId, shotId);
+      const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
+      const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
+      if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
+      setMessage(`Đang đưa cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
       const response = await api(`/api/projects/${projectId}/scene-jobs`, {
         method: 'POST',
         body: JSON.stringify({
           timeline_segment_id: segment.id, provider, prompt: promptText,
-          duration_seconds: isVeo ? 8 : 5, ratio: '1280:720', confirmed: true,
+          duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true,
+          reference_asset_id: referenceAssetId,
         }),
       });
       setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
@@ -3338,10 +3365,12 @@
     const prompt = $(`timelinePrompt-${segmentId}`)?.value?.trim() || '';
     if (prompt.length < 3) { setMessage('Hãy nhập visual prompt cho đoạn này trước.', 'error'); return; }
     const provider = $(`sceneProvider-${segmentId}`)?.value || 'gemini_image';
-    const isVeo = provider === 'gemini_veo';
-    if (!confirm(`Tạo ${isVeo ? 'video Veo' : 'ảnh AI'} từ prompt bằng API cloud và có thể phát sinh chi phí. Tiếp tục?`)) return;
+    const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
     const ratio = $(`sceneRatio-${segmentId}`)?.value || '1280:720';
-    setMessage(`Đang đưa cảnh ${segmentId} vào hàng đợi ${isVeo ? 'Google Veo' : provider === 'gemini_image' ? 'Gemini Image' : 'GPT Image'}...`);
+    const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, $(`timelineVisual-${segmentId}`)?.value || '') : null;
+    const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?`)) return;
+    setMessage(`Đang đưa cảnh ${segmentId} vào hàng đợi ${sceneProviderLabel(provider)}...`);
     try {
       const response = await api(`/api/projects/${projectId}/scene-jobs`, {
         method: 'POST',
@@ -3351,6 +3380,7 @@
           prompt,
           duration_seconds: isVeo ? 8 : 5,
           ratio,
+          reference_asset_id: referenceAssetId,
           confirmed: true,
         }),
       });
@@ -3379,16 +3409,17 @@
 
   async function generateAllRunwayScenes(projectId) {
     const provider = $(`batchSceneProvider-${projectId}`)?.value || 'gemini_image';
-    const isVeo = provider === 'gemini_veo';
-    if (!confirm(`Tạo ${isVeo ? 'video Veo' : 'ảnh AI'} cho toàn bộ cảnh chưa có visual? Mỗi cảnh sẽ dùng API credits.`)) return;
-    setMessage(`Đang đưa các cảnh vào hàng đợi ${isVeo ? 'Google Veo' : provider === 'gemini_image' ? 'Gemini Image' : 'GPT Image'}...`);
+    const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh chưa có visual? Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.`)) return;
+    setMessage(`Đang đưa các cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
     try {
+      const ratio = $(`batchSceneRatio-${projectId}`)?.value || '1280:720';
       const response = await api(`/api/projects/${projectId}/scene-jobs/batch`, {
-        method: 'POST', body: JSON.stringify({provider, duration_seconds: isVeo ? 8 : 5, ratio: '1280:720', confirmed: true}),
+        method: 'POST', body: JSON.stringify({provider, duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true}),
       });
       const jobs = response.jobs || [];
       if (!jobs.length) return setMessage('Không có cảnh nào cần tạo thêm; hãy kiểm tra storyboard.', 'success');
-      setMessage(`Đã đưa ${jobs.length}/${response.total_segments || jobs.length} cảnh sang ${isVeo ? 'Google Veo' : provider === 'gemini_image' ? 'Gemini Image' : 'GPT Image'}. Kết quả hoàn tất sẽ tự hiện trong storyboard.`, 'success');
+      setMessage(`Đã đưa ${jobs.length}/${response.total_segments || jobs.length} cảnh sang ${sceneProviderLabel(provider)}. Kết quả hoàn tất sẽ tự hiện trong storyboard.`, 'success');
       await openProjectDetail(projectId, 'editor');
       jobs.forEach((job) => { if (job.id) void watchSceneGenerationJob(projectId, job.id); });
     } catch (error) { setMessage(`Không thể tạo hàng loạt cảnh AI: ${error.message}`, 'error'); }
@@ -3408,7 +3439,7 @@
           await openProjectDetail(projectId);
           return job;
         }
-        if (attempt % 3 === 0) setMessage(`${job.provider || 'AI'} đang tạo cảnh... (${job.status})`);
+        if (attempt % 3 === 0) setMessage(`${sceneProviderLabel(job.provider)} đang tạo cảnh... (${job.status})`);
       } catch (error) {
         setMessage(`Không đọc được trạng thái tạo cảnh: ${error.message}`, 'error');
         return null;
