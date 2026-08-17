@@ -527,6 +527,15 @@
         <div id="integrationBody" class="panel-body"><div class="empty">Đang tải cấu hình AI...</div></div>
       </section>
 
+      <section id="orchestratorSettings" class="panel workspace-panel" style="margin-bottom:14px">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">◈</span> AI ĐIỀU PHỐI CHÍNH</div><div class="panel-sub">CLI đã đăng nhập trên máy (không phải API key) dùng để tự tìm phần tử trên web app lạ — ví dụ nút Generate/Download trong web_video_sidecar.py khi selector cố định không khớp.</div></div></div>
+        <div class="panel-body">
+          <div class="studio-field"><label for="orchestratorProviderSelect">Chọn AI điều phối</label><select id="orchestratorProviderSelect"><option value="codex_cli">Codex CLI</option><option value="claude_code_cli">Claude Code CLI</option></select></div>
+          <div id="orchestratorProviderHint" class="secondary-text" style="margin-top:6px">Đang kiểm tra trạng thái đăng nhập...</div>
+          <div class="queue-controls" style="margin-top:8px"><button class="btn small primary" type="button" onclick="saveOrchestratorProvider()">Lưu lựa chọn</button><button class="btn small ghost" type="button" onclick="loadOrchestratorSettings()">Kiểm tra lại</button></div>
+        </div>
+      </section>
+
       <section id="overviewMetrics" class="metrics workspace-panel">
         <div class="metric accent"><div class="metric-label">KÊNH ĐANG THEO DÕI</div><div id="channelsCount" class="metric-value">0</div><div class="metric-foot">DANH SÁCH HOẠT ĐỘNG</div></div>
         <div class="metric green"><div class="metric-label">NGUỒN ĐANG HOẠT ĐỘNG</div><div id="enabledCount" class="metric-value">0</div><div class="metric-foot">ĐÃ BẬT GIÁM SÁT</div></div>
@@ -1060,6 +1069,22 @@
         <div class="queue-controls">${item.ready ? '<span class="tag green">Có thể chọn ở AI Writer</span>' : '<button class="btn small primary" type="button" onclick="beginCodexLogin()">Đăng nhập Codex</button>'}<button class="btn small ghost" type="button" onclick="reloadCodexStatus()">Kiểm tra lại</button></div>
       </div>`;
     }
+    if (item.connection === 'claude_code_cli') {
+      return `<div class="integration-card ${item.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${item.ready ? 'ĐÃ ĐĂNG NHẬP' : 'CẦN ĐĂNG NHẬP'}</span></div>
+        <div class="secondary-text">${esc(item.category)} · ${esc(item.detail)}</div>
+        ${item.ready ? '' : '<div class="secondary-text" style="margin-top:6px">Chạy <code>DANG_NHAP_CLAUDE_CODE.bat</code> trong thư mục gốc app một lần để đăng nhập.</div>'}
+        <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadClaudeCodeStatus()">Kiểm tra lại</button></div>
+      </div>`;
+    }
+    if (item.connection === 'antigravity_cli') {
+      return `<div class="integration-card ${item.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${item.ready ? 'ĐÃ ĐĂNG NHẬP' : 'CẦN ĐĂNG NHẬP'}</span></div>
+        <div class="secondary-text">${esc(item.category)} · ${esc(item.detail)}</div>
+        ${item.ready ? '' : '<div class="secondary-text" style="margin-top:6px">Mở app Antigravity và đăng nhập tài khoản Google một lần.</div>'}
+        <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
+      </div>`;
+    }
     if (item.connection === 'handoff') {
       return `<div class="integration-card ${cardClass}">
         <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag cyan">${status}</span></div>
@@ -1132,9 +1157,44 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  async function reloadClaudeCodeStatus() {
+    try {
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings()]);
+      setMessage('Đã kiểm tra lại trạng thái Claude Code CLI.', 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function reloadIntegrationsAndTools() {
+    try {
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadAnalysisProviders()]);
+      setMessage('Đã kiểm tra lại trạng thái.', 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function loadOrchestratorSettings() {
+    const data = await api('/api/settings/orchestrator');
+    const select = $('orchestratorProviderSelect');
+    if (select) select.value = data.provider;
+    const hint = $('orchestratorProviderHint');
+    if (hint) {
+      const codex = data.options.find((item) => item.key === 'codex_cli');
+      const claude = data.options.find((item) => item.key === 'claude_code_cli');
+      hint.innerHTML = `Codex CLI: ${codex?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Claude Code CLI: ${claude?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'}`;
+    }
+  }
+
+  async function saveOrchestratorProvider() {
+    const provider = $('orchestratorProviderSelect')?.value || 'codex_cli';
+    try {
+      await api('/api/settings/orchestrator', {method: 'POST', body: JSON.stringify({provider})});
+      setMessage('Đã lưu AI điều phối chính.', 'success');
+      await loadOrchestratorSettings();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function loadAnalysisProviders() {
     const providers = await api('/api/analysis-providers');
-    const providerLabel = (item) => ({local_metadata: 'Local · không cần API key', anthropic_claude: 'Claude · AI cloud', openai_gpt: 'GPT · AI cloud', codex_cli: 'Codex CLI · tài khoản đã đăng nhập'}[item.provider] || item.label || item.provider);
+    const providerLabel = (item) => ({local_metadata: 'Local · không cần API key', anthropic_claude: 'Claude · AI cloud', openai_gpt: 'GPT · AI cloud', codex_cli: 'Codex CLI · tài khoản đã đăng nhập', claude_code_cli: 'Claude Code CLI · tài khoản đã đăng nhập', antigravity: 'Antigravity · tài khoản đã đăng nhập'}[item.provider] || item.label || item.provider);
     const select = $('analysisProviderSelect');
     const selected = select.value;
     select.innerHTML = providers.map((item) => `<option value="${esc(item.provider)}" ${item.available ? '' : 'disabled'}>${esc(providerLabel(item))}${item.available ? '' : ' · chưa cấu hình'}</option>`).join('');
@@ -3553,7 +3613,7 @@
     const videoIds = selectedVideoIdsArray();
     if (!videoIds.length) return;
     const providerSelect = $('analysisProviderSelect').value;
-    const provider = (providerSelect === 'anthropic_claude' || providerSelect === 'openai_gpt' || providerSelect === 'codex_cli') ? providerSelect : null;
+    const provider = (providerSelect === 'anthropic_claude' || providerSelect === 'openai_gpt' || providerSelect === 'codex_cli' || providerSelect === 'claude_code_cli' || providerSelect === 'antigravity') ? providerSelect : null;
     let done = 0;
     for (const videoId of videoIds) {
       setMessage(`AI Writer: đang xử lý ${done + 1}/${videoIds.length} (${videoId})...`);
@@ -3653,7 +3713,7 @@
 
   async function refresh() {
     try {
-      await Promise.all([loadHealth(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
+      await Promise.all([loadHealth(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();
@@ -3880,7 +3940,7 @@
     setMessage(`Đang tạo nội dung mới bằng AI Writer cho ${videoId}... có thể mất chút thời gian.`);
     try {
       const providerSelect = $('analysisProviderSelect').value;
-      const provider = (providerSelect === 'anthropic_claude' || providerSelect === 'openai_gpt' || providerSelect === 'codex_cli') ? providerSelect : null;
+      const provider = (providerSelect === 'anthropic_claude' || providerSelect === 'openai_gpt' || providerSelect === 'codex_cli' || providerSelect === 'claude_code_cli' || providerSelect === 'antigravity') ? providerSelect : null;
       const response = await api(`/api/videos/${encodeURIComponent(videoId)}/writer`, {method: 'POST', body: JSON.stringify({provider})});
       renderWriter(response);
       setMessage('AI Writer đã tạo xong nội dung mới.', 'success');

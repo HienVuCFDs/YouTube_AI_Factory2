@@ -167,3 +167,78 @@ def call_codex_json(
         if not result_path.is_file():
             raise CodexBridgeError("Codex CLI khong tao ket qua cuoi cung")
         return _parse_json_output(result_path.read_text(encoding="utf-8"))
+
+
+def call_codex_vision_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    image_path: str | Path,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    """Like call_codex_json, but attaches one image via Codex's native `-i/--image`
+    flag (verified via `codex exec --help` on this machine) instead of asking the
+    model to read a file — so the read-only, no-file-access posture of
+    call_codex_json can stay unchanged for its existing callers (writer.py).
+
+    Used by /api/orchestrator/locate-element (web_video_sidecar.py's vision
+    fallback): "here is a screenshot, where do I click".
+    """
+    status = codex_cli_status()
+    if not status["installed"]:
+        raise CodexBridgeError("Khong tim thay Codex CLI; hay cai hoac cau hinh CODEX_CLI_PATH")
+    if not status["logged_in"]:
+        raise CodexBridgeError("Codex CLI chua dang nhap. Hay chay DANG_NHAP_CODEX.bat mot lan")
+
+    instruction = (
+        f"{system_prompt}\n\n"
+        "Quy tac bat buoc: chi phan tich anh da dinh kem va noi dung duoc cung cap; "
+        "khong chay lenh, khong sua project va khong truy cap mang. Tra ve dung JSON theo schema.\n\n"
+        f"Yeu cau:\n{user_prompt}"
+    )
+    executable = str(status["path"])
+    with tempfile.TemporaryDirectory(prefix="youtube-ai-factory-codex-vision-") as directory:
+        workdir = Path(directory)
+        schema_path = workdir / "schema.json"
+        result_path = workdir / "result.json"
+        schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+        command = [
+            executable,
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--sandbox",
+            "read-only",
+            "--image",
+            str(Path(image_path).resolve()),
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(result_path),
+            "--color",
+            "never",
+            "-C",
+            str(settings.PROJECT_ROOT),
+            "-",
+        ]
+        try:
+            process = subprocess.run(
+                command,
+                input=instruction,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=_local_codex_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexBridgeError(f"Khong chay duoc Codex CLI: {exc}") from exc
+        if process.returncode != 0:
+            detail = (process.stderr or process.stdout or "").strip()[-2000:]
+            raise CodexBridgeError(f"Codex CLI that bai: {detail or process.returncode}")
+        if not result_path.is_file():
+            raise CodexBridgeError("Codex CLI khong tao ket qua cuoi cung")
+        return _parse_json_output(result_path.read_text(encoding="utf-8"))

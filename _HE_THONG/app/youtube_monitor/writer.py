@@ -4,7 +4,9 @@ import math
 import re
 from typing import Any
 
-from .llm_client import LlmError, call_claude_json, call_codex_json, call_openai_json
+from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
+from .antigravity_bridge import antigravity_cli_status
+from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status
 from .folklore_research import source_animal
 from . import settings
@@ -314,9 +316,36 @@ class CodexWriter:
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
 
+class ClaudeCodeCliWriter:
+    """Sinh noi dung bang Claude Code CLI da dang nhap (goi claude.ai), khong can ANTHROPIC_API_KEY."""
+
+    provider = "claude_code_cli"
+
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+        parsed = call_claude_code_cli_json(
+            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+        )
+        return _finalize(video, self.provider, parsed, bool(transcript_text))
+
+
+class AntigravityWriter:
+    """Sinh noi dung bang Antigravity CLI da dang nhap (tai khoan Google), khong can API key."""
+
+    provider = "antigravity"
+
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+        parsed = call_antigravity_json(
+            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+        )
+        return _finalize(video, self.provider, parsed, bool(transcript_text))
+
+
 _WRITERS: dict[str, Any] = {}
 
-AVAILABLE_WRITER_PROVIDERS = [ClaudeWriter.provider, OpenAiWriter.provider, CodexWriter.provider]
+AVAILABLE_WRITER_PROVIDERS = [
+    ClaudeWriter.provider, OpenAiWriter.provider, CodexWriter.provider,
+    ClaudeCodeCliWriter.provider, AntigravityWriter.provider,
+]
 
 SCRIPT_REVISION_SCHEMA = {
     "type": "object",
@@ -376,6 +405,10 @@ def revise_script(
         parsed = call_claude_json(_SCRIPT_REVISION_SYSTEM, user_prompt, SCRIPT_REVISION_SCHEMA, max_tokens=4000)
     elif active_writer.provider == OpenAiWriter.provider:
         parsed = call_openai_json(_SCRIPT_REVISION_SYSTEM, user_prompt, SCRIPT_REVISION_SCHEMA, max_tokens=4000)
+    elif active_writer.provider == ClaudeCodeCliWriter.provider:
+        parsed = call_claude_code_cli_json(_SCRIPT_REVISION_SYSTEM, user_prompt, SCRIPT_REVISION_SCHEMA, max_tokens=4000)
+    elif active_writer.provider == AntigravityWriter.provider:
+        parsed = call_antigravity_json(_SCRIPT_REVISION_SYSTEM, user_prompt, SCRIPT_REVISION_SCHEMA, max_tokens=4000)
     else:
         parsed = call_codex_json(_SCRIPT_REVISION_SYSTEM, user_prompt, SCRIPT_REVISION_SCHEMA, max_tokens=4000)
     return {
@@ -403,9 +436,14 @@ def resolve_writer(provider: str | None):
             name = OpenAiWriter.provider
         elif codex_cli_status().get("logged_in"):
             name = CodexWriter.provider
+        elif claude_code_cli_status().get("logged_in"):
+            name = ClaudeCodeCliWriter.provider
+        elif antigravity_cli_status().get("logged_in"):
+            name = AntigravityWriter.provider
         else:
             raise WriterError(
-                "AI Writer cần cấu hình ANTHROPIC_API_KEY hoặc OPENAI_API_KEY trong .env."
+                "AI Writer cần cấu hình ANTHROPIC_API_KEY/OPENAI_API_KEY, hoặc đăng nhập "
+                "Codex CLI/Claude Code CLI/Antigravity CLI trên máy."
             )
 
     if name not in _WRITERS:
@@ -415,6 +453,10 @@ def resolve_writer(provider: str | None):
             _WRITERS[name] = OpenAiWriter()
         elif name == CodexWriter.provider:
             _WRITERS[name] = CodexWriter()
+        elif name == ClaudeCodeCliWriter.provider:
+            _WRITERS[name] = ClaudeCodeCliWriter()
+        elif name == AntigravityWriter.provider:
+            _WRITERS[name] = AntigravityWriter()
         else:
             raise WriterError(f"Provider không được hỗ trợ cho AI Writer: {name}")
     return _WRITERS[name]

@@ -30,6 +30,7 @@ EDITABLE_INTEGRATION_KEYS = {
     "GOOGLE_OAUTH_CLIENT_ID",
     "GOOGLE_OAUTH_CLIENT_SECRET",
     "GOOGLE_OAUTH_REDIRECT_URI",
+    "AI_ORCHESTRATOR_PROVIDER",
 }
 
 
@@ -132,6 +133,33 @@ def _detect_codex_cli() -> str:
     ) if vscode_extensions.is_dir() else []
     return str(candidates[0]) if candidates else ""
 
+
+def _detect_claude_code_cli() -> str:
+    configured = integration_value("CLAUDE_CODE_CLI_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+    on_path = shutil.which("claude")
+    if on_path:
+        return on_path
+    vscode_extensions = Path(os.getenv("USERPROFILE", "")) / ".vscode" / "extensions"
+    candidates = sorted(
+        vscode_extensions.glob("anthropic.claude-code-*/resources/native-binary/claude.exe"),
+        key=lambda path: str(path),
+        reverse=True,
+    ) if vscode_extensions.is_dir() else []
+    return str(candidates[0]) if candidates else ""
+
+
+def _detect_antigravity_cli() -> str:
+    configured = integration_value("ANTIGRAVITY_CLI_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+    on_path = shutil.which("agy")
+    if on_path:
+        return on_path
+    default = Path(os.getenv("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"
+    return str(default) if default.is_file() else ""
+
 DATA_DIR = Path(os.getenv("YOUTUBE_DATA_DIR", str(SYSTEM_ROOT / "data")))
 DB_PATH = Path(os.getenv("YOUTUBE_DB_PATH", str(DATA_DIR / "youtube_monitor.db")))
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
@@ -165,6 +193,24 @@ CODEX_CLI_PATH = _detect_codex_cli()
 CODEX_BRIDGE_HOME = Path(
     os.getenv("LOCALAPPDATA", str(DATA_DIR / "local-app-data"))
 ) / "YouTubeAIFactory" / "codex_cli_profile"
+
+CLAUDE_CODE_CLI_PATH = _detect_claude_code_cli()
+CLAUDE_CODE_BRIDGE_HOME = Path(
+    os.getenv("LOCALAPPDATA", str(DATA_DIR / "local-app-data"))
+) / "YouTubeAIFactory" / "claude_code_cli_profile"
+
+ANTIGRAVITY_CLI_PATH = _detect_antigravity_cli()
+
+
+def orchestrator_provider() -> str:
+    """Which locally-installed, already-logged-in CLI agent (not a metered
+    API key) orchestrates tasks like locating an element on an unfamiliar web
+    page for web_video_sidecar.py. "codex_cli" or "claude_code_cli"; a
+    function (like openai_config() etc. above), not a constant, so a change
+    saved from the dashboard (Cai dat > AI dieu phoi chinh) takes effect
+    immediately instead of requiring an app restart.
+    """
+    return integration_value("AI_ORCHESTRATOR_PROVIDER", "codex_cli") or "codex_cli"
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()

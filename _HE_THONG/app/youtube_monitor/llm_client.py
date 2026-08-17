@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from . import settings
+from .antigravity_bridge import AntigravityBridgeError, call_antigravity_json as _call_antigravity_json
+from .claude_code_bridge import ClaudeCodeBridgeError, call_claude_code_json as _call_claude_code_json
 from .codex_bridge import CodexBridgeError, call_codex_json as _call_codex_json
 
 
@@ -22,6 +24,35 @@ def call_codex_json(
     try:
         return _call_codex_json(system_prompt, user_prompt, schema)
     except CodexBridgeError as exc:
+        raise LlmError(str(exc)) from exc
+
+
+def call_claude_code_cli_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    """Use the locally logged-in Claude Code CLI (claude.ai subscription)
+    without an ANTHROPIC_API_KEY."""
+    del max_tokens  # Claude Code CLI owns its model token budget.
+    try:
+        return _call_claude_code_json(system_prompt, user_prompt, schema)
+    except ClaudeCodeBridgeError as exc:
+        raise LlmError(str(exc)) from exc
+
+
+def call_antigravity_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    """Use the locally logged-in Antigravity CLI (Google account) without an API key."""
+    del max_tokens  # Antigravity CLI owns its model token budget.
+    try:
+        return _call_antigravity_json(system_prompt, user_prompt, schema)
+    except AntigravityBridgeError as exc:
         raise LlmError(str(exc)) from exc
 
 

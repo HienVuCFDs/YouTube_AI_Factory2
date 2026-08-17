@@ -29,10 +29,23 @@ it to database.BROWSER_SIDECAR_PROVIDERS. No other server-side change needed.
    download control, then update that provider's entry in PROVIDERS below.
    The selectors shipped here are a best-effort starting point (Playwright's
    own recommended role/text-based locators), NOT verified against the live
-   UI of either site — treat step 4 as mandatory before step 5.
+   UI of either site — --recon is optional now (see below) but still the
+   fastest way to get a provider working reliably from the start.
 5. python web_video_sidecar.py --provider flow_veo
    Runs the poll loop for real (one provider per process; run two processes
    if you want both Flow and Meta AI working at once).
+
+*** AI VISION FALLBACK (self-healing selectors) ***
+When none of a step's hardcoded selectors match — first run before --recon,
+or the site changed its UI later — the sidecar takes a screenshot and asks
+the app's configured orchestrator CLI (Cai dat > AI dieu phoi chinh: Codex
+CLI or Claude Code CLI, both driven via the user's own logged-in
+subscription, not a metered API key) where to click, via
+POST /api/orchestrator/locate-element. This makes --recon optional rather
+than mandatory, at the cost of a few extra seconds and one CLI invocation
+per fallback. Requires the chosen CLI to be logged in (Cai dat page shows
+status); if neither is logged in, the fallback simply fails with a clear
+error and the job is reported failed rather than hanging.
 
 *** IMPORTANT: this automates a consumer web app, not an official API ***
 Neither Google's nor Meta's consumer ToS generally permit automated access
@@ -68,6 +81,11 @@ class ProviderConfig:
     prompt_selectors: list[str] = field(default_factory=list)
     submit_selectors: list[str] = field(default_factory=list)
     download_selectors: list[str] = field(default_factory=list)
+    # Plain-language description of each target, used only when every
+    # selector above fails to match — see "AI VISION FALLBACK" above.
+    prompt_instruction: str = "O nhap prompt/mo ta video can tao (thuong la 1 textarea lon giua man hinh)"
+    submit_instruction: str = "Nut gui/tao video (Generate, Create, hoac icon mui ten gui), thuong canh o nhap prompt"
+    download_instruction: str = "Nut tai video vua tao xong (Download), xuat hien sau khi video render xong"
 
 
 PROVIDERS: dict[str, ProviderConfig] = {
@@ -136,6 +154,14 @@ def _api_post(path: str) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _api_post_json(path: str, payload: dict[str, Any], timeout: int = 180) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(f"{FACTORY}{path}", data=body, method="POST",
+                                      headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def _upload_asset(project_id: int, video_path: Path) -> int:
     """POST the downloaded clip as a multipart/form-data upload, return asset_id."""
     boundary = "----ytfactorywebvideo"
@@ -187,32 +213,81 @@ def _find_first(page, selectors: list[str], timeout_ms: int = 15_000):
     raise WebVideoError(f"Không tìm được phần tử khớp {selectors}: {last_error}")
 
 
+def _locate_via_vision(page, instruction: str) -> tuple[int, int]:
+    """AI vision fallback — see module docstring. Screenshots the current
+    page, asks the app's configured orchestrator CLI for pixel coordinates,
+    returns (x, y). Raises WebVideoError if the AI can't find it either or
+    no orchestrator CLI is logged in."""
+    viewport = page.viewport_size or {"width": 1280, "height": 800}
+    screenshot_path = Path(os.environ.get("TEMP", str(BASE_DIR))) / f"web-video-locate-{int(time.time() * 1000)}.png"
+    page.screenshot(path=str(screenshot_path))
+    try:
+        result = _api_post_json(
+            "/api/orchestrator/locate-element",
+            {
+                "screenshot_path": str(screenshot_path),
+                "instruction": instruction,
+                "viewport_width": viewport["width"],
+                "viewport_height": viewport["height"],
+            },
+        )
+    finally:
+        screenshot_path.unlink(missing_ok=True)
+    if not result.get("found"):
+        raise WebVideoError(f"AI (orchestrator) khong tim thay: {instruction}")
+    return int(result["x"]), int(result["y"])
+
+
+def _resolve_target(page, selectors: list[str], instruction: str, timeout_ms: int = 15_000):
+    """Try the fast, free hardcoded selectors first; fall back to AI vision
+    (slower, uses the orchestrator CLI) only if none of them match. Returns
+    ("locator", Locator) or ("point", (x, y))."""
+    try:
+        return "locator", _find_first(page, selectors, timeout_ms=timeout_ms)
+    except WebVideoError:
+        return "point", _locate_via_vision(page, instruction)
+
+
+def _click(page, kind: str, target) -> None:
+    if kind == "locator":
+        target.click()
+    else:
+        page.mouse.click(*target)
+
+
 def generate_video(page, config: ProviderConfig, prompt: str, download_dir: Path) -> Path:
     page.goto(config.url, wait_until="domcontentloaded")
-    prompt_box = _find_first(page, config.prompt_selectors)
-    prompt_box.click()
-    prompt_box.fill(prompt)
-    submit_button = _find_first(page, config.submit_selectors)
-    submit_button.click()
+    kind, target = _resolve_target(page, config.prompt_selectors, config.prompt_instruction)
+    _click(page, kind, target)
+    page.keyboard.type(prompt)
+    kind, target = _resolve_target(page, config.submit_selectors, config.submit_instruction)
+    _click(page, kind, target)
 
     deadline = time.monotonic() + GENERATION_TIMEOUT_SECONDS
-    download_control = None
+    resolved: tuple[str, Any] | None = None
     while time.monotonic() < deadline:
         try:
-            download_control = _find_first(page, config.download_selectors, timeout_ms=5_000)
+            resolved = ("locator", _find_first(page, config.download_selectors, timeout_ms=5_000))
             break
         except WebVideoError:
             time.sleep(5)
-    if download_control is None:
+    if resolved is None:
+        # One AI-vision attempt once the fixed timeout is close to expired,
+        # rather than spamming a vision call on every 5s poll above.
+        try:
+            resolved = ("point", _locate_via_vision(page, config.download_instruction))
+        except WebVideoError:
+            pass
+    if resolved is None:
         raise WebVideoError(f"Không tạo xong video sau {GENERATION_TIMEOUT_SECONDS}s")
 
     download_dir.mkdir(parents=True, exist_ok=True)
     with page.expect_download() as download_info:
-        download_control.click()
+        _click(page, resolved[0], resolved[1])
     download = download_info.value
-    target = download_dir / f"web-video-{int(time.time())}.mp4"
-    download.save_as(str(target))
-    return target
+    target_path = download_dir / f"web-video-{int(time.time())}.mp4"
+    download.save_as(str(target_path))
+    return target_path
 
 
 def run_login(provider: str, config: ProviderConfig) -> None:

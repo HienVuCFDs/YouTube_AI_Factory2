@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .analyzer import MetadataAnalyzer
-from .llm_client import LlmError, call_claude_json, call_codex_json, call_openai_json
+from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
 
 
 LlmAnalysisError = LlmError
@@ -118,6 +118,26 @@ class CodexAnalyzer:
         return _finalize_result(video, self.provider, parsed)
 
 
+class ClaudeCodeCliAnalyzer:
+    """Phan tich metadata bang Claude Code CLI da dang nhap, khong can ANTHROPIC_API_KEY."""
+
+    provider = "claude_code_cli"
+
+    def analyze(self, video: dict[str, Any]) -> dict[str, Any]:
+        parsed = call_claude_code_cli_json(_SYSTEM_PROMPT, _build_user_prompt(video), RESULT_SCHEMA)
+        return _finalize_result(video, self.provider, parsed)
+
+
+class AntigravityAnalyzer:
+    """Phan tich metadata bang Antigravity CLI da dang nhap, khong can API key."""
+
+    provider = "antigravity"
+
+    def analyze(self, video: dict[str, Any]) -> dict[str, Any]:
+        parsed = call_antigravity_json(_SYSTEM_PROMPT, _build_user_prompt(video), RESULT_SCHEMA)
+        return _finalize_result(video, self.provider, parsed)
+
+
 _LOCAL_ANALYZER = MetadataAnalyzer()
 _LLM_ANALYZERS: dict[str, Any] = {}
 
@@ -126,6 +146,8 @@ AVAILABLE_PROVIDERS = [
     ClaudeAnalyzer.provider,
     OpenAiAnalyzer.provider,
     CodexAnalyzer.provider,
+    ClaudeCodeCliAnalyzer.provider,
+    AntigravityAnalyzer.provider,
 ]
 
 
@@ -144,6 +166,10 @@ def resolve_analyzer(provider: str | None):
             _LLM_ANALYZERS[name] = OpenAiAnalyzer()
         elif name == CodexAnalyzer.provider:
             _LLM_ANALYZERS[name] = CodexAnalyzer()
+        elif name == ClaudeCodeCliAnalyzer.provider:
+            _LLM_ANALYZERS[name] = ClaudeCodeCliAnalyzer()
+        elif name == AntigravityAnalyzer.provider:
+            _LLM_ANALYZERS[name] = AntigravityAnalyzer()
         else:
             raise LlmAnalysisError(f"Provider không được hỗ trợ: {name}")
     return _LLM_ANALYZERS[name]

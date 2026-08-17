@@ -5,8 +5,14 @@ title Dang nhap Codex CLI
 set "CODEX_HOME=%LOCALAPPDATA%\YouTubeAIFactory\codex_cli_profile"
 if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
 
-set "CODEX_EXE=C:\Users\ADMIN\.vscode\extensions\openai.chatgpt-26.727.40816-win32-x64\bin\windows-x86_64\codex.exe"
-if exist "%CODEX_EXE%" goto login
+rem Extension version changes with every VS Code ChatGPT extension update, so
+rem search for whatever version is currently installed instead of a pinned
+rem path (a hardcoded version here previously went stale and silently broke
+rem this launcher).
+for /f "delims=" %%D in ('dir /b /ad /o-n "%USERPROFILE%\.vscode\extensions\openai.chatgpt-*" 2^>nul') do (
+    if not defined CODEX_EXE if exist "%USERPROFILE%\.vscode\extensions\%%D\bin\windows-x86_64\codex.exe" set "CODEX_EXE=%USERPROFILE%\.vscode\extensions\%%D\bin\windows-x86_64\codex.exe"
+)
+if defined CODEX_EXE goto login
 
 where codex >nul 2>&1
 if errorlevel 1 goto missing

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
@@ -9,7 +10,9 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .. import settings
-from ..codex_bridge import codex_cli_status, launch_codex_login
+from ..antigravity_bridge import antigravity_cli_status
+from ..claude_code_bridge import ClaudeCodeBridgeError, call_claude_code_json, claude_code_cli_status
+from ..codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
 from ..ffmpeg_renderer import ffmpeg_available, nvenc_available
 from ..maintenance import list_database_backups, prune_database_backups
 from ..oauth import status as oauth_status
@@ -89,6 +92,8 @@ def health() -> dict[str, Any]:
     openai_key, openai_model = settings.openai_config()
     runway_key, runway_model = settings.runway_config()
     codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
     oauth = oauth_status()
     openmontage_status = openmontage_adapter.status()
     return {
@@ -135,6 +140,11 @@ def health() -> dict[str, Any]:
         ),
         "codex_cli_installed": bool(codex["installed"]),
         "codex_cli_logged_in": bool(codex["logged_in"]),
+        "claude_code_cli_installed": bool(claude_code["installed"]),
+        "claude_code_cli_logged_in": bool(claude_code["logged_in"]),
+        "antigravity_cli_installed": bool(antigravity["installed"]),
+        "antigravity_cli_logged_in": bool(antigravity["logged_in"]),
+        "ai_orchestrator_provider": settings.orchestrator_provider(),
         "openmontage": openmontage_status,
     }
 
@@ -178,6 +188,8 @@ def _integration_status() -> list[dict[str, Any]]:
     anthropic_key, anthropic_model = settings.anthropic_config()
     runway_key, runway_model = settings.runway_config()
     codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
     oauth = oauth_status()
     return [
         {
@@ -241,6 +253,24 @@ def _integration_status() -> list[dict[str, Any]]:
             "connection": "codex_cli",
             "model": "Tai khoan Codex",
             "detail": str(codex["detail"]),
+        },
+        {
+            "key": "claude_code_cli",
+            "label": "Claude Code CLI tren may",
+            "category": "AI Writer / dieu phoi trinh duyet local bridge",
+            "ready": bool(claude_code["logged_in"]),
+            "connection": "claude_code_cli",
+            "model": "Tai khoan Claude",
+            "detail": str(claude_code["detail"]),
+        },
+        {
+            "key": "antigravity_cli",
+            "label": "Antigravity CLI tren may",
+            "category": "AI Writer / phan tich local bridge",
+            "ready": bool(antigravity["logged_in"]),
+            "connection": "antigravity_cli",
+            "model": "Tai khoan Google",
+            "detail": str(antigravity["detail"]),
         },
         {
             "key": "openmontage",
@@ -308,6 +338,87 @@ def openmontage_status() -> dict[str, Any]:
     return openmontage_adapter.status()
 
 
+OrchestratorProvider = Literal["codex_cli", "claude_code_cli"]
+
+
+class OrchestratorSettingsRequest(BaseModel):
+    provider: OrchestratorProvider
+
+
+def _orchestrator_settings() -> dict[str, Any]:
+    return {
+        "provider": settings.orchestrator_provider(),
+        "options": [
+            {"key": "codex_cli", "label": "Codex CLI", **codex_cli_status()},
+            {"key": "claude_code_cli", "label": "Claude Code CLI", **claude_code_cli_status()},
+        ],
+    }
+
+
+@router.get("/api/settings/orchestrator")
+def get_orchestrator_settings() -> dict[str, Any]:
+    """Which locally-logged-in CLI agent drives tasks like web_video_sidecar.py's
+    vision fallback (find an element on an unfamiliar page) — a CLI already
+    logged into the user's own Claude/Codex subscription, not a metered API key."""
+    return _orchestrator_settings()
+
+
+@router.post("/api/settings/orchestrator")
+def save_orchestrator_settings(payload: OrchestratorSettingsRequest) -> dict[str, Any]:
+    settings.save_integration_values({"AI_ORCHESTRATOR_PROVIDER": payload.provider})
+    return _orchestrator_settings()
+
+
+class LocateElementRequest(BaseModel):
+    screenshot_path: str = Field(min_length=1, max_length=1000)
+    instruction: str = Field(min_length=1, max_length=2000)
+    viewport_width: int = Field(ge=1, le=8000)
+    viewport_height: int = Field(ge=1, le=8000)
+
+
+_LOCATE_ELEMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "found": {"type": "boolean"},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["found", "x", "y"],
+}
+
+
+@router.post("/api/orchestrator/locate-element")
+def locate_element(payload: LocateElementRequest) -> dict[str, Any]:
+    """Vision fallback for web_video_sidecar.py: given a screenshot already
+    saved to disk (sidecar and app run on the same machine, so a local path
+    is enough — no upload needed) and a plain-language instruction, ask the
+    configured orchestrator CLI (the user's own logged-in Claude/Codex
+    subscription, not a metered API key) for pixel coordinates to click.
+    Used only when the sidecar's hardcoded selectors fail to find something."""
+    screenshot = Path(payload.screenshot_path)
+    if not screenshot.is_file():
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy ảnh: {screenshot}")
+    system_prompt = (
+        f"Ban dang xem anh chup man hinh mot trang web, kich thuoc {payload.viewport_width}x{payload.viewport_height} "
+        "pixel, goc toa do (0,0) o tren-trai. Tim toa do pixel can bam theo yeu cau ben duoi. "
+        "Neu khong thay phan tu phu hop, tra ve found=false va x=0, y=0."
+    )
+    provider = settings.orchestrator_provider()
+    try:
+        if provider == "claude_code_cli":
+            result = call_claude_code_json(
+                system_prompt, payload.instruction, _LOCATE_ELEMENT_SCHEMA, image_path=screenshot,
+            )
+        else:
+            result = call_codex_vision_json(
+                system_prompt, payload.instruction, _LOCATE_ELEMENT_SCHEMA, image_path=screenshot,
+            )
+    except (ClaudeCodeBridgeError, CodexBridgeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
 @router.get("/api/model-catalog")
 def model_catalog() -> list[dict[str, Any]]:
     """One stable catalog for the manual UI and future OpenClaw handoff."""
@@ -336,6 +447,8 @@ def tool_status() -> list[dict[str, Any]]:
     openai_key, _ = settings.openai_config()
     runway_key, runway_model = settings.runway_config()
     codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
     premiere_plugin = SYSTEM_ROOT / "premiere_plugin"
     whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
     try:
@@ -384,6 +497,20 @@ def tool_status() -> list[dict[str, Any]]:
             "ready": bool(codex["logged_in"]),
             "phase": "ready" if codex["logged_in"] else "configure",
             "detail": str(codex["detail"]),
+        },
+        {
+            "key": "claude_code_cli",
+            "label": "Claude Code CLI local",
+            "ready": bool(claude_code["logged_in"]),
+            "phase": "ready" if claude_code["logged_in"] else "configure",
+            "detail": str(claude_code["detail"]),
+        },
+        {
+            "key": "antigravity_cli",
+            "label": "Antigravity CLI local",
+            "ready": bool(antigravity["logged_in"]),
+            "phase": "ready" if antigravity["logged_in"] else "configure",
+            "detail": str(antigravity["detail"]),
         },
         {
             "key": "pyvideotrans",

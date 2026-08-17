@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 
 from .analysis_queue import AnalysisQueue
 from . import settings
+from .antigravity_bridge import antigravity_cli_status
+from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status, launch_codex_login
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
@@ -2707,6 +2709,8 @@ def list_analysis_providers() -> list[dict[str, Any]]:
     anthropic_key, anthropic_model = settings.anthropic_config()
     openai_key, openai_model = settings.openai_config()
     codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
     return [
         {"provider": "local_metadata", "label": "Local (không cần API key)", "available": True},
         {
@@ -2723,6 +2727,16 @@ def list_analysis_providers() -> list[dict[str, Any]]:
             "provider": "codex_cli",
             "label": "Codex CLI (tai khoan dang nhap)",
             "available": bool(codex["logged_in"]),
+        },
+        {
+            "provider": "claude_code_cli",
+            "label": "Claude Code CLI (tai khoan dang nhap)",
+            "available": bool(claude_code["logged_in"]),
+        },
+        {
+            "provider": "antigravity",
+            "label": "Antigravity CLI (tai khoan dang nhap)",
+            "available": bool(antigravity["logged_in"]),
         },
     ]
 
