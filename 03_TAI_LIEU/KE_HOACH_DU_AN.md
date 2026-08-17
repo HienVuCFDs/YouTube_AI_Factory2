@@ -937,3 +937,16 @@ Sau khi đọc kỹ toàn bộ mã nguồn `_HE_THONG`, tài liệu kế hoạch
 - Vì vậy **không nên gỡ guard này**, và cũng không nên tự ý sửa `video_compose.py` (đây là clone vendor từ repo GitHub ngoài `calesthio/OpenMontage`, nằm trong `_THU_NGHIEM` — không track trong git của project, sửa trực tiếp sẽ lệch khỏi upstream).
 
 Đường đi khả thi để thật sự "bật" OpenMontage cho GPU-only mode sau này (chưa làm, cần một phiên làm việc riêng để test render thật): sửa `openmontage_adapter.py::render_timeline()` để truyền `"codec": "h264_nvenc"` trong payload khi `nvenc_available()` — nhưng `_compose()` hiện dùng chung `-crf {crf} -preset {preset}` cho mọi codec (dòng 685), mà `h264_nvenc` không nhận `-crf` kiểu x264 (cần `-cq`/`-rc` và tên preset khác) — nghĩa là cần sửa thêm nhánh chọn tham số theo codec trong `video_compose.py`, rồi test render thật để xác nhận trước khi nới guard ở `main.py`. Vì đây là thay đổi có rủi ro (ảnh hưởng pipeline render thật, phụ thuộc code vendor bên ngoài), không tự thực hiện trong phiên này.
+
+## 39. Cập nhật triển khai: tách router hệ thống/OAuth ra khỏi main.py (2026-08-17)
+
+`main.py` là 1 file duy nhất chứa toàn bộ 126 route + mọi Pydantic model (3.266 dòng) — khó review/định vị khi cần sửa. Đã tách 2 nhóm route ít phụ thuộc chéo nhất ra `youtube_monitor/api/`:
+
+- `api/routes_system.py`: `/`, `/api/health`, `/api/maintenance/*`, `/api/summary`, `/api/integrations` (GET/POST), `/api/integrations/codex/login`, `/api/openmontage/status`, `/api/model-catalog`, `/api/tool-status`, `/api/browser/heartbeat`.
+- `api/routes_oauth.py`: toàn bộ `/api/oauth/youtube/*` và `/oauth/youtube/*`.
+
+Nguyên tắc an toàn: **không đổi bất kỳ route nào còn lại trong `main.py`**. Các singleton (`database`, `production_worker`, `publisher_worker`, `scene_generation_worker`, `openmontage_adapter`, `browser_lease_monitor`, `template_path`) và helper `_api_error` vẫn định nghĩa nguyên trạng trong `main.py`; 2 router mới `import` ngược lại từ `..main` (import đặt sau khi `_api_error` đã định nghĩa xong, ngay trước `app.include_router(...)`, để tránh circular-import — đã gặp và sửa lỗi này trong lúc làm). `main.py`: 3.266 → 2.778 dòng.
+
+Đã kiểm thử: `pytest` toàn bộ 103 test pass; **và khởi động app thật bằng `uvicorn` trên cổng phụ (8799, DB/project tách riêng khỏi dữ liệu thật)**, gọi thật `/`, `/api/health`, `/api/tool-status`, `/api/integrations`, `/api/oauth/youtube/status`, `/api/model-catalog`, `/api/summary` — toàn bộ trả 200 với dữ liệu đúng (bao gồm xác nhận lại `pyvideotrans_runtime_ready`/`voxcpm_runtime_ready` đều `true` qua route thật, khớp với điều tra mục 37).
+
+**Chưa làm, để lại cho phiên sau:** phần lớn route còn lại (~2.200 dòng: projects/scripts/shots/timeline/assets/thumbnails/scene-jobs/publish — pipeline sản xuất chính) chưa tách, vì đây là phần ghép chặt nhất và rủi ro cao nhất nếu tách vội. Gợi ý ranh giới cho lần sau: `routes_channels_videos.py` (channels/managed-channels/videos), `routes_projects.py` (script/shots/timeline/render-settings), `routes_assets.py` (assets/thumbnails/voice-library/scene-jobs), `routes_jobs_publish.py` (production jobs/publications/premiere export).
