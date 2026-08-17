@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from . import settings
+
+
+class CodexBridgeError(RuntimeError):
+    pass
+
+
+def _local_codex_environment() -> dict[str, str]:
+    """Use this app's dedicated Codex profile, never an inherited session."""
+    environment = os.environ.copy()
+    settings.CODEX_BRIDGE_HOME.mkdir(parents=True, exist_ok=True)
+    # A bridge launched by a development tool must not inherit a temporary
+    # bearer token belonging to that tool's own session.
+    environment["CODEX_HOME"] = str(settings.CODEX_BRIDGE_HOME)
+    environment.pop("CODEX_ACCESS_TOKEN", None)
+    return environment
+
+
+def codex_cli_status() -> dict[str, Any]:
+    executable = settings.CODEX_CLI_PATH
+    if not executable or not Path(executable).is_file():
+        return {
+            "installed": False,
+            "logged_in": False,
+            "path": "",
+            "detail": "Khong tim thay Codex CLI tren may",
+        }
+    try:
+        result = subprocess.run(
+            [executable, "login", "status"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            env=_local_codex_environment(),
+        )
+    except OSError as exc:
+        return {
+            "installed": False,
+            "logged_in": False,
+            "path": executable,
+            "detail": f"Khong chay duoc Codex CLI: {exc}",
+        }
+    message = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
+    logged_in = result.returncode == 0 and "not logged in" not in message.lower()
+    return {
+        "installed": True,
+        "logged_in": logged_in,
+        "path": executable,
+        "detail": "Codex CLI da dang nhap" if logged_in else "Codex CLI chua dang nhap",
+    }
+
+
+def launch_codex_login() -> dict[str, Any]:
+    """Open the official Codex CLI login in a visible local console."""
+    status = codex_cli_status()
+    if not status["installed"]:
+        raise CodexBridgeError("Khong tim thay Codex CLI tren may")
+    if status["logged_in"]:
+        return status
+    try:
+        subprocess.Popen(
+            [str(status["path"]), "login"],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            env=_local_codex_environment(),
+        )
+    except OSError as exc:
+        raise CodexBridgeError(f"Khong mo duoc Codex login: {exc}") from exc
+    return {
+        **status,
+        "detail": "Da mo cua so Codex login; hay hoan tat dang nhap roi quay lai Lam moi.",
+    }
+
+
+def _parse_json_output(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
+        if cleaned.rstrip().endswith("```"):
+            cleaned = cleaned.rstrip()[:-3].rstrip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise CodexBridgeError("Codex khong tra ve JSON hop le") from exc
+    if not isinstance(parsed, dict):
+        raise CodexBridgeError("Codex phai tra ve mot JSON object")
+    return parsed
+
+
+def call_codex_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    timeout_seconds: int = 600,
+) -> dict[str, Any]:
+    """Run the user's local Codex CLI as a read-only structured-output agent.
+
+    This uses the CLI's existing login rather than an OPENAI_API_KEY. The
+    worker is restricted to a read-only sandbox and receives no write task.
+    """
+    status = codex_cli_status()
+    if not status["installed"]:
+        raise CodexBridgeError("Khong tim thay Codex CLI; hay cai hoac cau hinh CODEX_CLI_PATH")
+    if not status["logged_in"]:
+        raise CodexBridgeError("Codex CLI chua dang nhap. Hay chay DANG_NHAP_CODEX.bat mot lan")
+
+    instruction = (
+        f"{system_prompt}\n\n"
+        "Quy tac bat buoc: chi phan tich noi dung duoc cung cap; khong doc file, khong chay lenh, "
+        "khong sua project va khong truy cap mang. Tra ve dung JSON theo schema.\n\n"
+        f"Du lieu can xu ly:\n{user_prompt}"
+    )
+    executable = str(status["path"])
+    with tempfile.TemporaryDirectory(prefix="youtube-ai-factory-codex-") as directory:
+        workdir = Path(directory)
+        schema_path = workdir / "schema.json"
+        result_path = workdir / "result.json"
+        schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+        command = [
+            executable,
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--sandbox",
+            "read-only",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(result_path),
+            "--color",
+            "never",
+            "-C",
+            str(settings.PROJECT_ROOT),
+            "-",
+        ]
+        try:
+            process = subprocess.run(
+                command,
+                input=instruction,
+                capture_output=True,
+                text=True,
+                # Windows otherwise defaults to a legacy console code page
+                # (often cp1252), which cannot carry Vietnamese prompts.
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=_local_codex_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexBridgeError(f"Khong chay duoc Codex CLI: {exc}") from exc
+        if process.returncode != 0:
+            detail = (process.stderr or process.stdout or "").strip()[-2000:]
+            raise CodexBridgeError(f"Codex CLI that bai: {detail or process.returncode}")
+        if not result_path.is_file():
+            raise CodexBridgeError("Codex CLI khong tao ket qua cuoi cung")
+        return _parse_json_output(result_path.read_text(encoding="utf-8"))

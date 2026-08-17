@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        --bg: #111315;
+        --panel: #1a1d20;
+        --panel-2: #22272b;
+        --line: #343b40;
+        --text: #f1f4f5;
+        --muted: #9ca7ad;
+        --green: #50d890;
+        --yellow: #f5c451;
+        --red: #ef6b73;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+      }
+
+      h1 { font-size: 17px; margin: 0 0 4px; }
+      h2 { font-size: 12px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+      p { color: var(--muted); line-height: 1.45; margin: 7px 0; }
+      .eyebrow { color: var(--green); font-size: 10px; letter-spacing: .12em; font-weight: bold; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 12px; margin-bottom: 10px; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .row + .row { margin-top: 8px; }
+      button, select {
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--panel-2);
+        color: var(--text);
+        padding: 8px 9px;
+        font-size: 12px;
+      }
+      button { cursor: pointer; font-weight: bold; }
+      button:hover { border-color: var(--green); }
+      button.primary { background: #1c6d49; border-color: #2ea86b; }
+      button:disabled { opacity: .45; cursor: default; }
+      select { flex: 1; }
+      .status { border-left: 3px solid var(--yellow); padding: 8px 9px; background: #1d1d1b; color: var(--muted); white-space: pre-wrap; }
+      .status.success { border-color: var(--green); color: #c9f5dc; }
+      .status.error { border-color: var(--red); color: #ffd4d6; }
+      .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+      .metric { background: var(--panel-2); border-radius: 5px; padding: 8px; }
+      .metric strong { display: block; font-size: 16px; margin-top: 3px; }
+      .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); margin-top: 6px; }
+      .note { font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="eyebrow">VIBE TRADING · VIDEO AUTOMATION</div>
+      <h1>YouTube AI Factory</h1>
+      <p>Nhập gói Premiere đã xuất từ dashboard, sau đó để Premiere tạo bản dựng nháp theo timeline.</p>
+      <div class="row">
+        <button id="choosePackage">Chọn thư mục Premiere Export</button>
+      </div>
+      <div id="packagePath" class="path">Chưa chọn thư mục.</div>
+    </div>
+
+    <div class="card">
+      <h2>Bản dựng AI Auto Draft</h2>
+      <div class="row">
+        <select id="sequenceMode" aria-label="Cách tạo sequence">
+          <option value="new">Tạo sequence mới từ media đầu tiên</option>
+          <option value="active">Dùng sequence đang active</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="createDraft" class="primary" disabled>Tạo bản dựng tự động</button>
+      </div>
+      <p class="note">Plugin sẽ import audio/video/ảnh local, đặt vào V1 và A2, cắt theo thời lượng segment, rồi thêm marker cho từng đoạn.</p>
+    </div>
+
+    <div id="summaryCard" class="card" hidden>
+      <h2>Manifest đã chọn</h2>
+      <div id="summaryText"></div>
+    </div>
+
+    <div id="status" class="status">Sẵn sàng.</div>
+    <script src="index.js"></script>
+  </body>
+</html>

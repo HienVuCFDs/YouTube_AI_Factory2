@@ -1,0 +1,3266 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import mimetypes
+import os
+import shlex
+import shutil
+import subprocess
+import threading
+import tempfile
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlparse
+
+from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from pydantic import BaseModel, Field
+
+from .analysis_queue import AnalysisQueue
+from . import settings
+from .codex_bridge import codex_cli_status, launch_codex_login
+from .database import Database
+from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
+from .ffmpeg_renderer import ffmpeg_available, nvenc_available
+from .llm_analyzer import LlmAnalysisError, resolve_analyzer
+from .maintenance import list_database_backups, prune_database_backups
+from .oauth import OAuthError
+from .oauth import build_authorize_url as build_oauth_authorize_url
+from .oauth import disconnect as oauth_disconnect
+from .oauth import exchange_code as oauth_exchange_code
+from .oauth import status as oauth_status
+from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
+from .production_worker import (
+    ProductionJobError,
+    ProductionWorker,
+    VOXCPM_PREVIEW_TEXT,
+    VOXCPM_VOICE_PRESETS,
+)
+from .publisher import PublisherError, PublisherWorker, next_channel_schedule
+from .project_layout import ensure_project_layout
+from .quality_check import build_quality_report
+from .scene_generator import SceneGenerationError, SceneGenerationWorker
+from .thumbnail_generator import ThumbnailGenerationError, generate_frame_thumbnails
+from .premiere_export import build_premiere_export_package
+from .service import SyncService, parse_push_feed
+from .settings import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_MODEL,
+    DB_PATH,
+    EDGE_TTS_COMMAND,
+    EDGE_TTS_RUNTIME_READY,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    FFMPEG_RENDER_COMMAND,
+    FFMPEG_BINARY,
+    LOCAL_ASSET_MAX_BYTES,
+    PRODUCTION_ARTIFACT_DIR,
+    PYVIDEOTRANS_COMMAND,
+    PYVIDEOTRANS_RUNTIME_READY,
+    PYVIDEOTRANS_TTS_TYPE,
+    PYVIDEOTRANS_VOICE_ROLE,
+    PYVIDEOTRANS_WORKDIR,
+    VOXCPM_DEVICE,
+    VOXCPM_MODEL,
+    VOXCPM_PROMPT_TEXT,
+    VOXCPM_PYTHON,
+    VOXCPM_REFERENCE_AUDIO,
+    VOXCPM_RUNNER,
+    VOXCPM_RUNTIME_READY,
+    SYSTEM_ROOT,
+    YOUTUBE_API_KEY,
+    YOUTUBE_MAX_INITIAL_VIDEOS,
+    YOUTUBE_PUSH_VERIFY_TOKEN,
+)
+from .script_builder import build_script_draft, script_to_markdown
+from .shot_planner import build_shot_plan, shots_to_markdown
+from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
+from .transcriber import (
+    TranscriptionError,
+    resolve_whisper_runtime,
+    save_asset_transcript_result,
+    save_transcript_result,
+    transcribe_local_file,
+    transcribe_video,
+)
+from .transcript import normalize_transcript
+from .transcript_queue import TranscriptQueue
+from .video_downloader import VideoDownloadError, delete_downloaded_video, download_video
+from .writer import WriterError, resolve_target_duration_seconds, resolve_writer, revise_script, validate_voiceover_plan
+from .folklore_research import research_folklore_remake
+from .reference_analyzer import ReferenceAnalysisError, analyze_reference
+from .youtube_captions import CaptionsError, download_caption, list_captions
+from .youtube_client import YouTubeApiError, YouTubeClient
+
+
+database = Database(DB_PATH)
+youtube = YouTubeClient(YOUTUBE_API_KEY)
+service = SyncService(database, youtube, YOUTUBE_MAX_INITIAL_VIDEOS)
+metadata_queue = AnalysisQueue(database)
+transcript_queue = TranscriptQueue(database)
+openmontage_adapter = OpenMontageAdapter(
+    settings.OPENMONTAGE_ROOT,
+    settings.OPENMONTAGE_PYTHON,
+    settings.OPENMONTAGE_RENDER_RUNTIME,
+    FFMPEG_BINARY,
+    settings.OPENMONTAGE_TIMEOUT_SECONDS,
+)
+production_worker = ProductionWorker(
+    database,
+    PRODUCTION_ARTIFACT_DIR,
+    pyvideotrans_command=PYVIDEOTRANS_COMMAND,
+    edge_tts_command=EDGE_TTS_COMMAND,
+    ffmpeg_command=FFMPEG_RENDER_COMMAND,
+    ffmpeg_binary=FFMPEG_BINARY,
+    pyvideotrans_workdir=PYVIDEOTRANS_WORKDIR,
+    pyvideotrans_voice_role=PYVIDEOTRANS_VOICE_ROLE,
+    pyvideotrans_tts_type=PYVIDEOTRANS_TTS_TYPE,
+    voxcpm_python=str(VOXCPM_PYTHON),
+    voxcpm_runner=str(VOXCPM_RUNNER),
+    voxcpm_model=VOXCPM_MODEL,
+    voxcpm_device=VOXCPM_DEVICE,
+    voxcpm_reference_audio=VOXCPM_REFERENCE_AUDIO,
+    voxcpm_prompt_text=VOXCPM_PROMPT_TEXT,
+    openmontage_adapter=openmontage_adapter,
+)
+publisher_worker = PublisherWorker(database)
+scene_generation_worker = SceneGenerationWorker(database, PRODUCTION_ARTIFACT_DIR)
+template_path = Path(__file__).resolve().parent / "templates" / "index.html"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class BrowserLeaseMonitor:
+    """Tự dừng server local khi không còn tab giao diện nào giữ heartbeat."""
+
+    def __init__(self) -> None:
+        self.enabled = _env_bool("YOUTUBE_AUTO_CLOSE_ON_BROWSER_EXIT", False)
+        self.idle_seconds = max(15.0, float(os.getenv("YOUTUBE_BROWSER_IDLE_SECONDS", "45")))
+        self.close_grace_seconds = max(5.0, float(os.getenv("YOUTUBE_BROWSER_CLOSE_GRACE_SECONDS", "10")))
+        self._leases: dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._browser_seen = False
+        self._empty_since: float | None = None
+        self._closing = False
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="browser-lease-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def heartbeat(self, client_id: str, status: Literal["online", "offline"]) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._browser_seen = True
+            if status == "offline":
+                self._leases.pop(client_id, None)
+            else:
+                self._leases[client_id] = now
+            self._empty_since = None if self._leases else (self._empty_since or now)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": self.enabled,
+                "browser_seen": self._browser_seen,
+                "active_clients": len(self._leases),
+                "idle_seconds": self.idle_seconds,
+                "close_grace_seconds": self.close_grace_seconds,
+            }
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(5.0):
+            now = time.monotonic()
+            should_close = False
+            with self._lock:
+                stale = [client_id for client_id, last_seen in self._leases.items() if now - last_seen > self.idle_seconds]
+                for client_id in stale:
+                    self._leases.pop(client_id, None)
+                if self._browser_seen and not self._leases:
+                    self._empty_since = self._empty_since or now
+                    should_close = now - self._empty_since >= self.close_grace_seconds
+                else:
+                    self._empty_since = None
+            if should_close:
+                self._shutdown_process()
+                return
+
+    def _shutdown_process(self) -> None:
+        with self._lock:
+            if self._closing:
+                return
+            self._closing = True
+        _stop_runtime_workers()
+        os._exit(0)
+
+
+_runtime_stop_lock = threading.Lock()
+_runtime_workers_stopped = False
+
+
+def _stop_runtime_workers() -> None:
+    global _runtime_workers_stopped
+    with _runtime_stop_lock:
+        if _runtime_workers_stopped:
+            return
+        _runtime_workers_stopped = True
+        scene_generation_worker.stop()
+        publisher_worker.stop()
+        production_worker.stop()
+        metadata_queue.stop()
+        transcript_queue.stop()
+
+
+browser_lease_monitor = BrowserLeaseMonitor()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    database.initialize()
+    metadata_queue.start()
+    transcript_queue.start()
+    production_worker.start()
+    publisher_worker.start()
+    scene_generation_worker.start()
+    browser_lease_monitor.start()
+    try:
+        yield
+    finally:
+        browser_lease_monitor.stop()
+        _stop_runtime_workers()
+
+
+app = FastAPI(title="YouTube AI Factory - Monitor", version="0.1.0", lifespan=lifespan)
+
+
+class BrowserHeartbeatRequest(BaseModel):
+    client_id: str = Field(min_length=8, max_length=128)
+    status: Literal["online", "offline"] = "online"
+
+
+class AddChannelRequest(BaseModel):
+    reference: str = Field(min_length=1, max_length=500)
+    group_name: str = Field(default="", max_length=100)
+    max_videos: int | None = Field(default=None, ge=1, le=5000)
+
+
+class ImportVideoRequest(BaseModel):
+    reference: str = Field(min_length=1, max_length=500)
+    group_name: str = Field(default="", max_length=100)
+
+
+class TrackingRequest(BaseModel):
+    enabled: bool
+
+
+class ChannelGroupRequest(BaseModel):
+    group_name: str = Field(default="", max_length=100)
+
+
+class ManagedChannelRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    channel_url: str = Field(min_length=1, max_length=500)
+    youtube_channel_id: str = Field(default="", max_length=200)
+    group_name: str = Field(default="", max_length=100)
+    workflow_reference_channel_id: str = Field(default="", max_length=200)
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] = "youtube_landscape"
+    language: str = Field(default="vi", max_length=20)
+    default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
+    default_voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
+    default_subtitle_provider: Literal["timeline_text", "faster_whisper_local"] = "timeline_text"
+    default_subtitle_model: str = Field(default="timeline", min_length=1, max_length=120)
+    default_transition_style: Literal["none", "fade"] = "fade"
+    notes: str = Field(default="", max_length=5000)
+    enabled: bool = True
+    schedule_enabled: bool = False
+    schedule_frequency: Literal["daily", "weekdays", "weekly", "monthly"] = "weekly"
+    schedule_time: str = Field(default="19:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    schedule_timezone: str = Field(default="Asia/Bangkok", max_length=60)
+    schedule_days: str = Field(default="mon", max_length=50)
+    default_privacy: Literal["private", "unlisted", "public"] = "private"
+    auto_upload: bool = False
+
+
+class ManagedChannelUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    channel_url: str | None = Field(default=None, min_length=1, max_length=500)
+    youtube_channel_id: str | None = Field(default=None, max_length=200)
+    group_name: str | None = Field(default=None, max_length=100)
+    workflow_reference_channel_id: str | None = Field(default=None, max_length=200)
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] | None = None
+    language: str | None = Field(default=None, max_length=20)
+    default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] | None = None
+    default_voice_model: str | None = Field(default=None, min_length=1, max_length=120)
+    default_subtitle_provider: Literal["timeline_text", "faster_whisper_local"] | None = None
+    default_subtitle_model: str | None = Field(default=None, min_length=1, max_length=120)
+    default_transition_style: Literal["none", "fade"] | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    enabled: bool | None = None
+    schedule_enabled: bool | None = None
+    schedule_frequency: Literal["daily", "weekdays", "weekly", "monthly"] | None = None
+    schedule_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    schedule_timezone: str | None = Field(default=None, max_length=60)
+    schedule_days: str | None = Field(default=None, max_length=50)
+    default_privacy: Literal["private", "unlisted", "public"] | None = None
+    auto_upload: bool | None = None
+
+
+class QueueAnalysisRequest(BaseModel):
+    channel_id: str | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+    force: bool = False
+    provider: str | None = None
+    video_ids: list[str] | None = Field(default=None, max_length=200)
+
+
+class QueuePauseRequest(BaseModel):
+    paused: bool
+
+
+class TranscriptRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2_000_000)
+    source_type: Literal["manual", "authorized_caption", "uploaded_file"] = "manual"
+    language: str = Field(default="", max_length=20)
+    transcript_format: Literal["txt", "srt", "vtt"] = "txt"
+
+
+class AutoTranscriptRequest(BaseModel):
+    language: str = Field(default="", max_length=20)
+    confirmed: bool = False
+
+
+class QueueTranscriptRequest(BaseModel):
+    channel_id: str | None = None
+    limit: int = Field(default=10, ge=1, le=200)
+    force: bool = False
+    video_ids: list[str] | None = Field(default=None, max_length=200)
+    confirmed: bool = False
+
+
+class WriterRequest(BaseModel):
+    provider: str | None = None
+    managed_channel_id: int | None = Field(default=None, ge=1)
+    creative_direction: str = Field(default="", max_length=4000)
+    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only"] = "new_angle_same_topic"
+    target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
+    target_duration_text: str = Field(default="", max_length=40)
+    use_web_research: bool = True
+
+
+class ScriptChatRequest(BaseModel):
+    provider: str | None = None
+    message: str = Field(min_length=1, max_length=10_000)
+
+
+class CaptionImportRequest(BaseModel):
+    caption_id: str = Field(min_length=1, max_length=200)
+    language: str = Field(default="", max_length=20)
+
+
+ProjectStatus = Literal["draft", "script", "review", "approved", "archived"]
+ScriptStatus = Literal["draft", "review", "approved"]
+ShotStatus = Literal["planned", "ready", "done"]
+TimelineStatus = Literal["planned", "voice_ready", "asset_ready", "ready", "done"]
+
+
+class CreateProjectRequest(BaseModel):
+    title: str = Field(default="", max_length=200)
+    notes: str = Field(default="", max_length=5000)
+    managed_channel_id: int | None = Field(default=None, ge=1)
+
+
+class UpdateProjectRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    status: ProjectStatus | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    managed_channel_id: int | None = Field(default=None, ge=1)
+
+
+class UpdateScriptRequest(BaseModel):
+    script_title: str | None = Field(default=None, max_length=300)
+    hook: str | None = Field(default=None, max_length=5000)
+    intro: str | None = Field(default=None, max_length=20_000)
+    main_content: str | None = Field(default=None, max_length=200_000)
+    cta: str | None = Field(default=None, max_length=5000)
+    status: ScriptStatus | None = None
+
+
+class GenerateShotsRequest(BaseModel):
+    force: bool = False
+
+
+class UpdateShotRequest(BaseModel):
+    narration: str | None = Field(default=None, max_length=20_000)
+    visual_prompt: str | None = Field(default=None, max_length=20_000)
+    asset_type: str | None = Field(default=None, max_length=50)
+    duration_seconds: int | None = Field(default=None, ge=1, le=3600)
+    status: ShotStatus | None = None
+
+
+class CreateShotRequest(BaseModel):
+    section: str = Field(default="main", max_length=60)
+    narration: str = Field(default="", max_length=20_000)
+    visual_prompt: str = Field(default="", max_length=20_000)
+    asset_type: str = Field(default="broll", max_length=50)
+    duration_seconds: int = Field(default=8, ge=1, le=3600)
+    status: ShotStatus = "planned"
+
+
+class ReorderShotsRequest(BaseModel):
+    shot_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class GenerateTimelineRequest(BaseModel):
+    force: bool = False
+
+
+class UpdateTimelineRequest(BaseModel):
+    voice_text: str | None = Field(default=None, max_length=20_000)
+    subtitle_text: str | None = Field(default=None, max_length=20_000)
+    visual_prompt: str | None = Field(default=None, max_length=20_000)
+    asset_type: str | None = Field(default=None, max_length=50)
+    duration_seconds: int | None = Field(default=None, ge=1, le=3600)
+    audio_path: str | None = Field(default=None, max_length=1000)
+    visual_path: str | None = Field(default=None, max_length=1000)
+    status: TimelineStatus | None = None
+
+
+class RenderSettingsRequest(BaseModel):
+    music_asset_id: int | None = Field(default=None, ge=1)
+    music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
+    transition_style: Literal["none", "fade"] = "fade"
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] = "youtube_landscape"
+    voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
+    voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
+    voice_rate: Literal["-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"] = "+0%"
+    voice_reference_asset_id: int | None = Field(default=None, ge=1)
+    voice_prompt_text: str = Field(default="", max_length=5000)
+    subtitle_provider: Literal["timeline_text", "faster_whisper_local"] = "timeline_text"
+    subtitle_model: str = Field(default="timeline", min_length=1, max_length=120)
+    publish_language: Literal["vi", "en", "th", "pt-BR", "es", "fr", "de", "ja", "ko", "zh-CN", "id"] = "vi"
+
+
+class GenerateThumbnailsRequest(BaseModel):
+    prompt: str = Field(default="", max_length=5_000)
+    seed: int | None = None
+    variants: int = Field(default=3, ge=1, le=6)
+
+
+ProductionJobType = Literal["voiceover", "source_visuals", "render", "premiere_draft", "director_production"]
+
+
+class CreateProductionJobRequest(BaseModel):
+    job_type: ProductionJobType
+    provider: str = Field(default="dry_run", min_length=1, max_length=50)
+    force: bool = False
+    confirmed: bool = False
+
+
+class CreatePublicationRequest(BaseModel):
+    managed_channel_id: int | None = Field(default=None, ge=1)
+    thumbnail_asset_id: int | None = Field(default=None, ge=1)
+    title: str = Field(default="", max_length=100)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list, max_length=500)
+    category_id: str = Field(default="27", min_length=1, max_length=10)
+    privacy_status: Literal["private", "unlisted", "public"] | None = None
+    scheduled_at: str | None = Field(default=None, max_length=80)
+    confirmed: bool = False
+
+
+DirectorProvider = Literal["codex_cli", "openai_gpt", "anthropic_claude"]
+
+
+class DirectorDraftRequest(BaseModel):
+    provider: DirectorProvider = "codex_cli"
+    creative_direction: str = Field(default="", max_length=4000)
+    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only"] = "new_angle_same_topic"
+    target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
+    target_duration_text: str = Field(default="", max_length=40)
+    use_web_research: bool = True
+    auto_produce: bool = False
+    confirmed: bool = False
+
+
+class PauseProductionQueueRequest(BaseModel):
+    paused: bool
+
+
+class PruneBackupsRequest(BaseModel):
+    keep: int = Field(default=14, ge=1, le=100)
+    confirmed: bool = False
+
+
+class PremiereExportRequest(BaseModel):
+    force: bool = False
+
+
+AssetType = Literal["video", "audio", "image"]
+
+
+class AttachAssetRequest(BaseModel):
+    asset_id: int = Field(ge=1)
+
+
+IntegrationProvider = Literal["openai_gpt", "google_gemini", "anthropic_claude", "runway"]
+
+
+class SaveIntegrationRequest(BaseModel):
+    provider: IntegrationProvider
+    api_key: str | None = Field(default=None, max_length=1000)
+    model: str | None = Field(default=None, max_length=120)
+    clear_api_key: bool = False
+
+
+class YouTubeOAuthConfigRequest(BaseModel):
+    client_id: str | None = Field(default=None, max_length=500)
+    client_secret: str | None = Field(default=None, max_length=500)
+    redirect_uri: str | None = Field(default=None, max_length=500)
+    clear: bool = False
+
+
+class CreateSceneGenerationRequest(BaseModel):
+    timeline_segment_id: int = Field(ge=1)
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image"] = "gemini_image"
+    prompt: str = Field(min_length=3, max_length=20_000)
+    duration_seconds: Literal[5, 10] = 5
+    ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
+    reference_asset_id: int | None = Field(default=None, ge=1)
+    confirmed: bool = False
+
+
+class BatchSceneGenerationRequest(BaseModel):
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image"] = "gemini_image"
+    duration_seconds: Literal[5, 10] = 5
+    ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
+    confirmed: bool = False
+
+
+class AnalyzeAssetRequest(BaseModel):
+    language: str = Field(default="", max_length=20)
+    confirmed: bool = False
+
+
+class RenameAssetRequest(BaseModel):
+    original_name: str = Field(min_length=1, max_length=180)
+
+
+def _api_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, YouTubeApiError):
+        status = exc.status_code if exc.status_code and 400 <= exc.status_code < 500 else 502
+        return HTTPException(status_code=status, detail=str(exc))
+    if isinstance(exc, TranscriptionError):
+        return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, LlmAnalysisError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, DirectorError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, (OAuthError, CaptionsError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, VideoDownloadError):
+        return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, ProductionJobError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, SceneGenerationError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, ThumbnailGenerationError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+def _write_project_document(project_id: int, filename: str, content: str) -> Path:
+    """Keep the human-readable production plan beside each project."""
+    path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["script"] / filename
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _current_final_video_path(project_id: int, script_id: int | None = None) -> Path | None:
+    """Return final.mp4 only when it was rendered from the current script."""
+    script = database.get_latest_project_script(project_id)
+    active_script_id = int(script_id or (script or {}).get("id") or 0)
+    if not active_script_id:
+        return None
+    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    if not final_path.is_file():
+        return None
+    for job in database.list_project_jobs(project_id, limit=100):
+        if (
+            int(job.get("script_id") or 0) == active_script_id
+            and job.get("job_type") in {"render", "director_production"}
+            and job.get("status") == "completed"
+            and Path(str(job.get("output_path") or "")).resolve() == final_path.resolve()
+        ):
+            return final_path
+    return None
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    return HTMLResponse(template_path.read_text(encoding="utf-8"))
+
+
+@app.post("/api/browser/heartbeat")
+def browser_heartbeat(payload: BrowserHeartbeatRequest) -> dict[str, Any]:
+    browser_lease_monitor.heartbeat(payload.client_id, payload.status)
+    return {"ok": True, "browser": browser_lease_monitor.snapshot()}
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    try:
+        whisper_device, whisper_compute_type = resolve_whisper_runtime()
+    except TranscriptionError as exc:
+        whisper_device, whisper_compute_type = "error", str(exc)
+    anthropic_key, anthropic_model = settings.anthropic_config()
+    openai_key, openai_model = settings.openai_config()
+    runway_key, runway_model = settings.runway_config()
+    codex = codex_cli_status()
+    oauth = oauth_status()
+    openmontage_status = openmontage_adapter.status()
+    return {
+        "ok": True,
+        "api_key_configured": bool(YOUTUBE_API_KEY),
+        "database": str(DB_PATH),
+        # Monitoring, analysis and transcript queues do not download video.  The
+        # confirmed AI Director action may download a single source for editing.
+        "auto_download_enabled": True,
+        "director_download_requires_confirmation": True,
+        "manual_video_download_available": True,
+        "whisper_requires_explicit_confirmation": True,
+        "whisper_device": whisper_device,
+        "whisper_compute_type": whisper_compute_type,
+        "gpu_only": settings.GPU_ONLY,
+        "cuda_device": settings.GPU_DEVICE_INDEX,
+        "ffmpeg_nvenc_available": nvenc_available(FFMPEG_BINARY),
+        "production_worker_running": bool(
+            production_worker._thread and production_worker._thread.is_alive()
+        ),
+        "publisher_worker_running": bool(
+            publisher_worker._thread and publisher_worker._thread.is_alive()
+        ),
+        "youtube_oauth_connected": bool(oauth.get("connected")),
+        "pyvideotrans_configured": bool(PYVIDEOTRANS_COMMAND),
+        "pyvideotrans_cuda_ready": settings.PYVIDEOTRANS_CUDA_READY,
+        "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
+        "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
+        "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
+        "voxcpm_runtime_ready": VOXCPM_RUNTIME_READY,
+        "voxcpm_model": VOXCPM_MODEL,
+        "voxcpm_device": VOXCPM_DEVICE,
+        "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
+        "ffmpeg_configured": bool(FFMPEG_RENDER_COMMAND),
+        "ffmpeg_builtin_available": ffmpeg_available(FFMPEG_BINARY),
+        "openai_configured": bool(openai_key),
+        "openai_model": openai_model,
+        "anthropic_configured": bool(anthropic_key),
+        "anthropic_model": anthropic_model,
+        "runway_configured": bool(runway_key),
+        "runway_model": runway_model,
+        "scene_generation_worker_running": bool(
+            scene_generation_worker._thread and scene_generation_worker._thread.is_alive()
+        ),
+        "codex_cli_installed": bool(codex["installed"]),
+        "codex_cli_logged_in": bool(codex["logged_in"]),
+        "openmontage": openmontage_status,
+    }
+
+
+@app.post("/api/maintenance/database-backup")
+def create_database_backup() -> dict[str, Any]:
+    backup_dir = DB_PATH.parent / "backups"
+    filename = f"youtube_monitor-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.db"
+    try:
+        path = database.backup_to(backup_dir / filename)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "completed", "path": str(path), "bytes": path.stat().st_size}
+
+
+@app.get("/api/maintenance/database-backups")
+def database_backups() -> dict[str, Any]:
+    backups = list_database_backups(DB_PATH.parent / "backups")
+    return {"backups": backups, "count": len(backups)}
+
+
+@app.post("/api/maintenance/database-backups/prune")
+def prune_backups(payload: PruneBackupsRequest) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Cần xác nhận trước khi dọn bản sao lưu cũ")
+    try:
+        result = prune_database_backups(DB_PATH.parent / "backups", payload.keep)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**result, "count": len(list_database_backups(DB_PATH.parent / "backups"))}
+
+
+@app.get("/api/summary")
+def summary() -> dict[str, int]:
+    return database.summary()
+
+
+def _integration_status() -> list[dict[str, Any]]:
+    openai_key, openai_model = settings.openai_config()
+    gemini_key, gemini_image_model, gemini_video_model = settings.gemini_config()
+    anthropic_key, anthropic_model = settings.anthropic_config()
+    runway_key, runway_model = settings.runway_config()
+    codex = codex_cli_status()
+    oauth = oauth_status()
+    return [
+        {
+            "key": "openai_gpt",
+            "label": "OpenAI GPT + Image API",
+            "category": "AI Writer / anh canh",
+            "ready": bool(openai_key),
+            "connection": "api_key",
+            "model": openai_model,
+            "detail": "Viet kich ban, phan tich va tao anh cho tung canh" if openai_key else "Can them OPENAI_API_KEY",
+        },
+        {
+            "key": "google_gemini",
+            "label": "Google Gemini Image + Veo",
+            "category": "Anh canh / video canh AI",
+            "ready": bool(gemini_key),
+            "connection": "api_key",
+            "model": gemini_image_model,
+            "detail": (
+                f"Anh: {gemini_image_model} · Video: {gemini_video_model} · Cần Google AI Studio Billing để tạo ảnh/video"
+                if gemini_key else "Can them GEMINI_API_KEY"
+            ),
+        },
+        {
+            "key": "anthropic_claude",
+            "label": "Claude API",
+            "category": "AI Writer / director",
+            "ready": bool(anthropic_key),
+            "connection": "api_key",
+            "model": anthropic_model,
+            "detail": "Viet kich ban, phan tich va tao ke hoach dung" if anthropic_key else "Can them ANTHROPIC_API_KEY",
+        },
+        {
+            "key": "runway",
+            "label": "Runway Video API",
+            "category": "Tao canh AI tu prompt",
+            "ready": bool(runway_key),
+            "connection": "api_key",
+            "model": runway_model,
+            "detail": "Tao video canh va gan vao timeline" if runway_key else "Can them RUNWAYML_API_SECRET",
+        },
+        {
+            "key": "youtube_oauth",
+            "label": "YouTube OAuth Publisher",
+            "category": "Upload video, thumbnail và đặt lịch đăng",
+            "ready": bool(oauth.get("connected")),
+            "configured": bool(oauth.get("configured")),
+            "connection": "youtube_oauth",
+            "model": "YouTube Data API v3",
+            "client_id_hint": oauth.get("client_id_hint", ""),
+            "redirect_uri": oauth.get("redirect_uri", ""),
+            "detail": "Đã kết nối tài khoản YouTube" if oauth.get("connected") else (
+                "Đã có Client ID nhưng chưa cấp quyền" if oauth.get("configured") else "Cần cấu hình OAuth Client ID và Client Secret"
+            ),
+        },
+        {
+            "key": "codex_cli",
+            "label": "Codex CLI tren may",
+            "category": "AI Writer local bridge",
+            "ready": bool(codex["logged_in"]),
+            "connection": "codex_cli",
+            "model": "Tai khoan Codex",
+            "detail": str(codex["detail"]),
+        },
+        {
+            "key": "openmontage",
+            "label": "OpenMontage video engine",
+            "category": "Dựng, chuyển cảnh và render local",
+            "ready": bool(openmontage_adapter.status()["ready"]),
+            "connection": "local_engine",
+            "model": openmontage_adapter.configured_runtime,
+            "detail": str(openmontage_adapter.status()["detail"]),
+        },
+        {
+            "key": "claude_desktop",
+            "label": "Claude Desktop",
+            "category": "Handoff local",
+            "ready": True,
+            "connection": "handoff",
+            "model": "JSON handoff",
+            "detail": "Xuat goi project de dua vao Claude; dung Claude API neu can tu dong trong app",
+        },
+    ]
+
+
+@app.get("/api/integrations")
+def list_integrations() -> list[dict[str, Any]]:
+    """Return provider state only; API secrets are never sent to the browser."""
+    return _integration_status()
+
+
+@app.post("/api/integrations")
+def save_integration(payload: SaveIntegrationRequest) -> dict[str, Any]:
+    mapping = {
+        "openai_gpt": ("OPENAI_API_KEY", "OPENAI_MODEL"),
+        "google_gemini": ("GEMINI_API_KEY", "GEMINI_IMAGE_MODEL"),
+        "anthropic_claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
+        "runway": ("RUNWAYML_API_SECRET", "RUNWAY_MODEL"),
+    }
+    key_name, model_name = mapping[payload.provider]
+    values: dict[str, str] = {}
+    if payload.clear_api_key:
+        values[key_name] = ""
+    elif payload.api_key is not None and payload.api_key.strip():
+        values[key_name] = payload.api_key.strip()
+    if payload.model is not None and payload.model.strip():
+        values[model_name] = payload.model.strip()
+    if not values:
+        raise HTTPException(status_code=400, detail="Hay nhap API key, model hoac chon xoa key")
+    try:
+        settings.save_integration_values(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    item = next(item for item in _integration_status() if item["key"] == payload.provider)
+    return {"status": "saved", "integration": item}
+
+
+@app.post("/api/integrations/codex/login")
+def begin_codex_login() -> dict[str, Any]:
+    try:
+        return {"status": "login_started", "integration": launch_codex_login()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/openmontage/status")
+def openmontage_status() -> dict[str, Any]:
+    return openmontage_adapter.status()
+
+
+@app.get("/api/model-catalog")
+def model_catalog() -> list[dict[str, Any]]:
+    """One stable catalog for the manual UI and future OpenClaw handoff."""
+    anthropic_key, anthropic_model = settings.anthropic_config()
+    openai_key, openai_model = settings.openai_config()
+    runway_key, runway_model = settings.runway_config()
+    whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
+    return [
+        {"stage": "LLM", "provider": "codex_cli", "model": "Codex local session", "mode": "local_handoff", "ready": bool(codex_cli_status()["logged_in"]), "vram": "—"},
+        {"stage": "LLM", "provider": "openai_gpt", "model": openai_model, "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
+        {"stage": "Image AI", "provider": "openai_image", "model": "gpt-image-1", "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
+        {"stage": "LLM", "provider": "anthropic_claude", "model": anthropic_model, "mode": "cloud", "ready": bool(anthropic_key), "vram": "Cloud"},
+        {"stage": "STT", "provider": "faster_whisper", "model": settings.WHISPER_MODEL_SIZE, "mode": "local_gpu" if settings.WHISPER_DEVICE != "cpu" else "local_cpu", "ready": whisper_ready, "vram": "~1–6 GB"},
+        {"stage": "TTS", "provider": "voxcpm", "model": settings.VOXCPM_MODEL, "mode": "local_gpu", "ready": VOXCPM_RUNTIME_READY, "vram": "~6–10 GB"},
+        {"stage": "TTS", "provider": "pyvideotrans", "model": PYVIDEOTRANS_VOICE_ROLE, "mode": "local_gpu", "ready": PYVIDEOTRANS_RUNTIME_READY, "vram": "Theo engine"},
+        {"stage": "TTS", "provider": "edge_tts", "model": "Neural voices", "mode": "cloud", "ready": EDGE_TTS_RUNTIME_READY, "vram": "Cloud"},
+        {"stage": "Video AI", "provider": "runway", "model": runway_model, "mode": "cloud", "ready": bool(runway_key), "vram": "Cloud"},
+        {"stage": "Render", "provider": "ffmpeg_builtin", "model": "H.264/AAC + NVENC", "mode": "local_gpu", "ready": ffmpeg_available(FFMPEG_BINARY) and nvenc_available(FFMPEG_BINARY), "vram": "~2 GB"},
+    ]
+
+
+@app.get("/api/tool-status")
+def tool_status() -> list[dict[str, Any]]:
+    oauth = oauth_status()
+    anthropic_key, _ = settings.anthropic_config()
+    openai_key, _ = settings.openai_config()
+    runway_key, runway_model = settings.runway_config()
+    codex = codex_cli_status()
+    premiere_plugin = SYSTEM_ROOT / "premiere_plugin"
+    whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
+    try:
+        whisper_device, whisper_compute_type = resolve_whisper_runtime()
+    except TranscriptionError as exc:
+        whisper_device, whisper_compute_type = "error", str(exc)
+    return [
+        {
+            "key": "youtube_api",
+            "label": "YouTube Data API",
+            "ready": bool(YOUTUBE_API_KEY),
+            "phase": "ready" if YOUTUBE_API_KEY else "configure",
+            "detail": "Đồng bộ metadata đa kênh" if YOUTUBE_API_KEY else "Cần YOUTUBE_API_KEY",
+        },
+        {
+            "key": "local_whisper",
+            "label": "Faster-Whisper local",
+            "ready": whisper_ready,
+            "phase": "ready" if whisper_ready else "configure",
+            "detail": f"Trích transcript bằng GPU {whisper_compute_type}" if whisper_ready and whisper_device == "cuda" else ("Trích transcript bằng CPU" if whisper_ready else "Cần faster-whisper và FFmpeg"),
+        },
+        {
+            "key": "ai_writer",
+            "label": "AI Writer",
+            "ready": bool(anthropic_key or openai_key),
+            "phase": "ready" if (anthropic_key or openai_key) else "configure",
+            "detail": "Claude/GPT đã cấu hình" if (ANTHROPIC_API_KEY or OPENAI_API_KEY) else "Cần OPENAI_API_KEY hoặc ANTHROPIC_API_KEY",
+        },
+        {
+            "key": "openai_image",
+            "label": "GPT Image · cảnh kể chuyện",
+            "ready": bool(openai_key),
+            "phase": "ready" if openai_key else "configure",
+            "detail": "Tạo ảnh cho từng cảnh, FFmpeg thêm chuyển động khi dựng" if openai_key else "Cần OPENAI_API_KEY",
+        },
+        {
+            "key": "runway_video",
+            "label": "Runway Video AI",
+            "ready": bool(runway_key),
+            "phase": "ready" if runway_key else "configure",
+            "detail": f"Tao canh tu prompt ({runway_model})" if runway_key else "Can RUNWAYML_API_SECRET",
+        },
+        {
+            "key": "codex_cli",
+            "label": "Codex CLI local",
+            "ready": bool(codex["logged_in"]),
+            "phase": "ready" if codex["logged_in"] else "configure",
+            "detail": str(codex["detail"]),
+        },
+        {
+            "key": "pyvideotrans",
+            "label": "pyVideoTrans voiceover · GPU check",
+            "ready": PYVIDEOTRANS_RUNTIME_READY,
+            "phase": "ready" if PYVIDEOTRANS_RUNTIME_READY else "configure",
+            "detail": (
+                "PyTorch CUDA sẵn sàng; F5/Qwen local sẽ dùng GPU"
+                if PYVIDEOTRANS_RUNTIME_READY
+                else ("Đang hoàn tất dependency pyVideoTrans" if PYVIDEOTRANS_COMMAND else "Cần cài tool và cấu hình PYVIDEOTRANS_COMMAND")
+            ),
+        },
+        {
+            "key": "voxcpm",
+            "label": "VoxCPM2 voiceover · CUDA",
+            "ready": VOXCPM_RUNTIME_READY,
+            "phase": "ready" if VOXCPM_RUNTIME_READY else "configure",
+            "detail": (
+                f"VoxCPM2 sẵn sàng trên {VOXCPM_DEVICE}; model sẽ tải ở lần chạy đầu"
+                if VOXCPM_RUNTIME_READY
+                else "Cần cài voxcpm trong môi trường pyVideoTrans và bật CUDA"
+            ),
+        },
+        {
+            "key": "ffmpeg",
+            "label": "FFmpeg renderer",
+            "ready": ffmpeg_available(FFMPEG_BINARY),
+            "phase": "ready" if ffmpeg_available(FFMPEG_BINARY) else "configure",
+            "detail": "Render local không cần command template" if ffmpeg_available(FFMPEG_BINARY) else "Cần cài FFmpeg",
+        },
+        {
+            "key": "premiere_plugin",
+            "label": "Premiere UXP plugin",
+            "ready": (premiere_plugin / "manifest.json").is_file(),
+            "phase": "ready" if (premiere_plugin / "manifest.json").is_file() else "planned",
+            "detail": "Đã có plugin, cần test trong Premiere" if (premiere_plugin / "manifest.json").is_file() else "Chưa dựng plugin",
+        },
+        {
+            "key": "youtube_oauth",
+            "label": "YouTube OAuth",
+            "ready": bool(oauth.get("connected")),
+            "phase": "ready" if oauth.get("connected") else "configure",
+            "detail": "Caption chính chủ / quyền kênh đã kết nối" if oauth.get("connected") else "Chưa cấu hình hoặc chưa kết nối OAuth",
+        },
+        {
+            "key": "youtube_webhook",
+            "label": "YouTube Push Webhook",
+            "ready": False,
+            "phase": "configure",
+            "detail": "Endpoint đã có, cần URL HTTPS public để đăng ký callback",
+        },
+        {
+            "key": "comfyui",
+            "label": "ComfyUI thumbnail",
+            "ready": False,
+            "phase": "planned",
+            "detail": "Chưa tích hợp workflow thumbnail",
+        },
+        {
+            "key": "publisher",
+            "label": "YouTube Publisher",
+            "ready": bool(publisher_worker._thread and publisher_worker._thread.is_alive()),
+            "phase": "ready" if (publisher_worker._thread and publisher_worker._thread.is_alive()) else "configure",
+            "detail": "Publisher queue đã sẵn sàng; cần kết nối YouTube OAuth để upload thật",
+        },
+        {
+            "key": "analytics",
+            "label": "Analytics Agent",
+            "ready": False,
+            "phase": "planned",
+            "detail": "Chưa tích hợp YouTube Analytics API",
+        },
+    ]
+
+
+@app.get("/api/oauth/youtube/status")
+def youtube_oauth_status() -> dict[str, Any]:
+    return oauth_status()
+
+
+@app.get("/api/oauth/youtube/channels")
+def youtube_oauth_channels() -> dict[str, Any]:
+    try:
+        return {"channels": publisher_worker.publisher.list_authorized_channels()}
+    except (OAuthError, PublisherError) as exc:
+        raise _api_error(exc) from exc
+
+
+@app.post("/api/oauth/youtube/config")
+def configure_youtube_oauth(payload: YouTubeOAuthConfigRequest) -> dict[str, Any]:
+    if payload.clear:
+        values = {
+            "GOOGLE_OAUTH_CLIENT_ID": "",
+            "GOOGLE_OAUTH_CLIENT_SECRET": "",
+        }
+        try:
+            settings.save_integration_values(values)
+            oauth_disconnect()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return oauth_status()
+
+    values: dict[str, str] = {}
+    if payload.client_id and payload.client_id.strip():
+        values["GOOGLE_OAUTH_CLIENT_ID"] = payload.client_id.strip()
+    if payload.client_secret and payload.client_secret.strip():
+        values["GOOGLE_OAUTH_CLIENT_SECRET"] = payload.client_secret.strip()
+    if payload.redirect_uri and payload.redirect_uri.strip():
+        redirect_uri = payload.redirect_uri.strip()
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+            raise HTTPException(status_code=400, detail="Redirect URI local phai dung http://127.0.0.1 hoac http://localhost")
+        values["GOOGLE_OAUTH_REDIRECT_URI"] = redirect_uri
+    if not values:
+        raise HTTPException(status_code=400, detail="Hay nhap Client ID, Client Secret hoac Redirect URI")
+    try:
+        settings.save_integration_values(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return oauth_status()
+
+
+@app.get("/oauth/youtube/authorize")
+def youtube_oauth_authorize() -> RedirectResponse:
+    try:
+        url = build_oauth_authorize_url()
+    except OAuthError as exc:
+        raise _api_error(exc) from exc
+    return RedirectResponse(url)
+
+
+@app.get("/oauth/youtube/callback", response_class=HTMLResponse)
+def youtube_oauth_callback(
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+) -> HTMLResponse:
+    if error:
+        return HTMLResponse(f"<p>Kết nối YouTube OAuth thất bại: {error}. Bạn có thể đóng tab này.</p>", status_code=400)
+    if not code:
+        return HTMLResponse("<p>Thiếu mã xác thực từ Google. Bạn có thể đóng tab này.</p>", status_code=400)
+    try:
+        oauth_exchange_code(code, state)
+    except OAuthError as exc:
+        return HTMLResponse(f"<p>Kết nối YouTube OAuth thất bại: {exc}</p>", status_code=400)
+    return HTMLResponse(
+        "<p>Đã kết nối YouTube OAuth thành công. Bạn có thể đóng tab này và quay lại ứng dụng.</p>"
+    )
+
+
+@app.post("/api/oauth/youtube/disconnect")
+def youtube_oauth_disconnect() -> dict[str, Any]:
+    oauth_disconnect()
+    return oauth_status()
+
+
+@app.get("/api/channels")
+def list_channels() -> list[dict[str, Any]]:
+    return database.list_channels()
+
+
+@app.post("/api/channels")
+def add_channel(payload: AddChannelRequest) -> dict[str, Any]:
+    try:
+        return service.add_channel(
+            payload.reference,
+            group_name=payload.group_name,
+            max_videos=payload.max_videos,
+        )
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.post("/api/videos/import")
+def import_reference_video(payload: ImportVideoRequest) -> dict[str, Any]:
+    try:
+        return service.add_video(payload.reference, group_name=payload.group_name)
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/managed-channels")
+def list_managed_channels() -> list[dict[str, Any]]:
+    return database.list_managed_channels()
+
+
+@app.post("/api/managed-channels")
+def add_managed_channel(payload: ManagedChannelRequest) -> dict[str, Any]:
+    try:
+        channel = database.create_managed_channel(
+            name=payload.name,
+            channel_url=payload.channel_url,
+            youtube_channel_id=payload.youtube_channel_id,
+            group_name=payload.group_name,
+            workflow_reference_channel_id=payload.workflow_reference_channel_id,
+            output_profile=payload.output_profile,
+            language=payload.language,
+            default_voice_provider=payload.default_voice_provider,
+            default_voice_model=payload.default_voice_model,
+            default_subtitle_provider=payload.default_subtitle_provider,
+            default_subtitle_model=payload.default_subtitle_model,
+            default_transition_style=payload.default_transition_style,
+            notes=payload.notes,
+            schedule_enabled=payload.schedule_enabled,
+            schedule_frequency=payload.schedule_frequency,
+            schedule_time=payload.schedule_time,
+            schedule_timezone=payload.schedule_timezone,
+            schedule_days=payload.schedule_days,
+            default_privacy=payload.default_privacy,
+            auto_upload=payload.auto_upload,
+        )
+        return {"status": "saved", "channel": channel}
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.patch("/api/managed-channels/{channel_id}")
+def update_managed_channel(channel_id: int, payload: ManagedChannelUpdateRequest) -> dict[str, Any]:
+    try:
+        channel = database.update_managed_channel(channel_id, **payload.model_dump(exclude_unset=True))
+    except Exception as exc:
+        raise _api_error(exc) from exc
+    if not channel:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kênh của tôi")
+    return {"status": "saved", "channel": channel}
+
+
+@app.get("/api/workflow-reference-channels")
+def list_workflow_reference_channels() -> list[dict[str, Any]]:
+    return [
+        {
+            "youtube_channel_id": channel["youtube_channel_id"],
+            "title": channel.get("title") or channel["youtube_channel_id"],
+            "channel_url": channel.get("channel_url") or "",
+            "group_name": channel.get("group_name") or "",
+            "thumbnail_url": channel.get("thumbnail_url") or "",
+        }
+        for channel in database.list_channels()
+    ]
+
+
+@app.patch("/api/channels/{channel_id}/tracking")
+def set_tracking(channel_id: str, payload: TrackingRequest) -> dict[str, Any]:
+    channel = database.set_tracking_enabled(channel_id, payload.enabled)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kênh")
+    return channel
+
+
+@app.patch("/api/channels/{channel_id}/group")
+def set_channel_group(channel_id: str, payload: ChannelGroupRequest) -> dict[str, Any]:
+    channel = database.set_channel_group(channel_id, payload.group_name)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kênh")
+    return channel
+
+
+@app.post("/api/channels/{channel_id}/sync")
+def sync_channel(
+    channel_id: str,
+    max_videos: int | None = Query(default=None, ge=1, le=5000),
+) -> dict[str, Any]:
+    try:
+        return service.sync_channel(channel_id, max_videos=max_videos, trigger="manual")
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/videos")
+def list_videos(
+    channel_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    return database.list_videos(channel_id, limit)
+
+
+@app.get("/api/projects")
+def list_projects(limit: int = Query(default=100, ge=1, le=200)) -> list[dict[str, Any]]:
+    return database.list_production_projects(limit)
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: int) -> dict[str, Any]:
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=2_000)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    final_path = _current_final_video_path(project_id, int((bundle.get("latest_script") or {}).get("id") or 0))
+    bundle["final_video"] = {
+        "available": bool(final_path),
+        "url": f"/api/projects/{project_id}/final-video" if final_path else None,
+        "size_bytes": final_path.stat().st_size if final_path else None,
+    }
+    return bundle
+
+
+@app.get("/api/projects/{project_id}/final-video")
+def stream_project_final_video(project_id: int) -> FileResponse:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    final_path = _current_final_video_path(project_id)
+    if not final_path:
+        raise HTTPException(status_code=404, detail="Dự án chưa có video hoàn chỉnh cho phiên kịch bản hiện tại; hãy tạo cảnh AI và render lại")
+    return FileResponse(final_path, media_type="video/mp4")
+
+
+@app.get("/api/projects/{project_id}/handoff")
+def get_project_handoff(
+    project_id: int,
+    transcript_chars: int = Query(default=50_000, ge=0, le=200_000),
+) -> dict[str, Any]:
+    limit = None if transcript_chars == 0 else transcript_chars
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=limit)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {
+        "handoff_version": "youtube_ai_factory.project.v1",
+        "intended_consumer": "OpenClaw",
+        **bundle,
+    }
+
+
+@app.get("/api/projects/{project_id}/script")
+def get_latest_project_script(project_id: int) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    return script or {"project_id": project_id, "status": "missing"}
+
+
+@app.get("/api/projects/{project_id}/scripts")
+def list_project_scripts(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return database.list_project_scripts(project_id)
+
+
+@app.post("/api/projects/{project_id}/script/draft")
+def create_project_script_draft(project_id: int) -> dict[str, Any]:
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    draft = build_script_draft(bundle)
+    script = database.create_project_script(project_id, **draft)
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    _write_project_document(project_id, "kich-ban.md", script_to_markdown(script, bundle["project"]))
+    return {"status": "saved", "script": script}
+
+
+@app.post("/api/projects/{project_id}/director-draft")
+def create_director_draft(
+    project_id: int,
+    payload: DirectorDraftRequest = DirectorDraftRequest(),
+) -> dict[str, Any]:
+    """Create an original, user-directed script and AI-scene blueprint.
+
+    Rendering is intentionally a separate phase: an actual video must have a
+    real scene clip/image for every shot, not placeholder title cards.
+    """
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    direction = payload.creative_direction.strip()
+    if not direction:
+        raise HTTPException(
+            status_code=400,
+            detail="AI Đạo diễn cần ý tưởng video mới của bạn (nhân vật, bối cảnh, diễn biến hoặc thông điệp) trước khi viết.",
+        )
+    try:
+        active_writer = resolve_writer(payload.provider)
+        video = bundle.get("source_video") or database.get_video(str(bundle["project"]["youtube_video_id"]))
+        transcript_text = (bundle.get("latest_transcript") or {}).get("content_text") or None
+        reference_analysis = (bundle.get("reference_analysis") or {}).get("result") or None
+        workflow_context = {
+            "managed_channel_name": bundle["project"].get("managed_channel_name", ""),
+            "output_profile": bundle["project"].get("managed_channel_output_profile", "youtube_landscape"),
+            "workflow_reference_title": bundle["project"].get("workflow_reference_title", ""),
+            "workflow_notes": bundle["project"].get("managed_channel_notes", ""),
+        }
+        target_duration = resolve_target_duration_seconds(payload.target_duration_seconds, direction, payload.target_duration_text, (video or {}).get("duration_seconds"))
+        research_context = research_folklore_remake(str((video or {}).get("title") or ""), direction) if payload.use_web_research else None
+        creative = active_writer.generate(
+            video or {},
+            transcript_text,
+            workflow_context=workflow_context,
+            creative_direction=direction,
+            remake_mode=payload.remake_mode,
+            target_duration_seconds=target_duration,
+            source_duration_seconds=(video or {}).get("duration_seconds"),
+            research_context=research_context,
+            reference_analysis=reference_analysis,
+        )
+        if research_context:
+            creative["research_context"] = research_context
+        creative["target_duration_seconds"] = target_duration
+        creative["quality_warnings"] = validate_voiceover_plan(creative, target_duration)
+        database.save_video_analysis(
+            str(bundle["project"]["youtube_video_id"]), creative, analysis_type="writer",
+            provider=active_writer.provider, source_type=creative["source_type"],
+        )
+        script = database.create_project_script(project_id, **dict(creative.get("new_script") or {}))
+        if not script:
+            raise HTTPException(status_code=404, detail="Không thể lưu kịch bản AI Đạo diễn")
+        shots = database.create_project_shots(
+            project_id,
+            int(script["id"]),
+            build_shot_plan(bundle["project"], script, writer_content=creative),
+            force=True,
+        )
+        if shots is None:
+            raise HTTPException(status_code=404, detail="Không thể lưu shot list AI Đạo diễn")
+        timeline = database.create_project_timeline(
+            project_id,
+            int(script["id"]),
+            build_timeline(bundle["project"], script, shots),
+            force=True,
+        )
+        if timeline is None:
+            raise HTTPException(status_code=404, detail="Không thể lưu timeline AI Đạo diễn")
+        _write_project_document(
+            project_id,
+            "ai-dao-dien.md",
+            "# AI Đạo diễn · brief sáng tạo\n\n"
+            f"- Ý tưởng của bạn: {direction}\n"
+            f"- Chế độ remake: {payload.remake_mode}\n\n"
+            "## Concept mới\n\n"
+            f"{creative.get('new_story_concept', '')}\n\n"
+            "## Áp dụng phong cách\n\n"
+            + "\n".join(f"- {item}" for item in creative.get("style_application", [])) + "\n",
+        )
+        _write_project_document(project_id, "kich-ban.md", script_to_markdown(script, bundle["project"]))
+        _write_project_document(project_id, "shot-list.md", shots_to_markdown(bundle["project"], script, shots))
+        _write_project_document(project_id, "timeline.md", timeline_to_markdown(bundle["project"], script, timeline))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+    return {
+        "status": "saved",
+        "director": creative,
+        "script": script,
+        "shots": shots,
+        "timeline": timeline,
+        "next_step": "Tạo video AI cho từng cảnh trong storyboard, xem/duyệt cảnh, rồi mới tạo voice và render.",
+    }
+
+
+@app.patch("/api/scripts/{script_id}")
+def update_script(script_id: int, payload: UpdateScriptRequest) -> dict[str, Any]:
+    script = database.update_project_script(
+        script_id,
+        script_title=payload.script_title,
+        hook=payload.hook,
+        intro=payload.intro,
+        main_content=payload.main_content,
+        cta=payload.cta,
+        status=payload.status,
+    )
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    project = database.get_production_project(int(script["project_id"]))
+    if project:
+        _write_project_document(int(script["project_id"]), "kich-ban.md", script_to_markdown(script, project))
+    return {"status": "saved", "script": script}
+
+
+@app.post("/api/scripts/{script_id}/approve")
+def approve_script(script_id: int) -> dict[str, Any]:
+    script = database.approve_project_script(script_id)
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    project = database.get_production_project(int(script["project_id"]))
+    if project:
+        _write_project_document(int(script["project_id"]), "kich-ban.md", script_to_markdown(script, project))
+    return {"status": "approved", "script": script}
+
+
+@app.post("/api/projects/{project_id}/script/chat")
+def revise_project_script_from_chat(
+    project_id: int,
+    payload: ScriptChatRequest,
+) -> dict[str, Any]:
+    """Revise the latest saved script through the selected AI writer provider."""
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Project chưa có kịch bản để chỉnh sửa")
+    video = database.get_video(str(project["youtube_video_id"]))
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn của project")
+    transcript = database.get_transcript(str(project["youtube_video_id"]), transcript_format="txt")
+    workflow_context = {
+        "managed_channel_name": project.get("managed_channel_name", ""),
+        "output_profile": project.get("managed_channel_output_profile", "youtube_landscape"),
+        "workflow_reference_title": project.get("workflow_reference_title", ""),
+        "workflow_notes": "",
+    } if project.get("managed_channel_id") else None
+    try:
+        revised = revise_script(
+            payload.provider,
+            video,
+            script,
+            payload.message,
+            transcript_text=transcript.get("content_text") if transcript else None,
+            workflow_context=workflow_context,
+        )
+        saved = database.create_project_script(
+            project_id,
+            script_title=revised["script_title"],
+            hook=revised["hook"],
+            intro=revised["intro"],
+            main_content=revised["main_content"],
+            cta=revised["cta"],
+        )
+        if not saved:
+            raise HTTPException(status_code=404, detail="Không thể lưu phiên bản kịch bản mới")
+        _write_project_document(project_id, "kich-ban.md", script_to_markdown(saved, project))
+        return {"status": "saved", "provider": revised["provider"], "script": saved}
+    except HTTPException:
+        raise
+    except WriterError as exc:
+        raise _api_error(exc) from exc
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/scripts/{script_id}/markdown")
+def export_script_markdown(script_id: int) -> PlainTextResponse:
+    script = database.get_project_script(script_id)
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    project = database.get_production_project(int(script["project_id"]))
+    return PlainTextResponse(
+        script_to_markdown(script, project),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.get("/api/projects/{project_id}/shots")
+def list_project_shots(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        return []
+    return database.list_project_shots(project_id, script_id=int(script["id"]))
+
+
+@app.post("/api/projects/{project_id}/shots/generate")
+def generate_project_shots(
+    project_id: int,
+    payload: GenerateShotsRequest = GenerateShotsRequest(),
+) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo shot list")
+    writer_analysis = database.get_video_analysis(str(project["youtube_video_id"]), analysis_type="writer")
+    writer_content = writer_analysis.get("result") if writer_analysis else None
+    planned = build_shot_plan(project, script, writer_content=writer_content)
+    shots = database.create_project_shots(
+        project_id,
+        int(script["id"]),
+        planned,
+        force=payload.force,
+    )
+    if shots is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "saved", "script_id": script["id"], "shots": shots}
+
+
+@app.patch("/api/shots/{shot_id}")
+def update_shot(shot_id: int, payload: UpdateShotRequest) -> dict[str, Any]:
+    shot = database.update_project_shot(
+        shot_id,
+        narration=payload.narration,
+        visual_prompt=payload.visual_prompt,
+        asset_type=payload.asset_type,
+        duration_seconds=payload.duration_seconds,
+        status=payload.status,
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    project = database.get_production_project(int(shot["project_id"]))
+    script = database.get_project_script(int(shot["script_id"]))
+    if project and script:
+        shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+        _write_project_document(int(project["id"]), "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "saved", "shot": shot}
+
+
+@app.post("/api/projects/{project_id}/shots")
+def create_project_shot(project_id: int, payload: CreateShotRequest) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản để thêm cảnh")
+    shot = database.create_project_shot(
+        project_id,
+        int(script["id"]),
+        section=payload.section,
+        narration=payload.narration,
+        visual_prompt=payload.visual_prompt,
+        asset_type=payload.asset_type,
+        duration_seconds=payload.duration_seconds,
+        status=payload.status,
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Không thể tạo cảnh")
+    shots = database.list_project_shots(project_id, script_id=int(script["id"]))
+    _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "created", "shot": shot, "shots": shots}
+
+
+@app.post("/api/shots/{shot_id}/duplicate")
+def duplicate_project_shot(shot_id: int) -> dict[str, Any]:
+    source = database.get_project_shot(shot_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    shot = database.duplicate_project_shot(shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Không thể nhân bản cảnh")
+    project = database.get_production_project(int(source["project_id"]))
+    script = database.get_project_script(int(source["script_id"]))
+    if project and script:
+        shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+        _write_project_document(int(project["id"]), "shot-list.md", shots_to_markdown(project, script, shots))
+    else:
+        shots = []
+    return {"status": "created", "source_shot_id": shot_id, "shot": shot, "shots": shots}
+
+
+@app.post("/api/projects/{project_id}/shots/reorder")
+def reorder_shots(project_id: int, payload: ReorderShotsRequest) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản để sắp xếp cảnh")
+    try:
+        shots = database.reorder_project_shots(project_id, payload.shot_ids, script_id=int(script["id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "saved", "shots": shots}
+
+
+@app.delete("/api/shots/{shot_id}")
+def delete_shot(shot_id: int) -> dict[str, Any]:
+    shot = database.get_project_shot(shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    if not database.delete_project_shot(shot_id):
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y cáº£nh")
+    project = database.get_production_project(int(shot["project_id"]))
+    script = database.get_project_script(int(shot["script_id"]))
+    if project and script:
+        shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+        _write_project_document(int(project["id"]), "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "deleted", "shot_id": shot_id}
+
+
+@app.get("/api/projects/{project_id}/shots/markdown")
+def export_project_shots_markdown(project_id: int) -> PlainTextResponse:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    shots = database.list_project_shots(project_id, script_id=int(script["id"])) if script else []
+    return PlainTextResponse(
+        shots_to_markdown(project, script, shots),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.get("/api/projects/{project_id}/timeline")
+def list_project_timeline(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        return []
+    return database.list_project_timeline(project_id, script_id=int(script["id"]))
+
+
+@app.post("/api/projects/{project_id}/timeline/generate")
+def generate_project_timeline(
+    project_id: int,
+    payload: GenerateTimelineRequest = GenerateTimelineRequest(),
+) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo timeline")
+    shots = database.list_project_shots(project_id, script_id=int(script["id"]))
+    if not shots:
+        raise HTTPException(status_code=400, detail="Project chưa có shot list để tạo timeline")
+    planned = build_timeline(project, script, shots)
+    timeline = database.create_project_timeline(
+        project_id,
+        int(script["id"]),
+        planned,
+        force=payload.force,
+    )
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    _write_project_document(project_id, "timeline.md", timeline_to_markdown(project, script, timeline))
+    return {
+        "status": "saved",
+        "script_id": script["id"],
+        "total_duration_seconds": sum(int(item["duration_seconds"]) for item in timeline),
+        "timeline": timeline,
+    }
+
+
+@app.patch("/api/timeline/{segment_id}")
+def update_timeline_segment(
+    segment_id: int,
+    payload: UpdateTimelineRequest,
+) -> dict[str, Any]:
+    segment = database.update_project_timeline_segment(
+        segment_id,
+        voice_text=payload.voice_text,
+        subtitle_text=payload.subtitle_text,
+        visual_prompt=payload.visual_prompt,
+        asset_type=payload.asset_type,
+        duration_seconds=payload.duration_seconds,
+        audio_path=payload.audio_path,
+        visual_path=payload.visual_path,
+        status=payload.status,
+    )
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
+    return {"status": "saved", "segment": segment}
+
+
+@app.get("/api/projects/{project_id}/timeline/manifest")
+def export_project_timeline_manifest(project_id: int) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    timeline = database.list_project_timeline(
+        project_id,
+        script_id=int(script["id"]) if script else None,
+    ) if script else []
+    return timeline_to_manifest(project, script, timeline)
+
+
+@app.get("/api/projects/{project_id}/timeline/markdown")
+def export_project_timeline_markdown(project_id: int) -> PlainTextResponse:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    timeline = database.list_project_timeline(
+        project_id,
+        script_id=int(script["id"]) if script else None,
+    ) if script else []
+    return PlainTextResponse(
+        timeline_to_markdown(project, script, timeline),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.get("/api/projects/{project_id}/render-settings")
+def get_project_render_settings(project_id: int) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return database.get_project_render_settings(project_id)
+
+
+@app.patch("/api/projects/{project_id}/render-settings")
+def update_project_render_settings(
+    project_id: int,
+    payload: RenderSettingsRequest,
+) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    try:
+        settings = database.update_project_render_settings(
+            project_id,
+            music_asset_id=payload.music_asset_id,
+            music_volume=payload.music_volume,
+            transition_style=payload.transition_style,
+            output_profile=payload.output_profile,
+            voice_provider=payload.voice_provider,
+            voice_model=payload.voice_model,
+            voice_rate=payload.voice_rate,
+            voice_reference_asset_id=payload.voice_reference_asset_id,
+            voice_prompt_text=payload.voice_prompt_text,
+            subtitle_provider=payload.subtitle_provider,
+            subtitle_model=payload.subtitle_model,
+            publish_language=payload.publish_language,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "saved", "settings": settings}
+
+
+@app.post("/api/projects/{project_id}/apply-channel-preset")
+def apply_channel_preset(project_id: int) -> dict[str, Any]:
+    try:
+        render_settings = database.apply_managed_channel_preset(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if render_settings is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {"status": "applied", "settings": render_settings}
+
+
+_ASSET_EXTENSIONS = {
+    "video": {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"},
+    "audio": {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"},
+    "image": {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"},
+}
+
+# The user's three reference recordings are kept in the shared documentation
+# folder.  Expose them as a small local library so they remain available when
+# the user switches projects.  Selecting one copies it into the project as a
+# normal editable audio asset; it never moves or changes the original file.
+_VOICE_LIBRARY_DIR = PRODUCTION_ARTIFACT_DIR.parent / "03_TAI_LIEU"
+_VOICE_LIBRARY = (
+    {
+        "key": "voice-sample-1",
+        "label": "Giọng mẫu 1",
+        "filename": "co_hang_chuc_mo_hinh_nen_khac_nhau_vay_phai_ghi_6547dcf8-c299-4d92-98e6-91436a06b912.mp3",
+    },
+    {
+        "key": "voice-sample-2",
+        "label": "Giọng mẫu 2",
+        "filename": "co_hang_chuc_mo_hinh_nen_khac_nhau_vay_phai_ghi_91710c44-a39b-4639-9a7c-5a66a35ce00f.mp3",
+    },
+    {
+        "key": "voice-sample-3",
+        "label": "Giọng mẫu 3",
+        "filename": "co_hang_chuc_mo_hinh_nen_khac_nhau_vay_phai_ghi_bc41f313-ba98-462c-a87d-1940164feb60.mp3",
+    },
+)
+_EDGE_TTS_VOICES = {
+    "vi-VN-HoaiMyNeural",
+    "vi-VN-NamMinhNeural",
+    "en-US-AriaNeural",
+    "en-US-GuyNeural",
+    "th-TH-PremwadeeNeural",
+    "pt-BR-FranciscaNeural",
+    "pt-BR-AntonioNeural",
+}
+_EDGE_PREVIEW_RATES = {"-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"}
+_EDGE_PREVIEW_TEXT = "Đây là bản nghe thử giọng đọc. Câu chuyện sẽ được kể rõ ràng, tự nhiên và giàu cảm xúc."
+
+
+def _voice_library_entry(key: str) -> dict[str, str]:
+    entry = next((item for item in _VOICE_LIBRARY if item["key"] == key), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Không tìm thấy giọng mẫu")
+    return entry
+
+
+def _voice_library_path(key: str) -> Path:
+    entry = _voice_library_entry(key)
+    return _VOICE_LIBRARY_DIR / entry["filename"]
+
+
+def _select_voxcpm_reference_asset(
+    project_id: int,
+    asset: dict[str, Any],
+    label: str,
+    voice_model: str = "voxcpm-default",
+) -> dict[str, Any]:
+    current = database.get_project_render_settings(project_id)
+    try:
+        return database.update_project_render_settings(
+            project_id,
+            music_asset_id=current.get("music_asset_id"),
+            music_volume=float(current.get("music_volume") or 0.12),
+            transition_style=str(current.get("transition_style") or "fade"),
+            output_profile=str(current.get("output_profile") or "youtube_landscape"),
+            voice_provider="voxcpm",
+            voice_model=voice_model,
+            voice_rate=str(current.get("voice_rate") or "+0%"),
+            voice_reference_asset_id=int(asset["id"]),
+            voice_prompt_text=str(current.get("voice_prompt_text") or f"Giọng kể chuyện tiếng Việt tự nhiên, dùng mẫu {label}."),
+            subtitle_provider=str(current.get("subtitle_provider") or "timeline_text"),
+            subtitle_model=str(current.get("subtitle_model") or "timeline"),
+            publish_language=str(current.get("publish_language") or "vi"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _edge_voice_preview_path(voice: str, rate: str) -> Path:
+    safe_rate = rate.replace("+", "plus").replace("-", "minus").replace("%", "")
+    return PRODUCTION_ARTIFACT_DIR / "_voice_previews" / f"edge-{voice}-{safe_rate}.mp3"
+
+
+def _safe_asset_stem(filename: str) -> str:
+    stem = Path(filename).stem
+    cleaned = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in stem)
+    return (cleaned[:80] or "asset").strip("._") or "asset"
+
+
+@app.get("/api/voice-previews/edge/{voice}")
+def stream_edge_voice_preview(voice: str, rate: str = Query(default="+0%")) -> FileResponse:
+    """Generate/cache a short real Edge TTS audition for the selected voice."""
+    if voice not in _EDGE_TTS_VOICES:
+        raise HTTPException(status_code=404, detail="Giọng Edge TTS không được hỗ trợ để nghe thử")
+    if rate not in _EDGE_PREVIEW_RATES:
+        raise HTTPException(status_code=400, detail="Tốc độ nghe thử không hợp lệ")
+    if not EDGE_TTS_RUNTIME_READY:
+        raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng để tạo bản nghe thử")
+    output = _edge_voice_preview_path(voice, rate)
+    if not output.is_file() or output.stat().st_size == 0:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        text_file = output.with_suffix(".txt")
+        text_file.write_text(_EDGE_PREVIEW_TEXT, encoding="utf-8")
+        values = {
+            "text_file": text_file,
+            "output_file": output,
+            "voice_role": voice,
+            "voice_rate": rate,
+            "srt_file": text_file.with_suffix(".srt"),
+            "output_dir": output.parent,
+            "language": "vi",
+        }
+        try:
+            rendered = EDGE_TTS_COMMAND.format(**{key: str(value) for key, value in values.items()})
+            args = [item.strip('"') for item in shlex.split(rendered, posix=False)]
+            result = subprocess.run(
+                args,
+                cwd=str(output.parent),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=90,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=502, detail=f"Không tạo được bản nghe thử Edge TTS: {exc}") from exc
+        if result.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+            detail = (result.stderr or result.stdout or "Edge TTS không trả về audio").strip()[-1000:]
+            raise HTTPException(status_code=502, detail=f"Không tạo được bản nghe thử Edge TTS: {detail}")
+    return FileResponse(output, media_type="audio/mpeg")
+
+
+@app.get("/api/voice-library")
+def list_voice_library() -> list[dict[str, Any]]:
+    """List the user's shared local voice samples without coupling to a project."""
+    return [
+        {
+            "key": item["key"],
+            "label": item["label"],
+            "ready": _voice_library_path(item["key"]).is_file(),
+            "url": f"/api/voice-library/{item['key']}/audio",
+        }
+        for item in _VOICE_LIBRARY
+    ]
+
+
+@app.get("/api/voice-library/{key}/audio")
+def stream_voice_library_audio(key: str) -> FileResponse:
+    path = _voice_library_path(key)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy file giọng mẫu trên máy")
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "audio/mpeg")
+
+
+@app.post("/api/projects/{project_id}/voice-library/{key}/select")
+def select_voice_library_sample(project_id: int, key: str) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    entry = _voice_library_entry(key)
+    source = _voice_library_path(key)
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy file giọng mẫu trên máy")
+
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assets = database.list_project_assets(project_id)
+    asset = next(
+        (
+            item for item in assets
+            if item.get("asset_type") == "audio" and str(item.get("sha256") or "") == digest
+            and Path(str(item.get("file_path") or "")).is_file()
+        ),
+        None,
+    )
+    if not asset:
+        asset_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "audio"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        target = asset_dir / f"voice-library-{entry['key']}{source.suffix.lower()}"
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Không thể sao chép giọng mẫu vào dự án: {exc}") from exc
+        asset = database.create_project_asset(
+            project_id,
+            "audio",
+            entry["label"],
+            str(target),
+            mime_type=mimetypes.guess_type(source.name)[0] or "audio/mpeg",
+            file_size=target.stat().st_size,
+            sha256=digest,
+        )
+    if not asset:
+        raise HTTPException(status_code=500, detail="Không thể lưu giọng mẫu vào dự án")
+    settings = _select_voxcpm_reference_asset(project_id, asset, entry["label"], f"library:{key}")
+    return {"status": "selected", "asset": asset, "settings": settings, "label": entry["label"]}
+
+
+@app.get("/api/projects/{project_id}/assets")
+def list_project_assets(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return database.list_project_assets(project_id)
+
+
+@app.post("/api/projects/{project_id}/assets/upload")
+def upload_project_asset(
+    project_id: int,
+    asset_type: AssetType = Form(...),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    filename = Path(file.filename or "").name
+    extension = Path(filename).suffix.lower()
+    if not filename or extension not in _ASSET_EXTENSIONS[asset_type]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Định dạng file không hợp lệ cho {asset_type}. Đuôi nhận được: {extension or 'không có'}",
+        )
+
+    asset_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / asset_type
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex[:12]}-{_safe_asset_stem(filename)}{extension}"
+    target = asset_dir / stored_name
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > LOCAL_ASSET_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="File vượt quá giới hạn upload local")
+                digest.update(chunk)
+                output.write(chunk)
+    except HTTPException:
+        target.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Không thể lưu file local: {exc}") from exc
+
+    asset = database.create_project_asset(
+        project_id,
+        asset_type,
+        filename,
+        str(target),
+        mime_type=file.content_type or mimetypes.guess_type(filename)[0] or "",
+        file_size=total,
+        sha256=digest.hexdigest(),
+    )
+    if not asset:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {"status": "uploaded", "asset": asset}
+
+
+@app.get("/api/assets/{asset_id}/download")
+def download_project_asset(asset_id: int) -> FileResponse:
+    asset = database.get_project_asset(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Không tìm thấy asset")
+    path = Path(str(asset["file_path"]))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File asset không còn tồn tại trên máy")
+    return FileResponse(path, media_type=asset.get("mime_type") or "application/octet-stream", filename=asset["original_name"])
+
+
+@app.patch("/api/assets/{asset_id}")
+def rename_project_asset(asset_id: int, payload: RenameAssetRequest) -> dict[str, Any]:
+    try:
+        asset = database.rename_project_asset(asset_id, payload.original_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not asset:
+        raise HTTPException(status_code=404, detail="Không tìm thấy asset")
+    return {"status": "renamed", "asset": asset}
+
+
+@app.get("/api/projects/{project_id}/thumbnails")
+def list_project_thumbnails(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return database.list_project_thumbnails(project_id)
+
+
+@app.post("/api/projects/{project_id}/thumbnails/generate")
+def generate_project_thumbnails(
+    project_id: int,
+    payload: GenerateThumbnailsRequest = GenerateThumbnailsRequest(),
+) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    script = database.get_latest_project_script(project_id)
+    prompt = payload.prompt.strip() or str((script or {}).get("script_title") or project.get("title") or "")
+    output_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "thumbnails" / uuid.uuid4().hex[:10]
+    try:
+        files = generate_frame_thumbnails(final_path, output_dir, FFMPEG_BINARY, payload.variants)
+    except ThumbnailGenerationError as exc:
+        raise _api_error(exc) from exc
+    thumbnails: list[dict[str, Any]] = []
+    for index, path in enumerate(files, start=1):
+        asset = database.create_project_asset(
+            project_id,
+            "image",
+            f"thumbnail-{index:02d}.jpg",
+            str(path),
+            mime_type="image/jpeg",
+            file_size=path.stat().st_size,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        if not asset:
+            raise HTTPException(status_code=500, detail="Không thể lưu thumbnail vào thư viện dự án")
+        thumbnail = database.create_project_thumbnail(
+            project_id,
+            int(asset["id"]),
+            provider="ffmpeg_frame",
+            model="ffmpeg",
+            prompt=prompt,
+            seed=(payload.seed + index - 1) if payload.seed is not None else None,
+        )
+        if thumbnail:
+            thumbnails.append(thumbnail)
+    return {"status": "generated", "thumbnails": thumbnails}
+
+
+@app.post("/api/thumbnails/{thumbnail_id}/select")
+def select_project_thumbnail(thumbnail_id: int) -> dict[str, Any]:
+    thumbnail = database.select_project_thumbnail(thumbnail_id)
+    if not thumbnail:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thumbnail")
+    return {"status": "selected", "thumbnail": thumbnail}
+
+
+@app.post("/api/assets/{asset_id}/analyze")
+def analyze_local_asset(asset_id: int, payload: AnalyzeAssetRequest) -> dict[str, Any]:
+    asset = database.get_project_asset(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Không tìm thấy asset")
+    if asset["asset_type"] not in {"audio", "video"}:
+        raise HTTPException(status_code=400, detail="Whisper hiện chỉ phân tích asset audio/video")
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Phân tích local cần confirmed=true vì sẽ dùng CPU/GPU")
+    database.update_project_asset_analysis(asset_id, "running")
+    try:
+        result = transcribe_local_file(asset["file_path"], f"asset-{asset_id}", language=payload.language or None)
+        if not result["text"]:
+            raise TranscriptionError("Whisper không nhận diện được lời thoại trong asset")
+        transcript = save_asset_transcript_result(database, asset_id, result)
+        database.update_project_asset_analysis(asset_id, "completed")
+    except Exception as exc:
+        database.update_project_asset_analysis(asset_id, "error", str(exc))
+        raise _api_error(exc) from exc
+    return {"status": "completed", "asset": database.get_project_asset(asset_id), "transcript": transcript}
+
+
+@app.post("/api/timeline/{segment_id}/attach-asset")
+def attach_asset_to_timeline(segment_id: int, payload: AttachAssetRequest) -> dict[str, Any]:
+    result = database.attach_asset_to_timeline_segment(segment_id, payload.asset_id)
+    if not result:
+        raise HTTPException(status_code=400, detail="Asset không hợp lệ hoặc không cùng project với timeline segment")
+    return {"status": "attached", **result}
+
+
+@app.get("/api/projects/{project_id}/scene-jobs")
+def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+    return database.list_scene_generation_jobs(project_id)
+
+
+@app.post("/api/projects/{project_id}/scene-jobs")
+def queue_scene_generation_job(
+    project_id: int,
+    payload: CreateSceneGenerationRequest,
+) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Tao canh AI se goi dich vu cloud va phat sinh chi phi; can confirmed=true",
+        )
+    if payload.provider == "runway":
+        runway_key, _ = settings.runway_config()
+        if not runway_key:
+            raise HTTPException(status_code=400, detail="Chua cau hinh Runway API trong Ket noi AI")
+    if payload.provider == "openai_image":
+        openai_key, _ = settings.openai_config()
+        if not openai_key:
+            raise HTTPException(status_code=400, detail="Chua cau hinh OPENAI_API_KEY trong Ket noi AI")
+    if payload.provider in {"gemini_image", "gemini_veo"}:
+        gemini_key, _, _ = settings.gemini_config()
+        if not gemini_key:
+            raise HTTPException(status_code=400, detail="Chua cau hinh GEMINI_API_KEY trong Ket noi AI")
+    if payload.reference_asset_id is not None:
+        asset = database.get_project_asset(payload.reference_asset_id)
+        if not asset or int(asset["project_id"]) != project_id:
+            raise HTTPException(status_code=400, detail="Asset tham chieu khong thuoc project")
+        if asset["asset_type"] != "image":
+            raise HTTPException(status_code=400, detail="Chi co the dung anh lam asset tham chieu")
+    job = database.create_scene_generation_job(
+        project_id,
+        payload.timeline_segment_id,
+        payload.provider,
+        payload.prompt,
+        duration_seconds=payload.duration_seconds,
+        ratio=payload.ratio,
+        reference_asset_id=payload.reference_asset_id,
+    )
+    if not job:
+        raise HTTPException(status_code=400, detail="Segment timeline khong hop le hoac khong thuoc project")
+    if payload.provider != "antigravity_image":
+        scene_generation_worker.enqueue(int(job["id"]))
+    return {"status": "delegated" if payload.provider == "antigravity_image" else "queued", "job": job}
+
+
+@app.post("/api/projects/{project_id}/scene-jobs/batch")
+def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationRequest) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Tạo toàn bộ cảnh AI có thể phát sinh chi phí; cần confirmed=true")
+    if payload.provider == "runway":
+        runway_key, _ = settings.runway_config()
+        if not runway_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình Runway API trong Kết nối AI")
+    else:
+        if payload.provider == "openai_image":
+            openai_key, _ = settings.openai_config()
+            if not openai_key:
+                raise HTTPException(status_code=400, detail="Chưa cấu hình OPENAI_API_KEY trong Kết nối AI")
+        else:
+            gemini_key, _, _ = settings.gemini_config()
+            if not gemini_key:
+                raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Cần tạo timeline trước khi tạo cảnh AI")
+    queued: list[dict[str, Any]] = []
+    for segment in timeline:
+        if str(segment.get("visual_path") or "").strip():
+            continue
+        prompt = str(segment.get("visual_prompt") or "").strip()
+        if not prompt:
+            continue
+        job = database.create_scene_generation_job(
+            project_id, int(segment["id"]), payload.provider, prompt,
+            duration_seconds=payload.duration_seconds, ratio=payload.ratio,
+        )
+        if job:
+            if payload.provider != "antigravity_image":
+                scene_generation_worker.enqueue(int(job["id"]))
+            queued.append(job)
+    return {"status": "queued", "jobs": queued, "queued_count": len(queued), "total_segments": len(timeline)}
+
+
+@app.get("/api/antigravity/next-scene-job")
+def claim_antigravity_scene_job() -> dict[str, Any]:
+    """Sidecar-only handoff: one queued image job becomes an Antigravity task."""
+    job = database.claim_next_antigravity_scene_job()
+    return {"job": job}
+
+
+@app.post("/api/antigravity/scene-jobs/{job_id}/complete")
+def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    asset = database.get_project_asset(asset_id)
+    if not job or str(job.get("provider")) != "antigravity_image":
+        raise HTTPException(status_code=404, detail="Không tìm thấy job Antigravity")
+    if not asset or int(asset["project_id"]) != int(job["project_id"]):
+        raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
+    attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
+    if not attached:
+        raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
+    finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.get("/api/projects/{project_id}/timeline/{segment_id}/visual-preview")
+def stream_timeline_visual_preview(project_id: int, segment_id: int) -> FileResponse:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment or int(segment["project_id"]) != project_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh trong dự án")
+    path = Path(str(segment.get("visual_path") or ""))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Cảnh này chưa có file video hoặc ảnh để preview")
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+
+
+@app.get("/api/projects/{project_id}/timeline/{segment_id}/audio-preview")
+def stream_timeline_audio_preview(project_id: int, segment_id: int) -> FileResponse:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment or int(segment["project_id"]) != project_id:
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y giọng đọc trong dá»± Ã¡n")
+    path = Path(str(segment.get("audio_path") or ""))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Cảnh này chưa có file giọng đọc để nghe")
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "audio/wav")
+
+
+def _voxcpm_preview_definition(key: str) -> dict[str, Any]:
+    for preset in VOXCPM_VOICE_PRESETS:
+        if str(preset["key"]) == key:
+            return preset
+    raise HTTPException(status_code=404, detail="Không tìm thấy preset giọng VoxCPM")
+
+
+def _voxcpm_preview_path(project_id: int, key: str) -> Path:
+    _voxcpm_preview_definition(key)
+    return ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["audio"] / "voice-previews" / f"{key}.wav"
+
+
+@app.post("/api/projects/{project_id}/voice-previews")
+def queue_voxcpm_voice_previews(project_id: int) -> dict[str, Any]:
+    if not VOXCPM_RUNTIME_READY:
+        raise HTTPException(status_code=400, detail="VoxCPM chưa sẵn sàng: kiểm tra CUDA và môi trường local")
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=400, detail="Hãy tạo project và kịch bản trước khi nghe thử giọng")
+    try:
+        job = production_worker.enqueue(project_id, int(script["id"]), "voice_preview", "voxcpm", force=False)
+    except ProductionJobError as exc:
+        raise _api_error(exc) from exc
+    return {"status": "queued" if job["status"] == "queued" else job["status"], "job": job}
+
+
+@app.get("/api/projects/{project_id}/voice-previews")
+def list_voxcpm_voice_previews(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return [
+        {
+            "key": preset["key"],
+            "label": preset["label"],
+            "style": preset["style"],
+            "ready": _voxcpm_preview_path(project_id, str(preset["key"])).is_file(),
+            "url": f"/api/projects/{project_id}/voice-previews/{preset['key']}/audio",
+        }
+        for preset in VOXCPM_VOICE_PRESETS
+    ]
+
+
+@app.get("/api/projects/{project_id}/voice-previews/{key}/audio")
+def stream_voxcpm_voice_preview(project_id: int, key: str) -> FileResponse:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    path = _voxcpm_preview_path(project_id, key)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Giọng thử chưa được tạo")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/projects/{project_id}/voice-previews/{key}/select")
+def select_voxcpm_voice_preview(project_id: int, key: str) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    preset = _voxcpm_preview_definition(key)
+    path = _voxcpm_preview_path(project_id, key)
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail="Hãy tạo và nghe thử preset này trước")
+    assets = database.list_project_assets(project_id)
+    asset = next((item for item in assets if Path(str(item.get("file_path") or "")) == path), None)
+    if not asset:
+        asset = database.create_project_asset(
+            project_id, "audio", f"VoxCPM preset · {preset['label']}.wav", str(path),
+            mime_type="audio/wav", file_size=path.stat().st_size,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+    if not asset:
+        raise HTTPException(status_code=500, detail="Không lưu được preset giọng vào dự án")
+    current = database.get_project_render_settings(project_id)
+    try:
+        render_settings = database.update_project_render_settings(
+            project_id,
+            music_asset_id=current.get("music_asset_id"),
+            music_volume=float(current.get("music_volume") or 0.12),
+            transition_style=str(current.get("transition_style") or "fade"),
+            output_profile=str(current.get("output_profile") or "youtube_landscape"),
+            voice_provider="voxcpm",
+            voice_model=f"design:{preset['style']}",
+            voice_rate=str(current.get("voice_rate") or "+0%"),
+            voice_reference_asset_id=int(asset["id"]),
+            voice_prompt_text=VOXCPM_PREVIEW_TEXT,
+            subtitle_provider=str(current.get("subtitle_provider") or "timeline_text"),
+            subtitle_model=str(current.get("subtitle_model") or "timeline"),
+            publish_language=str(current.get("publish_language") or "vi"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "selected", "preset": preset, "asset": asset, "settings": render_settings}
+
+
+@app.get("/api/scene-jobs/{job_id}")
+def get_scene_generation_job(job_id: int) -> dict[str, Any]:
+    job = database.get_scene_generation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y job táº¡o cáº£nh")
+    return job
+
+
+@app.get("/api/scene-generation-queue")
+def scene_generation_queue_status() -> dict[str, Any]:
+    return scene_generation_worker.status()
+
+
+@app.get("/api/projects/{project_id}/jobs")
+def list_project_jobs(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return database.list_project_jobs(project_id)
+
+
+@app.post("/api/projects/{project_id}/jobs")
+def queue_project_job(
+    project_id: int,
+    payload: CreateProductionJobRequest,
+) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
+    if not database.list_project_timeline(project_id, script_id=int(script["id"])):
+        raise HTTPException(status_code=400, detail="Project chưa có timeline")
+
+    provider = payload.provider.strip().lower()
+    allowed = {
+        "voiceover": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
+        "source_visuals": {"dry_run", "preview", "mock", "source_video", "source", "local_source"},
+        "render": {
+            "dry_run",
+            "preview",
+            "mock",
+            "ffmpeg",
+            "ffmpeg_command",
+            "ffmpeg_builtin",
+            "openmontage",
+            "openmontage_ffmpeg",
+            "openmontage_remotion",
+            "openmontage_hyperframes",
+        },
+        "premiere_draft": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
+        "director_production": {"edge_tts", "pyvideotrans", "voxcpm"},
+    }[payload.job_type]
+    if provider not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider không hợp lệ cho {payload.job_type}: {payload.provider}",
+        )
+    if provider not in {"dry_run", "preview", "mock"} and not payload.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Job production thật cần confirmed=true vì có thể gọi TTS hoặc render tốn tài nguyên",
+        )
+    if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_COMMAND:
+        raise HTTPException(status_code=400, detail="Chưa cấu hình PYVIDEOTRANS_COMMAND trong .env")
+    if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_RUNTIME_READY:
+        raise HTTPException(status_code=400, detail="Môi trường pyVideoTrans chưa hoàn tất dependency")
+    if provider == "voxcpm" and not VOXCPM_RUNTIME_READY:
+        raise HTTPException(status_code=400, detail="VoxCPM chưa sẵn sàng: kiểm tra voxcpm và CUDA")
+    if provider == "edge_tts" and not EDGE_TTS_RUNTIME_READY:
+        raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng trong môi trường local")
+    if provider in {"ffmpeg", "ffmpeg_command"} and not FFMPEG_RENDER_COMMAND:
+        raise HTTPException(status_code=400, detail="Chưa cấu hình FFMPEG_RENDER_COMMAND trong .env")
+    if payload.job_type == "source_visuals" and provider not in {"dry_run", "preview", "mock"} and not ffmpeg_available(FFMPEG_BINARY):
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
+    if provider == "ffmpeg_builtin" and not ffmpeg_available(FFMPEG_BINARY):
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
+    if settings.GPU_ONLY and payload.job_type in {"source_visuals", "render", "director_production"} and provider not in {"dry_run", "preview", "mock"} and not nvenc_available(FFMPEG_BINARY):
+        raise HTTPException(
+            status_code=400,
+            detail="GPU-only mode đang bật nhưng FFmpeg/NVENC chưa sẵn sàng; job không được phép chạy bằng CPU",
+        )
+    if settings.GPU_ONLY and payload.job_type == "render" and provider not in {"dry_run", "preview", "mock", "ffmpeg_builtin"}:
+        raise HTTPException(
+            status_code=400,
+            detail="GPU-only mode chỉ cho phép Render FFmpeg built-in với h264_nvenc",
+        )
+    if provider.startswith("openmontage"):
+        try:
+            runtime = runtime_for_provider(provider, openmontage_adapter.configured_runtime)
+        except OpenMontageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        openmontage_status = openmontage_adapter.status()
+        if not openmontage_status["runtimes"].get(runtime):
+            raise HTTPException(
+                status_code=400,
+                detail=f"OpenMontage runtime '{runtime}' chưa sẵn sàng: {openmontage_status['runtime_details'].get(runtime)}",
+            )
+    if payload.job_type == "director_production" and not ffmpeg_available(FFMPEG_BINARY):
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
+    try:
+        job = production_worker.enqueue(
+            project_id,
+            int(script["id"]),
+            payload.job_type,
+            provider,
+            force=payload.force,
+        )
+    except ProductionJobError as exc:
+        raise _api_error(exc) from exc
+    return {"status": "queued" if job["status"] == "queued" else job["status"], "job": job}
+
+
+def _publication_payload(project: dict[str, Any], script: dict[str, Any], payload: CreatePublicationRequest) -> dict[str, Any]:
+    writer = database.get_video_analysis(str(project["youtube_video_id"]), analysis_type="writer")
+    writer_result = (writer or {}).get("result") or {}
+    writer_tags = [str(item).lstrip("#").strip() for item in (writer_result.get("hashtags") or [])]
+    title = payload.title.strip() or str(script.get("script_title") or project.get("title") or "YouTube video")
+    description = payload.description.strip() or str(writer_result.get("new_description") or "")
+    if not description:
+        description = "\n\n".join(
+            part for part in (str(script.get("hook") or ""), str(script.get("cta") or "")) if part.strip()
+        )
+    tags = [str(tag).lstrip("#").strip() for tag in payload.tags if str(tag).strip()] or writer_tags
+    return {
+        "title": title,
+        "description": description,
+        "tags": list(dict.fromkeys(tags)),
+        "category_id": payload.category_id.strip() or "27",
+    }
+
+
+@app.get("/api/publisher/status")
+def publisher_status() -> dict[str, Any]:
+    return publisher_worker.status()
+
+
+@app.get("/api/publisher/queue")
+def publisher_queue(project_id: int | None = Query(default=None, ge=1)) -> dict[str, Any]:
+    return {
+        "status": publisher_worker.status(),
+        "publications": database.list_project_publications(project_id=project_id),
+    }
+
+
+@app.post("/api/projects/{project_id}/publish")
+def queue_project_publication(
+    project_id: int,
+    payload: CreatePublicationRequest,
+) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Publish cáº§n confirmed=true sau khi ngÆ°á»i dÃ¹ng Ä‘Ã£ duyá»‡t video")
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»± Ã¡n")
+    script = database.get_latest_project_script(project_id)
+    if not script or script.get("status") != "approved":
+        raise HTTPException(status_code=400, detail="KÃ­ch báº£n chÆ°a Ä‘Æ°á»£c duyá»‡t; hÃ£y duyá»‡t trÆ°á»›c khi Ä‘Æ°a vÃ o Publisher")
+    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    if not final_path.is_file():
+        raise HTTPException(status_code=400, detail="Project chÆ°a cÃ³ final.mp4; hÃ£y render vÃ  Quality Check trÆ°á»›c")
+
+    selected_thumbnail = next(
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        None,
+    )
+    thumbnail_path = str((selected_thumbnail or {}).get("file_path") or "")
+    if payload.thumbnail_asset_id:
+        thumbnail_asset = database.get_project_asset(int(payload.thumbnail_asset_id))
+        if not thumbnail_asset or int(thumbnail_asset.get("project_id") or 0) != project_id:
+            raise HTTPException(status_code=400, detail="Thumbnail asset khÃ´ng thuá»™c project nÃ y")
+        if thumbnail_asset.get("asset_type") != "image":
+            raise HTTPException(status_code=400, detail="Asset thumbnail pháº£i lÃ  file áº£nh")
+        thumbnail_file = Path(str(thumbnail_asset.get("file_path") or "")).expanduser()
+        if not thumbnail_file.is_file():
+            raise HTTPException(status_code=400, detail="KhÃ´ng tÃ¬m tháº¥y file thumbnail trÃªn mÃ¡y")
+        if thumbnail_file.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            raise HTTPException(status_code=400, detail="Thumbnail YouTube pháº£i lÃ  JPG hoáº·c PNG")
+        thumbnail_path = str(thumbnail_file)
+
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    report = build_quality_report(timeline, str(final_path), FFMPEG_BINARY, thumbnail_path)
+    if report["status"] != "pass":
+        failed = ", ".join(key for key, passed in report["checks"].items() if not passed)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quality Check chưa đạt: {failed}. Sửa lỗi hoặc tạo/chọn thumbnail trước khi xuất bản.",
+        )
+
+    managed_id = payload.managed_channel_id or project.get("managed_channel_id")
+    channel = database.get_managed_channel(int(managed_id)) if managed_id else None
+    if managed_id and not channel:
+        raise HTTPException(status_code=400, detail="KhÃ´ng tÃ¬m tháº¥y kÃªnh cá»§a tÃ´i")
+    privacy = payload.privacy_status or str((channel or {}).get("default_privacy") or "private")
+    scheduled_at = payload.scheduled_at.strip() if payload.scheduled_at else ""
+    if scheduled_at:
+        try:
+            parsed = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            scheduled_at = parsed.astimezone(timezone.utc).isoformat()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="scheduled_at pháº£i lÃ  ISO datetime há»£p lá»‡") from exc
+    elif channel and channel.get("schedule_enabled"):
+        scheduled_at = next_channel_schedule(channel) or ""
+    if not scheduled_at:
+        scheduled_at = None
+
+    try:
+        publication = database.create_project_publication(
+            project_id,
+            str(final_path),
+            **_publication_payload(project, script, payload),
+            privacy_status=privacy,
+            scheduled_at=scheduled_at,
+            managed_channel_id=int(managed_id) if managed_id else None,
+            thumbnail_path=thumbnail_path,
+        )
+    except (ValueError, PublisherError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "queued",
+        "publication": publication,
+        "publisher": publisher_worker.status(),
+    }
+
+
+@app.post("/api/publications/{publication_id}/cancel")
+def cancel_publication(publication_id: int) -> dict[str, Any]:
+    publication = database.get_project_publication(publication_id)
+    if not publication:
+        raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y publication")
+    if publication.get("status") != "queued":
+        raise HTTPException(status_code=400, detail="Chá»‰ cÃ³ thá»ƒ há»§y publication Ä‘ang xáº¿p hÃ ng")
+    return {"status": "cancelled", "publication": database.finish_project_publication(publication_id, "cancelled")}
+
+
+@app.get("/api/projects/{project_id}/quality-check")
+def get_project_quality_check(project_id: int) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"])) if script else []
+    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    selected_thumbnail = next(
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        None,
+    )
+    return build_quality_report(
+        timeline,
+        str(final_path),
+        FFMPEG_BINARY,
+        str((selected_thumbnail or {}).get("file_path") or ""),
+    )
+
+
+@app.get("/api/jobs/{job_id}")
+def get_project_job(job_id: int) -> dict[str, Any]:
+    job = database.get_project_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy production job")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_project_job(job_id: int) -> dict[str, Any]:
+    job = database.get_project_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy production job")
+    if job["status"] != "queued":
+        raise HTTPException(
+            status_code=409,
+            detail="Chỉ có thể hủy job đang chờ; job đang chạy sẽ hoàn tất an toàn.",
+        )
+    cancelled = database.cancel_queued_project_job(job_id)
+    return {"job": cancelled}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_project_job(job_id: int) -> dict[str, Any]:
+    job = database.get_project_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy production job")
+    if job["status"] not in {"error", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Chỉ có thể chạy lại job lỗi hoặc đã hủy")
+    retry_job = production_worker.enqueue(
+        int(job["project_id"]),
+        int(job["script_id"]),
+        str(job["job_type"]),
+        str(job["provider"]),
+        force=True,
+    )
+    return {"job": retry_job, "retried_from_job_id": job_id}
+
+
+@app.get("/api/production-queue")
+def production_queue_status() -> dict[str, Any]:
+    return {
+        **production_worker.status(),
+        "gpu_only": settings.GPU_ONLY,
+        "nvenc_available": nvenc_available(FFMPEG_BINARY),
+        "pyvideotrans_configured": bool(PYVIDEOTRANS_COMMAND),
+        "pyvideotrans_cuda_ready": settings.PYVIDEOTRANS_CUDA_READY,
+        "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
+        "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
+        "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
+        "voxcpm_runtime_ready": VOXCPM_RUNTIME_READY,
+        "voxcpm_model": VOXCPM_MODEL,
+        "voxcpm_device": VOXCPM_DEVICE,
+        "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
+        "ffmpeg_configured": bool(FFMPEG_RENDER_COMMAND),
+        "ffmpeg_builtin_available": ffmpeg_available(FFMPEG_BINARY),
+        "openmontage_runtime_ready": bool(openmontage_adapter.status()["ready"]),
+        "openmontage": openmontage_adapter.status(),
+        "artifact_dir": str(PRODUCTION_ARTIFACT_DIR),
+    }
+
+
+@app.patch("/api/production-queue")
+def toggle_production_queue(payload: PauseProductionQueueRequest) -> dict[str, Any]:
+    return production_worker.set_paused(payload.paused)
+
+
+@app.post("/api/projects/{project_id}/premiere-export")
+def export_premiere_package(
+    project_id: int,
+    payload: PremiereExportRequest = PremiereExportRequest(),
+) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Project chưa có timeline")
+    try:
+        package = build_premiere_export_package(
+            project,
+            script,
+            timeline,
+            database.get_video(str(project["youtube_video_id"])),
+            PRODUCTION_ARTIFACT_DIR,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "exported",
+        **package,
+        "download_url": f"/api/projects/{project_id}/premiere-export/download",
+    }
+
+
+@app.get("/api/projects/{project_id}/premiere-export/download")
+def download_premiere_package(project_id: int) -> FileResponse:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    zip_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "premiere-package.zip"
+    if not zip_path.is_file():
+        raise HTTPException(status_code=404, detail="Project chưa có gói Premiere")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"premiere-export-{project_id}.zip",
+    )
+
+
+@app.post("/api/videos/{video_id}/project")
+def create_project_from_video(
+    video_id: str,
+    payload: CreateProjectRequest = CreateProjectRequest(),
+) -> dict[str, Any]:
+    try:
+        project = database.create_production_project(
+            video_id,
+            title=payload.title,
+            notes=payload.notes,
+            managed_channel_id=payload.managed_channel_id,
+        )
+    except Exception as exc:
+        raise _api_error(exc) from exc
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    return {"status": "saved", "project": project}
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: int, payload: UpdateProjectRequest) -> dict[str, Any]:
+    project = database.update_production_project(
+        project_id,
+        title=payload.title,
+        status=payload.status,
+        notes=payload.notes,
+        managed_channel_id=payload.managed_channel_id,
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {"status": "saved", "project": project}
+
+
+@app.get("/api/videos/{video_id}/transcript")
+def get_video_transcript(
+    video_id: str,
+    transcript_format: str | None = Query(default=None, alias="format"),
+) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    transcript = database.get_transcript(video_id, transcript_format)
+    return transcript or {
+        "youtube_video_id": video_id,
+        "status": "missing",
+        "content_text": "",
+    }
+
+
+@app.get("/api/videos/{video_id}/transcripts")
+def list_video_transcripts(video_id: str) -> list[dict[str, Any]]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    return database.list_transcripts(video_id)
+
+
+@app.post("/api/videos/{video_id}/transcript")
+def save_video_transcript(video_id: str, payload: TranscriptRequest) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    content = normalize_transcript(payload.text, payload.transcript_format)
+    if not content:
+        raise HTTPException(status_code=422, detail="Transcript không có nội dung sau khi làm sạch")
+    transcript = database.save_transcript(
+        video_id,
+        content,
+        source_type=payload.source_type,
+        language=payload.language,
+        transcript_format=payload.transcript_format,
+    )
+    return {"status": "saved", "youtube_video_id": video_id, "transcript": transcript}
+
+
+@app.post("/api/videos/{video_id}/transcript/auto")
+def auto_transcribe_video(
+    video_id: str,
+    payload: AutoTranscriptRequest = AutoTranscriptRequest(),
+) -> dict[str, Any]:
+    """Extract temporary audio and run Faster-Whisper locally to produce a transcript.
+
+    Audio is discarded right after transcription; only the resulting text is stored,
+    tagged with source_type='whisper_auto' so it stays distinguishable from
+    manually-attested/authorized transcripts.
+    """
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    if not payload.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Whisper sẽ trích xuất audio tạm thời. Cần xác nhận rõ ràng trước khi chạy.",
+        )
+
+    job_id = database.start_analysis_job(video_id, "transcript", "faster_whisper")
+    try:
+        result = transcribe_video(video["video_url"], video_id, language=payload.language or None)
+        if not result["text"]:
+            raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
+
+        transcript = save_transcript_result(database, video_id, result)
+        database.finish_analysis_job(job_id, "completed")
+        return {
+            "job_id": job_id,
+            "video_id": video_id,
+            "status": "completed",
+            "provider": "faster_whisper",
+            "language": result["language"],
+            "transcript": transcript,
+        }
+    except Exception as exc:
+        database.finish_analysis_job(job_id, "error", str(exc))
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/videos/{video_id}/captions")
+def list_video_captions(video_id: str) -> list[dict[str, Any]]:
+    """List official YouTube caption tracks for a video (requires OAuth to be connected)."""
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    try:
+        return list_captions(video_id)
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+@app.post("/api/videos/{video_id}/transcript/from-caption")
+def import_caption_transcript(video_id: str, payload: CaptionImportRequest) -> dict[str, Any]:
+    """Download an official caption track via OAuth and save it as the video's transcript.
+
+    Only succeeds for videos the connected OAuth account owns/manages — YouTube rejects
+    caption downloads for other channels' videos regardless of scope.
+    """
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    try:
+        raw_srt = download_caption(payload.caption_id)
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+    content = normalize_transcript(raw_srt, "srt")
+    if not content:
+        raise HTTPException(status_code=422, detail="Caption không có nội dung sau khi làm sạch")
+    transcript = database.save_transcript(
+        video_id,
+        content,
+        source_type="authorized_caption",
+        language=payload.language,
+        transcript_format="txt",
+    )
+    return {"status": "saved", "youtube_video_id": video_id, "transcript": transcript}
+
+
+@app.post("/api/videos/{video_id}/download")
+def download_video_for_editing(
+    video_id: str,
+    media_type: str = Query(default="video", pattern="^(video|audio)$"),
+    confirmed: bool = Query(default=False),
+    browser_session: str = Query(default="", pattern="^(|coccoc)$"),
+) -> dict[str, Any]:
+    """Download a video's source file for local re-editing (reaction/commentary use).
+
+    Deliberately single-video and manual — no automatic or batch pipeline downloads video.
+    The file is kept on disk until explicitly deleted; publishing decisions and copyright
+    compliance for the resulting edited video remain the user's responsibility.
+    """
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    if not confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Tải media về máy cần xác nhận rõ ràng từ giao diện.",
+        )
+    try:
+        path = download_video(
+            video["video_url"],
+            video_id,
+            media_type=media_type,
+            browser_session=browser_session,
+        )
+    except Exception as exc:
+        raise _api_error(exc) from exc
+    database.mark_video_downloaded(video_id, str(path))
+    return {"video_id": video_id, "status": "downloaded", "path": str(path), "media_type": media_type}
+
+
+@app.post("/api/videos/{video_id}/download-with-cookie-file")
+async def download_video_with_cookie_file(
+    video_id: str,
+    media_type: str = Query(default="video", pattern="^(video|audio)$"),
+    confirmed: bool = Query(default=False),
+    cookie_file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Use a user-selected Netscape cookies.txt file only for one local download."""
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="Tải media cần xác nhận rõ ràng")
+    if Path(cookie_file.filename or "").suffix.lower() not in {".txt", ".cookies"}:
+        raise HTTPException(status_code=400, detail="Hãy chọn file cookies.txt")
+    content = await cookie_file.read()
+    if not content or len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File cookies.txt rỗng hoặc vượt quá 5 MB")
+    temporary_path = Path(tempfile.gettempdir()) / f"youtube-ai-cookie-{uuid.uuid4().hex}.txt"
+    try:
+        temporary_path.write_bytes(content)
+        path = download_video(
+            video["video_url"],
+            video_id,
+            media_type=media_type,
+            cookie_file=temporary_path,
+        )
+    except Exception as exc:
+        raise _api_error(exc) from exc
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    database.mark_video_downloaded(video_id, str(path))
+    return {"video_id": video_id, "status": "downloaded", "path": str(path), "media_type": media_type}
+
+
+@app.delete("/api/videos/{video_id}/download")
+def delete_video_download(video_id: str) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    delete_downloaded_video(video_id)
+    database.mark_video_media_deleted(video_id)
+    return {"video_id": video_id, "status": "deleted"}
+
+
+@app.get("/api/videos/{video_id}/analysis")
+def get_video_analysis(video_id: str) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    analysis = database.get_video_analysis(video_id, analysis_type="metadata")
+    return analysis or {"youtube_video_id": video_id, "status": "pending"}
+
+
+@app.get("/api/videos/{video_id}/reference-analysis")
+def get_reference_analysis(video_id: str) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    analysis = database.get_video_analysis(video_id, analysis_type="reference")
+    return analysis or {"youtube_video_id": video_id, "status": "pending"}
+
+
+@app.post("/api/videos/{video_id}/reference-analysis")
+def create_reference_analysis(video_id: str, provider: str = Query(default="codex_cli")) -> dict[str, Any]:
+    """Analyse structure and style as a remake reference, not a viewer-facing recap."""
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    transcript = database.get_transcript(video_id, transcript_format="txt")
+    transcript_text = str(transcript.get("content_text") or "").strip() if transcript else ""
+    job_id = database.start_analysis_job(video_id, "reference", provider)
+    try:
+        # Do not rely solely on the browser to enforce this workflow.  Reference
+        # analysis is also called from project actions and API clients; in all
+        # cases it needs spoken content before judging story beats and scenes.
+        # Existing transcripts are reused, so this never downloads audio twice.
+        transcript_generated = False
+        if not transcript_text:
+            whisper_result = transcribe_video(video["video_url"], video_id)
+            if not whisper_result["text"]:
+                raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
+            transcript = save_transcript_result(database, video_id, whisper_result)
+            transcript_text = str(transcript.get("content_text") or "").strip()
+            transcript_generated = True
+        result = analyze_reference(video, transcript_text, provider)
+        database.save_video_analysis(
+            video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
+        )
+        database.finish_analysis_job(job_id, "completed")
+        return {
+            "job_id": job_id,
+            "video_id": video_id,
+            "status": "completed",
+            "provider": result["provider"],
+            "transcript_generated": transcript_generated,
+            "result": result,
+        }
+    except ReferenceAnalysisError as exc:
+        database.finish_analysis_job(job_id, "error", str(exc))
+        raise _api_error(exc) from exc
+    except Exception as exc:
+        database.finish_analysis_job(job_id, "error", str(exc))
+        raise _api_error(exc) from exc
+
+
+@app.post("/api/videos/{video_id}/analyze")
+def analyze_video(
+    video_id: str,
+    provider: str | None = Query(default=None),
+) -> dict[str, Any]:
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    try:
+        active_analyzer = resolve_analyzer(provider)
+    except LlmAnalysisError as exc:
+        raise _api_error(exc) from exc
+
+    job_id = database.start_analysis_job(video_id, "metadata", active_analyzer.provider)
+    try:
+        # Metadata analysis may be launched outside the wizard too.  Keep the
+        # same promise as reference analysis: analysing a video also creates a
+        # reusable Whisper transcript when the video does not already have one.
+        transcript = database.get_transcript(video_id, transcript_format="txt")
+        transcript_generated = False
+        if not transcript or not str(transcript.get("content_text") or "").strip():
+            whisper_result = transcribe_video(video["video_url"], video_id)
+            if not whisper_result["text"]:
+                raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
+            save_transcript_result(database, video_id, whisper_result)
+            transcript_generated = True
+        result = active_analyzer.analyze(video)
+        database.save_video_analysis(
+            video_id,
+            result,
+            analysis_type="metadata",
+            provider=active_analyzer.provider,
+            source_type="metadata",
+        )
+        database.finish_analysis_job(job_id, "completed")
+        return {
+            "job_id": job_id,
+            "video_id": video_id,
+            "status": "completed",
+            "provider": active_analyzer.provider,
+            "transcript_generated": transcript_generated,
+            "result": result,
+        }
+    except Exception as exc:
+        database.mark_video_analysis_error(video_id)
+        database.finish_analysis_job(job_id, "error", str(exc))
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/videos/{video_id}/writer")
+def get_video_writer_content(video_id: str) -> dict[str, Any]:
+    if not database.get_video(video_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    result = database.get_video_analysis(video_id, analysis_type="writer")
+    return result or {"youtube_video_id": video_id, "status": "pending"}
+
+
+@app.post("/api/videos/{video_id}/writer")
+def generate_video_writer_content(
+    video_id: str,
+    payload: WriterRequest = WriterRequest(),
+) -> dict[str, Any]:
+    """Generate new titles/description/hashtags/CTA/script outline via an LLM.
+
+    Uses the saved Whisper transcript when one exists, metadata only otherwise.
+    Unlike metadata analysis, there is no free local fallback here — creative
+    writing genuinely needs an LLM, so this always requires Claude or GPT.
+    """
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    try:
+        active_writer = resolve_writer(payload.provider)
+    except WriterError as exc:
+        raise _api_error(exc) from exc
+
+    transcript = database.get_transcript(video_id, transcript_format="txt")
+    transcript_text = transcript["content_text"] if transcript else None
+    saved_reference = database.get_video_analysis(video_id, analysis_type="reference")
+    reference_analysis = saved_reference.get("result") if saved_reference else None
+    workflow_context = None
+    if payload.managed_channel_id is not None:
+        managed_channel = database.get_managed_channel(payload.managed_channel_id)
+        if not managed_channel:
+            raise HTTPException(status_code=404, detail="Không tìm thấy kênh xuất bản đã chọn")
+        workflow_context = {
+            "managed_channel_name": managed_channel.get("name", ""),
+            "output_profile": managed_channel.get("output_profile", "youtube_landscape"),
+            "workflow_reference_title": managed_channel.get("workflow_reference_title", ""),
+            "workflow_reference_description": managed_channel.get("workflow_reference_description", ""),
+            "workflow_notes": managed_channel.get("notes", ""),
+        }
+
+    job_id = database.start_analysis_job(video_id, "writer", active_writer.provider)
+    try:
+        target_duration = resolve_target_duration_seconds(payload.target_duration_seconds, payload.creative_direction, payload.target_duration_text, video.get("duration_seconds"))
+        research_context = research_folklore_remake(str(video.get("title") or ""), payload.creative_direction) if payload.use_web_research else None
+        result = active_writer.generate(
+            video,
+            transcript_text,
+            workflow_context=workflow_context,
+            creative_direction=payload.creative_direction,
+            remake_mode=payload.remake_mode,
+            target_duration_seconds=target_duration,
+            source_duration_seconds=video.get("duration_seconds"),
+            research_context=research_context,
+            reference_analysis=reference_analysis,
+        )
+        if research_context:
+            result["research_context"] = research_context
+        result["target_duration_seconds"] = target_duration
+        result["quality_warnings"] = validate_voiceover_plan(result, target_duration)
+        database.save_video_analysis(
+            video_id,
+            result,
+            analysis_type="writer",
+            provider=active_writer.provider,
+            source_type=result["source_type"],
+        )
+        database.finish_analysis_job(job_id, "completed")
+        return {
+            "job_id": job_id,
+            "video_id": video_id,
+            "status": "completed",
+            "provider": active_writer.provider,
+            "result": result,
+        }
+    except Exception as exc:
+        database.finish_analysis_job(job_id, "error", str(exc))
+        raise _api_error(exc) from exc
+
+
+@app.get("/api/analysis-providers")
+def list_analysis_providers() -> list[dict[str, Any]]:
+    anthropic_key, anthropic_model = settings.anthropic_config()
+    openai_key, openai_model = settings.openai_config()
+    codex = codex_cli_status()
+    return [
+        {"provider": "local_metadata", "label": "Local (không cần API key)", "available": True},
+        {
+            "provider": "anthropic_claude",
+            "label": f"Claude ({anthropic_model})",
+            "available": bool(anthropic_key),
+        },
+        {
+            "provider": "openai_gpt",
+            "label": f"GPT ({openai_model})",
+            "available": bool(openai_key),
+        },
+        {
+            "provider": "codex_cli",
+            "label": "Codex CLI (tai khoan dang nhap)",
+            "available": bool(codex["logged_in"]),
+        },
+    ]
+
+
+@app.get("/api/analysis-jobs")
+def list_analysis_jobs(limit: int = Query(default=30, ge=1, le=100)) -> list[dict[str, Any]]:
+    return database.list_analysis_jobs(limit)
+
+
+@app.get("/api/analysis-queue")
+def analysis_queue_status() -> dict[str, Any]:
+    return metadata_queue.status()
+
+
+@app.post("/api/analysis-queue")
+def enqueue_analysis(payload: QueueAnalysisRequest) -> dict[str, Any]:
+    provider = payload.provider or "local_metadata"
+    anthropic_key, _ = settings.anthropic_config()
+    openai_key, _ = settings.openai_config()
+    codex = codex_cli_status()
+    if provider == "anthropic_claude" and not anthropic_key:
+        raise HTTPException(status_code=400, detail="Thiếu ANTHROPIC_API_KEY trong .env")
+    if provider == "openai_gpt" and not openai_key:
+        raise HTTPException(status_code=400, detail="Thiếu OPENAI_API_KEY trong .env")
+    if provider == "codex_cli" and not codex["logged_in"]:
+        raise HTTPException(status_code=400, detail="Codex CLI chua dang nhap")
+    try:
+        resolve_analyzer(provider)
+    except LlmAnalysisError as exc:
+        raise _api_error(exc) from exc
+    result = metadata_queue.enqueue_pending(
+        channel_id=payload.channel_id,
+        limit=payload.limit,
+        force=payload.force,
+        provider=payload.provider,
+        video_ids=payload.video_ids,
+    )
+    return {**result, "queue": metadata_queue.status()}
+
+
+@app.patch("/api/analysis-queue")
+def pause_analysis_queue(payload: QueuePauseRequest) -> dict[str, Any]:
+    return metadata_queue.set_paused(payload.paused)
+
+
+@app.get("/api/transcript-queue")
+def transcript_queue_status() -> dict[str, Any]:
+    return transcript_queue.status()
+
+
+@app.post("/api/transcript-queue")
+def enqueue_transcripts(payload: QueueTranscriptRequest) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Hàng đợi Whisper sẽ trích xuất audio tạm thời cho nhiều video. Cần xác nhận trước khi chạy.",
+        )
+    result = transcript_queue.enqueue_pending(
+        channel_id=payload.channel_id,
+        limit=payload.limit,
+        force=payload.force,
+        video_ids=payload.video_ids,
+    )
+    return {**result, "queue": transcript_queue.status()}
+
+
+@app.patch("/api/transcript-queue")
+def pause_transcript_queue(payload: QueuePauseRequest) -> dict[str, Any]:
+    return transcript_queue.set_paused(payload.paused)
+
+
+@app.get("/api/sync-runs")
+def list_sync_runs(limit: int = Query(default=30, ge=1, le=100)) -> list[dict[str, Any]]:
+    return database.list_sync_runs(limit)
+
+
+@app.get("/webhooks/youtube")
+def youtube_push_verification(
+    mode: str | None = Query(default=None, alias="hub.mode"),
+    challenge: str | None = Query(default=None, alias="hub.challenge"),
+    verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+) -> PlainTextResponse:
+    if YOUTUBE_PUSH_VERIFY_TOKEN and verify_token != YOUTUBE_PUSH_VERIFY_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid verification token")
+    if mode == "subscribe" and challenge:
+        return PlainTextResponse(challenge)
+    return PlainTextResponse("ok")
+
+
+@app.post("/webhooks/youtube")
+async def youtube_push_event(request: Request) -> dict[str, Any]:
+    try:
+        events = parse_push_feed(await request.body())
+        result = service.handle_push_events(events)
+        return {"ok": True, "events": len(events), **result}
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("youtube_monitor.main:app", host="127.0.0.1", port=8787, reload=False)

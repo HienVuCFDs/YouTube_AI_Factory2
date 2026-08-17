@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from . import settings
+from .codex_bridge import CodexBridgeError, call_codex_json as _call_codex_json
+
+
+class LlmError(RuntimeError):
+    pass
+
+
+def call_codex_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    """Use the locally logged-in Codex CLI without an OpenAI API key."""
+    del max_tokens  # Codex CLI owns its model token budget.
+    try:
+        return _call_codex_json(system_prompt, user_prompt, schema)
+    except CodexBridgeError as exc:
+        raise LlmError(str(exc)) from exc
+
+
+def call_claude_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    api_key, model = settings.anthropic_config()
+    if not api_key:
+        raise LlmError("Thiếu ANTHROPIC_API_KEY. Hãy thêm vào .env để dùng Claude.")
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise LlmError("Thiếu thư viện anthropic. Cài đặt bằng: pip install anthropic") from exc
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as exc:
+        raise LlmError(f"Claude API lỗi: {exc}") from exc
+
+    text = next((block.text for block in response.content if block.type == "text"), "")
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise LlmError(f"Claude trả về JSON không hợp lệ: {exc}") from exc
+
+
+def call_openai_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    api_key, model = settings.openai_config()
+    if not api_key:
+        raise LlmError("Thiếu OPENAI_API_KEY. Hãy thêm vào .env để dùng GPT.")
+    import httpx
+
+    schema_hint = json.dumps(schema, ensure_ascii=False)
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "response_format": {"type": "json_object"},
+                "max_tokens": max_tokens,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": f"{system_prompt} Schema JSON bắt buộc: {schema_hint}",
+                    },
+                    {"role": "user", "content": user_prompt},
+                ],
+            },
+            timeout=90.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise LlmError(f"OpenAI API lỗi: {exc}") from exc
+
+    payload = response.json()
+    try:
+        text = payload["choices"][0]["message"]["content"]
+        return json.loads(text)
+    except (KeyError, IndexError, ValueError) as exc:
+        raise LlmError(f"OpenAI trả về dữ liệu không hợp lệ: {exc}") from exc

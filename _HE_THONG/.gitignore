@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+data/*.db
+data/*.sqlite*
+data/*.log
+data/oauth_token.json
+downloads/
+

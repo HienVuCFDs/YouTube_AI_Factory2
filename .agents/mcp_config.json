@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "youtube_factory": {
+      "command": "C:\\Program Files\\Python313\\python.exe",
+      "args": [
+        "F:\\YouTube_AI_Factory\\_HE_THONG\\app\\youtube_monitor\\ai_desktop_mcp.py"
+      ],
+      "env": {
+        "YOUTUBE_FACTORY_URL": "http://127.0.0.1:8787"
+      }
+    }
+  }
+}
