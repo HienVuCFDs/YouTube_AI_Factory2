@@ -2705,7 +2705,12 @@
     const totalTimelineDuration = timeline.reduce((total, item) => total + Number(item.duration_seconds || 0), 0);
     const timelineRows = timeline.length ? timeline.map((segment) => {
       const sceneJob = sceneGenerationJobs.find((item) => Number(item.timeline_segment_id) === Number(segment.id));
-      const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''}` : 'Chưa tạo ảnh AI cho đoạn này.';
+      const sceneJobActions = sceneJob
+        ? (sceneJob.status === 'queued' ? `<button class="btn small ghost" type="button" onclick="cancelSceneJob(${project.id}, ${sceneJob.id})">Hủy</button>`
+          : ['error', 'cancelled'].includes(sceneJob.status) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Chạy lại</button>`
+          : '')
+        : '';
+      const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''} ${sceneJobActions}` : 'Chưa tạo ảnh AI cho đoạn này.';
       const sceneControls = sceneReady ? `
         <select id="sceneProvider-${segment.id}" aria-label="Engine tạo cảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image · ảnh</option><option value="gemini_veo">Google Veo · video</option>${openaiImageReady ? '<option value="openai_image">GPT Image · ảnh</option>' : ''}</select>
         <select id="sceneRatio-${segment.id}" aria-label="Tỷ lệ cảnh AI"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select>
@@ -2831,7 +2836,7 @@
       </div>`;
     const adapterStatus = state.productionQueue?.voxcpm_runtime_ready ? 'VOXCPM2 GPU SẴN SÀNG' : state.productionQueue?.edge_tts_runtime_ready ? 'EDGE TTS SẴN SÀNG' : state.productionQueue?.pyvideotrans_runtime_ready ? 'PYVIDEOTRANS SẴN SÀNG' : 'TTS CHƯA SẴN SÀNG';
     const ffmpegStatus = state.productionQueue?.ffmpeg_builtin_available ? 'FFMPEG LOCAL SẴN SÀNG' : 'FFMPEG LOCAL KHÔNG TÌM THẤY';
-    const publicationRows = publications.length ? publications.map((item) => `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">YouTube Publisher · ${esc(item.status)}</div><div class="job-meta">${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'queued' ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}</div>`).join('') : '<div class="empty">Chưa có publication nào.</div>';
+    const publicationRows = publications.length ? publications.map((item) => `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">YouTube Publisher · ${esc(item.status)}</div><div class="job-meta">${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'queued' ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`).join('') : '<div class="empty">Chưa có publication nào.</div>';
     const publisherActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>Publisher YouTube · chờ duyệt cuối</label><p class="panel-sub">Chỉ đưa video đã render vào hàng đợi. Nếu không chọn thời gian, app dùng lịch mặc định của kênh.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationChannel" aria-label="Kênh đăng">${managedChannelOptions}</select><select id="publicationThumbnail" aria-label="Thumbnail">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Đưa video vào Publisher</button><span class="secondary-text">${publications.length} publication</span></div><div style="margin-top:8px">${publicationRows}</div></div>`;
     const directorAction = `
       <div class="analysis-item" style="margin-bottom:14px; border-color:rgba(34,197,94,.5); background:linear-gradient(120deg,rgba(34,197,94,.11),rgba(16,20,27,.9) 52%)">
@@ -3270,6 +3275,23 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  async function cancelSceneJob(projectId, jobId) {
+    try {
+      await api(`/api/scene-jobs/${jobId}/cancel`, {method: 'POST'});
+      setMessage('Đã hủy job tạo cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function retrySceneJob(projectId, jobId) {
+    try {
+      const response = await api(`/api/scene-jobs/${jobId}/retry`, {method: 'POST'});
+      setMessage('Đã đưa job vào hàng đợi lại.', 'success');
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function generateAllRunwayScenes(projectId) {
     const provider = $(`batchSceneProvider-${projectId}`)?.value || 'gemini_image';
     const isVeo = provider === 'gemini_veo';
@@ -3457,6 +3479,14 @@
     try {
       await api(`/api/publications/${publicationId}/cancel`, {method: 'POST'});
       setMessage('Đã hủy publication.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function retryPublication(publicationId, projectId) {
+    try {
+      await api(`/api/publications/${publicationId}/retry`, {method: 'POST'});
+      setMessage('Đã đưa publication vào hàng đợi lại.', 'success');
       await openProjectDetail(projectId);
     } catch (error) { setMessage(error.message, 'error'); }
   }
@@ -3655,9 +3685,25 @@
 
   async function loadJobs() {
     state.jobs = await api('/api/analysis-jobs?limit=8');
-    const jobStatus = (status) => ({completed: 'HOÀN TẤT', error: 'LỖI', running: 'ĐANG CHẠY'}[status] || 'ĐANG CHỜ');
+    const jobStatus = (status) => ({completed: 'HOÀN TẤT', error: 'LỖI', cancelled: 'ĐÃ HỦY', running: 'ĐANG CHẠY'}[status] || 'ĐANG CHỜ');
     $('jobsBody').innerHTML = state.jobs.length ? state.jobs.map((job) => `
-      <div class="job-row"><span class="job-dot ${esc(job.status)}"></span><div class="job-main"><div class="job-title">${esc(channelName(state.videos.find((v) => v.youtube_video_id === job.youtube_video_id)?.youtube_channel_id))}</div><div class="job-meta">${esc(job.youtube_video_id)} · ${esc(job.provider)} · ${date(job.finished_at || job.created_at)}</div></div><span class="tag ${job.status === 'completed' ? 'green' : job.status === 'error' ? 'red' : 'orange'}">${jobStatus(job.status)}</span></div>`).join('') : '<div class="empty">Chưa có tác vụ phân tích. Hãy bấm Phân tích trên một video.</div>';
+      <div class="job-row"><span class="job-dot ${esc(job.status)}"></span><div class="job-main"><div class="job-title">${esc(channelName(state.videos.find((v) => v.youtube_video_id === job.youtube_video_id)?.youtube_channel_id))}</div><div class="job-meta">${esc(job.youtube_video_id)} · ${esc(job.provider)} · ${date(job.finished_at || job.created_at)}</div></div><span class="tag ${job.status === 'completed' ? 'green' : job.status === 'error' ? 'red' : job.status === 'cancelled' ? 'red' : 'orange'}">${jobStatus(job.status)}</span>${job.status === 'queued' ? `<button class="btn small ghost" type="button" onclick="cancelAnalysisJob(${job.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(job.status) ? `<button class="btn small ghost" type="button" onclick="retryAnalysisJob(${job.id})">Chạy lại</button>` : ''}</div>`).join('') : '<div class="empty">Chưa có tác vụ phân tích. Hãy bấm Phân tích trên một video.</div>';
+  }
+
+  async function cancelAnalysisJob(jobId) {
+    try {
+      await api(`/api/analysis-jobs/${jobId}/cancel`, {method: 'POST'});
+      setMessage('Đã hủy job.', 'success');
+      await Promise.all([loadJobs(), loadQueueStatus(), loadTranscriptQueueStatus()]);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function retryAnalysisJob(jobId) {
+    try {
+      await api(`/api/analysis-jobs/${jobId}/retry`, {method: 'POST'});
+      setMessage('Đã đưa job vào hàng đợi lại.', 'success');
+      await Promise.all([loadJobs(), loadQueueStatus(), loadTranscriptQueueStatus()]);
+    } catch (error) { setMessage(error.message, 'error'); }
   }
 
   async function loadQueueStatus() {
