@@ -79,6 +79,31 @@ class ProductionWorkerTests(unittest.TestCase):
             self.assertEqual(finished_premiere["status"], "completed")
             self.assertTrue(Path(finished_premiere["output_path"]).is_file())
 
+    def test_voiceover_segment_job_is_scoped_and_does_not_block_other_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project = self._database_with_timeline(directory)
+            script = database.get_latest_project_script(project["id"])
+            timeline = database.list_project_timeline(project["id"])
+            segment_id = int(timeline[0]["id"])
+            worker = ProductionWorker(database, Path(directory) / "artifacts")
+
+            job = worker.enqueue(
+                project["id"], script["id"], "voiceover_segment", "dry_run", segment_id=segment_id,
+            )
+            self.assertEqual(job["segment_id"], segment_id)
+
+            # A whole-project "voiceover" job must not be treated as a duplicate
+            # of a segment-scoped one (different segment_id, same job_type
+            # prefix) — the dedup check added for segment_id has to actually
+            # distinguish them, not just always match on job_type.
+            whole_project_job = worker.enqueue(project["id"], script["id"], "voiceover", "dry_run")
+            self.assertNotEqual(whole_project_job["id"], job["id"])
+
+            worker._process(job["id"])
+            finished = database.get_project_job(job["id"])
+            self.assertEqual(finished["status"], "completed")
+            self.assertEqual(finished["segment_id"], segment_id)
+
     def test_voxcpm_batch_sends_reference_style_not_prompt_text(self):
         """Regression test: VoxCPM's `prompt_text` must be an exact transcript
         of the reference clip (per the model's own docs) — sending our

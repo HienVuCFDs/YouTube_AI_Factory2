@@ -464,7 +464,7 @@ class GenerateThumbnailsRequest(BaseModel):
     variants: int = Field(default=3, ge=1, le=6)
 
 
-ProductionJobType = Literal["voiceover", "source_visuals", "render", "premiere_draft", "director_production"]
+ProductionJobType = Literal["voiceover", "voiceover_segment", "source_visuals", "render", "premiere_draft", "director_production"]
 
 
 class CreateProductionJobRequest(BaseModel):
@@ -472,6 +472,7 @@ class CreateProductionJobRequest(BaseModel):
     provider: str = Field(default="dry_run", min_length=1, max_length=50)
     force: bool = False
     confirmed: bool = False
+    segment_id: int | None = Field(default=None, ge=1)
 
 
 class CreatePublicationRequest(BaseModel):
@@ -1982,6 +1983,7 @@ def queue_project_job(
     provider = payload.provider.strip().lower()
     allowed = {
         "voiceover": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
+        "voiceover_segment": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
         "source_visuals": {"dry_run", "preview", "mock", "source_video", "source", "local_source"},
         "render": {
             "dry_run",
@@ -2045,6 +2047,12 @@ def queue_project_job(
             )
     if payload.job_type == "director_production" and not ffmpeg_available(FFMPEG_BINARY):
         raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
+    if payload.job_type == "voiceover_segment":
+        if not payload.segment_id:
+            raise HTTPException(status_code=400, detail="Cần chọn đúng đoạn timeline để tạo lại giọng đọc")
+        segment = database.get_project_timeline_segment(int(payload.segment_id))
+        if not segment or int(segment.get("project_id") or 0) != project_id:
+            raise HTTPException(status_code=400, detail="Đoạn timeline không thuộc dự án này")
     try:
         job = production_worker.enqueue(
             project_id,
@@ -2052,6 +2060,7 @@ def queue_project_job(
             payload.job_type,
             provider,
             force=payload.force,
+            segment_id=payload.segment_id,
         )
     except ProductionJobError as exc:
         raise _api_error(exc) from exc

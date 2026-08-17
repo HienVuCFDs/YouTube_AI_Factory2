@@ -505,6 +505,7 @@ class Database:
             self._ensure_column(connection, "project_render_settings", "subtitle_provider", "TEXT NOT NULL DEFAULT 'timeline_text'")
             self._ensure_column(connection, "project_render_settings", "subtitle_model", "TEXT NOT NULL DEFAULT 'timeline'")
             self._ensure_column(connection, "project_render_settings", "publish_language", "TEXT NOT NULL DEFAULT 'vi'")
+            self._ensure_column(connection, "project_jobs", "segment_id", "INTEGER")
             for column, ddl in (
                 ("schedule_enabled", "INTEGER NOT NULL DEFAULT 0"),
                 ("schedule_frequency", "TEXT NOT NULL DEFAULT 'weekly'"),
@@ -1968,6 +1969,7 @@ class Database:
         job_type: str,
         provider: str,
         force: bool = False,
+        segment_id: int | None = None,
     ) -> dict[str, Any] | None:
         project = self.get_production_project(project_id)
         script = self.get_project_script(script_id)
@@ -1980,9 +1982,10 @@ class Database:
                     SELECT * FROM project_jobs
                     WHERE project_id = ? AND script_id = ? AND job_type = ?
                       AND status IN ('queued', 'running')
+                      AND segment_id IS ?
                     ORDER BY id DESC LIMIT 1
                     """,
-                    (project_id, script_id, job_type),
+                    (project_id, script_id, job_type, segment_id),
                 ).fetchone()
                 if active:
                     return dict(active)
@@ -1991,10 +1994,10 @@ class Database:
                 """
                 INSERT INTO project_jobs (
                     project_id, script_id, job_type, provider, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'queued', ?, ?)
+                    segment_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
-                (project_id, script_id, job_type.strip(), provider.strip(), now, now),
+                (project_id, script_id, job_type.strip(), provider.strip(), segment_id, now, now),
             )
             job_id = int(cursor.lastrowid)
             self._add_project_job_event(

@@ -24,7 +24,7 @@ from .timeline_builder import timeline_to_manifest
 from .transcriber import TranscriptionError, transcribe_local_file
 
 
-JOB_TYPES = {"voiceover", "voice_preview", "source_visuals", "render", "premiere_draft", "director_production"}
+JOB_TYPES = {"voiceover", "voiceover_segment", "voice_preview", "source_visuals", "render", "premiere_draft", "director_production"}
 OPENMONTAGE_RENDER_PROVIDERS = {
     "openmontage",
     "openmontage_ffmpeg",
@@ -356,6 +356,11 @@ def run_voiceover_job(
     voxcpm_prompt_text: str = "",
 ) -> str:
     project, script, timeline = _context(database, job)
+    segment_id = job.get("segment_id")
+    if segment_id is not None:
+        timeline = [item for item in timeline if int(item["id"]) == int(segment_id)]
+        if not timeline:
+            raise ProductionJobError("Không tìm thấy đoạn timeline cần tạo lại giọng đọc")
     render_settings = database.get_project_render_settings(int(project["id"]))
     language = str(render_settings.get("publish_language") or language)
     voice_role = str(render_settings.get("voice_model") or voice_role)
@@ -890,6 +895,7 @@ class ProductionWorker:
         job_type: str,
         provider: str,
         force: bool = False,
+        segment_id: int | None = None,
     ) -> dict[str, Any]:
         if job_type not in JOB_TYPES:
             raise ProductionJobError(f"Job type không được hỗ trợ: {job_type}")
@@ -899,6 +905,7 @@ class ProductionWorker:
             job_type,
             provider,
             force=force,
+            segment_id=segment_id,
         )
         if not job:
             raise ProductionJobError("Không tìm thấy project hoặc script")
@@ -943,7 +950,7 @@ class ProductionWorker:
         if not job:
             return
         try:
-            if job["job_type"] == "voiceover":
+            if job["job_type"] in ("voiceover", "voiceover_segment"):
                 output_path = run_voiceover_job(
                     self.database,
                     job,

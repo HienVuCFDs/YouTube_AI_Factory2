@@ -2691,7 +2691,14 @@
             </select>
             <button class="btn small ghost" onclick="saveShot(${shot.id})">Lưu cảnh</button>
           </div>
-          <div class="storyboard-summary"><span>${number(shot.duration_seconds)} giây</span><span>Timeline: ${segment.start_seconds == null ? 'chưa tạo' : `${segment.start_seconds}s–${segment.end_seconds}s`}</span>${visualPath ? `<span>${visualPath.includes('director_draft_visuals') ? 'Visual draft – cần thay' : 'Visual đã gắn'}</span>` : '<span>Chưa gắn visual thật</span>'}</div>
+          <div class="storyboard-summary"><span>${number(shot.duration_seconds)} giây</span><span>Timeline: ${segment.start_seconds == null ? 'chưa tạo' : `${segment.start_seconds}s–${segment.end_seconds}s`}</span>${visualPath ? `<span>${visualPath.includes('director_draft_visuals') ? 'Visual draft – cần thay' : 'Visual đã gắn'}</span>` : '<span>Chưa gắn visual thật</span>'}${segment.audio_path ? '<span>Đã có giọng đọc</span>' : ''}</div>
+          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap">
+            <input id="shotImageFile-${shot.id}" type="file" accept="image/*,video/*" style="max-width:180px" onchange="uploadShotImage(${project.id}, ${shot.id}, this)" aria-label="Tải ảnh/video cho cảnh" />
+            ${visualPath ? `<button class="btn small danger" type="button" onclick="deleteShotImage(${project.id}, ${segment.id})">Xóa ảnh/video</button>` : ''}
+            <select id="shotSceneProvider-${shot.id}" aria-label="Engine tạo cảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_image">Gemini Image · ảnh</option><option value="gemini_veo">Google Veo · video</option><option value="openai_image">GPT Image · ảnh</option></select>
+            <button class="btn small primary" type="button" onclick="generateShotVideo(${project.id}, ${shot.id})">Tạo video/ảnh AI cho cảnh</button>
+            <button class="btn small ghost" type="button" onclick="regenerateShotVoice(${project.id}, ${shot.id})">Tạo lại giọng đọc cảnh này</button>
+          </div>
         </div>
          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><button class="btn small ghost" onclick="moveStoryboardShot(${project.id}, ${shot.id}, -1)" ${shotPosition === 0 ? 'disabled' : ''}>↑</button><button class="btn small ghost" onclick="moveStoryboardShot(${project.id}, ${shot.id}, 1)" ${shotPosition === shots.length - 1 ? 'disabled' : ''}>↓</button><button class="btn small ghost" onclick="duplicateStoryboardShot(${project.id}, ${shot.id})">Nhân bản</button><button class="btn small danger" onclick="deleteStoryboardShot(${project.id}, ${shot.id})">Xóa cảnh</button></div>
        </article>`;
@@ -3177,6 +3184,84 @@
     try {
       await api(`/api/shots/${shotId}`, {method: 'DELETE'});
       setMessage('Đã xóa cảnh khỏi storyboard.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function ensureSegmentForShot(projectId, shotId) {
+    // force:false is a safe no-op if a timeline already exists — this only
+    // creates one the first time a shot-level action is used before the
+    // user has explicitly generated a timeline themselves.
+    await api(`/api/projects/${projectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+    const timeline = await api(`/api/projects/${projectId}/timeline`);
+    const segment = timeline.find((item) => Number(item.shot_id) === Number(shotId));
+    if (!segment) throw new Error('Không tạo được đoạn timeline tương ứng cho cảnh này.');
+    return segment;
+  }
+
+  async function uploadShotImage(projectId, shotId, inputEl) {
+    const file = inputEl?.files?.[0];
+    if (!file) return;
+    setMessage(`Đang tải ${file.name} lên...`);
+    try {
+      const segment = await ensureSegmentForShot(projectId, shotId);
+      const form = new FormData();
+      form.append('asset_type', file.type.startsWith('video') ? 'video' : 'image');
+      form.append('file', file);
+      const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      await api(`/api/timeline/${segment.id}/attach-asset`, {method: 'POST', body: JSON.stringify({asset_id: data.asset.id})});
+      setMessage('Đã gắn ảnh/video vào cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+    finally { if (inputEl) inputEl.value = ''; }
+  }
+
+  async function deleteShotImage(projectId, segmentId) {
+    if (!segmentId || !confirm('Xóa ảnh/video khỏi cảnh này?')) return;
+    try {
+      await api(`/api/timeline/${segmentId}`, {method: 'PATCH', body: JSON.stringify({visual_path: ''})});
+      setMessage('Đã xóa ảnh/video khỏi cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateShotVideo(projectId, shotId) {
+    const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
+    if (promptText.length < 3) return setMessage('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.', 'error');
+    const provider = $(`shotSceneProvider-${shotId}`)?.value || 'gemini_image';
+    const isVeo = ['gemini_veo', 'flow_veo', 'meta_ai_video'].includes(provider);
+    const usesSubscription = ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI cho cảnh này? ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
+    setMessage('Đang đưa cảnh vào hàng đợi tạo ảnh/video AI...');
+    try {
+      const segment = await ensureSegmentForShot(projectId, shotId);
+      const response = await api(`/api/projects/${projectId}/scene-jobs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          timeline_segment_id: segment.id, provider, prompt: promptText,
+          duration_seconds: isVeo ? 8 : 5, ratio: '1280:720', confirmed: true,
+        }),
+      });
+      setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function regenerateShotVoice(projectId, shotId) {
+    if (!confirm('Tạo lại giọng đọc riêng cho cảnh này? Sẽ ghi đè audio hiện có của cảnh (nếu có).')) return;
+    setMessage('Đang tạo lại giọng đọc cho cảnh này...');
+    try {
+      const segment = await ensureSegmentForShot(projectId, shotId);
+      const renderSettings = await api(`/api/projects/${projectId}/render-settings`);
+      const provider = renderSettings?.voice_provider || 'edge_tts';
+      await api(`/api/projects/${projectId}/jobs`, {
+        method: 'POST',
+        body: JSON.stringify({job_type: 'voiceover_segment', provider, confirmed: true, segment_id: segment.id}),
+      });
+      setMessage('Đã đưa việc tạo giọng đọc cho cảnh này vào hàng đợi.', 'success');
       await openProjectDetail(projectId);
     } catch (error) { setMessage(error.message, 'error'); }
   }
