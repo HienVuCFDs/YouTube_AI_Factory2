@@ -186,14 +186,18 @@ def _build_prompt(
         f"Tags gốc: {tags}",
     ]
     parts.append(f"Source video duration: {int(source_duration_seconds or 0)} seconds.")
+    channel_name = str((workflow_context or {}).get("managed_channel_name") or "").strip()
     if workflow_context:
         parts.append(
             "Destination channel workflow (style reference only; do not copy source content): "
-            f"channel={workflow_context.get('managed_channel_name', '')}; "
+            f"channel={channel_name or '(chưa đặt tên — xem quy tắc CTA bên dưới)'}; "
             f"reference={workflow_context.get('workflow_reference_title', '')}; "
             f"format={workflow_context.get('output_profile', '')}; "
             f"notes={str(workflow_context.get('workflow_notes', ''))[:1200]}"
         )
+    parts.append(
+        f"Quy tắc CTA/kênh (bắt buộc): {'Nhắc đúng tên kênh là ' + channel_name + ' khi kêu gọi đăng ký.' if channel_name else 'KHÔNG có tên kênh cụ thể cho video này — tuyệt đối không tự bịa hay đặt tên kênh nào (kể cả tên nghe hợp lý). CTA chỉ dùng lời kêu gọi chung chung như “nhấn đăng ký để xem thêm”, không nêu bất kỳ tên kênh nào.'}"
+    )
     if reference_analysis:
         scene_map = reference_analysis.get("scene_map") if isinstance(reference_analysis.get("scene_map"), list) else []
         reference_beats = "\n".join(
@@ -363,6 +367,8 @@ SCRIPT_REVISION_SCHEMA = {
 _SCRIPT_REVISION_SYSTEM = (
     "Bạn là biên tập viên kịch bản YouTube. Hãy chỉnh sửa bản kịch bản hiện tại theo yêu cầu của người dùng, "
     "giữ lại thông tin đúng, bổ sung giá trị riêng, không sao chép nguyên văn nguồn. "
+    "Không tự bịa hay đổi tên kênh trong CTA trừ khi người dùng nêu rõ tên kênh trong yêu cầu chỉnh sửa; "
+    "nếu không có tên kênh cụ thể, CTA chỉ dùng lời kêu gọi chung chung, không nêu tên kênh nào. "
     "Trả về đúng JSON theo schema, không thêm giải thích ngoài JSON."
 )
 
