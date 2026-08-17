@@ -66,12 +66,12 @@ def save_integration_values(values: dict[str, str]) -> None:
         return
     invalid = set(values) - EDITABLE_INTEGRATION_KEYS
     if invalid:
-        raise ValueError(f"KhÃ´ng Ä‘Æ°á»£c phÃ©p thay Ä‘á»•i: {', '.join(sorted(invalid))}")
+        raise ValueError(f"Không được phép thay đổi: {', '.join(sorted(invalid))}")
     normalized: dict[str, str] = {}
     for key, raw_value in values.items():
         value = str(raw_value).strip()
         if "\n" in value or "\r" in value:
-            raise ValueError(f"GiÃ¡ trá»‹ {key} khÃ´ng Ä‘Æ°á»£c chá»©a xuá»‘ng dÃ²ng")
+            raise ValueError(f"Giá trị {key} không được chứa xuống dòng")
         normalized[key] = value
 
     existing_lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
@@ -88,7 +88,9 @@ def save_integration_values(values: dict[str, str]) -> None:
     if remaining:
         if updated_lines and updated_lines[-1].strip():
             updated_lines.append("")
-        updated_lines.append("# Local integrations (managed from dashboard)")
+        header = "# Local integrations (managed from dashboard)"
+        if header not in updated_lines:
+            updated_lines.append(header)
         updated_lines.extend(f"{key}={value}" for key, value in remaining.items())
     ENV_PATH.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
     for key, value in normalized.items():
@@ -173,7 +175,7 @@ OAUTH_TOKEN_PATH = DATA_DIR / "oauth_token.json"
 
 # Deliberate, single-video, manual download for re-editing (reaction/commentary videos
 # with the user's own added footage and voiceover) — never used by any automatic/batch
-# pipeline. See PROJECT_PLAN.md for the policy this changes.
+# pipeline. See 03_TAI_LIEU/KE_HOACH_DU_AN.md (muc 19) for the policy this changes.
 VIDEO_DOWNLOAD_DIR = Path(os.getenv("VIDEO_DOWNLOAD_DIR", str(PROJECT_ROOT / "02_NGUYEN_LIEU" / "tai_ve")))
 
 # Production adapters. Empty commands keep the workflow in safe dry-run mode;
