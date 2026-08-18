@@ -16,17 +16,17 @@
   "content_scripts": [
     {
       "matches": ["https://gemini.google.com/*"],
-      "js": ["content_gemini.js"],
+      "js": ["content_common.js", "content_gemini.js"],
       "run_at": "document_idle"
     },
     {
       "matches": ["https://chatgpt.com/*"],
-      "js": ["content_chatgpt.js"],
+      "js": ["content_common.js", "content_chatgpt.js"],
       "run_at": "document_idle"
     },
     {
       "matches": ["https://www.meta.ai/*"],
-      "js": ["content_meta.js"],
+      "js": ["content_common.js", "content_meta.js"],
       "run_at": "document_idle"
     }
   ],
