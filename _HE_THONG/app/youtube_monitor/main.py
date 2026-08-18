@@ -134,6 +134,15 @@ publisher_worker = PublisherWorker(database)
 scene_generation_worker = SceneGenerationWorker(database, PRODUCTION_ARTIFACT_DIR)
 template_path = Path(__file__).resolve().parent / "templates" / "index.html"
 
+# Tracks the last time each external-sidecar provider (Antigravity/Flow/Meta
+# AI) actually polled for work, so the UI can tell "queued, waiting for a
+# sidecar that isn't running" apart from "queued, sidecar will pick it up in
+# a few seconds" instead of just sitting at an unmoving progress bar. Reset
+# on every app restart by design — a fresh process has no sidecar sightings
+# yet, which is the correct "unknown" state until one polls in.
+_sidecar_last_seen: dict[str, datetime] = {}
+_SIDECAR_STALE_AFTER_SECONDS = 30  # polls happen every 5-10s when idle
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -1732,6 +1741,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
 @app.get("/api/antigravity/next-scene-job")
 def claim_antigravity_scene_job() -> dict[str, Any]:
     """Sidecar-only handoff: one queued image job becomes an Antigravity task."""
+    _sidecar_last_seen["antigravity_image"] = datetime.now(timezone.utc)
     job = database.claim_next_antigravity_scene_job()
     return {"job": job}
 
@@ -1773,8 +1783,27 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
     """
     if provider not in database.BROWSER_SIDECAR_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Provider không hợp lệ: {provider}")
+    _sidecar_last_seen[provider] = datetime.now(timezone.utc)
     job = database.claim_next_scene_job_for_provider(provider)
     return {"job": job}
+
+
+@app.get("/api/scene-sidecar-status")
+def scene_sidecar_status() -> dict[str, Any]:
+    """Whether each external-sidecar provider has polled recently enough to
+    be considered alive — lets the UI say "no sidecar is running" instead of
+    silently sitting at an unmoving progress bar when jobs stay queued."""
+    now = datetime.now(timezone.utc)
+    result: dict[str, Any] = {}
+    for provider in database.EXTERNAL_SIDECAR_PROVIDERS:
+        last_seen = _sidecar_last_seen.get(provider)
+        seconds_ago = (now - last_seen).total_seconds() if last_seen else None
+        result[provider] = {
+            "last_seen_at": last_seen.isoformat() if last_seen else None,
+            "seconds_ago": seconds_ago,
+            "alive": seconds_ago is not None and seconds_ago <= _SIDECAR_STALE_AFTER_SECONDS,
+        }
+    return result
 
 
 @app.post("/api/browser-scene-jobs/{job_id}/complete")

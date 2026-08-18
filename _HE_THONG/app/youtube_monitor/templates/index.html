@@ -1771,7 +1771,26 @@
   };
   const isSubscriptionProvider = (provider) => provider in SUBSCRIPTION_PROVIDER_HINTS;
 
-  function updateStudioSceneGenerationAvailability() {
+  async function sidecarWarningText(provider) {
+    if (!isSubscriptionProvider(provider)) return '';
+    try {
+      const status = await api('/api/scene-sidecar-status');
+      const info = status[provider];
+      if (info && !info.alive) {
+        const seenText = info.seconds_ago == null ? 'chưa từng thấy poll lần nào kể từ khi mở app'
+          : `lần poll gần nhất cách đây ${Math.round(info.seconds_ago)}s`;
+        return `⚠ Sidecar chưa chạy (${seenText}) — job sẽ nằm chờ mãi ở "queued", tiến độ sẽ không nhích. Hãy khởi động sidecar (${provider === 'antigravity_image' ? 'trong Antigravity' : `python web_video_sidecar.py --provider ${provider}`}) trước khi bấm tạo.`;
+      }
+    } catch { /* status check is best-effort; don't block the hint on it */ }
+    return '';
+  }
+
+  async function sidecarWarningHtml(provider) {
+    const text = await sidecarWarningText(provider);
+    return text ? `<br><b style="color:#c0392b">${text}</b>` : '';
+  }
+
+  async function updateStudioSceneGenerationAvailability() {
     const hasProject = Boolean(state.studioProjectId);
 
     const imageButton = $('studioGenerateImagesButton');
@@ -1789,6 +1808,7 @@
           : providerReady
           ? 'Google Gemini/OpenAI sẽ tạo một ảnh kể chuyện cho mỗi cảnh; FFmpeg tạo chuyển động nhẹ khi dựng video.'
           : `Cần kết nối <b>${provider.startsWith('gemini_') ? 'Google Gemini API' : 'OpenAI GPT + Image API'}</b> trước. Vào Công cụ & kết nối, dán API key rồi bấm “Lưu & bật”.`;
+        void sidecarWarningHtml(provider).then((warning) => { if (warning) imageHint.innerHTML += warning; });
       }
     }
 
@@ -1804,6 +1824,7 @@
           : providerReady
           ? 'Google Veo sẽ tạo clip video thật cho mỗi cảnh (chậm hơn và tốn credits hơn). Video hoàn tất sẽ hiện trong storyboard.'
           : 'Cần kết nối <b>Google Gemini API</b> trước. Vào Công cụ & kết nối, dán API key rồi bấm “Lưu & bật”.';
+        void sidecarWarningHtml(provider).then((warning) => { if (warning) videoHint.innerHTML += warning; });
       }
     }
   }
@@ -1921,7 +1942,8 @@
       setStudioProgress(0, 'Cần kết nối API trước khi tạo cảnh.', 'error');
       return setMessage(`Hãy nhập ${provider.startsWith('gemini_') ? 'GEMINI_API_KEY tại thẻ Google Gemini Image + Veo' : 'OPENAI_API_KEY tại thẻ OpenAI GPT + Image API'}, bấm “Lưu & bật”, sau đó quay lại Storyboard.`, 'error');
     }
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho mọi cảnh chưa có hình? ${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return;
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho mọi cảnh chưa có hình? ${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
     const button = $(buttonId);
     if (button) button.disabled = true;
     setStudioProgress(5, `Đang tạo timeline trước khi gửi ${isVeo ? 'video' : 'ảnh'} sang ${sceneProviderLabel(provider)}...`);
@@ -3289,7 +3311,8 @@
     const segment = await ensureSegmentForShot(projectId, shotId);
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}`)) return null;
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
     setMessage(`Đang đưa cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
     const response = await api(`/api/projects/${projectId}/scene-jobs`, {
       method: 'POST',
@@ -3489,7 +3512,8 @@
     if (promptText.length < 3) throw new Error('Hãy nhập visual prompt cho đoạn này trước.');
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, $(`timelineVisual-${segmentId}`)?.value || '') : null;
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?`)) return null;
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
     setMessage(`Đang đưa cảnh ${segmentId} vào hàng đợi ${sceneProviderLabel(provider)}...`);
     const response = await api(`/api/projects/${projectId}/scene-jobs`, {
       method: 'POST',
@@ -3549,7 +3573,8 @@
   }
 
   async function runTimelineSceneBatch(projectId, provider, ratio, isVeo) {
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh chưa có visual? Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.`)) return;
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh chưa có visual? Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
     setMessage(`Đang đưa các cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
     try {
       const response = await api(`/api/projects/${projectId}/scene-jobs/batch`, {
