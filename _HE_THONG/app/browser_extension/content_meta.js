@@ -25,16 +25,32 @@ function ytfCollectExistingVideoSrcs() {
   return set;
 }
 
-function ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs = 180000, intervalMs = 1500 } = {}) {
+// See ytfWaitForNewImage's comment in content_common.js: background
+// (inactive) tabs never finish decoding images, so img.complete/
+// naturalWidth is unreliable there — this uses the same
+// src-persists-for-settleMs debounce instead. Video elements don't have
+// that decode-throttling issue (readyState reflects metadata load, not
+// paint), so the video branch keeps its original check.
+function ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs = 180000, intervalMs = 1500, settleMs = 2000 } = {}) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
+    let candidate = null; // { src, firstSeenAt }
     const tick = () => {
+      let foundSrc = null;
       for (const selector of YTF_META_IMAGE_SELECTORS) {
         for (const img of document.querySelectorAll(selector)) {
-          if (img.src && !priorImageSrcs.has(img.src) && img.complete && img.naturalWidth > 64) {
-            return resolve({ kind: 'image', src: img.src });
-          }
+          if (ytfIsRealImageSrc(img.src) && !priorImageSrcs.has(img.src)) { foundSrc = img.src; break; }
         }
+        if (foundSrc) break;
+      }
+      if (foundSrc) {
+        if (candidate && candidate.src === foundSrc) {
+          if (Date.now() - candidate.firstSeenAt >= settleMs) return resolve({ kind: 'image', src: foundSrc });
+        } else {
+          candidate = { src: foundSrc, firstSeenAt: Date.now() };
+        }
+      } else {
+        candidate = null;
       }
       for (const video of document.querySelectorAll(YTF_META_VIDEO_SELECTORS.join(','))) {
         if (video.src && !priorVideoSrcs.has(video.src) && video.readyState >= 2) {
