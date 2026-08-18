@@ -22,14 +22,34 @@ const PROVIDER_URLS = {
   chatgpt_web_image: 'https://chatgpt.com/',
   meta_ai_video: 'https://www.meta.ai/',
 };
+// Each job opens its own independent tab, so several can genuinely run at
+// once with no DOM conflict — this just caps how many at a time (across
+// all providers combined) rather than forcing a hard 1-at-a-time queue.
+const MAX_CONCURRENT_JOBS = 3;
+// Small gap between claiming additional jobs within the same notification
+// burst, so a big batch doesn't open N tabs in the same instant — softens
+// the automation signature slightly without giving up real parallelism.
+const CLAIM_STAGGER_MS = 1500;
 
-let processing = false;
+let activeJobs = 0;
 let socket = null;
 let reconnectDelayMs = 2000;
 
 async function getEnabledProviders() {
   const stored = await chrome.storage.local.get('enabledProviders');
   return stored.enabledProviders || Object.keys(PROVIDER_URLS);
+}
+
+// Per-job status entries (not a single overwritten line) since several jobs
+// can be in flight at once now — popup.js renders the most recent handful.
+async function setJobStatus(jobId, text) {
+  const stored = await chrome.storage.local.get('jobStatuses');
+  const statuses = stored.jobStatuses || {};
+  statuses[jobId] = { text, at: Date.now() };
+  const trimmed = Object.fromEntries(
+    Object.entries(statuses).sort((a, b) => b[1].at - a[1].at).slice(0, 10),
+  );
+  await chrome.storage.local.set({ jobStatuses: trimmed });
 }
 
 async function setStatus(text) {
@@ -107,7 +127,7 @@ async function processOneJob(provider, job) {
         console.warn('YT Factory: could not fetch reference image', error);
       }
     }
-    await setStatus(`[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
+    await setJobStatus(jobId, `[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
     tabId = await findOrCreateTab(PROVIDER_URLS[provider]);
     const result = await chrome.tabs.sendMessage(tabId, {
       type: 'ytf_generate', provider, jobId, prompt: job.prompt, ratio: job.ratio,
@@ -117,13 +137,13 @@ async function processOneJob(provider, job) {
     if (!result || !result.ok) {
       throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');
     }
-    await setStatus(`[${provider}] job ${jobId}: đang tải kết quả lên...`);
+    await setJobStatus(jobId, `[${provider}] job ${jobId}: đang tải kết quả lên...`);
     const assetId = await uploadAsset(projectId, result.base64, result.mimeType, result.kind);
     await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}`, { method: 'POST' });
-    await setStatus(`[${provider}] job ${jobId}: xong -> asset ${assetId}`);
+    await setJobStatus(jobId, `[${provider}] job ${jobId}: xong -> asset ${assetId}`);
   } catch (error) {
     const message = String(error?.message || error);
-    await setStatus(`[${provider}] job ${jobId}: LỖI - ${message}`);
+    await setJobStatus(jobId, `[${provider}] job ${jobId}: LỖI - ${message}`);
     try {
       await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/fail?error=${encodeURIComponent(message.slice(0, 500))}`, { method: 'POST' });
     } catch { /* best-effort */ }
@@ -135,19 +155,25 @@ async function processOneJob(provider, job) {
 }
 
 // Called only in reaction to a server push (see WebSocket onmessage below)
-// — never on a timer.
+// — never on a timer. Claims and starts jobs (one atomic claim at a time,
+// so concurrent notifications for the same provider can't double-claim)
+// up to MAX_CONCURRENT_JOBS across all providers combined; each claimed
+// job runs in its own tab without blocking the others.
 async function handleProviderNotified(provider) {
-  if (processing) return; // a poke arriving mid-job just means "check again after"
   const enabled = await getEnabledProviders();
   if (!enabled.includes(provider)) return;
-  processing = true;
-  try {
-    const { job } = await apiGet(`/api/browser-scene-jobs/next?provider=${provider}`);
-    if (job) await processOneJob(provider, job);
-  } catch (error) {
-    await setStatus(`Lỗi khi lấy job (${provider}): ${String(error?.message || error)}`);
-  } finally {
-    processing = false;
+  while (activeJobs < MAX_CONCURRENT_JOBS) {
+    let job;
+    try {
+      ({ job } = await apiGet(`/api/browser-scene-jobs/next?provider=${provider}`));
+    } catch (error) {
+      await setStatus(`Lỗi khi lấy job (${provider}): ${String(error?.message || error)}`);
+      return;
+    }
+    if (!job) return; // queue empty for this provider
+    activeJobs += 1;
+    void processOneJob(provider, job).finally(() => { activeJobs -= 1; });
+    if (activeJobs < MAX_CONCURRENT_JOBS) await new Promise((r) => setTimeout(r, CLAIM_STAGGER_MS));
   }
 }
 

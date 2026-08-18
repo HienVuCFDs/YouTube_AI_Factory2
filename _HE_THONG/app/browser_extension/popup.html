@@ -24,6 +24,10 @@
     Tick ở đây quyết định extension có xử lý job của provider đó không.
     Cần đã đăng nhập trang tương ứng ít nhất 1 lần trong trình duyệt này.
     <br /><br />
+    Chạy song song tối đa 3 cảnh cùng lúc (mỗi cảnh 1 tab riêng, không giới
+    hạn theo provider) — sửa <code>MAX_CONCURRENT_JOBS</code> trong
+    <code>background.js</code> nếu muốn đổi số này.
+    <br /><br />
     Nếu job báo lỗi "selector chưa khớp": mở DevTools trên trang đó, tìm đúng ô nhập
     prompt/nút gửi/khu vực ảnh kết quả, sửa file <code>content_*.js</code> tương ứng,
     rồi bấm "Reload" ở trang <code>chrome://extensions</code> — không cần đăng nhập lại.
