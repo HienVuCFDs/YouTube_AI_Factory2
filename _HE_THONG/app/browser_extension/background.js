@@ -141,6 +141,32 @@ function connectSocket() {
   socket.onerror = () => { try { socket.close(); } catch { /* already closing */ } };
 }
 
+// Relays a content script's "the AI asked a clarifying question" request to
+// the app's orchestrator endpoint. Routed through here rather than fetched
+// directly from the content script because page CSPs (chatgpt.com,
+// gemini.google.com) can block a content-script-initiated fetch to an
+// arbitrary origin even with host_permissions declared; a background
+// service worker's fetch is a separate context, unaffected by the page's
+// CSP either way.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'ytf_craft_answer') return false;
+  (async () => {
+    try {
+      const response = await fetch(`${FACTORY}/api/orchestrator/answer-prompt-question`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ original_prompt: message.originalPrompt || '', page_text: message.pageText || '' }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      sendResponse({ answer: data.answer || null });
+    } catch (error) {
+      sendResponse({ answer: null, error: String(error?.message || error) });
+    }
+  })();
+  return true;
+});
+
 chrome.alarms.create('ytf-keepalive', { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'ytf-keepalive') connectSocket(); });
 chrome.runtime.onInstalled.addListener(connectSocket);

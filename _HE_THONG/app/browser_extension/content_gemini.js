@@ -32,7 +32,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const submitBtn = await ytfWaitFor(YTF_GEMINI_SUBMIT_SELECTORS, { timeoutMs: 10000 });
       ytfClick(submitBtn);
       const imageSrc = await ytfWaitForNewImageWithFollowup(
-        YTF_GEMINI_IMAGE_SELECTORS, priorSrcs, YTF_GEMINI_PROMPT_SELECTORS, YTF_GEMINI_SUBMIT_SELECTORS,
+        YTF_GEMINI_IMAGE_SELECTORS, priorSrcs, YTF_GEMINI_PROMPT_SELECTORS, YTF_GEMINI_SUBMIT_SELECTORS, message.prompt,
       );
       const { base64, mimeType } = await ytfImageToBase64(imageSrc);
       sendResponse({ ok: true, base64, mimeType });

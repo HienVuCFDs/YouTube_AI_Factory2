@@ -31,6 +31,7 @@ from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, nvenc_available
 from .llm_analyzer import LlmAnalysisError, resolve_analyzer
+from .llm_client import LlmError, call_claude_code_cli_json, call_codex_json
 from .maintenance import list_database_backups, prune_database_backups
 from .oauth import OAuthError
 from .oauth import build_authorize_url as build_oauth_authorize_url
@@ -1653,6 +1654,87 @@ def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
     return database.list_scene_generation_jobs(project_id)
 
 
+
+# Chat-style image providers where the raw storyboard visual_prompt (often
+# written as a multi-step animation brief: "sau do...", "tiep theo...")
+# reliably triggers the model to ask a clarifying question instead of
+# generating directly — confirmed live across both Gemini and ChatGPT.
+_CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image", "meta_ai_video"}
+
+_CRAFT_IMAGE_PROMPT_SCHEMA = {
+    "type": "object",
+    "properties": {"prompt": {"type": "string"}},
+    "required": ["prompt"],
+}
+
+
+def _call_orchestrator_json(system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+    provider = settings.orchestrator_provider()
+    call = call_claude_code_cli_json if provider == "claude_code_cli" else call_codex_json
+    return call(system_prompt, user_prompt, schema)
+
+
+def _craft_image_prompt(raw_prompt: str) -> str:
+    """Rewrites a storyboard's raw visual_prompt into a standalone
+    single-image prompt via the app's configured orchestrator CLI (the
+    user's own logged-in Claude/Codex subscription — not a metered API
+    key), so a chat-based image AI can act on it immediately instead of
+    asking what to draw. Falls back to the raw prompt untouched if the
+    orchestrator call fails — an awkward prompt beats no job at all."""
+    system_prompt = (
+        "Ban la chuyen gia viet prompt cho AI tao anh (Gemini/ChatGPT/DALL-E). Nguoi dung se dua mo ta "
+        "mot canh hoat hinh, co the co nhieu buoc chuyen dong theo thoi gian ('sau do', 'tiep theo', ...). "
+        "Hay viet lai thanh MOT prompt tao MOT anh tinh duy nhat: cu the, ro rang, khong con yeu to trinh "
+        "tu thoi gian — chi giu lai bo cuc/khoanh khac tinh dep nhat de minh hoa dung y chinh cua canh. "
+        "Tra loi bang tieng Anh, ngan gon, khong hoi lai, khong giai thich them."
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA)
+        crafted = str(result.get("prompt") or "").strip()
+        return crafted or raw_prompt
+    except LlmError:
+        return raw_prompt
+
+
+class AnswerPromptQuestionRequest(BaseModel):
+    original_prompt: str = Field(min_length=1, max_length=20_000)
+    page_text: str = Field(default="", max_length=4000)
+
+
+_ANSWER_QUESTION_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+}
+
+
+@app.post("/api/orchestrator/answer-prompt-question")
+def answer_prompt_question(payload: AnswerPromptQuestionRequest) -> dict[str, Any]:
+    """When a chat-based image AI asks a clarifying question instead of
+    generating directly (confirmed live with both Gemini and ChatGPT), the
+    browser extension sends the tail of the page's visible text here
+    instead of guessing with one canned reply. The orchestrator CLI reads
+    it and writes a short, natural confirmation so the chat can proceed
+    without a human — same account/subscription used everywhere else in
+    this app, not a metered API key."""
+    system_prompt = (
+        "Ban dang giup tra loi thay nguoi dung trong mot cuoc chat voi AI tao anh. AI do vua hoi lai mot cau "
+        "ve bo cuc/phong cach truoc khi tao anh, thay vi tao ngay. Duoi day la mo ta canh goc nguoi dung "
+        "muon tao, roi den doan cuoi trang chat hien tai (co the lan lon voi noi dung khac ngoai cau hoi). "
+        "Hay viet MOT cau tra loi ngan gon, tu nhien, cung ngon ngu voi doan chat, xac nhan/chon phuong an "
+        "hop ly nhat de AI tiep tuc tao anh ngay, khong hoi them."
+    )
+    user_prompt = f"Mo ta canh goc:\n{payload.original_prompt}\n\nDuoi trang chat hien tai:\n{payload.page_text}"
+    try:
+        result = _call_orchestrator_json(system_prompt, user_prompt, _ANSWER_QUESTION_SCHEMA)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="Orchestrator khong tra ve cau tra loi")
+    return {"answer": answer}
+
+
 @app.post("/api/projects/{project_id}/scene-jobs")
 def queue_scene_generation_job(
     project_id: int,
@@ -1681,11 +1763,14 @@ def queue_scene_generation_job(
             raise HTTPException(status_code=400, detail="Asset tham chieu khong thuoc project")
         if asset["asset_type"] != "image":
             raise HTTPException(status_code=400, detail="Chi co the dung anh lam asset tham chieu")
+    prompt_text = payload.prompt
+    if payload.provider in _CHAT_IMAGE_PROVIDERS:
+        prompt_text = _craft_image_prompt(prompt_text)
     job = database.create_scene_generation_job(
         project_id,
         payload.timeline_segment_id,
         payload.provider,
-        payload.prompt,
+        prompt_text,
         duration_seconds=payload.duration_seconds,
         ratio=payload.ratio,
         reference_asset_id=payload.reference_asset_id,
@@ -1728,6 +1813,8 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         prompt = str(segment.get("visual_prompt") or "").strip()
         if not prompt:
             continue
+        if payload.provider in _CHAT_IMAGE_PROVIDERS:
+            prompt = _craft_image_prompt(prompt)
         job = database.create_scene_generation_job(
             project_id, int(segment["id"]), payload.provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,

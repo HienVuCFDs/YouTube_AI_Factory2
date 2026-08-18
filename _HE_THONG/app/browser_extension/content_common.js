@@ -126,21 +126,43 @@ function ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs = 180000,
   });
 }
 
+// Relays "the AI asked a clarifying question" to the app's orchestrator
+// (Claude Code / Codex CLI — the user's own logged-in subscription) via the
+// background script, which crafts a short, natural, context-aware reply
+// instead of us guessing. Falls back to a generic canned reply if the
+// orchestrator call fails (not logged in, app unreachable, etc.) — a
+// slightly awkward nudge still beats not trying at all.
+function ytfAskOrchestratorForAnswer(originalPrompt) {
+  return new Promise((resolve) => {
+    const pageText = (document.body?.innerText || '').trim().slice(-1500);
+    try {
+      chrome.runtime.sendMessage({ type: 'ytf_craft_answer', originalPrompt, pageText }, (response) => {
+        resolve(response?.answer || null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+const YTF_GENERIC_FOLLOWUP_TEXT = 'Yes, please go ahead and generate the image directly now based on the description above. No need to ask anything further — just pick the best composition/style yourself and proceed.';
+
 // Gemini/ChatGPT sometimes ask a clarifying question about style/layout
 // instead of generating directly, or offer 2 candidate images to pick from
 // — both leave the chat waiting on a human. This nudges it forward once:
 // wait a shorter first window for an image; if none shows up (most likely
 // a clarifying question, since a real 2-candidate reply already produces
 // matchable <img> elements that ytfWaitForNewImage's first-match behavior
-// picks from without needing an explicit choice), type a generic "just
-// proceed" reply and submit again, then give it the rest of the budget.
+// picks from without needing an explicit choice), ask the orchestrator to
+// write a reply and submit it, then give it the rest of the budget.
 async function ytfWaitForNewImageWithFollowup(
-  containerSelectors, priorSrcs, promptSelectors, submitSelectors,
-  { totalTimeoutMs = 180000, firstWaitMs = 45000, followupText = 'Yes, please go ahead and generate the image directly now based on the description above. No need to ask anything further — just pick the best composition/style yourself and proceed.' } = {},
+  containerSelectors, priorSrcs, promptSelectors, submitSelectors, originalPrompt,
+  { totalTimeoutMs = 180000, firstWaitMs = 45000 } = {},
 ) {
   try {
     return await ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs: firstWaitMs });
   } catch (firstError) {
+    const followupText = (await ytfAskOrchestratorForAnswer(originalPrompt)) || YTF_GENERIC_FOLLOWUP_TEXT;
     try {
       const promptBox = await ytfWaitFor(promptSelectors, { timeoutMs: 5000 });
       ytfTypeInto(promptBox, followupText);
