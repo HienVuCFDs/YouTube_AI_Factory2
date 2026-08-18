@@ -8,11 +8,21 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+# Windows consoles often default stdout/stderr to cp1252, which can't encode
+# the Vietnamese text in our own error messages (or in whatever agy prints).
+# That crashed print() mid-except-block once, which skipped fail() entirely
+# and took the whole polling loop down with it — a single job failure must
+# never be able to do that.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 FACTORY = os.getenv("YOUTUBE_FACTORY_URL", "http://127.0.0.1:8787").rstrip("/")
 WORKSPACE = Path(r"F:\YouTube_AI_Factory")
@@ -95,8 +105,13 @@ def main() -> None:
             dispatch(job)
             time.sleep(20)
         except Exception as exc:  # noqa: BLE001 - job is already claimed ('running'); must report failure, not just log it
-            print(f"YT Factory sidecar error on job {job.get('id')}: {exc}", flush=True)
+            # Report to the app FIRST: that's the part that actually unblocks
+            # the job. Logging is best-effort and must never be able to skip it.
             fail(int(job["id"]), str(exc))
+            try:
+                print(f"YT Factory sidecar error on job {job.get('id')}: {exc}", flush=True)
+            except Exception:  # noqa: BLE001 - console encoding issues must not crash the loop
+                pass
             time.sleep(15)
 
 
