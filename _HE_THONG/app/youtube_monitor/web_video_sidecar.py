@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -80,6 +81,29 @@ FACTORY = os.getenv("YOUTUBE_FACTORY_URL", "http://127.0.0.1:8787").rstrip("/")
 BASE_DIR = Path(__file__).parent
 GENERATION_TIMEOUT_SECONDS = int(os.getenv("WEB_VIDEO_GENERATION_TIMEOUT", "600"))
 HEADLESS = os.getenv("WEB_VIDEO_HEADLESS", "0").strip().lower() in {"1", "true", "yes"}
+
+# Opt-in alternative to the --login flow: drive your REAL, everyday Chrome
+# profile instead of a dedicated isolated one, so an already-logged-in
+# session (Gemini/ChatGPT open in your normal browser) is reused with no
+# separate login step. This is a meaningfully bigger blast radius than the
+# isolated profile — it's your actual daily-driver identity, cookies,
+# passwords and all — so it's off unless explicitly requested, and refuses
+# to run while Chrome is open (sharing a live profile directory between two
+# running Chrome processes corrupts it).
+USE_SYSTEM_CHROME = os.getenv("WEB_VIDEO_USE_SYSTEM_CHROME", "0").strip().lower() in {"1", "true", "yes"}
+SYSTEM_CHROME_USER_DATA_DIR = Path(os.getenv("WEB_VIDEO_CHROME_USER_DATA_DIR", str(Path(os.getenv("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data")))
+SYSTEM_CHROME_PROFILE = os.getenv("WEB_VIDEO_CHROME_PROFILE", "Default")
+
+
+def _system_chrome_is_running() -> bool:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "chrome.exe" in result.stdout.lower()
+    except Exception:  # noqa: BLE001 - if we can't tell, assume the risky case
+        return True
 
 
 @dataclass
@@ -460,25 +484,48 @@ def generate_video(
     return _capture_video_download(page, config, download_dir)
 
 
+def _launch_context(playwright, provider: str, headless: bool):
+    """Isolated per-provider profile by default (needs one-time --login).
+    With WEB_VIDEO_USE_SYSTEM_CHROME=1, launches your real Chrome profile
+    instead — already logged into everything, no separate login step, but a
+    much bigger blast radius (your actual account, not a sandboxed one), so
+    it refuses to run while Chrome is open rather than risk corrupting a
+    profile two Chrome processes are writing to at once."""
+    if USE_SYSTEM_CHROME:
+        if _system_chrome_is_running():
+            raise SystemExit(
+                "WEB_VIDEO_USE_SYSTEM_CHROME=1 nhung Chrome dang mo va dung chinh profile that cua ban. "
+                "Hay dong TOAN BO cua so Chrome (khong chi tab) roi chay lai, de tranh xung dot/hong du lieu profile."
+            )
+        print(f"[{provider}] Dùng profile Chrome thật tại {SYSTEM_CHROME_USER_DATA_DIR} (profile: {SYSTEM_CHROME_PROFILE}).", flush=True)
+        return playwright.chromium.launch_persistent_context(
+            str(SYSTEM_CHROME_USER_DATA_DIR), channel="chrome", headless=headless,
+            args=[f"--profile-directory={SYSTEM_CHROME_PROFILE}"],
+        )
+    profile_dir = _profile_dir(provider)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return playwright.chromium.launch_persistent_context(str(profile_dir), headless=headless)
+
+
 def run_login(provider: str, config: ProviderConfig) -> None:
     from playwright.sync_api import sync_playwright
 
-    profile_dir = _profile_dir(provider)
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    if USE_SYSTEM_CHROME:
+        raise SystemExit("WEB_VIDEO_USE_SYSTEM_CHROME=1 dùng thẳng profile Chrome đã đăng nhập sẵn — không cần (và không hỗ trợ) bước --login riêng.")
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(str(profile_dir), headless=False)
+        context = _launch_context(playwright, provider, headless=False)
         page = context.new_page()
         page.goto(config.url, wait_until="domcontentloaded")
         input(f"Đăng nhập trong cửa sổ vừa mở ({provider}), đợi trang tải xong rồi bấm Enter ở đây...")
         context.close()
-    print(f"Đã lưu session tại {profile_dir}. Có thể chạy lại mà không cần đăng nhập nữa.")
+    print(f"Đã lưu session tại {_profile_dir(provider)}. Có thể chạy lại mà không cần đăng nhập nữa.")
 
 
 def run_recon(provider: str, config: ProviderConfig) -> None:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(str(_profile_dir(provider)), headless=False)
+        context = _launch_context(playwright, provider, headless=False)
         page = context.new_page()
         page.goto(config.url, wait_until="domcontentloaded")
         print("Dùng Playwright Inspector để tìm selector thật cho: ô nhập prompt, nút gửi/generate, nút download.")
@@ -489,12 +536,13 @@ def run_recon(provider: str, config: ProviderConfig) -> None:
 def run_loop(provider: str, config: ProviderConfig) -> None:
     from playwright.sync_api import sync_playwright
 
-    profile_dir = _profile_dir(provider)
-    if not any(profile_dir.glob("*")):
-        raise SystemExit(f"Chưa có session đăng nhập tại {profile_dir}. Chạy `--provider {provider} --login` trước.")
+    if not USE_SYSTEM_CHROME:
+        profile_dir = _profile_dir(provider)
+        if not any(profile_dir.glob("*")):
+            raise SystemExit(f"Chưa có session đăng nhập tại {profile_dir}. Chạy `--provider {provider} --login` trước.")
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(str(profile_dir), headless=HEADLESS)
+        context = _launch_context(playwright, provider, headless=HEADLESS)
         page = context.new_page()
         while True:
             try:
