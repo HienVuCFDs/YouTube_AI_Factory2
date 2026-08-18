@@ -24,6 +24,11 @@ def get_next() -> dict | None:
         return json.loads(response.read().decode("utf-8")).get("job")
 
 
+def get_job_status(job_id: int) -> str:
+    with urllib.request.urlopen(f"{FACTORY}/api/scene-jobs/{job_id}", timeout=20) as response:
+        return str(json.loads(response.read().decode("utf-8")).get("status") or "")
+
+
 def fail(job_id: int, error: str) -> None:
     """Report a claimed job as failed so it doesn't stay stuck at 'running'
     forever with no error message (that used to happen whenever dispatch()
@@ -54,10 +59,25 @@ Use youtube_factory_get_storyboard for this project. Create exactly ONE cinemati
 No text, captions, logos or watermarks. Save the image in the returned import_folder. Then call youtube_factory_import_asset with project_id, segment_id and the saved file path. Finally call youtube_factory_complete_antigravity_scene with job_id {job_id} and the asset_id returned by import. Do not merely explain; execute these tools.'''
     if not AGY.is_file():
         raise RuntimeError(f"Không tìm thấy Antigravity CLI: {AGY}")
-    subprocess.run(
+    result = subprocess.run(
         [str(AGY), "-p", text, "--output-format", "json", "--dangerously-skip-permissions", "--print-timeout", "10m"],
-        cwd=str(WORKSPACE), check=True, timeout=660,
+        cwd=str(WORKSPACE), capture_output=True, text=True, timeout=660,
     )
+    output_tail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()[-800:] or "(không có output)"
+    if result.returncode != 0:
+        raise RuntimeError(f"agy thoát với mã lỗi {result.returncode}: {output_tail}")
+    # agy exiting 0 only proves the CLI call itself finished — not that the
+    # agent actually called youtube_factory_complete_antigravity_scene during
+    # its turn. Without this check, a turn where the agent never touched our
+    # tools (e.g. they weren't registered, or it just answered in text) looks
+    # like a clean success and the job is left at 'running' forever with no
+    # error at all — which is exactly what was happening in production.
+    status = get_job_status(job_id)
+    if status != "completed":
+        raise RuntimeError(
+            f"agy chạy xong (exit 0) nhưng job vẫn ở trạng thái '{status}' — agent không gọi "
+            f"youtube_factory_complete_antigravity_scene. Output cuối của agy: {output_tail}"
+        )
 
 
 def main() -> None:
