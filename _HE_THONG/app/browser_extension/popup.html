@@ -19,8 +19,10 @@
   <label><input type="checkbox" id="p-chatgpt" /> ChatGPT (web)</label>
   <label><input type="checkbox" id="p-meta" /> Meta AI</label>
   <div class="hint">
-    Cực bật ở đây quyết định extension có tự động lấy job của provider đó không.
-    Cần giữ ít nhất 1 tab đã đăng nhập trang tương ứng còn hiệu lực trong trình duyệt này.
+    Chỉ hoạt động khi app báo có job qua kết nối WebSocket — không tự động
+    kiểm tra định kỳ, không mở tab hay gọi trang web nào khi không có việc.
+    Tick ở đây quyết định extension có xử lý job của provider đó không.
+    Cần đã đăng nhập trang tương ứng ít nhất 1 lần trong trình duyệt này.
     <br /><br />
     Nếu job báo lỗi "selector chưa khớp": mở DevTools trên trang đó, tìm đúng ô nhập
     prompt/nút gửi/khu vực ảnh kết quả, sửa file <code>content_*.js</code> tương ứng,

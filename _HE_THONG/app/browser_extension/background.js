@@ -1,14 +1,22 @@
 // YT Factory AI Web Bridge — background service worker.
 //
-// Polls the local app's existing browser-sidecar queue (the same API
-// web_video_sidecar.py uses: GET/POST /api/browser-scene-jobs/...) and, for
-// each queued job, opens a background tab on the target AI site, asks that
-// tab's content script to type the prompt and grab the result, then
-// uploads it back. Runs inside the user's own already-logged-in browser
-// profile — no separate Playwright browser, no separate login, ever.
+// Push-driven, not polling: holds one WebSocket open to the local app
+// (ws://127.0.0.1:8787/ws/browser-scene-jobs) and does nothing at all
+// until the SERVER sends a message saying a job is queued for a provider
+// this extension has enabled. Only then does it open a tab / talk to the
+// site / call the app's REST API. No timer-driven "is there a job yet?"
+// checks against the site or the app.
+//
+// The one exception is a long-interval chrome.alarms tick (see
+// KEEPALIVE_PERIOD_MINUTES below) — MV3 service workers can be suspended
+// by the browser at any time, and an open WebSocket alone isn't a
+// guaranteed way to keep one alive across Chrome versions, so the alarm
+// exists purely to wake the worker up and reconnect the socket if it
+// dropped while suspended. It does not itself check for jobs.
 
 const FACTORY = 'http://127.0.0.1:8787';
-const POLL_PERIOD_MINUTES = 0.5; // 30s — chrome.alarms minimum period
+const WS_URL = 'ws://127.0.0.1:8787/ws/browser-scene-jobs';
+const KEEPALIVE_PERIOD_MINUTES = 1; // just "is the socket still open?", not a job check
 const PROVIDER_URLS = {
   gemini_web_image: 'https://gemini.google.com/app',
   chatgpt_web_image: 'https://chatgpt.com/',
@@ -16,6 +24,8 @@ const PROVIDER_URLS = {
 };
 
 let processing = false;
+let socket = null;
+let reconnectDelayMs = 2000;
 
 async function getEnabledProviders() {
   const stored = await chrome.storage.local.get('enabledProviders');
@@ -29,12 +39,6 @@ async function setStatus(text) {
 async function apiGet(path) {
   const response = await fetch(`${FACTORY}${path}`);
   if (!response.ok) throw new Error(`GET ${path} -> HTTP ${response.status}`);
-  return response.json();
-}
-
-async function apiPost(path) {
-  const response = await fetch(`${FACTORY}${path}`, { method: 'POST' });
-  if (!response.ok) throw new Error(`POST ${path} -> HTTP ${response.status}`);
   return response.json();
 }
 
@@ -56,9 +60,6 @@ async function uploadAsset(projectId, base64, mimeType, kind) {
 
 async function findOrCreateTab(url) {
   const tab = await chrome.tabs.create({ url, active: false });
-  // Give the SPA a moment to boot before the content script's own element
-  // waits kick in — most of these chat UIs render their shell fast but
-  // hydrate interactivity a beat later.
   await new Promise((resolve) => {
     const listener = (tabId, info) => {
       if (tabId === tab.id && info.status === 'complete') {
@@ -67,7 +68,7 @@ async function findOrCreateTab(url) {
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
-    setTimeout(resolve, 15000); // don't wait forever if 'complete' never fires cleanly
+    setTimeout(resolve, 15000);
   });
   await new Promise((r) => setTimeout(r, 1500));
   return tab.id;
@@ -88,7 +89,7 @@ async function processOneJob(provider, job) {
     }
     await setStatus(`[${provider}] job ${jobId}: đang tải kết quả lên...`);
     const assetId = await uploadAsset(projectId, result.base64, result.mimeType, result.kind);
-    await apiPost(`/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}`);
+    await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}`, { method: 'POST' });
     await setStatus(`[${provider}] job ${jobId}: xong -> asset ${assetId}`);
   } catch (error) {
     const message = String(error?.message || error);
@@ -103,33 +104,45 @@ async function processOneJob(provider, job) {
   }
 }
 
-async function pollOnce() {
-  if (processing) return;
+// Called only in reaction to a server push (see WebSocket onmessage below)
+// — never on a timer.
+async function handleProviderNotified(provider) {
+  if (processing) return; // a poke arriving mid-job just means "check again after"
+  const enabled = await getEnabledProviders();
+  if (!enabled.includes(provider)) return;
   processing = true;
   try {
-    const providers = await getEnabledProviders();
-    for (const provider of providers) {
-      let job;
-      try {
-        const result = await apiGet(`/api/browser-scene-jobs/next?provider=${provider}`);
-        job = result.job;
-      } catch (error) {
-        await setStatus(`Không kết nối được app (${FACTORY}): ${String(error?.message || error)}`);
-        continue;
-      }
-      if (job) {
-        await processOneJob(provider, job);
-        return; // one job per poll tick, human-paced like the Python sidecar
-      }
-    }
-    await setStatus('Đang chờ job (không có gì trong hàng đợi).');
+    const { job } = await apiGet(`/api/browser-scene-jobs/next?provider=${provider}`);
+    if (job) await processOneJob(provider, job);
+  } catch (error) {
+    await setStatus(`Lỗi khi lấy job (${provider}): ${String(error?.message || error)}`);
   } finally {
     processing = false;
   }
 }
 
-chrome.alarms.create('ytf-poll', { periodInMinutes: POLL_PERIOD_MINUTES });
-chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'ytf-poll') pollOnce(); });
-// Also fire once on install/startup instead of waiting a full period.
-chrome.runtime.onInstalled.addListener(() => pollOnce());
-chrome.runtime.onStartup.addListener(() => pollOnce());
+function connectSocket() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+  socket = new WebSocket(WS_URL);
+  socket.onopen = () => {
+    reconnectDelayMs = 2000;
+    setStatus('Đã kết nối app — chờ job (không tự poll).');
+  };
+  socket.onmessage = (event) => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (data && data.provider) handleProviderNotified(data.provider);
+  };
+  socket.onclose = () => {
+    setStatus('Mất kết nối app — sẽ tự kết nối lại.');
+    setTimeout(connectSocket, reconnectDelayMs);
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 60000);
+  };
+  socket.onerror = () => { try { socket.close(); } catch { /* already closing */ } };
+}
+
+chrome.alarms.create('ytf-keepalive', { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
+chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'ytf-keepalive') connectSocket(); });
+chrome.runtime.onInstalled.addListener(connectSocket);
+chrome.runtime.onStartup.addListener(connectSocket);
+connectSocket();

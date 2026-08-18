@@ -11,7 +11,7 @@ async function loadState() {
     const secondsAgo = stored.lastStatusAt ? Math.round((Date.now() - stored.lastStatusAt) / 1000) : null;
     statusEl.textContent = `${stored.lastStatus}${secondsAgo != null ? ` (${secondsAgo}s trước)` : ''}`;
   } else {
-    statusEl.textContent = 'Chưa có hoạt động nào — extension poll job mỗi 30s.';
+    statusEl.textContent = 'Chưa có hoạt động nào — đang chờ app báo có job (không tự poll).';
   }
 }
 

@@ -3340,6 +3340,14 @@ class Database:
             )
         return int(cursor.rowcount)
 
+    def count_queued_scene_generation_jobs(self, provider: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM scene_generation_jobs WHERE status = 'queued' AND provider = ?",
+                (provider,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
     def scene_generation_queue_status(self) -> dict[str, int]:
         with self._connect() as connection:
             rows = connection.execute(

@@ -26,11 +26,23 @@ các tab bạn đã đăng nhập sẵn.
 
 ## Cách hoạt động
 
-Extension poll (mỗi 30 giây) đúng hàng đợi job mà `web_video_sidecar.py`
-cũng dùng (`GET /api/browser-scene-jobs/next`) — dùng chung backend, không
-cần sửa gì phía app. Khi có job: mở 1 tab nền (không làm phiền bạn), tự gõ
-prompt, gửi, đợi ảnh/video xuất hiện, tải về, gửi lên app, gắn vào đúng
-cảnh trong storyboard, rồi đóng tab.
+**Push, không poll.** Extension giữ một kết nối WebSocket tới app
+(`ws://127.0.0.1:8787/ws/browser-scene-jobs`) và không làm gì cả cho đến khi
+chính app báo "có job" qua kết nối đó — không có vòng lặp nào tự động kiểm
+tra định kỳ, không mở tab hay gọi trang web nào khi hàng đợi trống. Việc
+kiểm tra hàng đợi (rẻ, trong tiến trình app, mỗi 2 giây) nằm ở phía server,
+không phải phía extension.
+
+Khi có thông báo: extension gọi đúng endpoint claim-job hiện có
+(`GET /api/browser-scene-jobs/next`, dùng chung với `web_video_sidecar.py`,
+không cần sửa gì phía app) để lấy job một cách an toàn, mở 1 tab nền (không
+làm phiền bạn), tự gõ prompt, gửi, đợi ảnh/video xuất hiện, tải về, gửi lên
+app, gắn vào đúng cảnh trong storyboard, rồi đóng tab.
+
+Nếu mất kết nối app (vd app khởi động lại), extension tự kết nối lại; có
+một alarm nền mỗi 1 phút chỉ để đảm bảo việc kết nối lại đó thực sự xảy ra
+ngay cả khi trình duyệt tạm ngưng service worker của extension — bản thân
+alarm đó không kiểm tra job.
 
 ## Nếu job báo lỗi "không tìm thấy phần tử" / "selector chưa khớp"
 

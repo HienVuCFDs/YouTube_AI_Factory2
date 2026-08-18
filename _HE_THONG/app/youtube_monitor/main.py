@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import mimetypes
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -1828,6 +1829,35 @@ def fail_browser_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Không tìm thấy job trình duyệt")
     finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
     return {"status": "error", "job": finished}
+
+
+@app.websocket("/ws/browser-scene-jobs")
+async def browser_scene_jobs_ws(websocket: WebSocket) -> None:
+    """Push side of the browser-sidecar queue, for clients (the browser
+    extension bridge) that want to sit idle instead of polling on a timer.
+    The client does nothing but hold this connection open; a message here
+    is just "go check /api/browser-scene-jobs/next for <provider>" — the
+    actual atomic claim still goes through that existing endpoint, so two
+    connected clients racing on the same push is still safe.
+
+    Implemented as a cheap in-process DB check every 2s, done here on the
+    server rather than by the client, because that's the actual point:
+    server-side, in-process polling of its own SQLite file is negligible
+    load; a browser extension re-hitting this API in a tight client loop
+    just to ask "anything new?" is not.
+    """
+    await websocket.accept()
+    last_queued: dict[str, int] = {}
+    try:
+        while True:
+            for provider in database.BROWSER_SIDECAR_PROVIDERS:
+                count = database.count_queued_scene_generation_jobs(provider)
+                if count > 0 and count != last_queued.get(provider):
+                    await websocket.send_json({"provider": provider, "queued": count})
+                last_queued[provider] = count
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/api/projects/{project_id}/timeline/{segment_id}/visual-preview")
