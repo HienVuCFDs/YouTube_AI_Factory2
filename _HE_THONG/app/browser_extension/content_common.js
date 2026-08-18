@@ -101,6 +101,37 @@ function ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs = 180000,
   });
 }
 
+// Gemini/ChatGPT sometimes ask a clarifying question about style/layout
+// instead of generating directly, or offer 2 candidate images to pick from
+// — both leave the chat waiting on a human. This nudges it forward once:
+// wait a shorter first window for an image; if none shows up (most likely
+// a clarifying question, since a real 2-candidate reply already produces
+// matchable <img> elements that ytfWaitForNewImage's first-match behavior
+// picks from without needing an explicit choice), type a generic "just
+// proceed" reply and submit again, then give it the rest of the budget.
+async function ytfWaitForNewImageWithFollowup(
+  containerSelectors, priorSrcs, promptSelectors, submitSelectors,
+  { totalTimeoutMs = 180000, firstWaitMs = 45000, followupText = 'Yes, please go ahead and generate the image directly now based on the description above. No need to ask anything further — just pick the best composition/style yourself and proceed.' } = {},
+) {
+  try {
+    return await ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs: firstWaitMs });
+  } catch (firstError) {
+    try {
+      const promptBox = await ytfWaitFor(promptSelectors, { timeoutMs: 5000 });
+      ytfTypeInto(promptBox, followupText);
+      await new Promise((r) => setTimeout(r, 300));
+      const submitBtn = await ytfWaitFor(submitSelectors, { timeoutMs: 5000 });
+      ytfClick(submitBtn);
+    } catch {
+      // Couldn't send the nudge (prompt box busy/gone) — fall through and
+      // let the remaining wait either catch a late image or time out with
+      // the original diagnostic.
+    }
+    const remaining = Math.max(totalTimeoutMs - firstWaitMs, 30000);
+    return ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs: remaining });
+  }
+}
+
 function ytfCollectExistingImageSrcs(containerSelectors) {
   const set = new Set();
   for (const selector of containerSelectors) {

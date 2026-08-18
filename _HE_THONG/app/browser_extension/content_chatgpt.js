@@ -26,7 +26,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await new Promise((r) => setTimeout(r, 300));
       const submitBtn = await ytfWaitFor(YTF_CHATGPT_SUBMIT_SELECTORS, { timeoutMs: 10000 });
       ytfClick(submitBtn);
-      const imageSrc = await ytfWaitForNewImage(YTF_CHATGPT_IMAGE_SELECTORS, priorSrcs, { timeoutMs: 180000 });
+      const imageSrc = await ytfWaitForNewImageWithFollowup(
+        YTF_CHATGPT_IMAGE_SELECTORS, priorSrcs, YTF_CHATGPT_PROMPT_SELECTORS, YTF_CHATGPT_SUBMIT_SELECTORS,
+      );
       const { base64, mimeType } = await ytfImageToBase64(imageSrc);
       sendResponse({ ok: true, base64, mimeType });
     } catch (error) {

@@ -48,6 +48,21 @@ function ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs =
   });
 }
 
+async function ytfWaitForNewImageOrVideoWithFollowup(priorImageSrcs, priorVideoSrcs, { totalTimeoutMs = 180000, firstWaitMs = 45000 } = {}) {
+  try {
+    return await ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs: firstWaitMs });
+  } catch (firstError) {
+    try {
+      const promptBox = await ytfWaitFor(YTF_META_PROMPT_SELECTORS, { timeoutMs: 5000 });
+      ytfTypeInto(promptBox, 'Yes, please go ahead and generate it directly now based on the description above. No need to ask anything further — just pick the best composition/style yourself and proceed.');
+      await new Promise((r) => setTimeout(r, 300));
+      const submitBtn = await ytfWaitFor(YTF_META_SUBMIT_SELECTORS, { timeoutMs: 5000 });
+      ytfClick(submitBtn);
+    } catch { /* fall through to the remaining wait / original timeout */ }
+    return ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs: Math.max(totalTimeoutMs - firstWaitMs, 30000) });
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'ytf_generate' || message.provider !== 'meta_ai_video') return false;
   (async () => {
@@ -59,7 +74,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await new Promise((r) => setTimeout(r, 300));
       const submitBtn = await ytfWaitFor(YTF_META_SUBMIT_SELECTORS, { timeoutMs: 10000 });
       ytfClick(submitBtn);
-      const result = await ytfWaitForNewImageOrVideo(priorImageSrcs, priorVideoSrcs, { timeoutMs: 180000 });
+      const result = await ytfWaitForNewImageOrVideoWithFollowup(priorImageSrcs, priorVideoSrcs);
       const { base64, mimeType } = await ytfImageToBase64(result.src);
       sendResponse({ ok: true, base64, mimeType, kind: result.kind });
     } catch (error) {
