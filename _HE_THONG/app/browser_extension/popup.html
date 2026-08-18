@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<title>YT Factory Web Bridge</title>
+<style>
+  body { width: 320px; font-family: system-ui, sans-serif; padding: 12px; font-size: 13px; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .status { background: #f2f2f2; border-radius: 6px; padding: 8px; margin-bottom: 10px; word-break: break-word; min-height: 32px; }
+  label { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .hint { color: #666; font-size: 11px; margin-top: 10px; line-height: 1.5; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <h1>YT Factory · AI Web Bridge</h1>
+  <div id="status" class="status">Đang tải trạng thái...</div>
+  <label><input type="checkbox" id="p-gemini" /> Gemini (web)</label>
+  <label><input type="checkbox" id="p-chatgpt" /> ChatGPT (web)</label>
+  <label><input type="checkbox" id="p-meta" /> Meta AI</label>
+  <div class="hint">
+    Cực bật ở đây quyết định extension có tự động lấy job của provider đó không.
+    Cần giữ ít nhất 1 tab đã đăng nhập trang tương ứng còn hiệu lực trong trình duyệt này.
+    <br /><br />
+    Nếu job báo lỗi "selector chưa khớp": mở DevTools trên trang đó, tìm đúng ô nhập
+    prompt/nút gửi/khu vực ảnh kết quả, sửa file <code>content_*.js</code> tương ứng,
+    rồi bấm "Reload" ở trang <code>chrome://extensions</code> — không cần đăng nhập lại.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
