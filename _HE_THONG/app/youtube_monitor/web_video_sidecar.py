@@ -504,7 +504,22 @@ def _launch_context(playwright, provider: str, headless: bool):
         )
     profile_dir = _profile_dir(provider)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(str(profile_dir), headless=headless)
+    # channel="chrome" uses the real installed Chrome binary instead of
+    # Playwright's bundled Chromium. Found empirically: the bundled
+    # chromium-*/chrome-win64/chrome.exe consistently self-terminates
+    # (exit code 21) within ~1s of launch with --remote-debugging-pipe on
+    # this machine — real, signed, already-installed Chrome does not hit
+    # this, with the exact same flags and an equally fresh profile
+    # directory. Root cause undetermined (no matching Defender/ASR/crash
+    # event was found), but the fix is reproducible and low-risk: it's
+    # still this dedicated isolated profile dir, not the user's real one.
+    try:
+        return playwright.chromium.launch_persistent_context(str(profile_dir), channel="chrome", headless=headless)
+    except Exception as exc:  # noqa: BLE001 - machines without Chrome installed fall back to the bundled binary
+        if "chrome" in str(exc).lower() and ("install" in str(exc).lower() or "channel" in str(exc).lower()):
+            print("Không tìm thấy Chrome thật đã cài — dùng lại Chromium đi kèm Playwright.", flush=True)
+            return playwright.chromium.launch_persistent_context(str(profile_dir), headless=headless)
+        raise
 
 
 def run_login(provider: str, config: ProviderConfig) -> None:
