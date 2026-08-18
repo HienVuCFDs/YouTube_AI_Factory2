@@ -79,6 +79,15 @@ from typing import Any
 
 FACTORY = os.getenv("YOUTUBE_FACTORY_URL", "http://127.0.0.1:8787").rstrip("/")
 BASE_DIR = Path(__file__).parent
+# Profile/download storage defaults to the OS drive (%LOCALAPPDATA%), not
+# BASE_DIR (wherever this repo happens to be checked out). Found
+# empirically: Chrome's network-service sandbox tries to grant an
+# AppContainer ACL on the profile dir at launch, and that grant fails with
+# "Access is denied (0x5)" when the dir lives on a secondary data volume
+# with different root ACL/ownership than the OS drive — reproduced
+# consistently on an F:\ checkout, fixed immediately by moving off it, with
+# no code or Chrome-flag workaround able to route around it.
+STATE_DIR = Path(os.getenv("WEB_VIDEO_STATE_DIR", str(Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "YouTubeAIFactory" / "web_video_sidecar")))
 GENERATION_TIMEOUT_SECONDS = int(os.getenv("WEB_VIDEO_GENERATION_TIMEOUT", "600"))
 HEADLESS = os.getenv("WEB_VIDEO_HEADLESS", "0").strip().lower() in {"1", "true", "yes"}
 
@@ -235,11 +244,11 @@ class WebVideoError(RuntimeError):
 
 
 def _profile_dir(provider: str) -> Path:
-    return Path(os.getenv("WEB_VIDEO_PROFILE_DIR", str(BASE_DIR / f"_web_video_profile_{provider}")))
+    return Path(os.getenv("WEB_VIDEO_PROFILE_DIR", str(STATE_DIR / f"profile_{provider}")))
 
 
 def _download_dir(provider: str) -> Path:
-    return Path(os.getenv("WEB_VIDEO_DOWNLOAD_DIR", str(BASE_DIR / f"_web_video_downloads_{provider}")))
+    return Path(os.getenv("WEB_VIDEO_DOWNLOAD_DIR", str(STATE_DIR / f"downloads_{provider}")))
 
 
 def _api_get(path: str) -> dict[str, Any]:
@@ -500,7 +509,7 @@ def _launch_context(playwright, provider: str, headless: bool):
         print(f"[{provider}] Dùng profile Chrome thật tại {SYSTEM_CHROME_USER_DATA_DIR} (profile: {SYSTEM_CHROME_PROFILE}).", flush=True)
         return playwright.chromium.launch_persistent_context(
             str(SYSTEM_CHROME_USER_DATA_DIR), channel="chrome", headless=headless,
-            args=[f"--profile-directory={SYSTEM_CHROME_PROFILE}"],
+            args=[f"--profile-directory={SYSTEM_CHROME_PROFILE}", "--disable-features=NetworkServiceSandbox"],
         )
     profile_dir = _profile_dir(provider)
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -513,12 +522,20 @@ def _launch_context(playwright, provider: str, headless: bool):
     # directory. Root cause undetermined (no matching Defender/ASR/crash
     # event was found), but the fix is reproducible and low-risk: it's
     # still this dedicated isolated profile dir, not the user's real one.
+    # Belt-and-suspenders: also try disabling the network-service sandbox
+    # feature that does the AppContainer ACL grant described above (see
+    # STATE_DIR). Confirmed this flag alone does NOT fix an F:\-drive
+    # profile dir — moving off the drive is what actually fixed it — but it
+    # costs nothing to keep in case some other environment hits the same
+    # ACL failure for a different reason (e.g. AppContainer/UWP support
+    # disabled at the OS level, unrelated to which drive the profile is on).
+    extra_args = ["--disable-features=NetworkServiceSandbox"]
     try:
-        return playwright.chromium.launch_persistent_context(str(profile_dir), channel="chrome", headless=headless)
+        return playwright.chromium.launch_persistent_context(str(profile_dir), channel="chrome", headless=headless, args=extra_args)
     except Exception as exc:  # noqa: BLE001 - machines without Chrome installed fall back to the bundled binary
         if "chrome" in str(exc).lower() and ("install" in str(exc).lower() or "channel" in str(exc).lower()):
             print("Không tìm thấy Chrome thật đã cài — dùng lại Chromium đi kèm Playwright.", flush=True)
-            return playwright.chromium.launch_persistent_context(str(profile_dir), headless=headless)
+            return playwright.chromium.launch_persistent_context(str(profile_dir), headless=headless, args=extra_args)
         raise
 
 
