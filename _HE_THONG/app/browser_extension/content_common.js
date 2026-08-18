@@ -57,6 +57,29 @@ async function ytfImageToBase64(url) {
   return { base64, mimeType };
 }
 
+// On timeout, builds a diagnostic string instead of a bare "no new image"
+// message — was flying blind on 3 consistently-failing jobs with no way to
+// tell "selector never matched anything" from "matched but never finished
+// loading" from "the AI answered in text instead of generating an image
+// this time" without eyes on the actual tab. Cheap to compute, only runs
+// once when we're already about to fail.
+function ytfDescribeTimeoutState(containerSelectors, priorSrcs) {
+  let totalMatched = 0;
+  let matchedNotNew = 0;
+  let matchedNewNotLoaded = 0;
+  for (const selector of containerSelectors) {
+    let found;
+    try { found = document.querySelectorAll(selector); } catch { continue; }
+    for (const img of found) {
+      totalMatched += 1;
+      if (!img.src || priorSrcs.has(img.src)) { matchedNotNew += 1; continue; }
+      if (!(img.complete && img.naturalWidth > 64)) matchedNewNotLoaded += 1;
+    }
+  }
+  const lastText = (document.body?.innerText || '').trim().slice(-300).replace(/\s+/g, ' ');
+  return `selectors matched ${totalMatched} phan tu (${matchedNotNew} khong moi, ${matchedNewNotLoaded} moi nhung chua load xong). Cuoi trang: "${lastText}"`;
+}
+
 function ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs = 180000, intervalMs = 1500 } = {}) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
@@ -69,7 +92,9 @@ function ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs = 180000,
           }
         }
       }
-      if (Date.now() > deadline) return reject(new Error(`Khong thay anh moi sau ${Math.round(timeoutMs / 1000)}s`));
+      if (Date.now() > deadline) {
+        return reject(new Error(`Khong thay anh moi sau ${Math.round(timeoutMs / 1000)}s. ${ytfDescribeTimeoutState(containerSelectors, priorSrcs)}`));
+      }
       setTimeout(tick, intervalMs);
     };
     tick();
