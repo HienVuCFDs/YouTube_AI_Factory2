@@ -527,7 +527,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -536,7 +536,7 @@ class CreateSceneGenerationRequest(BaseModel):
 
 
 class BatchSceneGenerationRequest(BaseModel):
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False

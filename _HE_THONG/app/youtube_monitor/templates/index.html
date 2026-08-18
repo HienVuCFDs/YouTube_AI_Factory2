@@ -421,7 +421,7 @@
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_image">Google Gemini · tạo ảnh</option><option value="openai_image">OpenAI GPT Image · tạo ảnh</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
+          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo · tạo video thật</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI cho các cảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Video sẽ được tạo cho mỗi cảnh chưa có hình.</div>
@@ -1763,11 +1763,15 @@
     antigravity_image: 'Antigravity sẽ dùng gói AI đã đăng nhập để tạo ảnh và tự gắn vào storyboard. Cần bật sidecar YT Factory một lần trong Antigravity.',
     flow_veo: 'Flow (Veo 3) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập để tạo video và tự gắn vào storyboard. Cần chạy `python web_video_sidecar.py --provider flow_veo` và đăng nhập Google một lần.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập để tạo video miễn phí và tự gắn vào storyboard. Cần chạy `python web_video_sidecar.py --provider meta_ai_video` và đăng nhập một lần.',
+    gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập để tạo ảnh qua giao diện chat, không cần API key. Cần chạy `python web_video_sidecar.py --provider gemini_web_image --login` và đăng nhập Google một lần.',
+    chatgpt_web_image: 'ChatGPT (web) sẽ dùng tài khoản ChatGPT Plus/Pro đã đăng nhập để tạo ảnh qua giao diện chat, không cần API key. Cần chạy `python web_video_sidecar.py --provider chatgpt_web_image --login` và đăng nhập một lần.',
   };
   const SUBSCRIPTION_PROVIDER_SHORT = {
     antigravity_image: 'Antigravity sẽ dùng gói đã đăng nhập.',
     flow_veo: 'Flow (Veo 3) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập (miễn phí).',
+    gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập.',
+    chatgpt_web_image: 'ChatGPT (web) sẽ dùng tài khoản ChatGPT Plus/Pro đã đăng nhập.',
   };
   const isSubscriptionProvider = (provider) => provider in SUBSCRIPTION_PROVIDER_HINTS;
 
@@ -2767,7 +2771,7 @@
       const sceneJobActions = sceneJob
         ? (sceneJob.status === 'queued' ? `<button class="btn small ghost" type="button" onclick="cancelSceneJob(${project.id}, ${sceneJob.id})">Hủy</button>`
           : ['error', 'cancelled'].includes(sceneJob.status) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Chạy lại</button>`
-          : (sceneJob.status === 'running' && ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(sceneJob.provider)) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Kẹt lâu? Chạy lại</button>`
+          : (sceneJob.status === 'running' && SUBSCRIPTION_SCENE_PROVIDERS.has(sceneJob.provider)) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Kẹt lâu? Chạy lại</button>`
           : '')
         : '';
       const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''} ${sceneJobActions}` : 'Chưa tạo ảnh AI cho đoạn này.';
@@ -3246,13 +3250,17 @@
     return {
       antigravity_image: 'Antigravity', flow_veo: 'Flow (Veo 3)', meta_ai_video: 'Meta AI (Vibes)',
       gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
+      gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)',
     }[provider] || provider || 'AI';
   }
 
   const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
-  const IMAGE_PROVIDER_OPTIONS = '<option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image</option><option value="openai_image">GPT Image</option>';
-  const VIDEO_PROVIDER_OPTIONS = '<option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo</option>';
+  // Providers that need no API key, driven instead by the caller's own
+  // logged-in web/agent session (browser sidecar or Antigravity's agent).
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'flow_veo', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image']);
+  const IMAGE_PROVIDER_OPTIONS = '<option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
+  const VIDEO_PROVIDER_OPTIONS = '<option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo (API)</option>';
 
   async function findReferenceImageAssetId(projectId, visualPath) {
     if (!visualPath) return null;
@@ -3307,7 +3315,7 @@
   async function createSceneJob(projectId, shotId, promptText, provider, ratio) {
     if (promptText.length < 3) throw new Error('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.');
     const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
-    const usesSubscription = ['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider);
+    const usesSubscription = SUBSCRIPTION_SCENE_PROVIDERS.has(provider);
     const segment = await ensureSegmentForShot(projectId, shotId);
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
@@ -3513,7 +3521,7 @@
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, $(`timelineVisual-${segmentId}`)?.value || '') : null;
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
     const sidecarWarning = await sidecarWarningText(provider);
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${['antigravity_image', 'flow_veo', 'meta_ai_video'].includes(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${SUBSCRIPTION_SCENE_PROVIDERS.has(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
     setMessage(`Đang đưa cảnh ${segmentId} vào hàng đợi ${sceneProviderLabel(provider)}...`);
     const response = await api(`/api/projects/${projectId}/scene-jobs`, {
       method: 'POST',

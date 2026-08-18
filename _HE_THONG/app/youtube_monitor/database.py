@@ -3201,7 +3201,7 @@ class Database:
     # queue/claim/complete/fail API surface — see /api/browser-scene-jobs/*).
     # Add a new provider here (plus its Literal entry in main.py request
     # models and its driver in web_video_sidecar.py) to support another site.
-    BROWSER_SIDECAR_PROVIDERS = ("flow_veo", "meta_ai_video")
+    BROWSER_SIDECAR_PROVIDERS = ("flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image")
 
     # Providers handled by an external pull-queue sidecar (Antigravity's own
     # built-in tool, or any BROWSER_SIDECAR_PROVIDERS) instead of the
