@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,28 @@ def _antigravity_environment() -> dict[str, str]:
     return os.environ.copy()
 
 
+# `agy models` (used only to check login status) takes up to 20s and is
+# invoked from ~6 endpoints the frontend polls every 3s. Uncached, that
+# stacked into 4-5+ concurrent `agy.exe` processes at all times, real enough
+# resource contention that it was starving the actual sidecar's own agy
+# calls. A short TTL keeps the status reasonably fresh without re-spawning a
+# process on every poll.
+_status_cache: dict[str, Any] | None = None
+_status_cache_at = 0.0
+_STATUS_CACHE_TTL_SECONDS = 20.0
+
+
 def antigravity_cli_status() -> dict[str, Any]:
+    global _status_cache, _status_cache_at
+    now = time.monotonic()
+    if _status_cache is not None and (now - _status_cache_at) < _STATUS_CACHE_TTL_SECONDS:
+        return _status_cache
+    result = _antigravity_cli_status_uncached()
+    _status_cache, _status_cache_at = result, now
+    return result
+
+
+def _antigravity_cli_status_uncached() -> dict[str, Any]:
     executable = settings.ANTIGRAVITY_CLI_PATH
     if not executable or not Path(executable).is_file():
         return {

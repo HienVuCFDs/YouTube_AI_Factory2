@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,26 @@ def _local_claude_environment() -> dict[str, str]:
     return os.environ.copy()
 
 
+# See antigravity_bridge.py's _status_cache for why: this status check is
+# invoked from ~6 endpoints the frontend polls every 3s, and uncached that
+# stacks up concurrent CLI subprocesses for no reason (the login state
+# barely changes second to second).
+_status_cache: dict[str, Any] | None = None
+_status_cache_at = 0.0
+_STATUS_CACHE_TTL_SECONDS = 20.0
+
+
 def claude_code_cli_status() -> dict[str, Any]:
+    global _status_cache, _status_cache_at
+    now = time.monotonic()
+    if _status_cache is not None and (now - _status_cache_at) < _STATUS_CACHE_TTL_SECONDS:
+        return _status_cache
+    result = _claude_code_cli_status_uncached()
+    _status_cache, _status_cache_at = result, now
+    return result
+
+
+def _claude_code_cli_status_uncached() -> dict[str, Any]:
     executable = settings.CLAUDE_CODE_CLI_PATH
     if not executable or not Path(executable).is_file():
         return {
