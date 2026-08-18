@@ -18,6 +18,12 @@ const YTF_META_IMAGE_SELECTORS = [
   "div[role='img']",
 ];
 const YTF_META_VIDEO_SELECTORS = ["video"];
+const YTF_META_IMAGE_UPLOAD_SELECTORS = [
+  "input[type='file']",
+  "button[aria-label*='Add photo' i]",
+  "button[aria-label*='Upload' i]",
+  "button[aria-label*='Attach' i]",
+];
 
 function ytfCollectExistingVideoSrcs() {
   const set = new Set();
@@ -86,6 +92,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       const priorImageSrcs = ytfCollectExistingImageSrcs(YTF_META_IMAGE_SELECTORS);
       const priorVideoSrcs = ytfCollectExistingVideoSrcs();
+      if (message.referenceImageBase64) {
+        await ytfAttachReferenceImage(YTF_META_IMAGE_UPLOAD_SELECTORS, message.referenceImageBase64, message.referenceImageMimeType);
+        await new Promise((r) => setTimeout(r, 800)); // let the site's own upload/preview settle before typing
+      }
       const promptBox = await ytfWaitFor(YTF_META_PROMPT_SELECTORS, { timeoutMs: 20000 });
       ytfTypeInto(promptBox, message.prompt);
       await new Promise((r) => setTimeout(r, 300));

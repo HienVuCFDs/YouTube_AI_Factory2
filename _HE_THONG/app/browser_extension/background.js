@@ -74,15 +74,45 @@ async function findOrCreateTab(url) {
   return tab.id;
 }
 
+// Fetches an existing scene image (image-to-video reference) as base64 so
+// it can travel inside a chrome.tabs.sendMessage payload — content scripts
+// can't read a local file path (F:\...), and fetching cross-origin from the
+// content script itself risks the target page's CSP, so the background
+// script does it and hands the bytes over already-encoded.
+async function fetchReferenceImageBase64(assetId) {
+  const response = await fetch(`${FACTORY}/api/assets/${assetId}/download`);
+  if (!response.ok) throw new Error(`Tai anh tham chieu -> HTTP ${response.status}`);
+  const blob = await response.blob();
+  const base64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('Khong doc duoc anh tham chieu'));
+    reader.readAsDataURL(blob);
+  });
+  return { base64, mimeType: blob.type || 'image/png' };
+}
+
 async function processOneJob(provider, job) {
   const jobId = job.id;
   const projectId = job.project_id;
   let tabId = null;
   try {
-    await setStatus(`[${provider}] job ${jobId}: mở tab và gửi prompt...`);
+    let referenceImage = null;
+    if (job.reference_asset_id) {
+      try {
+        referenceImage = await fetchReferenceImageBase64(job.reference_asset_id);
+      } catch (error) {
+        // Image-to-video is a nice-to-have on top of a working text-to-X
+        // job — a failed reference fetch shouldn't abort the whole job.
+        console.warn('YT Factory: could not fetch reference image', error);
+      }
+    }
+    await setStatus(`[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
     tabId = await findOrCreateTab(PROVIDER_URLS[provider]);
     const result = await chrome.tabs.sendMessage(tabId, {
       type: 'ytf_generate', provider, jobId, prompt: job.prompt, ratio: job.ratio,
+      referenceImageBase64: referenceImage?.base64 || null,
+      referenceImageMimeType: referenceImage?.mimeType || null,
     });
     if (!result || !result.ok) {
       throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');

@@ -1659,9 +1659,18 @@ def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
 # written as a multi-step animation brief: "sau do...", "tiep theo...")
 # reliably triggers the model to ask a clarifying question instead of
 # generating directly — confirmed live across both Gemini and ChatGPT.
-_CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image", "meta_ai_video"}
+_CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image"}
+# Meta AI produces video, not a still — the "collapse to one static frame"
+# instruction _craft_image_prompt gives would be actively wrong here, so it
+# gets its own motion-oriented crafting (_craft_video_prompt) instead.
+_CHAT_VIDEO_PROVIDERS = {"meta_ai_video"}
 
 _CRAFT_IMAGE_PROMPT_SCHEMA = {
+    "type": "object",
+    "properties": {"prompt": {"type": "string"}},
+    "required": ["prompt"],
+}
+_CRAFT_VIDEO_PROMPT_SCHEMA = {
     "type": "object",
     "properties": {"prompt": {"type": "string"}},
     "required": ["prompt"],
@@ -1690,6 +1699,35 @@ def _craft_image_prompt(raw_prompt: str) -> str:
     )
     try:
         result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA)
+        crafted = str(result.get("prompt") or "").strip()
+        return crafted or raw_prompt
+    except LlmError:
+        return raw_prompt
+
+
+def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
+    """Rewrites a storyboard's raw visual_prompt into a prompt for a
+    chat-based video AI (Meta AI) — the mirror of _craft_image_prompt, but
+    motion language is exactly what's wanted here rather than something to
+    strip out. When the scene already has a generated still (image-to-video,
+    the usual case once Storyboard images exist), the prompt only needs to
+    describe how that frame should animate, not re-describe the composition
+    from scratch."""
+    context = (
+        "Nguoi dung da co san MOT anh tinh se duoc dinh kem lam khung hinh dau (image-to-video) — "
+        "prompt chi can mo ta CHUYEN DONG/HANH DONG xay ra tu khung hinh do, khong can mo ta lai bo cuc anh."
+        if has_reference_image else
+        "Nguoi dung chua co anh nao — AI se tao video hoan toan tu prompt (text-to-video), can mo ta ca "
+        "bo cuc lan chuyen dong."
+    )
+    system_prompt = (
+        f"Ban la chuyen gia viet prompt cho AI tao video ngan. {context} "
+        "Hay viet lai mo ta canh duoi day thanh MOT prompt video ngan gon, cu the, ro rang ve chuyen dong "
+        "xay ra trong video, phu hop de AI tao video hieu va tao ngay khong hoi lai. "
+        "Tra loi bang tieng Anh, ngan gon, khong hoi lai, khong giai thich them."
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_VIDEO_PROMPT_SCHEMA)
         crafted = str(result.get("prompt") or "").strip()
         return crafted or raw_prompt
     except LlmError:
@@ -1766,6 +1804,8 @@ def queue_scene_generation_job(
     prompt_text = payload.prompt
     if payload.provider in _CHAT_IMAGE_PROVIDERS:
         prompt_text = _craft_image_prompt(prompt_text)
+    elif payload.provider in _CHAT_VIDEO_PROVIDERS:
+        prompt_text = _craft_video_prompt(prompt_text, has_reference_image=bool(payload.reference_asset_id))
     job = database.create_scene_generation_job(
         project_id,
         payload.timeline_segment_id,
@@ -1815,6 +1855,10 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             continue
         if payload.provider in _CHAT_IMAGE_PROVIDERS:
             prompt = _craft_image_prompt(prompt)
+        elif payload.provider in _CHAT_VIDEO_PROVIDERS:
+            # Batch only ever targets segments with no visual yet (skipped
+            # above), so there's never an existing image to attach here.
+            prompt = _craft_video_prompt(prompt, has_reference_image=False)
         job = database.create_scene_generation_job(
             project_id, int(segment["id"]), payload.provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,

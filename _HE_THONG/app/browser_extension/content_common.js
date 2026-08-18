@@ -186,3 +186,49 @@ function ytfCollectExistingImageSrcs(containerSelectors) {
   }
   return set;
 }
+
+// Image-to-video: attaches an existing scene image as the starting frame
+// before submitting the prompt. Best-effort, same unverified-selector
+// caveat as everything else here — tries a direct <input type=file> first
+// (common when an "Add image" button is really just a styled label for a
+// hidden input), then falls back to clicking an upload affordance and
+// hoping it reveals one. Returns false rather than throwing on failure —
+// image-to-video is additive on top of a working text-to-X job, not a hard
+// requirement, so a failed attach should fall through to generating from
+// the prompt alone rather than aborting the job.
+async function ytfAttachReferenceImage(uploadSelectors, base64, mimeType, filename = 'reference.png') {
+  if (!base64) return false;
+  let file;
+  try {
+    const byteChars = atob(base64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i += 1) bytes[i] = byteChars.charCodeAt(i);
+    file = new File([bytes], filename, { type: mimeType || 'image/png' });
+  } catch {
+    return false;
+  }
+  const dataTransfer = new DataTransfer();
+  dataTransfer.items.add(file);
+  const assign = (input) => {
+    input.files = dataTransfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const directInput = document.querySelector("input[type='file']");
+  if (directInput) {
+    assign(directInput);
+    return true;
+  }
+  try {
+    const button = await ytfWaitFor(uploadSelectors, { timeoutMs: 5000 });
+    ytfClick(button);
+    await new Promise((r) => setTimeout(r, 500));
+    const revealedInput = document.querySelector("input[type='file']");
+    if (revealedInput) {
+      assign(revealedInput);
+      return true;
+    }
+  } catch {
+    // No upload affordance found — caller proceeds without a reference image.
+  }
+  return false;
+}
