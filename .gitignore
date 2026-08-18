@@ -7,6 +7,11 @@ _HE_THONG/data/*.log
 _HE_THONG/data/oauth_token.json
 _HE_THONG/data/backups/
 
+# web_video_sidecar.py Playwright browser profiles — real login session
+# cookies for Flow/Meta AI/Gemini/ChatGPT, never source code
+_HE_THONG/app/youtube_monitor/_web_video_profile_*/
+_HE_THONG/app/youtube_monitor/_web_video_downloads_*/
+
 # Python
 __pycache__/
 *.py[cod]
