@@ -1889,7 +1889,7 @@ class BrowserActionRequest(BaseModel):
 _BROWSER_ACTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["type", "click", "wait", "done", "fail"]},
+        "action": {"type": "string", "enum": ["type", "click", "attach_image", "wait", "done", "fail"]},
         "index": {"type": "integer"},
         "text": {"type": "string"},
         "reason": {"type": "string"},
@@ -1932,12 +1932,15 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
         "Cac hanh dong hop le:\n"
         "- type: go van ban vao phan tu (can 'index' va 'text')\n"
         "- click: bam vao phan tu (can 'index')\n"
+        "- attach_image: dinh kem anh tham chieu vao o dinh kem file (can 'index'); "
+        "chi dung khi MUC TIEU noi rang co san anh tham chieu\n"
         "- wait: cho trang xu ly (dung khi vua gui xong hoac AI dang tao noi dung)\n"
         "- done: muc tieu da hoan thanh (vi du video/anh ket qua da xuat hien)\n"
         "- fail: khong the hoan thanh, giai thich ly do trong 'reason'\n\n"
         "Nguyen tac: phan tu DISABLED thi khong bam duoc, hay 'wait' cho no mo khoa. "
         "Neu trang hoi lai mot cau de xac nhan, hay 'type' cau tra loi phu hop roi bam gui. "
         "Neu da gui prompt va dang cho ket qua, hay 'wait'. "
+        "Neu trang chua o dung man hinh can thiet, hay 'click' de dieu huong den do truoc. "
         "Truong 'reason' viet ngan gon bang tieng Viet."
     )
     user_prompt = (
@@ -1952,7 +1955,7 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     action = str(result.get("action") or "").strip()
-    if action not in {"type", "click", "wait", "done", "fail"}:
+    if action not in {"type", "click", "attach_image", "wait", "done", "fail"}:
         raise HTTPException(status_code=502, detail=f"Orchestrator tra ve hanh dong khong hop le: {action}")
     return {
         "action": action,

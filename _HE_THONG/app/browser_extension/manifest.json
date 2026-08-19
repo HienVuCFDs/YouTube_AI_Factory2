@@ -32,7 +32,7 @@
     },
     {
       "matches": ["https://www.meta.ai/*"],
-      "js": ["content_common.js", "content_agent.js", "content_meta.js"],
+      "js": ["content_common.js", "content_agent.js"],
       "run_at": "document_idle"
     }
   ],

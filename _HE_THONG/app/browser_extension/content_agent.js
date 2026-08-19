@@ -1,13 +1,19 @@
 // Generic "hands" for the orchestrator: reports what is on the page and
-// performs one action at a time, without knowing anything about a specific
-// site's layout.
+// performs one action, without knowing anything about a specific site's
+// layout.
 //
 // This replaces per-site hardcoded selector scripts. Those had to guess, up
 // front, which element was the send button, where the download control hid,
 // and what order to touch things in — and every guess that missed cost a
 // full generate-and-fail cycle to discover. The site knows its own layout
-// and the orchestrator can read it, so the decisions belong there; this file
-// only supplies observations and carries out instructions.
+// and the orchestrator can read it, so the decisions belong there.
+//
+// Deliberately stateless per message: the decide/act loop lives in
+// background.js instead of here. A loop running inside the content script
+// died the moment the page navigated ("the page keeping the extension port
+// is moved into back/forward cache"), which is exactly what happens when
+// the agent opens Vibes' create screen. The background worker survives
+// navigation, and the content script is re-injected into the new page.
 
 const YTF_INTERACTIVE_SELECTOR = [
   'button',
@@ -20,6 +26,7 @@ const YTF_INTERACTIVE_SELECTOR = [
   'select',
 ].join(',');
 
+// Indices in a snapshot refer to this array until the next snapshot.
 let ytfSnapshotElements = [];
 
 function ytfIsVisible(el) {
@@ -31,12 +38,9 @@ function ytfIsVisible(el) {
 
 function ytfDescribeElement(el) {
   const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || '').trim();
-  let text = '';
-  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-    text = String(el.value || '').trim();
-  } else {
-    text = String(el.innerText || '').trim().replace(/\s+/g, ' ');
-  }
+  const text = (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
+    ? String(el.value || '').trim()
+    : String(el.innerText || '').trim().replace(/\s+/g, ' ');
   return {
     tag: el.tagName.toLowerCase(),
     role: el.getAttribute('role') || (el.tagName === 'INPUT' ? el.type || '' : ''),
@@ -47,20 +51,36 @@ function ytfDescribeElement(el) {
 }
 
 // Media is included so the orchestrator can tell "the result has arrived"
-// from "still generating" — that judgement was previously a fixed timeout.
+// from "still generating" — a judgement that used to be a fixed timeout.
 function ytfTakeSnapshot() {
   ytfSnapshotElements = [];
   const described = [];
+  const seen = new Set();
   const push = (el, extra = {}) => {
-    const index = ytfSnapshotElements.length;
+    if (seen.has(el)) return;
+    seen.add(el);
+    described.push({ i: ytfSnapshotElements.length, ...ytfDescribeElement(el), ...extra });
     ytfSnapshotElements.push(el);
-    described.push({ i: index, ...ytfDescribeElement(el), ...extra });
   };
-  for (const el of document.querySelectorAll(YTF_INTERACTIVE_SELECTOR)) {
-    if (!ytfIsVisible(el)) continue;
+
+  const interactive = [...document.querySelectorAll(YTF_INTERACTIVE_SELECTOR)];
+  let visible = interactive.filter(ytfIsVisible);
+  // Chrome can defer layout in a tab that was never rendered (ours open with
+  // active:false), making every rect 0x0 — an empty report would be
+  // indistinguishable from a genuine load failure, so fall back to the
+  // unfiltered list rather than claiming the page is blank.
+  if (!visible.length && interactive.length) visible = interactive;
+  for (const el of visible) {
     push(el);
     if (described.length >= 60) break;
   }
+
+  // File inputs are almost always styled invisible (a button acts as their
+  // label), yet they're the one element the orchestrator must target by index.
+  for (const el of document.querySelectorAll("input[type='file']")) {
+    push(el, { text: 'O DINH KEM FILE' });
+  }
+
   for (const el of document.querySelectorAll('video, img')) {
     if (!ytfIsVisible(el)) continue;
     const src = el.currentSrc || el.src || '';
@@ -73,11 +93,33 @@ function ytfTakeSnapshot() {
   return described;
 }
 
-function ytfPageTail() {
-  return (document.body?.innerText || '').trim().slice(-1200).replace(/\s+/g, ' ');
+// Fills a specific file input the orchestrator picked. If it aimed at the
+// button fronting a hidden input instead, click that and take whichever input
+// it reveals — either is a reasonable thing for it to point at.
+async function ytfAttachReferenceImageTo(el, base64, mimeType) {
+  if (!el || !base64) return false;
+  let input = el.tagName === 'INPUT' && el.type === 'file' ? el : null;
+  if (!input) {
+    ytfClick(el);
+    await new Promise((r) => setTimeout(r, 800));
+    input = document.querySelector("input[type='file']");
+  }
+  if (!input) return false;
+  try {
+    const byteChars = atob(base64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i += 1) bytes[i] = byteChars.charCodeAt(i);
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(new File([bytes], 'reference.png', { type: mimeType || 'image/png' }));
+    input.files = dataTransfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-async function ytfPerformAction(action) {
+async function ytfPerformAction(action, referenceImage) {
   const el = typeof action.index === 'number' ? ytfSnapshotElements[action.index] : null;
   switch (action.action) {
     case 'type':
@@ -89,12 +131,19 @@ async function ytfPerformAction(action) {
       if (!el) throw new Error(`click: khong co phan tu index ${action.index}`);
       ytfClick(el);
       // Some controls only respond to the element's own activation path.
-      if (typeof el.click === 'function' && el.tagName === 'BUTTON') {
+      if (el.tagName === 'BUTTON' && typeof el.click === 'function') {
         await new Promise((r) => setTimeout(r, 200));
         if (el.isConnected) el.click();
       }
       await new Promise((r) => setTimeout(r, 1500));
       return;
+    case 'attach_image': {
+      if (!referenceImage?.base64) throw new Error('attach_image: khong co anh tham chieu cho job nay');
+      const ok = await ytfAttachReferenceImageTo(el, referenceImage.base64, referenceImage.mimeType);
+      if (!ok) throw new Error('attach_image: khong gan duoc anh vao phan tu nay');
+      await new Promise((r) => setTimeout(r, 2000));
+      return;
+    }
     case 'wait':
       await new Promise((r) => setTimeout(r, 5000));
       return;
@@ -103,47 +152,58 @@ async function ytfPerformAction(action) {
   }
 }
 
-function ytfRequestAction(payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      chrome.runtime.sendMessage({ type: 'ytf_browser_action', payload }, (response) => {
-        if (!response || response.error) reject(new Error(response?.error || 'Khong goi duoc AI dieu phoi'));
-        else resolve(response);
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
+// A <video> playing through MediaSource exposes only a blob: URL that can't
+// be fetched, but the page sometimes also carries a plain progressive URL.
+function ytfFindDirectMediaUrl() {
+  for (const el of document.querySelectorAll("video source[src], a[href*='.mp4'], a[download][href^='http']")) {
+    const url = el.getAttribute('src') || el.getAttribute('href') || '';
+    if (/^https?:/i.test(url)) return url;
+  }
+  return null;
 }
 
-// Runs the observe → decide → act loop until the orchestrator says done/fail
-// or the step budget runs out. Returns the media element the run ended on,
-// when there is one, so the caller can upload the result.
-async function ytfRunAgent(goal, { maxSteps = 25 } = {}) {
-  const history = [];
-  for (let step = 1; step <= maxSteps; step += 1) {
-    const elements = ytfTakeSnapshot();
-    const decision = await ytfRequestAction({
-      goal,
-      url: location.href,
-      elements,
-      page_text: ytfPageTail(),
-      history,
-      step,
-    });
-    history.push(`${step}. ${decision.action}${decision.index != null ? `(${decision.index})` : ''} — ${decision.reason}`);
-    if (decision.action === 'done') {
-      const el = typeof decision.index === 'number' ? ytfSnapshotElements[decision.index] : null;
-      return { ok: true, element: el, history };
-    }
-    if (decision.action === 'fail') {
-      throw new Error(`AI dieu phoi dung lai: ${decision.reason}`);
-    }
-    try {
-      await ytfPerformAction(decision);
-    } catch (error) {
-      history.push(`   loi khi thuc hien: ${String(error?.message || error)}`);
-    }
+async function ytfGrabMedia(index) {
+  const el = ytfSnapshotElements[index];
+  if (!el) throw new Error(`Khong co phan tu index ${index} de lay ket qua`);
+  const isVideo = el.tagName === 'VIDEO';
+  let src = el.currentSrc || el.src || '';
+  if (!src) throw new Error('Phan tu ket qua khong co src');
+  if (isVideo && src.startsWith('blob:')) src = ytfFindDirectMediaUrl() || src;
+  if (src.startsWith('blob:')) {
+    // Bytes live inside the player; background.js drives the site's own
+    // download control and imports the file from disk instead.
+    return { needsDownload: true, kind: 'video' };
   }
-  throw new Error(`Het ${maxSteps} buoc ma chua xong. Da lam:\n${history.join('\n')}`);
+  const { base64, mimeType } = await ytfImageToBase64(src);
+  return { base64, mimeType, kind: isVideo ? 'video' : 'image' };
 }
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message?.type?.startsWith('ytf_agent_')) return false;
+  (async () => {
+    try {
+      if (message.type === 'ytf_agent_snapshot') {
+        sendResponse({
+          ok: true,
+          url: location.href,
+          elements: ytfTakeSnapshot(),
+          pageText: (document.body?.innerText || '').trim().slice(-1200).replace(/\s+/g, ' '),
+        });
+        return;
+      }
+      if (message.type === 'ytf_agent_action') {
+        await ytfPerformAction(message.action, message.referenceImage);
+        sendResponse({ ok: true });
+        return;
+      }
+      if (message.type === 'ytf_agent_grab') {
+        sendResponse({ ok: true, ...(await ytfGrabMedia(message.index)) });
+        return;
+      }
+      sendResponse({ ok: false, error: `Khong hieu lenh: ${message.type}` });
+    } catch (error) {
+      sendResponse({ ok: false, error: String(error?.message || error) });
+    }
+  })();
+  return true;
+});

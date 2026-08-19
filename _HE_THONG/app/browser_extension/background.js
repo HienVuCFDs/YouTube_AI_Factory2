@@ -20,13 +20,12 @@ const KEEPALIVE_PERIOD_MINUTES = 1; // just "is the socket still open?", not a j
 const PROVIDER_URLS = {
   gemini_web_image: 'https://gemini.google.com/app',
   chatgpt_web_image: 'https://chatgpt.com/',
-  // Not /vibes: that surface is a public feed of other people's AI videos,
-  // and "wait for a new <video> to appear" latched onto strangers' clips
-  // scrolling in (confirmed live — the opened item belonged to unrelated
-  // accounts and had only like/comment/share controls, no download). Our own
-  // prompts land in a chat conversation either way, and the chat page has no
-  // foreign videos to confuse the detector.
-  meta_ai_video: 'https://www.meta.ai/',
+  // Vibes, not the plain chat: the chat surface refuses video outright
+  // (confirmed live — it returned "Yêu cầu đã bị dừng" three times and then
+  // explained its video limitations), while Vibes is where Meta actually
+  // generates clips. The feed of strangers' videos there is handled by the
+  // agent's goal telling it not to mistake one for our result.
+  meta_ai_video: 'https://www.meta.ai/vibes',
 };
 // Each job opens its own independent tab, so several can genuinely run at
 // once with no DOM conflict — this just caps how many at a time (across
@@ -188,6 +187,102 @@ async function fetchReferenceImageBase64(assetId) {
   return { base64, mimeType: blob.type || 'image/png' };
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Talks to the content script, tolerating the page navigating underneath us.
+// Every navigation tears down the old content script and injects a fresh one,
+// so a send that lands mid-transition throws; retrying is normal operation
+// here, not an error path.
+async function sendToTab(tabId, message, { retries = 6, gapMs = 2000 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, message);
+      if (response) return response;
+      lastError = new Error('Content script khong tra loi');
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(gapMs);
+  }
+  throw new Error(`Tab khong phan hoi: ${String(lastError?.message || lastError)}`);
+}
+
+async function askOrchestratorForAction(payload) {
+  const response = await fetch(`${FACTORY}/api/orchestrator/browser-action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Hoi AI dieu phoi -> HTTP ${response.status} ${detail.slice(0, 200)}`);
+  }
+  return response.json();
+}
+
+// The observe → decide → act loop. Lives here rather than in the content
+// script so it survives the page navigations the agent itself causes.
+async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null, onStep = null } = {}) {
+  const history = [];
+  for (let step = 1; step <= maxSteps; step += 1) {
+    const snapshot = await sendToTab(tabId, { type: 'ytf_agent_snapshot' });
+    if (!snapshot.ok) throw new Error(snapshot.error || 'Khong chup duoc trang');
+
+    const decision = await askOrchestratorForAction({
+      goal,
+      url: snapshot.url,
+      elements: snapshot.elements,
+      page_text: snapshot.pageText,
+      history,
+      step,
+    });
+    const label = `${step}. ${decision.action}${decision.index != null ? `(${decision.index})` : ''} — ${decision.reason}`;
+    history.push(label);
+    if (onStep) await onStep(label);
+
+    if (decision.action === 'done') return { index: decision.index, history };
+    if (decision.action === 'fail') throw new Error(`AI dieu phoi dung lai: ${decision.reason}`);
+
+    const result = await sendToTab(tabId, {
+      type: 'ytf_agent_action',
+      action: decision,
+      referenceImage: decision.action === 'attach_image' ? referenceImage : null,
+    });
+    if (!result.ok) history.push(`   loi khi thuc hien: ${result.error}`);
+  }
+  throw new Error(`Het ${maxSteps} buoc ma chua xong. Da lam:\n${history.join('\n')}`);
+}
+
+function buildAgentGoal(provider, job, hasReference) {
+  if (provider !== 'meta_ai_video') return null;
+  return [
+    'Tao MOT VIDEO NGAN co chuyen dong (KHONG phai anh tinh) bang tinh nang tao video cua Meta AI.',
+    '',
+    'LUU Y QUAN TRONG: khung chat thong thuong cua Meta AI KHONG tao duoc video — da thu va no tu choi, '
+    + 'chi giai thich han che roi de xuat phuong an khac. Tinh nang tao video nam o muc "Vibes". '
+    + 'Hay tim dung nut/man hinh TAO video moi (vi du nut "Tao", "Create", dau cong, hoac o nhap prompt '
+    + 'cua man tao video) truoc khi go prompt.',
+    '',
+    hasReference
+      ? 'CO san mot anh tham chieu. Khi da mo dung man tao video va thay o dinh kem file, hay dung '
+        + 'attach_image de gan anh do lam khung hinh dau tien. Neu man tao video khong ho tro dinh kem anh '
+        + 'thi cu tao tu prompt cung duoc.'
+      : 'Khong co anh tham chieu — tao hoan toan tu prompt.',
+    '',
+    'CANH BAO: trang Vibes hien thi feed video cua NGUOI KHAC. Tuyet doi khong coi video trong feed la '
+    + 'ket qua. Chi tra ve done khi video do CHINH luot tao nay sinh ra da xuat hien, kem index cua '
+    + 'phan tu <video> do.',
+    '',
+    'Neu nut gui dang DISABLED, hay wait roi thu lai.',
+    '',
+    'PROMPT CAN GUI:',
+    job.prompt,
+  ].join('\n');
+}
+
 async function processOneJob(provider, job) {
   const jobId = job.id;
   const projectId = job.project_id;
@@ -205,20 +300,44 @@ async function processOneJob(provider, job) {
     }
     await setJobStatus(jobId, `[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
     tabId = await findOrCreateTab(PROVIDER_URLS[provider]);
-    const result = await chrome.tabs.sendMessage(tabId, {
-      type: 'ytf_generate', provider, jobId, prompt: job.prompt, ratio: job.ratio,
-      referenceImageBase64: referenceImage?.base64 || null,
-      referenceImageMimeType: referenceImage?.mimeType || null,
-    });
-    if (!result || !result.ok) {
-      throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');
+
+    const goal = buildAgentGoal(provider, job, Boolean(referenceImage));
+    let result;
+    if (goal) {
+      const finished = await runAgentInTab(tabId, goal, {
+        maxSteps: 30,
+        referenceImage,
+        onStep: (label) => setJobStatus(jobId, `[${provider}] job ${jobId}: ${label}`),
+      });
+      if (typeof finished.index !== 'number') {
+        throw new Error('AI điều phối báo xong nhưng không chỉ ra phần tử kết quả');
+      }
+      result = await sendToTab(tabId, { type: 'ytf_agent_grab', index: finished.index });
+      if (!result.ok) throw new Error(result.error || 'Không lấy được kết quả');
+    } else {
+      // Providers still on their own scripted flow (Gemini/ChatGPT images,
+      // which already work end to end) keep the original message contract.
+      result = await chrome.tabs.sendMessage(tabId, {
+        type: 'ytf_generate', provider, jobId, prompt: job.prompt, ratio: job.ratio,
+        referenceImageBase64: referenceImage?.base64 || null,
+        referenceImageMimeType: referenceImage?.mimeType || null,
+      });
+      if (!result || !result.ok) {
+        throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');
+      }
     }
+
     await setJobStatus(jobId, `[${provider}] job ${jobId}: đang tải kết quả lên...`);
     let assetId;
     if (result.needsDownload) {
       await setJobStatus(jobId, `[${provider}] job ${jobId}: đang lưu video về máy...`);
       const filePath = await withDownloadGate(() => waitForNextDownload(
-        () => chrome.tabs.sendMessage(tabId, { type: 'ytf_download', provider, videoSrc: result.videoSrc }),
+        () => runAgentInTab(tabId, [
+          'Tai video vua tao ve may.',
+          'Tim va bam nut/menu tai xuong (co the nam trong menu "Lua chon khac" hoac "...") cua DUNG video',
+          'vua tao. Sau khi da bam vao muc tai xuong, tra ve done.',
+        ].join('\n'), { maxSteps: 12 }),
+        { timeoutMs: 240000 },
       ));
       assetId = await importLocalFile(projectId, filePath, 'video');
     } else {
