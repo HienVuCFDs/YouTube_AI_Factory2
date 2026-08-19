@@ -1538,6 +1538,80 @@ def upload_project_asset(
     return {"status": "uploaded", "asset": asset}
 
 
+class ImportLocalAssetRequest(BaseModel):
+    path: str = Field(min_length=3, max_length=1000)
+    asset_type: AssetType = "video"
+
+
+@app.post("/api/projects/{project_id}/assets/import-local")
+def import_local_project_asset(project_id: int, payload: ImportLocalAssetRequest) -> dict[str, Any]:
+    """Copy a file the browser already downloaded into the project's assets.
+
+    Meta AI plays generated videos through MediaSource, so the <video> src is
+    a blob: URL backed by streamed segments — not fetchable, which stranded
+    every video job at "Failed to fetch" even with CDN host permissions. The
+    workable route is to let the site's own Download button write the file to
+    disk and import it from there, which this endpoint does.
+
+    Reads a caller-supplied path, so it is deliberately fenced: the server
+    only listens on 127.0.0.1, and the path must resolve inside the user's
+    home directory (where every browser download lands) with an extension
+    already allowed for that asset type.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    source = Path(payload.path).expanduser()
+    try:
+        source = source.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Không đọc được file: {exc}") from exc
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="Đường dẫn không phải file")
+    home = Path.home().resolve()
+    if not source.is_relative_to(home):
+        raise HTTPException(status_code=400, detail="Chỉ nhận file nằm trong thư mục người dùng")
+    extension = source.suffix.lower()
+    if extension not in _ASSET_EXTENSIONS[payload.asset_type]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Định dạng file không hợp lệ cho {payload.asset_type}. Đuôi nhận được: {extension or 'không có'}",
+        )
+    size = source.stat().st_size
+    if size > LOCAL_ASSET_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File vượt quá giới hạn upload local")
+
+    asset_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / payload.asset_type
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex[:12]}-{_safe_asset_stem(source.name)}{extension}"
+    target = asset_dir / stored_name
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as src, target.open("wb") as output:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                output.write(chunk)
+    except OSError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Không thể sao chép file: {exc}") from exc
+
+    asset = database.create_project_asset(
+        project_id,
+        payload.asset_type,
+        source.name,
+        str(target),
+        mime_type=mimetypes.guess_type(source.name)[0] or "",
+        file_size=size,
+        sha256=digest.hexdigest(),
+    )
+    if not asset:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {"status": "imported", "asset": asset}
+
+
 @app.get("/api/assets/{asset_id}/download")
 def download_project_asset(asset_id: int) -> FileResponse:
     asset = database.get_project_asset(asset_id)
@@ -1724,6 +1798,11 @@ def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
         f"Ban la chuyen gia viet prompt cho AI tao video ngan. {context} "
         "Hay viet lai mo ta canh duoi day thanh MOT prompt video ngan gon, cu the, ro rang ve chuyen dong "
         "xay ra trong video, phu hop de AI tao video hieu va tao ngay khong hoi lai. "
+        # A chat surface that can do both stills and clips will answer with a
+        # still unless the request names the medium — that happened live on
+        # Meta AI, which returned an image for a video job.
+        "Prompt PHAI bat dau bang mot cau yeu cau ro rang tao VIDEO (vi du 'Create a short animated video ...'), "
+        "de AI khong hieu nham thanh tao anh tinh. "
         "Tra loi bang tieng Anh, ngan gon, khong hoi lai, khong giai thich them."
     )
     try:
@@ -1737,6 +1816,7 @@ def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
 class AnswerPromptQuestionRequest(BaseModel):
     original_prompt: str = Field(min_length=1, max_length=20_000)
     page_text: str = Field(default="", max_length=4000)
+    kind: Literal["image", "video"] = "image"
 
 
 _ANSWER_QUESTION_SCHEMA = {
@@ -1755,12 +1835,27 @@ def answer_prompt_question(payload: AnswerPromptQuestionRequest) -> dict[str, An
     it and writes a short, natural confirmation so the chat can proceed
     without a human — same account/subscription used everywhere else in
     this app, not a metered API key."""
+    # The answer has to name the right output type. While this was hardcoded
+    # to "anh", video jobs got a reply asking the chat to produce a still —
+    # observed live: Meta AI returned an image for a video job because the
+    # auto-reply ended with "va tao hinh luon giup minh nhe".
+    if payload.kind == "video":
+        target = (
+            "AI tao VIDEO. AI do vua hoi lai mot cau truoc khi tao video, thay vi tao ngay. "
+        )
+        instruction = (
+            "xac nhan/chon phuong an hop ly nhat de AI tao VIDEO CO CHUYEN DONG ngay, khong hoi them. "
+            "Cau tra loi phai noi ro la muon VIDEO (video clip co chuyen dong), tuyet doi khong duoc "
+            "yeu cau tao anh tinh."
+        )
+    else:
+        target = "AI tao anh. AI do vua hoi lai mot cau ve bo cuc/phong cach truoc khi tao anh, thay vi tao ngay. "
+        instruction = "xac nhan/chon phuong an hop ly nhat de AI tiep tuc tao anh ngay, khong hoi them."
     system_prompt = (
-        "Ban dang giup tra loi thay nguoi dung trong mot cuoc chat voi AI tao anh. AI do vua hoi lai mot cau "
-        "ve bo cuc/phong cach truoc khi tao anh, thay vi tao ngay. Duoi day la mo ta canh goc nguoi dung "
-        "muon tao, roi den doan cuoi trang chat hien tai (co the lan lon voi noi dung khac ngoai cau hoi). "
-        "Hay viet MOT cau tra loi ngan gon, tu nhien, cung ngon ngu voi doan chat, xac nhan/chon phuong an "
-        "hop ly nhat de AI tiep tuc tao anh ngay, khong hoi them."
+        f"Ban dang giup tra loi thay nguoi dung trong mot cuoc chat voi {target}"
+        "Duoi day la mo ta canh goc nguoi dung muon tao, roi den doan cuoi trang chat hien tai "
+        "(co the lan lon voi noi dung khac ngoai cau hoi). "
+        f"Hay viet MOT cau tra loi ngan gon, tu nhien, cung ngon ngu voi doan chat, {instruction}"
     )
     user_prompt = f"Mo ta canh goc:\n{payload.original_prompt}\n\nDuoi trang chat hien tai:\n{payload.page_text}"
     try:
@@ -1771,6 +1866,100 @@ def answer_prompt_question(payload: AnswerPromptQuestionRequest) -> dict[str, An
     if not answer:
         raise HTTPException(status_code=502, detail="Orchestrator khong tra ve cau tra loi")
     return {"answer": answer}
+
+
+class BrowserPageElement(BaseModel):
+    i: int
+    tag: str = ""
+    role: str = ""
+    label: str = ""
+    text: str = ""
+    disabled: bool = False
+
+
+class BrowserActionRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=4000)
+    url: str = Field(default="", max_length=500)
+    elements: list[BrowserPageElement] = Field(default_factory=list)
+    page_text: str = Field(default="", max_length=3000)
+    history: list[str] = Field(default_factory=list)
+    step: int = 0
+
+
+_BROWSER_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["type", "click", "wait", "done", "fail"]},
+        "index": {"type": "integer"},
+        "text": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": ["action", "reason"],
+}
+
+
+@app.post("/api/orchestrator/browser-action")
+def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
+    """Picks the next UI action for the browser extension to perform.
+
+    The extension used to hardcode which selector to click and in what order,
+    which broke on every layout, language, and state difference the live site
+    presented — most of a working session went into guessing selectors. This
+    inverts that: the extension reports what is actually on the page and the
+    orchestrator (the user's own CLI subscription, same as everywhere else in
+    this app) decides one action at a time, so it can react to whatever the
+    site actually shows instead of following a fixed script.
+    """
+    lines = []
+    for element in payload.elements[:80]:
+        parts = [f"[{element.i}] <{element.tag}>"]
+        if element.role:
+            parts.append(f"role={element.role}")
+        if element.label:
+            parts.append(f'label="{element.label[:80]}"')
+        if element.text:
+            parts.append(f'text="{element.text[:80]}"')
+        if element.disabled:
+            parts.append("DISABLED")
+        lines.append(" ".join(parts))
+    element_block = "\n".join(lines) or "(khong co phan tu nao)"
+    history_block = "\n".join(payload.history[-12:]) or "(chua lam gi)"
+
+    system_prompt = (
+        "Ban dang dieu khien mot trang web AI (Meta AI / Gemini / ChatGPT) thong qua mot extension trinh duyet, "
+        "de hoan thanh MUC TIEU duoc giao. Moi luot ban chi chon DUNG MOT hanh dong tiep theo dua tren danh sach "
+        "phan tu dang co tren trang.\n"
+        "Cac hanh dong hop le:\n"
+        "- type: go van ban vao phan tu (can 'index' va 'text')\n"
+        "- click: bam vao phan tu (can 'index')\n"
+        "- wait: cho trang xu ly (dung khi vua gui xong hoac AI dang tao noi dung)\n"
+        "- done: muc tieu da hoan thanh (vi du video/anh ket qua da xuat hien)\n"
+        "- fail: khong the hoan thanh, giai thich ly do trong 'reason'\n\n"
+        "Nguyen tac: phan tu DISABLED thi khong bam duoc, hay 'wait' cho no mo khoa. "
+        "Neu trang hoi lai mot cau de xac nhan, hay 'type' cau tra loi phu hop roi bam gui. "
+        "Neu da gui prompt va dang cho ket qua, hay 'wait'. "
+        "Truong 'reason' viet ngan gon bang tieng Viet."
+    )
+    user_prompt = (
+        f"MUC TIEU:\n{payload.goal}\n\n"
+        f"URL hien tai: {payload.url}\n\n"
+        f"CAC HANH DONG DA LAM (buoc {payload.step}):\n{history_block}\n\n"
+        f"PHAN TU TREN TRANG:\n{element_block}\n\n"
+        f"NOI DUNG CUOI TRANG:\n{payload.page_text}"
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, user_prompt, _BROWSER_ACTION_SCHEMA)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    action = str(result.get("action") or "").strip()
+    if action not in {"type", "click", "wait", "done", "fail"}:
+        raise HTTPException(status_code=502, detail=f"Orchestrator tra ve hanh dong khong hop le: {action}")
+    return {
+        "action": action,
+        "index": result.get("index"),
+        "text": str(result.get("text") or ""),
+        "reason": str(result.get("reason") or ""),
+    }
 
 
 @app.post("/api/projects/{project_id}/scene-jobs")

@@ -20,6 +20,12 @@ const KEEPALIVE_PERIOD_MINUTES = 1; // just "is the socket still open?", not a j
 const PROVIDER_URLS = {
   gemini_web_image: 'https://gemini.google.com/app',
   chatgpt_web_image: 'https://chatgpt.com/',
+  // Not /vibes: that surface is a public feed of other people's AI videos,
+  // and "wait for a new <video> to appear" latched onto strangers' clips
+  // scrolling in (confirmed live — the opened item belonged to unrelated
+  // accounts and had only like/comment/share controls, no download). Our own
+  // prompts land in a chat conversation either way, and the chat page has no
+  // foreign videos to confuse the detector.
   meta_ai_video: 'https://www.meta.ai/',
 };
 // Each job opens its own independent tab, so several can genuinely run at
@@ -76,6 +82,76 @@ async function uploadAsset(projectId, base64, mimeType, kind) {
   if (!response.ok) throw new Error(`Upload asset -> HTTP ${response.status}`);
   const data = await response.json();
   return data.asset.id;
+}
+
+// Imports a file the browser wrote to disk (see waitForNextDownload) —
+// the extension can't read local files, but the app runs on this machine
+// and can, so it takes the path and copies it into the project itself.
+async function importLocalFile(projectId, path, assetType) {
+  const response = await fetch(`${FACTORY}/api/projects/${projectId}/assets/import-local`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, asset_type: assetType }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Import file -> HTTP ${response.status} ${detail.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  return data.asset.id;
+}
+
+// chrome.downloads gives no way to tell which tab started a download, so
+// jobs needing one take turns through this gate: only one job is between
+// "click Download" and "download finished" at a time, which is what makes
+// attributing the next new download to that job safe while other jobs keep
+// generating in parallel.
+let downloadGate = Promise.resolve();
+function withDownloadGate(fn) {
+  const run = downloadGate.then(fn, fn);
+  downloadGate = run.then(() => {}, () => {});
+  return run;
+}
+
+function waitForNextDownload(triggerFn, { timeoutMs = 180000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let downloadId = null;
+    let settled = false;
+    const cleanup = () => {
+      chrome.downloads.onCreated.removeListener(onCreated);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+    };
+    const finish = (isError, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (isError) reject(value instanceof Error ? value : new Error(String(value)));
+      else resolve(value);
+    };
+    const onCreated = (item) => { if (downloadId == null) downloadId = item.id; };
+    const onChanged = (delta) => {
+      if (downloadId == null || delta.id !== downloadId) return;
+      if (delta.state?.current === 'complete') {
+        chrome.downloads.search({ id: downloadId }, (items) => {
+          const filename = items?.[0]?.filename;
+          if (filename) finish(false, filename);
+          else finish(true, new Error('Khong lay duoc duong dan file da tai'));
+        });
+      } else if (delta.state?.current === 'interrupted') {
+        finish(true, new Error(`Tai file bi gian doan: ${delta.error?.current || 'khong ro'}`));
+      }
+    };
+    const timer = setTimeout(() => finish(true, new Error('Het thoi gian cho tai file ve')), timeoutMs);
+    chrome.downloads.onCreated.addListener(onCreated);
+    chrome.downloads.onChanged.addListener(onChanged);
+    Promise.resolve()
+      .then(triggerFn)
+      .then((result) => {
+        if (result && result.ok === false) finish(true, new Error(result.error || 'Khong bam duoc nut Download'));
+      })
+      .catch((error) => finish(true, error));
+  });
 }
 
 async function findOrCreateTab(url) {
@@ -138,7 +214,16 @@ async function processOneJob(provider, job) {
       throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');
     }
     await setJobStatus(jobId, `[${provider}] job ${jobId}: đang tải kết quả lên...`);
-    const assetId = await uploadAsset(projectId, result.base64, result.mimeType, result.kind);
+    let assetId;
+    if (result.needsDownload) {
+      await setJobStatus(jobId, `[${provider}] job ${jobId}: đang lưu video về máy...`);
+      const filePath = await withDownloadGate(() => waitForNextDownload(
+        () => chrome.tabs.sendMessage(tabId, { type: 'ytf_download', provider, videoSrc: result.videoSrc }),
+      ));
+      assetId = await importLocalFile(projectId, filePath, 'video');
+    } else {
+      assetId = await uploadAsset(projectId, result.base64, result.mimeType, result.kind);
+    }
     await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}`, { method: 'POST' });
     await setJobStatus(jobId, `[${provider}] job ${jobId}: xong -> asset ${assetId}`);
   } catch (error) {
@@ -204,6 +289,61 @@ function connectSocket() {
 // arbitrary origin even with host_permissions declared; a background
 // service worker's fetch is a separate context, unaffected by the page's
 // CSP either way.
+// Converts via arrayBuffer rather than FileReader.readAsDataURL: a
+// generated video can be tens of MB and building one giant data: URL
+// string to then slice apart is wasteful, and chunked btoa keeps the call
+// stack safe (String.fromCharCode applied to a whole multi-MB array
+// overflows it).
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// Downloads a generated result on behalf of a content script whose own
+// fetch was blocked by CORS (see ytfImageToBase64 in content_common.js).
+// Works only for hosts declared in manifest host_permissions.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'ytf_fetch_media') return false;
+  (async () => {
+    try {
+      const response = await fetch(message.url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      sendResponse({ base64: await blobToBase64(blob), mimeType: blob.type || 'image/png' });
+    } catch (error) {
+      sendResponse({ base64: null, error: String(error?.message || error) });
+    }
+  })();
+  return true;
+});
+
+// Relays the agent loop's "what should I do next?" to the orchestrator.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'ytf_browser_action') return false;
+  (async () => {
+    try {
+      const response = await fetch(`${FACTORY}/api/orchestrator/browser-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message.payload || {}),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status} ${detail.slice(0, 200)}`);
+      }
+      sendResponse(await response.json());
+    } catch (error) {
+      sendResponse({ error: String(error?.message || error) });
+    }
+  })();
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'ytf_craft_answer') return false;
   (async () => {
@@ -211,7 +351,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const response = await fetch(`${FACTORY}/api/orchestrator/answer-prompt-question`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ original_prompt: message.originalPrompt || '', page_text: message.pageText || '' }),
+        body: JSON.stringify({
+          original_prompt: message.originalPrompt || '',
+          page_text: message.pageText || '',
+          kind: message.kind || 'image',
+        }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();

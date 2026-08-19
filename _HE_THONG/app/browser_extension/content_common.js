@@ -20,6 +20,17 @@ function ytfWaitFor(selectors, { timeoutMs = 20000, intervalMs = 400 } = {}) {
 // Types into either a <textarea>/<input> or a contenteditable element,
 // dispatching the input events these React/Angular-style chat UIs listen
 // for (a plain .value= assignment is usually silently ignored by them).
+//
+// The contenteditable branch must go through execCommand('insertText')
+// rather than assigning .textContent: meta.ai (and Messenger/Facebook)
+// run Lexical, which keeps its own editor model and only updates it from
+// real beforeinput/input events the browser generates. A .textContent
+// assignment paints the text on screen while Lexical still believes the
+// box is empty — which is exactly what was observed live: prompt visible
+// in the chat box, never sent, and the Send button absent entirely
+// (these UIs only render/enable it once their model has content, so the
+// earlier "khong tim thay button[aria-label*='Send']" failure was this
+// same bug, not a wrong selector).
 function ytfTypeInto(el, text) {
   el.focus();
   if ('value' in el) {
@@ -28,33 +39,77 @@ function ytfTypeInto(el, text) {
     if (setter) setter.call(el, text); else el.value = text;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-  } else {
+    return;
+  }
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  if (!document.execCommand('insertText', false, text)) {
     el.textContent = text;
     el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
   }
 }
 
+// Sends one full pointer+mouse activation sequence, exactly once.
+//
+// The previous version dispatched mousedown/mouseup AND called el.click().
+// Menus on meta.ai open on pointer/mouse-down, so the extra native click
+// counted as a second activation and toggled them shut again — the observed
+// result was "clicked the overflow button, nothing opened at all". Meta's UI
+// also listens for PointerEvents, which plain MouseEvents never triggered.
 function ytfClick(el) {
-  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-  el.click();
+  const base = { bubbles: true, cancelable: true, composed: true, view: window, button: 0 };
+  const down = { ...base, buttons: 1 };
+  const up = { ...base, buttons: 0 };
+  el.dispatchEvent(new PointerEvent('pointerover', down));
+  el.dispatchEvent(new MouseEvent('mouseover', down));
+  el.dispatchEvent(new PointerEvent('pointerdown', down));
+  el.dispatchEvent(new MouseEvent('mousedown', down));
+  if (typeof el.focus === 'function') el.focus();
+  el.dispatchEvent(new PointerEvent('pointerup', up));
+  el.dispatchEvent(new MouseEvent('mouseup', up));
+  el.dispatchEvent(new MouseEvent('click', up));
 }
 
 // Fetches an <img>/media src the page has already loaded (same-origin
 // session cookies apply automatically since this runs as a page fetch, not
 // a background-script cross-origin one) and returns {base64, mimeType}.
-async function ytfImageToBase64(url) {
-  const response = await fetch(url, { credentials: 'include' });
-  if (!response.ok) throw new Error(`Khong tai duoc anh: HTTP ${response.status}`);
-  const blob = await response.blob();
-  const mimeType = blob.type || 'image/png';
-  const base64 = await new Promise((resolve, reject) => {
+function ytfBlobToBase64(blob) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
     reader.onerror = () => reject(new Error('Khong doc duoc du lieu anh'));
     reader.readAsDataURL(blob);
   });
-  return { base64, mimeType };
+}
+
+async function ytfImageToBase64(url) {
+  try {
+    const response = await fetch(url, { credentials: 'include' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    return { base64: await ytfBlobToBase64(blob), mimeType: blob.type || 'image/png' };
+  } catch (pageError) {
+    // A content-script fetch is subject to CORS against the media host, and
+    // results live on separate CDNs (fbcdn.net, oaiusercontent.com, ...) that
+    // don't send permissive CORS headers — that surfaced as a bare
+    // "Failed to fetch" after generation had actually succeeded. The
+    // background service worker's fetch bypasses CORS for hosts listed in
+    // manifest host_permissions, so retry there. blob:/data: URLs are the
+    // reverse case (page-scoped, invisible to the worker), hence page-first.
+    if (/^https?:/i.test(url)) {
+      const relayed = await new Promise((resolve) => {
+        try {
+          chrome.runtime.sendMessage({ type: 'ytf_fetch_media', url }, (response) => resolve(response || null));
+        } catch { resolve(null); }
+      });
+      if (relayed?.base64) return { base64: relayed.base64, mimeType: relayed.mimeType || 'image/png' };
+      throw new Error(`Khong tai duoc ket qua: ${String(pageError?.message || pageError)} (background: ${relayed?.error || 'khong phan hoi'}) | URL: ${url.slice(0, 200)}`);
+    }
+    throw new Error(`Khong tai duoc ket qua: ${String(pageError?.message || pageError)} | URL: ${url.slice(0, 200)}`);
+  }
 }
 
 // Chrome throttles image decode/paint in background (inactive) tabs —
@@ -132,11 +187,14 @@ function ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs = 180000,
 // instead of us guessing. Falls back to a generic canned reply if the
 // orchestrator call fails (not logged in, app unreachable, etc.) — a
 // slightly awkward nudge still beats not trying at all.
-function ytfAskOrchestratorForAnswer(originalPrompt) {
+// `kind` decides whether the crafted reply asks for a still or a clip —
+// without it every reply asked for an image, so a video job that hit a
+// clarifying question came back with a picture instead of a video.
+function ytfAskOrchestratorForAnswer(originalPrompt, kind = 'image') {
   return new Promise((resolve) => {
     const pageText = (document.body?.innerText || '').trim().slice(-1500);
     try {
-      chrome.runtime.sendMessage({ type: 'ytf_craft_answer', originalPrompt, pageText }, (response) => {
+      chrome.runtime.sendMessage({ type: 'ytf_craft_answer', originalPrompt, pageText, kind }, (response) => {
         resolve(response?.answer || null);
       });
     } catch {
@@ -146,6 +204,7 @@ function ytfAskOrchestratorForAnswer(originalPrompt) {
 }
 
 const YTF_GENERIC_FOLLOWUP_TEXT = 'Yes, please go ahead and generate the image directly now based on the description above. No need to ask anything further — just pick the best composition/style yourself and proceed.';
+const YTF_GENERIC_VIDEO_FOLLOWUP_TEXT = 'Yes, please go ahead and generate the animated VIDEO clip directly now based on the description above — not a still image. No need to ask anything further; pick the best approach yourself and proceed.';
 
 // Gemini/ChatGPT sometimes ask a clarifying question about style/layout
 // instead of generating directly, or offer 2 candidate images to pick from
@@ -167,8 +226,7 @@ async function ytfWaitForNewImageWithFollowup(
       const promptBox = await ytfWaitFor(promptSelectors, { timeoutMs: 5000 });
       ytfTypeInto(promptBox, followupText);
       await new Promise((r) => setTimeout(r, 300));
-      const submitBtn = await ytfWaitFor(submitSelectors, { timeoutMs: 5000 });
-      ytfClick(submitBtn);
+      await ytfSubmitPrompt(promptBox, submitSelectors, { timeoutMs: 5000 });
     } catch {
       // Couldn't send the nudge (prompt box busy/gone) — fall through and
       // let the remaining wait either catch a late image or time out with
@@ -177,6 +235,160 @@ async function ytfWaitForNewImageWithFollowup(
     const remaining = Math.max(totalTimeoutMs - firstWaitMs, 30000);
     return ytfWaitForNewImage(containerSelectors, priorSrcs, { timeoutMs: remaining });
   }
+}
+
+function ytfComposerText(el) {
+  return String('value' in el ? el.value : el.innerText || '').trim();
+}
+
+// Finds the send control by aria-label/title near the composer. It's an
+// icon-only button whose markup and label language vary, so a fixed selector
+// list keeps missing it; searching outward from the composer itself avoids
+// grabbing an unrelated button elsewhere on the page.
+function ytfFindSubmitNear(promptEl) {
+  const patterns = ['send', 'gửi', 'gui', 'submit'];
+  let node = promptEl;
+  for (let i = 0; node && i < 6; i += 1) {
+    for (const el of node.querySelectorAll("button, [role='button']")) {
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLowerCase();
+      if (patterns.some((pattern) => label.includes(pattern))) return el;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function ytfSendEnter(promptEl) {
+  promptEl.focus();
+  // Focusing a contenteditable does not by itself put a caret inside it, and
+  // an editor that sees no selection of its own ignores the keystroke — so
+  // place the caret at the end before dispatching.
+  if (!('value' in promptEl)) {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(promptEl);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    const event = new KeyboardEvent(type, {
+      key: 'Enter', code: 'Enter', bubbles: true, cancelable: true, composed: true,
+    });
+    // keyCode/which are readonly getters on KeyboardEvent.prototype — the
+    // constructor's options bag silently ignores them and they read back
+    // as 0, so a handler doing `if (e.keyCode === 13)` (still very common
+    // in chat UIs) never fires. They have to be redefined per-event.
+    Object.defineProperty(event, 'keyCode', { get: () => 13 });
+    Object.defineProperty(event, 'which', { get: () => 13 });
+    promptEl.dispatchEvent(event);
+  }
+}
+
+// Submits the composer and VERIFIES the prompt actually went out.
+//
+// This used to fire a click (or Enter) and return either way, so a failed
+// submit was indistinguishable from a successful one: the prompt sat visibly
+// in the box while the job burned its whole multi-minute wait and then failed
+// with a misleading "no result appeared". Checking that the composer emptied
+// turns that into an immediate error naming exactly what was tried.
+async function ytfSubmitPrompt(promptEl, submitSelectors, { timeoutMs = 4000 } = {}) {
+  // "Composer is empty" is the wrong test when promptEl turns out to be a
+  // wrapper rather than the editor itself: leftover placeholder text would
+  // make a successful send look failed. Track the prompt's own opening text
+  // instead — that disappears on send no matter what else the node holds.
+  const before = ytfComposerText(promptEl);
+  const marker = before.slice(0, 40);
+  const startUrl = location.href;
+  const sent = () => {
+    // A successful send re-renders the composer (and routes from / to
+    // /prompt/<id>). The old node is then detached — and a detached
+    // textarea keeps its .value, so reading text off it reported "not
+    // sent" forever even though the prompt had gone through.
+    if (!promptEl.isConnected) return true;
+    if (location.href !== startUrl) return true;
+    return marker
+      ? !ytfComposerText(promptEl).includes(marker)
+      : ytfComposerText(promptEl).length === 0;
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 1500));
+  const tried = [];
+
+  const findButton = () => {
+    for (const selector of submitSelectors) {
+      let found = null;
+      try { found = document.querySelector(selector); } catch { found = null; }
+      if (found) return found;
+    }
+    return ytfFindSubmitNear(promptEl);
+  };
+  const isEnabled = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+
+  // With a reference image attached the send button sits disabled until the
+  // site finishes its own upload — measured live: disabled=true with an
+  // image, disabled=false without one. Clicking through that window did
+  // nothing, so wait for it to unlock before attempting anything.
+  let button = findButton();
+  const enableDeadline = Date.now() + Math.max(timeoutMs, 45000);
+  while (!isEnabled(button) && Date.now() < enableDeadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    button = findButton();
+  }
+
+  // The send button is found reliably (aria-label "Gửi"), but a dispatched
+  // click alone did not activate it, so this walks through progressively
+  // different activation routes and checks after each one. Verification is
+  // what makes trying several safe: the first that empties the composer wins
+  // and the rest never run.
+  const attempts = [];
+  if (button) {
+    const name = button.getAttribute('aria-label') || button.tagName;
+    attempts.push([`click(${name})`, () => ytfClick(button)]);
+    // Native .click() carries activation semantics a synthetic MouseEvent
+    // doesn't, and some handlers sit on the inner icon rather than the button.
+    attempts.push(['native-click', () => button.click?.()]);
+    attempts.push(['click-child', () => {
+      const child = button.querySelector('svg, span, div, i');
+      if (child) ytfClick(child);
+    }]);
+  }
+  attempts.push(['enter', () => ytfSendEnter(promptEl)]);
+  attempts.push(['form-submit', () => {
+    const form = promptEl.closest('form');
+    if (form) (form.requestSubmit ? form.requestSubmit() : form.submit());
+  }]);
+
+  for (const [name, run] of attempts) {
+    tried.push(name);
+    try { run(); } catch { /* try the next route */ }
+    await settle();
+    if (sent()) return;
+  }
+
+  // Nearest ancestor that actually holds buttons — the immediate parents of a
+  // contenteditable usually hold none, which is why the previous diagnostic
+  // reported "(khong co)" and told us nothing.
+  let composer = promptEl.parentElement;
+  for (let i = 0; composer && i < 6; i += 1) {
+    if (composer.querySelector("button, [role='button']")) break;
+    composer = composer.parentElement;
+  }
+  const clickables = composer ? [...composer.querySelectorAll("button, [role='button']")] : [];
+  const labels = clickables
+    .map((el) => (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || '').trim())
+    .filter(Boolean).slice(0, 20).join(' / ');
+  // A send button that is present but refuses every activation route is
+  // usually disabled because the composer's own state says "nothing to
+  // send" — worth knowing before hunting for more ways to click it.
+  const buttonState = button
+    ? `disabled=${button.disabled ?? 'n/a'} aria-disabled=${button.getAttribute('aria-disabled') ?? 'n/a'}`
+    : 'khong tim thay nut';
+  const attached = document.querySelectorAll("input[type='file']").length;
+  throw new Error(
+    `Khong gui duoc prompt (da thu: ${tried.join(', ')}). Nut Gui: ${buttonState}. `
+    + `O nhap: <${promptEl.tagName.toLowerCase()}> con giu "${ytfComposerText(promptEl).slice(0, 60)}". `
+    + `So input file: ${attached}. Nut quanh khung soan: ${labels || '(khong co)'}`,
+  );
 }
 
 function ytfCollectExistingImageSrcs(containerSelectors) {

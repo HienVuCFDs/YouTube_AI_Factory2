@@ -29,8 +29,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const promptBox = await ytfWaitFor(YTF_GEMINI_PROMPT_SELECTORS, { timeoutMs: 20000 });
       ytfTypeInto(promptBox, message.prompt);
       await new Promise((r) => setTimeout(r, 300));
-      const submitBtn = await ytfWaitFor(YTF_GEMINI_SUBMIT_SELECTORS, { timeoutMs: 10000 });
-      ytfClick(submitBtn);
+      await ytfSubmitPrompt(promptBox, YTF_GEMINI_SUBMIT_SELECTORS, { timeoutMs: 8000 });
       const imageSrc = await ytfWaitForNewImageWithFollowup(
         YTF_GEMINI_IMAGE_SELECTORS, priorSrcs, YTF_GEMINI_PROMPT_SELECTORS, YTF_GEMINI_SUBMIT_SELECTORS, message.prompt,
       );
