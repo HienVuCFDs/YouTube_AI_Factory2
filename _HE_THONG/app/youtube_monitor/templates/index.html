@@ -421,7 +421,7 @@
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
+          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo · tạo video thật</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI cho các cảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Video sẽ được tạo cho mỗi cảnh chưa có hình.</div>
@@ -3250,7 +3250,7 @@
     return {
       antigravity_image: 'Antigravity', flow_veo: 'Flow (Veo 3)', meta_ai_video: 'Meta AI (Vibes)',
       gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
-      gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)',
+      gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)', flow_image: 'Flow (ảnh)',
     }[provider] || provider || 'AI';
   }
 
@@ -3258,8 +3258,8 @@
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
-  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'flow_veo', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image']);
-  const IMAGE_PROVIDER_OPTIONS = '<option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image']);
+  const IMAGE_PROVIDER_OPTIONS = '<option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
   const VIDEO_PROVIDER_OPTIONS = '<option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo (API)</option>';
 
   async function findReferenceImageAssetId(projectId, visualPath) {

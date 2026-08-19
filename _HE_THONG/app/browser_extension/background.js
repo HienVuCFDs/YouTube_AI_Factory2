@@ -30,6 +30,16 @@ const PROVIDER_URLS = {
   // whichever Flow project the user already has open (see REUSE_TAB_MATCH),
   // rather than forcing one hardcoded project.
   flow_veo: 'https://labs.google/fx/vi/tools/flow',
+  // Same workspace as flow_veo — the composer's own tab switch picks image
+  // vs video, and image generation there costs no credits.
+  flow_image: 'https://labs.google/fx/vi/tools/flow',
+};
+
+// Our ratio strings, in the terms Flow's own aspect-ratio buttons use.
+const FLOW_ASPECT_LABELS = {
+  '1280:720': '16:9',
+  '720:1280': '9:16',
+  '1024:1024': '1:1',
 };
 // Each job opens its own independent tab, so several can genuinely run at
 // once with no DOM conflict — this just caps how many at a time (across
@@ -377,6 +387,41 @@ async function typeWithDebugger(tabId, index, text) {
   }
 }
 
+// Clicks by having the browser dispatch a real mouse press at the element's
+// position, over the DevTools protocol.
+//
+// Same reason as typeWithDebugger: Flow ignores synthetic activation. The
+// prompt was typed, the options were right, and the agent clicked the send
+// arrow — and nothing was ever submitted, through every synthetic variant
+// (dispatched click, native .click(), pointer sequences, clicking the inner
+// icon). A protocol-level press is indistinguishable from the user's own.
+async function clickWithDebugger(tabId, index) {
+  const target = { tabId };
+  await debuggerAttach(target);
+  try {
+    const box = await debuggerCommand(target, 'Runtime.evaluate', {
+      expression: `(() => {
+        const el = document.querySelector('[data-ytf-idx="${index}"]');
+        if (!el) return null;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return null;
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`,
+      returnByValue: true,
+    });
+    const point = box?.result?.value;
+    if (!point) return 'khong-thay-phan-tu-hoac-khong-nhin-thay';
+    const common = { x: point.x, y: point.y, button: 'left', clickCount: 1, buttons: 1 };
+    await debuggerCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', ...common, buttons: 0 });
+    await debuggerCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...common });
+    await debuggerCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...common, buttons: 0 });
+    return 'ok';
+  } finally {
+    await debuggerDetach(target);
+  }
+}
+
 // Types into a field from the PAGE's own JS world.
 //
 // A content script runs in an isolated world with its own DOM wrappers, so
@@ -461,6 +506,17 @@ async function performAction(tabId, action, referenceImage) {
     const fallback = await sendToTab(tabId, { type: 'ytf_agent_action', action });
     return { ...fallback, via: `content-script (${notes.join('; ')})` };
   }
+  if (action.action === 'click' && typeof action.index === 'number') {
+    try {
+      const outcome = await clickWithDebugger(tabId, action.index);
+      if (outcome === 'ok') return { ok: true, via: 'debugger-click' };
+      const fallback = await sendToTab(tabId, { type: 'ytf_agent_action', action });
+      return { ...fallback, via: `content-script-click (debugger: ${outcome})` };
+    } catch (error) {
+      const fallback = await sendToTab(tabId, { type: 'ytf_agent_action', action });
+      return { ...fallback, via: `content-script-click (debugger: ${String(error?.message || error)})` };
+    }
+  }
   return sendToTab(tabId, {
     type: 'ytf_agent_action',
     action,
@@ -502,6 +558,7 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
   // already there and the job is to select it, not send it again.
   let attachCount = 0;
   for (let step = 1; step <= maxSteps; step += 1) {
+    if (onStep && step === 1) await onStep('dang-chup-trang');
     const snapshot = await sendToTab(tabId, { type: 'ytf_agent_snapshot' });
     if (!snapshot.ok) throw new Error(snapshot.error || 'Khong chup duoc trang');
 
@@ -563,6 +620,29 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
 }
 
 function buildAgentGoal(provider, job, hasReference) {
+  if (provider === 'flow_image') {
+    const aspect = FLOW_ASPECT_LABELS[job.ratio] || '16:9';
+    return [
+      'Tao MOT ANH TINH bang Google Flow trong project dang mo.',
+      '',
+      'GIAO DIEN: khung soan nam o DUOI CUNG giua man hinh. Ngay tren o nhap co bang tuy chon voi:',
+      '- Hai the: "Hinh anh" va "Video" -> phai chon the "Hinh anh"',
+      `- Day ti le khung hinh: 16:9, 4:3, 1:1, 3:4, 9:16 -> chon ${aspect}`,
+      '- Bo chon model (vi du "Nano Banana 2")',
+      '- So luong: x1, x2, x3, x4 -> chon x1 (chi can 1 anh)',
+      'Neu bang tuy chon chua hien, hay bam vao nhan che do canh o nhap de mo no ra.',
+      '',
+      'Sau khi dat dung cac tuy chon, go prompt vao o nhap roi bam nut mui ten gui o goc phai-duoi.',
+      'Dong chu "Qua trinh tao se ton 0 tin dung" xac nhan dang o che do anh (khong ton tin dung).',
+      'Neu no bao ton tin dung thi ban dang o che do VIDEO — hay chuyen lai ve the "Hinh anh".',
+      '',
+      'Anh tao xong sau vai giay. Chi tra ve done khi anh KET QUA cua luot tao nay da xuat hien,',
+      'kem index cua phan tu <img> do. Cac anh cu trong thu vien KHONG phai ket qua.',
+      '',
+      'PROMPT CAN GUI:',
+      job.prompt,
+    ].join('\n');
+  }
   if (provider === 'flow_veo') {
     return [
       'Tao MOT VIDEO NGAN bang Google Flow (Veo) trong project dang mo san.',
@@ -646,13 +726,23 @@ function buildAgentGoal(provider, job, hasReference) {
 // must run one job at a time.
 const REUSE_TAB_MATCH = {
   flow_veo: 'https://labs.google/*',
+  flow_image: 'https://labs.google/*',
 };
 
 async function processOneJob(provider, job) {
-  if (REUSE_TAB_MATCH[provider]) {
-    return withProviderTabLock(provider, () => runJob(provider, job));
-  }
+  const shared = REUSE_TAB_MATCH[provider];
+  // Keyed by the shared tab, not the provider: flow_image and flow_veo drive
+  // the same Flow tab, so locking per provider would let them collide.
+  if (shared) return withProviderTabLock(shared, () => runJob(provider, job));
   return runJob(provider, job);
+}
+
+// Breadcrumbs to the app's access log. A stalled run leaves no trace at all
+// otherwise — the job sits at "running" with no error and no requests, and
+// the reason lives only in the service worker's own console.
+function trace(jobId, stage) {
+  return fetch(`${FACTORY}/api/browser/trace?job=${jobId}&stage=${encodeURIComponent(stage)}`)
+    .catch(() => { /* tracing must never break the run */ });
 }
 
 async function runJob(provider, job) {
@@ -661,6 +751,7 @@ async function runJob(provider, job) {
   let tabId = null;
   let createdTab = false;
   try {
+    await trace(jobId, `bat-dau-${provider}`);
     let referenceImage = null;
     if (job.reference_asset_id) {
       try {
@@ -674,24 +765,30 @@ async function runJob(provider, job) {
     await setJobStatus(jobId, `[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
     // Flow is a heavy workspace app that keeps initialising after load.
     const opened = await findOrCreateTab(PROVIDER_URLS[provider], {
-      settleMs: provider === 'flow_veo' ? 8000 : 1500,
+      settleMs: provider.startsWith('flow_') ? 8000 : 1500,
       reuseMatch: REUSE_TAB_MATCH[provider] || null,
     });
     tabId = opened.tabId;
     createdTab = opened.created;
+    await trace(jobId, createdTab ? 'da-mo-tab-moi' : 'dung-lai-tab-co-san');
     if (!createdTab) {
       await setJobStatus(jobId, `[${provider}] job ${jobId}: dùng lại tab đang mở sẵn`);
       await ensureContentScripts(tabId);
+      await trace(jobId, 'da-tiem-content-script');
     }
 
     const goal = buildAgentGoal(provider, job, Boolean(referenceImage));
     let result;
     if (goal) {
+      await trace(jobId, 'bat-dau-vong-lap-agent');
       const finished = await runAgentInTab(tabId, goal, {
         // Veo takes minutes, so its run needs room for many wait steps.
         maxSteps: provider === 'flow_veo' ? 50 : 30,
         referenceImage,
-        onStep: (label) => setJobStatus(jobId, `[${provider}] job ${jobId}: ${label}`),
+        onStep: async (label) => {
+          await setJobStatus(jobId, `[${provider}] job ${jobId}: ${label}`);
+          await trace(jobId, label.slice(0, 100));
+        },
       });
       if (typeof finished.index !== 'number') {
         throw new Error('AI điều phối báo xong nhưng không chỉ ra phần tử kết quả');

@@ -529,7 +529,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -538,7 +538,7 @@ class CreateSceneGenerationRequest(BaseModel):
 
 
 class BatchSceneGenerationRequest(BaseModel):
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
@@ -1733,7 +1733,7 @@ def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
 # written as a multi-step animation brief: "sau do...", "tiep theo...")
 # reliably triggers the model to ask a clarifying question instead of
 # generating directly — confirmed live across both Gemini and ChatGPT.
-_CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image"}
+_CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image", "flow_image"}
 # These produce video, not a still — the "collapse to one static frame"
 # instruction _craft_image_prompt gives would be actively wrong here, so they
 # get motion-oriented crafting (_craft_video_prompt) instead.
@@ -2233,6 +2233,18 @@ def complete_browser_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
     return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.get("/api/browser/trace")
+def browser_trace(job: int = 0, stage: str = "") -> dict[str, Any]:
+    """Breadcrumb endpoint for the extension's job pipeline.
+
+    A stalled run is otherwise invisible from here: the job sits at
+    'running' with no error and no requests, and the only place the reason
+    exists is the extension's own service-worker console. Each stage hits
+    this so the server access log shows exactly how far a job got.
+    """
+    return {"ok": True, "job": job, "stage": stage[:120]}
 
 
 @app.post("/api/browser-scene-jobs/{job_id}/fail")

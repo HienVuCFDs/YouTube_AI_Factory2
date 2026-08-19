@@ -3,6 +3,7 @@ const CHECKBOXES = {
   chatgpt_web_image: 'p-chatgpt',
   meta_ai_video: 'p-meta',
   flow_veo: 'p-flow',
+  flow_image: 'p-flow-image',
 };
 
 async function loadState() {
