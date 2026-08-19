@@ -3,7 +3,7 @@
   "name": "YT Factory - AI Web Bridge",
   "version": "1.0.0",
   "description": "Dieu phoi Gemini/ChatGPT/Meta AI web (tai khoan da dang nhap trong trinh duyet nay) de tao anh/video cho YouTube AI Factory. Khong dung API tra phi, khong can dang nhap rieng.",
-  "permissions": ["tabs", "scripting", "storage", "alarms", "downloads"],
+  "permissions": ["tabs", "scripting", "storage", "alarms", "downloads", "debugger"],
   "host_permissions": [
     "http://127.0.0.1:8787/*",
     "https://gemini.google.com/*",

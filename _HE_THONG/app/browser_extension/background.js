@@ -303,6 +303,80 @@ async function sendToTab(tabId, message, { retries = 6, gapMs = 2000 } = {}) {
   throw new Error(`Tab khong phan hoi: ${String(lastError?.message || lastError)}`);
 }
 
+// Types by asking the browser itself to insert the text, over the DevTools
+// protocol.
+//
+// This is the only route whose input events are genuinely trusted, and
+// trusted input is what rich-text editors actually respond to. Everything
+// else — assigning .value, execCommand, dispatching beforeinput, even
+// running in the page's own world — left Flow's Lexical composer believing
+// it was empty: the prompt was visible on screen with the placeholder still
+// overlaid, and the send button never unlocked. The cost is the browser's
+// "is being debugged" banner while a job runs, which is worth paying for a
+// step that otherwise cannot be completed at all.
+function debuggerCommand(target, method, params) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand(target, method, params, (result) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(result);
+    });
+  });
+}
+
+function debuggerAttach(target) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach(target, '1.3', () => {
+      const error = chrome.runtime.lastError;
+      // Already attached is fine — another job in this run may hold it.
+      if (error && !/already attached/i.test(error.message)) reject(new Error(error.message));
+      else resolve();
+    });
+  });
+}
+
+function debuggerDetach(target) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach(target, () => {
+      void chrome.runtime.lastError; // detaching an already-gone target is fine
+      resolve();
+    });
+  });
+}
+
+async function typeWithDebugger(tabId, index, text) {
+  const target = { tabId };
+  await debuggerAttach(target);
+  try {
+    // Focus the real editable host and select what's there, so the insert
+    // replaces rather than appends.
+    const focusResult = await debuggerCommand(target, 'Runtime.evaluate', {
+      expression: `(() => {
+        const target = document.querySelector('[data-ytf-idx="${index}"]');
+        if (!target) return 'khong-thay-phan-tu';
+        const el = target.isContentEditable
+          ? (target.closest('[data-lexical-editor="true"]') || target)
+          : (target.querySelector('[data-lexical-editor="true"], [contenteditable="true"]') || target);
+        el.focus();
+        if ('value' in el && typeof el.select === 'function') { el.select(); return 'ok'; }
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return 'ok';
+      })()`,
+      returnByValue: true,
+    });
+    if (focusResult?.result?.value !== 'ok') {
+      return String(focusResult?.result?.value || 'khong-focus-duoc');
+    }
+    await debuggerCommand(target, 'Input.insertText', { text });
+    return 'ok';
+  } finally {
+    await debuggerDetach(target);
+  }
+}
+
 // Types into a field from the PAGE's own JS world.
 //
 // A content script runs in an isolated world with its own DOM wrappers, so
@@ -365,19 +439,27 @@ async function typeIntoMainWorld(tabId, index, text) {
 // script, which holds the live element references.
 async function performAction(tabId, action, referenceImage) {
   if (action.action === 'type' && typeof action.index === 'number') {
-    let mainWorldNote = '';
+    const text = action.text || '';
+    const notes = [];
+
+    // Ordered by how convincing the input looks to the page: a real browser
+    // insert, then the page's own world, then the isolated world.
     try {
-      const outcome = await typeIntoMainWorld(tabId, action.index, action.text || '');
-      if (outcome === 'ok') return { ok: true, via: 'main-world' };
-      mainWorldNote = outcome;
+      const outcome = await typeWithDebugger(tabId, action.index, text);
+      if (outcome === 'ok') return { ok: true, via: 'debugger' };
+      notes.push(`debugger: ${outcome}`);
     } catch (error) {
-      // world:'MAIN' needs a recent Chromium; on an older build this throws
-      // and we quietly used the content-script path instead — worth saying
-      // so, since that path is the one React can ignore.
-      mainWorldNote = String(error?.message || error);
+      notes.push(`debugger: ${String(error?.message || error)}`);
+    }
+    try {
+      const outcome = await typeIntoMainWorld(tabId, action.index, text);
+      if (outcome === 'ok') return { ok: true, via: `main-world (${notes.join('; ')})` };
+      notes.push(`main-world: ${outcome}`);
+    } catch (error) {
+      notes.push(`main-world: ${String(error?.message || error)}`);
     }
     const fallback = await sendToTab(tabId, { type: 'ytf_agent_action', action });
-    return { ...fallback, via: `content-script (main-world: ${mainWorldNote})` };
+    return { ...fallback, via: `content-script (${notes.join('; ')})` };
   }
   return sendToTab(tabId, {
     type: 'ytf_agent_action',
