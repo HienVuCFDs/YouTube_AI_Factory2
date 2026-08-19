@@ -84,10 +84,18 @@ function ytfTakeSnapshot() {
   ytfSnapshotElements = [];
   const described = [];
   const seen = new Set();
+  // Stamp each element with its index. Attributes live on the DOM node
+  // itself, so they're the one way to name an element across JS worlds —
+  // background.js needs that to type into a field from the page's own
+  // context (see typeIntoMainWorld). Cleared first so a stale index from an
+  // earlier snapshot can't be matched.
+  document.querySelectorAll('[data-ytf-idx]').forEach((el) => el.removeAttribute('data-ytf-idx'));
   const push = (el, extra = {}) => {
     if (seen.has(el)) return;
     seen.add(el);
-    described.push({ i: ytfSnapshotElements.length, ...ytfDescribeElement(el), ...extra });
+    const index = ytfSnapshotElements.length;
+    try { el.setAttribute('data-ytf-idx', String(index)); } catch { /* not settable, fine */ }
+    described.push({ i: index, ...ytfDescribeElement(el), ...extra });
     ytfSnapshotElements.push(el);
   };
 
@@ -101,6 +109,30 @@ function ytfTakeSnapshot() {
   for (const el of visible) {
     push(el);
     if (described.length >= 60) break;
+  }
+
+  // Controls built from plain <div>s carry no button/role markup, so the
+  // semantic pass above misses them entirely — Flow's "Bắt đầu"/"Kết thúc"
+  // frame slots never appeared at all, leaving the agent with no way to
+  // attach the starting image. A pointer cursor is what makes them look
+  // clickable to a person, so use the same signal: small, visible, few
+  // children, and not nested inside something already captured.
+  const isInsideCaptured = (el) => {
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      if (seen.has(node)) return true;
+    }
+    return false;
+  };
+  for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+    if (described.length >= 70) break;
+    if (seen.has(el) || el.children.length > 3) continue;
+    const text = String(el.innerText || '').trim();
+    if (!text || text.length > 40) continue;
+    if (!ytfIsVisible(el) || isInsideCaptured(el)) continue;
+    let cursor = '';
+    try { cursor = window.getComputedStyle(el).cursor; } catch { continue; }
+    if (cursor !== 'pointer') continue;
+    push(el, {});
   }
 
   // File inputs are almost always styled invisible (a button acts as their

@@ -1752,9 +1752,30 @@ _CRAFT_VIDEO_PROMPT_SCHEMA = {
 
 
 def _call_orchestrator_json(system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Calls the configured orchestrator CLI, falling back to the other one.
+
+    The browser agent asks for a decision on every step, so a single CLI
+    hiccup used to end the whole run — one transient Claude Code error threw
+    away a 30-step Flow session that was nearly finished. Both CLIs are the
+    user's own logged-in subscriptions, so trying the other costs nothing
+    extra and covers the usual causes: a transient failure, or one provider
+    sitting in a usage-limit window while the other has reset.
+    """
     provider = settings.orchestrator_provider()
-    call = call_claude_code_cli_json if provider == "claude_code_cli" else call_codex_json
-    return call(system_prompt, user_prompt, schema)
+    primary, secondary = (
+        (call_claude_code_cli_json, call_codex_json)
+        if provider == "claude_code_cli"
+        else (call_codex_json, call_claude_code_cli_json)
+    )
+    try:
+        return primary(system_prompt, user_prompt, schema)
+    except LlmError as primary_error:
+        try:
+            return secondary(system_prompt, user_prompt, schema)
+        except LlmError as secondary_error:
+            raise LlmError(
+                f"Ca hai orchestrator deu that bai. Chinh: {primary_error} | Du phong: {secondary_error}"
+            ) from primary_error
 
 
 def _craft_image_prompt(raw_prompt: str) -> str:

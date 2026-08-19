@@ -303,17 +303,110 @@ async function sendToTab(tabId, message, { retries = 6, gapMs = 2000 } = {}) {
   throw new Error(`Tab khong phan hoi: ${String(lastError?.message || lastError)}`);
 }
 
-async function askOrchestratorForAction(payload) {
-  const response = await fetch(`${FACTORY}/api/orchestrator/browser-action`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+// Types into a field from the PAGE's own JS world.
+//
+// A content script runs in an isolated world with its own DOM wrappers, so
+// React's value tracker — which lives on the page's wrapper — never sees the
+// assignment. Observed on Flow: the prompt text appeared in the textarea but
+// React still believed it empty, leaving the "Tạo" button disabled through
+// every retry. Running the same assignment in the main world puts it on the
+// wrapper React is watching, so its onChange fires and the button unlocks.
+async function typeIntoMainWorld(tabId, index, text) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    args: [String(index), text],
+    func: (idx, value) => {
+      const target = document.querySelector(`[data-ytf-idx="${idx}"]`);
+      if (!target) return 'khong-thay-phan-tu';
+      // Resolve to the editor's own root: a rich-text editor only listens on
+      // its own element, so typing into a look-alike wrapper leaves its model
+      // empty even though the characters show up.
+      const el = target.isContentEditable
+        ? (target.closest('[data-lexical-editor="true"]') || target)
+        : (target.querySelector('[data-lexical-editor="true"], [contenteditable="true"]') || target);
+      el.focus();
+      if ('value' in el) {
+        const proto = el instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, value); else el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'ok';
+      }
+      const selectAll = () => {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      };
+      const landed = () => String(el.innerText || '').includes(value.slice(0, 30));
+      selectAll();
+      if (document.execCommand('insertText', false, value) && landed()) return 'ok';
+      // Lexical builds its model from beforeinput, not from the DOM.
+      selectAll();
+      el.dispatchEvent(new InputEvent('beforeinput', {
+        bubbles: true, cancelable: true, composed: true, inputType: 'insertText', data: value,
+      }));
+      el.dispatchEvent(new InputEvent('input', {
+        bubbles: true, composed: true, inputType: 'insertText', data: value,
+      }));
+      return landed() ? 'ok' : 'go-vao-nhung-editor-khong-nhan';
+    },
   });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`Hoi AI dieu phoi -> HTTP ${response.status} ${detail.slice(0, 200)}`);
+  return injected?.result || 'khong-co-ket-qua';
+}
+
+// Routes one action: typing goes through the page's own world (React only
+// notices assignments made there), everything else through the content
+// script, which holds the live element references.
+async function performAction(tabId, action, referenceImage) {
+  if (action.action === 'type' && typeof action.index === 'number') {
+    let mainWorldNote = '';
+    try {
+      const outcome = await typeIntoMainWorld(tabId, action.index, action.text || '');
+      if (outcome === 'ok') return { ok: true, via: 'main-world' };
+      mainWorldNote = outcome;
+    } catch (error) {
+      // world:'MAIN' needs a recent Chromium; on an older build this throws
+      // and we quietly used the content-script path instead — worth saying
+      // so, since that path is the one React can ignore.
+      mainWorldNote = String(error?.message || error);
+    }
+    const fallback = await sendToTab(tabId, { type: 'ytf_agent_action', action });
+    return { ...fallback, via: `content-script (main-world: ${mainWorldNote})` };
   }
-  return response.json();
+  return sendToTab(tabId, {
+    type: 'ytf_agent_action',
+    action,
+    referenceImage: action.action === 'attach_image' ? referenceImage : null,
+  });
+}
+
+// Retries a failed decision instead of ending the run. The CLI behind this
+// occasionally errors for one call, and losing a nearly-finished 30-step
+// session to a single hiccup wastes both time and paid generation quota.
+async function askOrchestratorForAction(payload, { attempts = 3 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${FACTORY}/api/orchestrator/browser-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) return await response.json();
+      const detail = await response.text().catch(() => '');
+      lastError = new Error(`HTTP ${response.status} ${detail.slice(0, 200)}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < attempts) await sleep(5000);
+  }
+  throw new Error(`Hoi AI dieu phoi that bai sau ${attempts} lan: ${String(lastError?.message || lastError)}`);
 }
 
 // The observe → decide → act loop. Lives here rather than in the content
@@ -365,12 +458,9 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
       }
     }
 
-    const result = await sendToTab(tabId, {
-      type: 'ytf_agent_action',
-      action: decision,
-      referenceImage: decision.action === 'attach_image' ? referenceImage : null,
-    });
+    const result = await performAction(tabId, decision, referenceImage);
     if (!result.ok) history.push(`   loi khi thuc hien: ${result.error}`);
+    else if (result.via) history.push(`   (thuc hien qua: ${result.via})`);
 
     // Follow-up steps the orchestrator was confident enough to decide without
     // seeing the page again — each one skipped saves ~11s of CLI time. They
@@ -378,7 +468,7 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
     // longer matches what those steps assumed.
     for (const followUp of Array.isArray(decision.then) ? decision.then.slice(0, 4) : []) {
       if (followUp.action === 'attach_image') continue; // one upload per run, enforced above
-      const followResult = await sendToTab(tabId, { type: 'ytf_agent_action', action: followUp });
+      const followResult = await performAction(tabId, followUp, null);
       const tag = `   + ${followUp.action}${followUp.index != null ? `(${followUp.index})` : ''}`;
       if (!followResult.ok) {
         history.push(`${tag}: dung lai - ${followResult.error}`);

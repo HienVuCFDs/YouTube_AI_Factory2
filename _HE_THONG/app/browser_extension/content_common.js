@@ -31,9 +31,37 @@ function ytfWaitFor(selectors, { timeoutMs = 20000, intervalMs = 400 } = {}) {
 // (these UIs only render/enable it once their model has content, so the
 // earlier "khong tim thay button[aria-label*='Send']" failure was this
 // same bug, not a wrong selector).
-function ytfTypeInto(el, text) {
+// Rich-text editors listen for beforeinput on their OWN root element. Typing
+// into a wrapper that merely looks like the field puts the characters in the
+// DOM — visible on screen — while the editor never hears about them: on Flow
+// the prompt showed with its placeholder still overlaid and the send button
+// never unlocked. Resolve to the real editable host first.
+function ytfResolveEditable(el) {
+  if (!el) return el;
+  if (el.isContentEditable) {
+    return el.closest('[data-lexical-editor="true"]') || el;
+  }
+  return el.querySelector('[data-lexical-editor="true"], [contenteditable="true"]') || el;
+}
+
+function ytfTypeInto(target, text) {
+  const el = ytfResolveEditable(target);
   el.focus();
   if ('value' in el) {
+    // execCommand goes through the browser's own editing pipeline, so the
+    // resulting input event is TRUSTED and carries the change the way a real
+    // keystroke would — which is what React's value tracker actually
+    // responds to. Assigning .value from a content script only produces a
+    // synthetic event against an isolated-world wrapper, and React kept
+    // treating the box as empty: on Flow the prompt text was visible while
+    // the placeholder still showed over it and the "Tạo" button stayed
+    // disabled through every retry.
+    try {
+      el.select();
+      if (document.execCommand('insertText', false, text) && el.value === text) return;
+    } catch {
+      // execCommand can be unavailable/disabled — fall through.
+    }
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
       || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
     if (setter) setter.call(el, text); else el.value = text;
@@ -41,15 +69,36 @@ function ytfTypeInto(el, text) {
     el.dispatchEvent(new Event('change', { bubbles: true }));
     return;
   }
-  const selection = window.getSelection();
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  if (!document.execCommand('insertText', false, text)) {
-    el.textContent = text;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
-  }
+  const selectAll = () => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+  const landed = () => String(el.innerText || '').includes(text.slice(0, 30));
+
+  selectAll();
+  try {
+    if (document.execCommand('insertText', false, text) && landed()) return;
+  } catch { /* fall through to the beforeinput route */ }
+
+  // Lexical (Flow's composer, and Meta's) drives its model from beforeinput
+  // rather than from the DOM, so hand it one directly. Without this the text
+  // lands in the DOM while the editor still believes it is empty — the
+  // placeholder stayed visible over the prompt and the send control never
+  // appeared.
+  selectAll();
+  el.dispatchEvent(new InputEvent('beforeinput', {
+    bubbles: true, cancelable: true, composed: true, inputType: 'insertText', data: text,
+  }));
+  el.dispatchEvent(new InputEvent('input', {
+    bubbles: true, composed: true, inputType: 'insertText', data: text,
+  }));
+  if (landed()) return;
+
+  el.textContent = text;
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
 }
 
 // Sends one full pointer+mouse activation sequence, exactly once.
