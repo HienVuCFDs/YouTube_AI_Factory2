@@ -1,4 +1,9 @@
-const CHECKBOXES = { gemini_web_image: 'p-gemini', chatgpt_web_image: 'p-chatgpt', meta_ai_video: 'p-meta' };
+const CHECKBOXES = {
+  gemini_web_image: 'p-gemini',
+  chatgpt_web_image: 'p-chatgpt',
+  meta_ai_video: 'p-meta',
+  flow_veo: 'p-flow',
+};
 
 async function loadState() {
   const stored = await chrome.storage.local.get(['enabledProviders', 'lastStatus', 'lastStatusAt', 'jobStatuses']);

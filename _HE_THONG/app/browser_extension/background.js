@@ -26,6 +26,10 @@ const PROVIDER_URLS = {
   // generates clips. The feed of strangers' videos there is handled by the
   // agent's goal telling it not to mistake one for our result.
   meta_ai_video: 'https://www.meta.ai/vibes',
+  // Only a fallback for when no Flow tab is open: normal operation reuses
+  // whichever Flow project the user already has open (see REUSE_TAB_MATCH),
+  // rather than forcing one hardcoded project.
+  flow_veo: 'https://labs.google/fx/vi/tools/flow',
 };
 // Each job opens its own independent tab, so several can genuinely run at
 // once with no DOM conflict — this just caps how many at a time (across
@@ -40,9 +44,41 @@ let activeJobs = 0;
 let socket = null;
 let reconnectDelayMs = 2000;
 
+// MV3 suspends an idle service worker after ~30s, which silently kills any
+// run in progress: the job stays "running" in the database forever with no
+// error, no log line, and no further requests — exactly what was observed
+// after a job was claimed and then nothing happened at all. Calling a
+// chrome.* API resets that idle timer, so tick one while any job is live.
+// The waits inside a run (11s per orchestrator decision, 8s page waits) are
+// long enough to cross the threshold on their own.
+let keepAliveTimer = null;
+function startKeepAlive() {
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(() => {
+    chrome.runtime.getPlatformInfo(() => { /* touching the API is the point */ });
+  }, 20000);
+}
+function stopKeepAliveIfIdle() {
+  if (keepAliveTimer && activeJobs === 0) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
+// A provider added by an update turns on once, then the user's own tick
+// decides. Without the knownProviders record it would be permanently
+// invisible: the stored list predates it, so jobs for it would be silently
+// skipped with no indication why.
 async function getEnabledProviders() {
-  const stored = await chrome.storage.local.get('enabledProviders');
-  return stored.enabledProviders || Object.keys(PROVIDER_URLS);
+  const all = Object.keys(PROVIDER_URLS);
+  const stored = await chrome.storage.local.get(['enabledProviders', 'knownProviders']);
+  const enabled = stored.enabledProviders || all;
+  const known = stored.knownProviders || (stored.enabledProviders ? [] : all);
+  const added = all.filter((provider) => !known.includes(provider));
+  if (!added.length) return enabled;
+  const merged = [...new Set([...enabled, ...added])];
+  await chrome.storage.local.set({ enabledProviders: merged, knownProviders: all });
+  return merged;
 }
 
 // Per-job status entries (not a single overwritten line) since several jobs
@@ -153,20 +189,54 @@ function waitForNextDownload(triggerFn, { timeoutMs = 180000 } = {}) {
   });
 }
 
-async function findOrCreateTab(url) {
-  const tab = await chrome.tabs.create({ url, active: false });
-  await new Promise((resolve) => {
-    const listener = (tabId, info) => {
-      if (tabId === tab.id && info.status === 'complete') {
+function waitForTabComplete(tabId, { timeoutMs = 30000 } = {}) {
+  return new Promise((resolve) => {
+    const listener = (updatedId, info) => {
+      if (updatedId === tabId && info.status === 'complete') {
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
-    setTimeout(resolve, 15000);
+    setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }, timeoutMs);
   });
-  await new Promise((r) => setTimeout(r, 1500));
-  return tab.id;
+}
+
+// Reuses a tab the user already has open on that site when reuseMatch is
+// given, rather than opening a fresh one.
+//
+// A newly opened Flow tab never reached the scene composer — it sat on the
+// content library with both "Tạo" buttons disabled, no matter which route
+// the agent tried. A tab the user has already navigated to the right screen
+// sidesteps that entirely, and also avoids re-running a heavy workspace
+// app's startup for every job. Returns {tabId, created} so the caller only
+// closes tabs it opened — closing the user's own tab would be rude and
+// would lose whatever state made it usable.
+async function findOrCreateTab(url, { settleMs = 1500, reuseMatch = null } = {}) {
+  if (reuseMatch) {
+    const open = await chrome.tabs.query({ url: reuseMatch });
+    if (open.length) {
+      return { tabId: open[open.length - 1].id, created: false };
+    }
+  }
+  const tab = await chrome.tabs.create({ url, active: false });
+  await waitForTabComplete(tab.id);
+  // Heavy single-page apps keep initialising well past load "complete".
+  await new Promise((r) => setTimeout(r, settleMs));
+  return { tabId: tab.id, created: true };
+}
+
+// Providers that drive a shared, reused tab must take turns — two jobs
+// typing into the same composer would interleave into nonsense.
+const tabLocks = new Map();
+function withProviderTabLock(provider, fn) {
+  const previous = tabLocks.get(provider) || Promise.resolve();
+  const run = previous.then(fn, fn);
+  tabLocks.set(provider, run.then(() => {}, () => {}));
+  return run;
 }
 
 // Fetches an existing scene image (image-to-video reference) as base64 so
@@ -195,6 +265,24 @@ function sleep(ms) {
 // Every navigation tears down the old content script and injects a fresh one,
 // so a send that lands mid-transition throws; retrying is normal operation
 // here, not an error path.
+// Declarative content scripts only land on pages loaded after the extension
+// started. A tab the user already had open — the whole point of reusing one
+// — has no receiver, which surfaced as "Could not establish connection.
+// Receiving end does not exist." Inject on demand, but only when a ping goes
+// unanswered: re-injecting into a tab that already has them throws on the
+// duplicate top-level declarations.
+async function ensureContentScripts(tabId) {
+  try {
+    const pong = await chrome.tabs.sendMessage(tabId, { type: 'ytf_agent_ping' });
+    if (pong?.ok) return;
+  } catch { /* nothing listening yet — inject below */ }
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content_common.js', 'content_agent.js'],
+  });
+  await sleep(500);
+}
+
 async function sendToTab(tabId, message, { retries = 6, gapMs = 2000 } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -206,6 +294,11 @@ async function sendToTab(tabId, message, { retries = 6, gapMs = 2000 } = {}) {
       lastError = error;
     }
     await sleep(gapMs);
+    // Safety net for a page that came back without our scripts (e.g. it
+    // navigated somewhere the declarative injection doesn't cover).
+    if (attempt === 1) {
+      try { await ensureContentScripts(tabId); } catch { /* keep retrying */ }
+    }
   }
   throw new Error(`Tab khong phan hoi: ${String(lastError?.message || lastError)}`);
 }
@@ -227,6 +320,12 @@ async function askOrchestratorForAction(payload) {
 // script so it survives the page navigations the agent itself causes.
 async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null, onStep = null } = {}) {
   const history = [];
+  // Filling a file input uploads a copy into the site's media library. When
+  // that didn't visibly fill the frame slot, the agent kept retrying and
+  // flooded the library with ~20 copies of the same reference image. One
+  // upload per run is all that can ever be useful — after that the file is
+  // already there and the job is to select it, not send it again.
+  let attachCount = 0;
   for (let step = 1; step <= maxSteps; step += 1) {
     const snapshot = await sendToTab(tabId, { type: 'ytf_agent_snapshot' });
     if (!snapshot.ok) throw new Error(snapshot.error || 'Khong chup duoc trang');
@@ -245,6 +344,26 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
 
     if (decision.action === 'done') return { index: decision.index, history };
     if (decision.action === 'fail') throw new Error(`AI dieu phoi dung lai: ${decision.reason}`);
+    if (decision.action === 'reload') {
+      // Recovery from a crashed SPA — Flow died with "Application error: a
+      // client-side exception" and the agent could correctly diagnose it but
+      // had no way to act, so the run was lost.
+      await chrome.tabs.reload(tabId);
+      await waitForTabComplete(tabId);
+      await sleep(5000);
+      continue;
+    }
+
+    if (decision.action === 'attach_image') {
+      attachCount += 1;
+      if (attachCount > 1) {
+        history.push(
+          '   BI CHAN: anh tham chieu DA duoc tai len o buoc truoc roi. Tai len lan nua chi tao them ban sao '
+          + 'thua trong thu vien. Hay bam vao khe "Bat dau" va CHON anh do TU THU VIEN, dung tai len nua.',
+        );
+        continue;
+      }
+    }
 
     const result = await sendToTab(tabId, {
       type: 'ytf_agent_action',
@@ -252,11 +371,79 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
       referenceImage: decision.action === 'attach_image' ? referenceImage : null,
     });
     if (!result.ok) history.push(`   loi khi thuc hien: ${result.error}`);
+
+    // Follow-up steps the orchestrator was confident enough to decide without
+    // seeing the page again — each one skipped saves ~11s of CLI time. They
+    // stop at the first failure, since anything unexpected means the page no
+    // longer matches what those steps assumed.
+    for (const followUp of Array.isArray(decision.then) ? decision.then.slice(0, 4) : []) {
+      if (followUp.action === 'attach_image') continue; // one upload per run, enforced above
+      const followResult = await sendToTab(tabId, { type: 'ytf_agent_action', action: followUp });
+      const tag = `   + ${followUp.action}${followUp.index != null ? `(${followUp.index})` : ''}`;
+      if (!followResult.ok) {
+        history.push(`${tag}: dung lai - ${followResult.error}`);
+        break;
+      }
+      history.push(tag);
+    }
   }
   throw new Error(`Het ${maxSteps} buoc ma chua xong. Da lam:\n${history.join('\n')}`);
 }
 
 function buildAgentGoal(provider, job, hasReference) {
+  if (provider === 'flow_veo') {
+    return [
+      'Tao MOT VIDEO NGAN bang Google Flow (Veo) trong project dang mo san.',
+      '',
+      'CANH BAO QUAN TRONG: Flow co ca chuc nang tao ANH va tao VIDEO. Lan truoc agent da lac vao chuc nang',
+      'tao anh va bam lap lai, sinh ra 7 tam anh tinh giong nhau, tieu ton luot tra phi cua nguoi dung ma',
+      'khong duoc video nao. TUYET DOI khong dung cac muc lien quan den anh ("Hinh anh", "Nhan vat", "Canh",',
+      '"Chinh sua hinh anh", "Nano Banana", "Tao ban ve y tuong"). Neu ket qua hien ra la ANH TINH thi ban',
+      'dang o sai cho — dung bam tiep, hay tim lai khu vuc tao video.',
+      '',
+      'GIAO DIEN THAT (da xem tan mat): khung soan nam o DUOI CUNG giua man hinh, gom:',
+      '- Hai khe khung hinh o tren cung khung soan: "Bat dau" va "Ket thuc" (start/end frame)',
+      '- O nhap prompt lon o giua',
+      '- Goc trai duoi: nut "Tac nhan"',
+      '- Goc phai duoi: nhan che do dang la "Video - 720p - 8s" va NUT MUI TEN GUI (->). Bam mui ten nay',
+      '  chinh la lenh tao video. Day la nut can bam sau khi da go prompt.',
+      '',
+      'Cac tam ANH trong thu vien phia tren la RAC tu nhung lan chay hong truoc, KHONG phai ket qua.',
+      'Dung coi chung la ket qua va dung bam vao chung.',
+      '',
+      hasReference
+        ? [
+          'CO san mot anh tham chieu can dua vao khe "Bat dau" (khung hinh dau tien).',
+          'Cach lam: bam vao khe "Bat dau" -> se hien cac lua chon (vi du tai len tu may / chon tu thu vien)',
+          '-> chon muc TAI LEN tu may -> khi snapshot xuat hien "O DINH KEM FILE" thi dung attach_image vao do.',
+          'CANH BAO DA XAY RA: attach_image do vao o file cua THU VIEN chu khong vao khe "Bat dau", nen khe',
+          'van trong va viec thu lai da tao ra hang chuc ban sao thua trong thu vien. Vi vay attach_image chi',
+          'duoc dung DUNG MOT LAN trong ca luot chay; lan thu hai se bi chan.',
+          '',
+          'Anh mau nhieu kha nang DA CO SAN trong thu vien (tu cac lan truoc). Hay uu tien: bam khe "Bat dau"',
+          '-> chon anh do TU THU VIEN, thay vi tai len moi. Chi dung attach_image neu that su khong tim thay',
+          'anh nao trong thu vien.',
+          '',
+          'BAT BUOC: canh nay DA CO anh mau, nen video PHAI duoc dung tu chinh anh do.',
+          'TUYET DOI KHONG duoc chuyen sang che do van ban thanh video (text-to-video) de tao khong co anh —',
+          'video tao kieu do se khac han anh storyboard, khong dung duoc, va con ton luot tra phi vo ich.',
+          'Neu khong dua duoc anh vao sau khi da thu cac o dinh kem khac nhau, hay tra ve fail va mo ta ro',
+          'da thu nhung gi, trang bao loi gi. KHONG bam tao video khi khe "Bat dau" con trong.',
+        ].join('\n')
+        : 'Khong co anh tham chieu — tao hoan toan tu prompt.',
+      '',
+      'Tab nay co the la tab nguoi dung DA mo san va da o dung man hinh tao video — hay xem ky snapshot',
+      'truoc khi dieu huong di dau. Neu da thay o nhap prompt video va nut tao thi cu dung luon, khong can',
+      'tim kiem them.',
+      '',
+      'Veo tao video mat vai phut. Sau khi bam tao, hay dung wait nhieu lan de cho, dung voi ket luan that bai.',
+      'Chi tra ve done khi video KET QUA cua luot tao nay da xuat hien, kem index cua phan tu <video> do.',
+      'Neu nut tao dang DISABLED, hay wait roi thu lai.',
+      '',
+      'PROMPT CAN GUI:',
+      job.prompt,
+    ].join('\n');
+  }
   if (provider !== 'meta_ai_video') return null;
   return [
     'Tao MOT VIDEO NGAN co chuyen dong (KHONG phai anh tinh) bang tinh nang tao video cua Meta AI.',
@@ -283,10 +470,24 @@ function buildAgentGoal(provider, job, hasReference) {
   ].join('\n');
 }
 
+// Sites whose tab we reuse instead of opening a fresh one, and therefore
+// must run one job at a time.
+const REUSE_TAB_MATCH = {
+  flow_veo: 'https://labs.google/*',
+};
+
 async function processOneJob(provider, job) {
+  if (REUSE_TAB_MATCH[provider]) {
+    return withProviderTabLock(provider, () => runJob(provider, job));
+  }
+  return runJob(provider, job);
+}
+
+async function runJob(provider, job) {
   const jobId = job.id;
   const projectId = job.project_id;
   let tabId = null;
+  let createdTab = false;
   try {
     let referenceImage = null;
     if (job.reference_asset_id) {
@@ -299,13 +500,24 @@ async function processOneJob(provider, job) {
       }
     }
     await setJobStatus(jobId, `[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
-    tabId = await findOrCreateTab(PROVIDER_URLS[provider]);
+    // Flow is a heavy workspace app that keeps initialising after load.
+    const opened = await findOrCreateTab(PROVIDER_URLS[provider], {
+      settleMs: provider === 'flow_veo' ? 8000 : 1500,
+      reuseMatch: REUSE_TAB_MATCH[provider] || null,
+    });
+    tabId = opened.tabId;
+    createdTab = opened.created;
+    if (!createdTab) {
+      await setJobStatus(jobId, `[${provider}] job ${jobId}: dùng lại tab đang mở sẵn`);
+      await ensureContentScripts(tabId);
+    }
 
     const goal = buildAgentGoal(provider, job, Boolean(referenceImage));
     let result;
     if (goal) {
       const finished = await runAgentInTab(tabId, goal, {
-        maxSteps: 30,
+        // Veo takes minutes, so its run needs room for many wait steps.
+        maxSteps: provider === 'flow_veo' ? 50 : 30,
         referenceImage,
         onStep: (label) => setJobStatus(jobId, `[${provider}] job ${jobId}: ${label}`),
       });
@@ -349,10 +561,14 @@ async function processOneJob(provider, job) {
     const message = String(error?.message || error);
     await setJobStatus(jobId, `[${provider}] job ${jobId}: LỖI - ${message}`);
     try {
-      await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/fail?error=${encodeURIComponent(message.slice(0, 500))}`, { method: 'POST' });
+      // These reports are the only window into what actually happened on the
+      // page — 500 chars kept cutting them off mid-diagnosis.
+      await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/fail?error=${encodeURIComponent(message.slice(0, 2000))}`, { method: 'POST' });
     } catch { /* best-effort */ }
   } finally {
-    if (tabId != null) {
+    // Only close tabs we opened — the user's own tab carries the state that
+    // made it usable in the first place.
+    if (tabId != null && createdTab) {
       try { await chrome.tabs.remove(tabId); } catch { /* tab may already be closed */ }
     }
   }
@@ -376,7 +592,11 @@ async function handleProviderNotified(provider) {
     }
     if (!job) return; // queue empty for this provider
     activeJobs += 1;
-    void processOneJob(provider, job).finally(() => { activeJobs -= 1; });
+    startKeepAlive();
+    void processOneJob(provider, job).finally(() => {
+      activeJobs -= 1;
+      stopKeepAliveIfIdle();
+    });
     if (activeJobs < MAX_CONCURRENT_JOBS) await new Promise((r) => setTimeout(r, CLAIM_STAGGER_MS));
   }
 }

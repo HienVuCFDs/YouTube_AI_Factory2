@@ -9,6 +9,7 @@
     "https://gemini.google.com/*",
     "https://chatgpt.com/*",
     "https://www.meta.ai/*",
+    "https://labs.google/*",
     "https://*.fbcdn.net/*",
     "https://*.cdninstagram.com/*",
     "https://*.fbsbx.com/*",
@@ -32,6 +33,11 @@
     },
     {
       "matches": ["https://www.meta.ai/*"],
+      "js": ["content_common.js", "content_agent.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://labs.google/*"],
       "js": ["content_common.js", "content_agent.js"],
       "run_at": "document_idle"
     }

@@ -36,17 +36,45 @@ function ytfIsVisible(el) {
   return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
 }
 
+// Nearest ancestor text, for elements that carry none of their own — an
+// icon button next to "Video · 720p · 8s" is identifiable from that
+// neighbouring text even when the button itself says nothing.
+function ytfContextText(el) {
+  let node = el.parentElement;
+  for (let i = 0; node && i < 3; i += 1) {
+    const text = String(node.innerText || '').trim().replace(/\s+/g, ' ');
+    if (text.length > 2) return text.slice(0, 100);
+    node = node.parentElement;
+  }
+  return '';
+}
+
 function ytfDescribeElement(el) {
   const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || '').trim();
   const text = (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
     ? String(el.value || '').trim()
     : String(el.innerText || '').trim().replace(/\s+/g, ' ');
+  const rect = el.getBoundingClientRect();
+  const className = typeof el.className === 'string' ? el.className : '';
+  // Icon-only controls — Flow's generate button is one — carry no label and
+  // no text, so a description limited to those reported them as a bare
+  // "<button>" and the orchestrator had no way to recognise them. Position,
+  // size, class/id hints and neighbouring text are what make them
+  // identifiable ("the arrow at the bottom right of the composer").
   return {
     tag: el.tagName.toLowerCase(),
     role: el.getAttribute('role') || (el.tagName === 'INPUT' ? el.type || '' : ''),
     label: label.slice(0, 120),
     text: text.slice(0, 120),
     disabled: Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true',
+    id: (el.id || '').slice(0, 60),
+    testid: (el.getAttribute('data-testid') || '').slice(0, 60),
+    cls: className.slice(0, 90),
+    x: Math.round(rect.left),
+    y: Math.round(rect.top),
+    w: Math.round(rect.width),
+    h: Math.round(rect.height),
+    ctx: (label || text) ? '' : ytfContextText(el),
   };
 }
 
@@ -100,9 +128,18 @@ async function ytfAttachReferenceImageTo(el, base64, mimeType) {
   if (!el || !base64) return false;
   let input = el.tagName === 'INPUT' && el.type === 'file' ? el : null;
   if (!input) {
+    // Take whichever input the click REVEALS, never one that was already on
+    // the page. Grabbing the first existing input sent the file to the media
+    // library's uploader instead of the frame slot: the slot stayed empty,
+    // the agent retried, and the library filled with dozens of copies of the
+    // same image. If the click reveals nothing, fail rather than fall back —
+    // a wrong target here is worse than no attach at all.
+    const before = new Set(document.querySelectorAll("input[type='file']"));
     ytfClick(el);
-    await new Promise((r) => setTimeout(r, 800));
-    input = document.querySelector("input[type='file']");
+    for (let waited = 0; waited < 3000 && !input; waited += 500) {
+      await new Promise((r) => setTimeout(r, 500));
+      input = [...document.querySelectorAll("input[type='file']")].find((c) => !before.has(c)) || null;
+    }
   }
   if (!input) return false;
   try {
@@ -121,6 +158,12 @@ async function ytfAttachReferenceImageTo(el, base64, mimeType) {
 
 async function ytfPerformAction(action, referenceImage) {
   const el = typeof action.index === 'number' ? ytfSnapshotElements[action.index] : null;
+  // Batched follow-up steps run against the snapshot taken before the first
+  // one, so an element the earlier step removed must be reported rather than
+  // silently no-op'd — the caller stops the batch and re-observes.
+  if (el && !el.isConnected) {
+    throw new Error(`Phan tu index ${action.index} da bien mat khoi trang`);
+  }
   switch (action.action) {
     case 'type':
       if (!el) throw new Error(`type: khong co phan tu index ${action.index}`);
@@ -145,7 +188,10 @@ async function ytfPerformAction(action, referenceImage) {
       return;
     }
     case 'wait':
-      await new Promise((r) => setTimeout(r, 5000));
+      // Video generation runs for minutes, so a wait step is worth more than
+      // a couple of seconds — each one otherwise costs a full orchestrator
+      // round-trip just to say "keep waiting".
+      await new Promise((r) => setTimeout(r, 8000));
       return;
     default:
       throw new Error(`Hanh dong khong ho tro: ${action.action}`);
@@ -182,10 +228,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith('ytf_agent_')) return false;
   (async () => {
     try {
+      if (message.type === 'ytf_agent_ping') {
+        sendResponse({ ok: true });
+        return;
+      }
       if (message.type === 'ytf_agent_snapshot') {
         sendResponse({
           ok: true,
           url: location.href,
+          // Coordinates only mean something against the viewport they were
+          // measured in.
+          viewport: { w: window.innerWidth, h: window.innerHeight },
           elements: ytfTakeSnapshot(),
           pageText: (document.body?.innerText || '').trim().slice(-1200).replace(/\s+/g, ' '),
         });

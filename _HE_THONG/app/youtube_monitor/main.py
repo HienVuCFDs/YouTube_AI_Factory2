@@ -1734,10 +1734,10 @@ def list_scene_generation_jobs(project_id: int) -> list[dict[str, Any]]:
 # reliably triggers the model to ask a clarifying question instead of
 # generating directly — confirmed live across both Gemini and ChatGPT.
 _CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image"}
-# Meta AI produces video, not a still — the "collapse to one static frame"
-# instruction _craft_image_prompt gives would be actively wrong here, so it
-# gets its own motion-oriented crafting (_craft_video_prompt) instead.
-_CHAT_VIDEO_PROVIDERS = {"meta_ai_video"}
+# These produce video, not a still — the "collapse to one static frame"
+# instruction _craft_image_prompt gives would be actively wrong here, so they
+# get motion-oriented crafting (_craft_video_prompt) instead.
+_CHAT_VIDEO_PROVIDERS = {"meta_ai_video", "flow_veo"}
 
 _CRAFT_IMAGE_PROMPT_SCHEMA = {
     "type": "object",
@@ -1875,11 +1875,28 @@ class BrowserPageElement(BaseModel):
     label: str = ""
     text: str = ""
     disabled: bool = False
+    # Icon-only controls carry no label or text at all — position, size,
+    # class/id hints and neighbouring text are the only things that make them
+    # identifiable, and without them the orchestrator saw a bare "<button>".
+    id: str = ""
+    testid: str = ""
+    cls: str = ""
+    x: int = 0
+    y: int = 0
+    w: int = 0
+    h: int = 0
+    ctx: str = ""
+
+
+class BrowserViewport(BaseModel):
+    w: int = 0
+    h: int = 0
 
 
 class BrowserActionRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     url: str = Field(default="", max_length=500)
+    viewport: BrowserViewport = Field(default_factory=BrowserViewport)
     elements: list[BrowserPageElement] = Field(default_factory=list)
     page_text: str = Field(default="", max_length=3000)
     history: list[str] = Field(default_factory=list)
@@ -1889,9 +1906,28 @@ class BrowserActionRequest(BaseModel):
 _BROWSER_ACTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["type", "click", "attach_image", "wait", "done", "fail"]},
+        "action": {
+            "type": "string",
+            "enum": ["type", "click", "attach_image", "wait", "reload", "done", "fail"],
+        },
         "index": {"type": "integer"},
         "text": {"type": "string"},
+        # Optional follow-up steps to run without another round trip. One
+        # decision costs ~11s of CLI time, so a 30-step run spent most of its
+        # wall clock waiting on the orchestrator rather than on the page.
+        "then": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["type", "click", "attach_image", "wait"]},
+                    "index": {"type": "integer"},
+                    "text": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+        },
         "reason": {"type": "string"},
     },
     "required": ["action", "reason"],
@@ -1919,10 +1955,26 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
             parts.append(f'label="{element.label[:80]}"')
         if element.text:
             parts.append(f'text="{element.text[:80]}"')
+        if element.testid:
+            parts.append(f'testid="{element.testid}"')
+        if element.id:
+            parts.append(f'id="{element.id}"')
+        if element.cls:
+            parts.append(f'class="{element.cls}"')
+        if element.w or element.h:
+            parts.append(f"tai=({element.x},{element.y}) kichthuoc={element.w}x{element.h}")
+        if element.ctx:
+            parts.append(f'canh="{element.ctx[:80]}"')
         if element.disabled:
             parts.append("DISABLED")
         lines.append(" ".join(parts))
     element_block = "\n".join(lines) or "(khong co phan tu nao)"
+    viewport_note = (
+        f"Kich thuoc man hinh: {payload.viewport.w}x{payload.viewport.h} "
+        "(toa do 'tai=(x,y)' tinh tu goc TREN-TRAI; y cang lon la cang gan DAY man hinh, "
+        "x cang lon la cang gan MEP PHAI)."
+        if payload.viewport.w else ""
+    )
     history_block = "\n".join(payload.history[-12:]) or "(chua lam gi)"
 
     system_prompt = (
@@ -1935,8 +1987,24 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
         "- attach_image: dinh kem anh tham chieu vao o dinh kem file (can 'index'); "
         "chi dung khi MUC TIEU noi rang co san anh tham chieu\n"
         "- wait: cho trang xu ly (dung khi vua gui xong hoac AI dang tao noi dung)\n"
+        "- reload: tai lai trang, dung khi trang bi loi/sap (vi du 'Application error') hoac giao dien "
+        "bien mat het; sau khi tai lai se quay ve trang goc ban dau\n"
         "- done: muc tieu da hoan thanh (vi du video/anh ket qua da xuat hien)\n"
         "- fail: khong the hoan thanh, giai thich ly do trong 'reason'\n\n"
+        "GOP NHIEU BUOC: moi lan hoi ban ton khoang 11 giay, nen neu ban CHAC CHAN ve chuoi thao tac tiep "
+        "theo ma khong can nhin lai trang giua chung (vi du: go prompt vao o nhap ROI bam nut gui), hay dua "
+        "them cac buoc do vao mang 'then' (toi da 4 buoc). Chi gop khi cac phan tu can thao tac DEU da co "
+        "trong danh sach hien tai va ban tin chung khong bien mat sau buoc dau. Neu khong chac, cu tra ve "
+        "mot hanh dong va se duoc nhin lai trang o luot sau.\n"
+        "NHAN DIEN NUT KHONG CO CHU: nhieu nut chi co icon nen khong co label lan text. Hay dua vao "
+        "toa do/kich thuoc, ten class/id, va chu o khoi ben canh ('canh=...') de suy ra chuc nang. "
+        "Vi du nut gui/tao thuong la nut vuong nho nam o goc PHAI-DUOI cua khung soan prompt.\n"
+        "QUY TAC CHONG LAP: xem ky phan CAC HANH DONG DA LAM. Neu ban da lam mot hanh dong ma trang "
+        "khong tien trien theo huong mong muon, TUYET DOI khong lam lai hanh dong do lan nua — hay thu "
+        "cach khac. Neu da thu 3 cach khac nhau ma van khong dung huong, hay tra ve 'fail' va noi ro ly do. "
+        "Moi lan bam nham nut tao co the tieu ton luot tra phi cua nguoi dung, nen tha dung lai con hon lap lai. "
+        "KIEM TRA LOAI KET QUA: neu MUC TIEU la tao video ma ket qua hien ra lai la anh tinh, thi day la SAI "
+        "— dung tao them, hay tim dung chuc nang tao video hoac tra ve 'fail'.\n"
         "Nguyen tac: phan tu DISABLED thi khong bam duoc, hay 'wait' cho no mo khoa. "
         "Neu trang hoi lai mot cau de xac nhan, hay 'type' cau tra loi phu hop roi bam gui. "
         "Neu da gui prompt va dang cho ket qua, hay 'wait'. "
@@ -1945,7 +2013,8 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
     )
     user_prompt = (
         f"MUC TIEU:\n{payload.goal}\n\n"
-        f"URL hien tai: {payload.url}\n\n"
+        f"URL hien tai: {payload.url}\n"
+        f"{viewport_note}\n\n"
         f"CAC HANH DONG DA LAM (buoc {payload.step}):\n{history_block}\n\n"
         f"PHAN TU TREN TRANG:\n{element_block}\n\n"
         f"NOI DUNG CUOI TRANG:\n{payload.page_text}"
@@ -1955,7 +2024,7 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     action = str(result.get("action") or "").strip()
-    if action not in {"type", "click", "attach_image", "wait", "done", "fail"}:
+    if action not in {"type", "click", "attach_image", "wait", "reload", "done", "fail"}:
         raise HTTPException(status_code=502, detail=f"Orchestrator tra ve hanh dong khong hop le: {action}")
     return {
         "action": action,
