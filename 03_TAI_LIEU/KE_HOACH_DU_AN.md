@@ -999,3 +999,70 @@ Cùng lưu ý minh bạch như Flow: selector chưa xác minh (không có tài k
 Đã kiểm thử: `pytest` 109/109 pass; khởi động app thật, gọi `/api/browser-scene-jobs/next` cho cả 2 provider (đều `{"job": null}`), provider không hợp lệ trả 400, job không tồn tại trả 404.
 
 **Chưa làm, cần người dùng tự thực hiện tiếp**: `python web_video_sidecar.py --provider meta_ai_video --login` rồi `--recon` để xác minh/sửa selector thật của Meta AI, tương tự bước đã cần làm cho Flow.
+
+## 43. AI điều phối lái trình duyệt: bỏ selector cứng, thêm chấm chất lượng và lập kế hoạch (2026-08-20)
+
+Bối cảnh: cách làm ở mục 41-42 (sidecar Playwright + selector viết sẵn) đã thất bại trên thực tế. Playwright mở profile riêng nên **mỗi lần chạy lại bắt đăng nhập tay**; và selector đoán trước thì cứ sai — giao diện thật hiển thị tiếng Việt, nút gửi là icon không nhãn, khe khung hình là `div` không phải `button`. Mỗi lần đoán sai tốn trọn một vòng tạo-rồi-hỏng mới phát hiện ra.
+
+Đã đổi sang: **extension chạy trong trình duyệt người dùng đã đăng nhập sẵn**, và **AI điều phối là bên ra quyết định**, extension chỉ làm mắt và tay.
+
+### 43.1 Đã làm được
+
+**Kiến trúc điều khiển**
+- Extension Manifest V3 chạy trong Cốc Cốc của người dùng — không profile riêng, không đăng nhập lại. Nhận việc qua WebSocket đẩy từ app, không polling.
+- Vòng lặp *quan sát → quyết định → hành động* nằm ở **service worker** (không phải content script): content script chết mỗi lần trang điều hướng, mà điều hướng chính là việc agent phải làm.
+- Content script chỉ còn 3 việc không trạng thái: chụp trang, thực hiện 1 thao tác, lấy file kết quả.
+- Hành động AI dùng được: `type`, `click`, `attach_image`, `wait`, `reload`, `done`, `fail`, kèm gộp nhiều bước một lượt hỏi (mỗi lượt hỏi tốn ~11 giây CLI).
+
+**Ba lớp phải "thật" mới chạy được** — đây là phát hiện tốn nhiều thời gian nhất:
+- Gõ chữ và bấm chuột qua `chrome.debugger` (`Input.insertText`, `Input.dispatchMouseEvent`). Mọi sự kiện giả đều bị từ chối: gán `.value`, `execCommand`, `beforeinput`, chạy trong thế giới JS chính — Lexical của Flow vẫn coi ô nhập là trống, nút Tạo khoá vĩnh viễn.
+- Nhìn thấy nút không nhãn: ảnh chụp trang gửi kèm toạ độ, kích thước, class/id và chữ khối bên cạnh. Thiếu những thứ này thì nút gửi của Flow chỉ hiện ra là `<button>` trống trơn.
+- Nhìn thấy nút dạng `div`: nhận diện thêm bằng con trỏ chuột hình bàn tay.
+
+**Độ bền**
+- Giữ service worker sống trong lúc chạy job (MV3 giết worker rảnh sau ~30 giây, làm job chết lặng lẽ để lại trạng thái `running` vĩnh viễn, không lỗi, không log).
+- Dấu vết từng chặng gửi về `/api/browser/trace` — trước đó hoàn toàn mù khi job đứng im.
+- Orchestrator lỗi thì tự đổi sang CLI còn lại (Claude Code ↔ Codex), phía extension thử lại 3 lần.
+- Dùng lại tab người dùng đang mở (tab mới không vào được màn tạo của Flow); tự tiêm content script vào tab đó; không đóng tab của người dùng.
+
+**Chống đốt tiền** — sau khi lỗi của chính hệ thống làm ngập thư viện Flow hàng chục ảnh trùng:
+- `attach_image` chỉ nhận ô file **mới hiện ra sau khi bấm**, không lấy bừa ô đầu tiên (đó là ô upload thư viện, nên ảnh chui vào thư viện còn khe khung hình vẫn trống).
+- Chỉ cho upload **1 lần/job**; cảnh đã có ảnh mẫu thì cấm chuyển sang text-to-video; cấm bấm Tạo khi khe ảnh trống.
+- Quy tắc chống lặp trong system prompt: thử 3 cách không được thì dừng và báo, không lặp lại thao tác đã thất bại.
+
+**Bốn tính năng điều phối**
+- **Chia việc song song**: mẻ tạo cảnh nhận danh sách provider, chia luân phiên (Flow + ChatGPT + Gemini).
+- **Chấm chất lượng**: sau mỗi cảnh, orchestrator mở file ra xem, báo *nhìn thấy gì thật sự*, khớp hay không, điểm 1-10, lỗi cụ thể; kém thì tự tạo lại tối đa 1 lần. Cần `image_path` để mở quyền Read của CLI — thiếu nó thì CLI **từ chối mô tả** thay vì bịa (đó là cách phát hiện ra thiếu sót này).
+- **Quyết định tĩnh/GIF/video** cho từng cảnh kèm fps và lý do, lưu vào `visual_kind`/`visual_fps` (không dùng `asset_type` vì cột đó mang nghĩa nguồn gốc).
+- **Kế hoạch dựng**: mỗi cảnh có kiểu vào cảnh (cắt/mờ) và chuyển động camera (đẩy vào/kéo lùi/đứng yên); `ffmpeg_renderer` đọc `edit_transition`/`edit_effect` theo từng cảnh, `static` tắt hẳn Ken Burns.
+- **Cửa giao việc** `/api/projects/{id}/orchestrate`: nói ý định, AI đọc trạng thái thật rồi đề xuất các bước; mặc định chỉ hiện kế hoạch, không chạy.
+
+**Kết quả kiểm chứng thật**
+- Tạo ảnh qua ChatGPT web: chạy tốt.
+- Tạo ảnh qua Google Flow (Nano Banana, **0 tín dụng**): chạy tốt, đúng tỉ lệ 16:9, ảnh đúng nội dung prompt.
+- Chấm chất lượng: đọc được cả kim đồng hồ trong ảnh, chấm 8/10, bắt được sai lệch thật (mô tả cần *một* vali chuyền qua, ảnh lại thành *hai* cặp riêng).
+- Kế hoạch loại hình trên storyboard 15 cảnh: 6 ảnh / 2 GIF / 7 video — 8 cảnh không phải đốt tín dụng video.
+- Kế hoạch dựng: biết để `static` cho cảnh vốn đã là GIF/video, biết `cut` khi hai cảnh so sánh trạng thái ngược nhau.
+
+### 43.2 Chưa làm được
+
+- **Tạo video Flow (Veo) chưa chạy trọn vẹn**: đã qua được các nút thắt (vào đúng màn, đưa ảnh vào khe "Bắt đầu", chọn đúng chế độ, gõ và bấm thật) nhưng **hết tín dụng Flow** trước khi có một lần chạy đến cuối. Cần một lần chạy có tín dụng để xác nhận.
+- **Meta AI không tạo được video** — người dùng làm tay cũng không được. Không phải lỗi automation. `meta_ai_video` giữ lại nhưng coi như không dùng được.
+- **Chia việc song song chưa test thật** — mới đúng về code, chưa chạy một mẻ thật để xác nhận.
+- **Gemini web** chưa test lại sau các thay đổi ở phần dùng chung.
+- **Loại GIF chưa có đường sản xuất riêng** — kế hoạch đã biết chọn `gif` + fps, nhưng chưa có provider nào nhận việc tạo GIF; hiện sẽ rơi vào nhóm video.
+- **Selector còn sót ở Gemini/ChatGPT**: hai file này vẫn dùng luồng viết cứng cũ (đang chạy được nên chưa đụng vào), chưa chuyển sang cơ chế agent.
+
+### 43.3 Điều kiện để chạy tự động không có người
+
+Hiện **chưa nên** bật chạy qua đêm không giám sát. Không phải vì AI điều phối kém — nó đã tự sửa sai (nhận ra mình bấm nhầm nút `add_2`, tự tìm nút gửi thật) và biết dừng đúng lúc (thấy "không đủ tín dụng" thì không bấm tiếp). Thiếu là ở lớp bảo vệ quanh nó:
+
+1. **Chó canh job kẹt**: job `running` quá N phút → tự chuyển lỗi + xếp lại. Bắt buộc, vì MV3 giết worker là chuyện thường.
+2. **Hạn mức + ngắt mạch**: trần lượt tạo mỗi ngày/mỗi dự án; provider hỏng N lần liên tiếp thì tự tắt X giờ; thấy hết tín dụng thì dừng hẳn provider đó, không thử lại.
+3. **Sổ năng lực provider**: nhớ "Meta không tạo được video" để không lặp lại vĩnh viễn; ghi lần cuối thành công và tỉ lệ hỏng gần đây.
+4. **Cột `pipeline_stage`**: hiện trạng thái đang phải suy ra bằng cách đếm.
+5. **Vòng lặp điều phối nền** (2-5 phút/nhịp) gọi `orchestrate` với chính sách thay cho xác nhận tay.
+6. **Nhật ký hành động**: lý do AI đưa ra, việc đã làm, kết quả, chi phí ước tính.
+7. **Vẫn dừng hỏi người** khi: hết tín dụng/hạn mức, một cảnh chấm trượt 2 lần, mọi provider của một loại việc đều bị ngắt mạch, và **trước bước xuất bản** (hành động ra ngoài, không thu hồi được).
+
+Thứ tự nên làm: (1) và (2) trước vì chúng chặn thiệt hại, rồi (4)(5), rồi (3)(6), cuối cùng mới mở khoá chạy không giám sát.
