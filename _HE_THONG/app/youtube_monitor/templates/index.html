@@ -421,7 +421,7 @@
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
+          <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo · tạo video thật</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI cho các cảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Video sẽ được tạo cho mỗi cảnh chưa có hình.</div>
@@ -1555,6 +1555,7 @@
     if ($('studioGenerateTimelineButton')) $('studioGenerateTimelineButton').disabled = true;
     if ($('studioQueueRenderButton')) $('studioQueueRenderButton').disabled = true;
     if ($('studioGenerateImagesButton')) $('studioGenerateImagesButton').disabled = true;
+    $('studioOrchestrateButton')?.addEventListener('click', () => void runStudioOrchestrate());
     if ($('studioGenerateVideosButton')) $('studioGenerateVideosButton').disabled = true;
     if ($('studioProjectSummary')) $('studioProjectSummary').textContent = 'Chưa tạo';
     if ($('studioScriptSummary')) $('studioScriptSummary').textContent = 'Chưa có';
@@ -3263,6 +3264,45 @@
   function batchProviderPayload(provider, isVeo) {
     if (provider !== 'auto_parallel') return {provider};
     return {providers: isVeo ? PARALLEL_VIDEO_PROVIDERS : PARALLEL_IMAGE_PROVIDERS};
+  }
+
+  // One place to hand the orchestrator an intent and see the steps it would
+  // run, rather than putting a CLI call behind every button. Costly steps
+  // only run after the plan has been shown and confirmed.
+  async function runStudioOrchestrate() {
+    const projectId = state.studioProjectId;
+    const intent = $('studioOrchestrateIntent')?.value?.trim();
+    const target = $('studioOrchestratePlan');
+    if (!projectId || !intent) return setMessage('Hãy chọn dự án và nhập việc cần giao.', 'error');
+    if (target) target.textContent = 'Đang hỏi AI điều phối...';
+    try {
+      const plan = await api(`/api/projects/${projectId}/orchestrate`, {
+        method: 'POST', body: JSON.stringify({intent, dry_run: true}),
+      });
+      const steps = (plan.steps || []).map((s, i) => `${i + 1}. ${s.action} — ${s.reason}`).join('\n');
+      if (target) target.textContent = `${plan.understanding}
+
+${steps}`;
+      if (!steps) return setMessage('AI điều phối không đề xuất bước nào.', 'success');
+      if (!confirm(`AI điều phối đề xuất:
+
+${steps}
+
+Chạy các bước này?`)) return;
+      if (target) target.textContent = 'Đang thực hiện...';
+      const done = await api(`/api/projects/${projectId}/orchestrate`, {
+        method: 'POST', body: JSON.stringify({intent, dry_run: false}),
+      });
+      if (target) {
+        target.textContent = (done.steps || [])
+          .map((s) => `${s.action}: ${s.result?.status || 'xong'}${s.result?.detail ? ` — ${s.result.detail}` : ''}`)
+          .join('\n');
+      }
+      setMessage('AI điều phối đã chạy xong các bước.', 'success');
+    } catch (error) {
+      if (target) target.textContent = '';
+      setMessage(`AI điều phối lỗi: ${error.message}`, 'error');
+    }
   }
   const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);

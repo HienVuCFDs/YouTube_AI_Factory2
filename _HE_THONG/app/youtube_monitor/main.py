@@ -2335,6 +2335,137 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
     }
 
 
+class OrchestrateRequest(BaseModel):
+    intent: str = Field(min_length=3, max_length=2000)
+    # Costly steps stay behind an explicit confirmation: the plan is shown
+    # first so nothing spends generation quota before it has been read.
+    dry_run: bool = True
+
+
+_ORCHESTRATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "understanding": {"type": "string"},
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["plan_visuals", "plan_edit", "generate_images", "generate_videos", "nothing"],
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["action", "reason"],
+            },
+        },
+    },
+    "required": ["understanding", "steps"],
+}
+
+
+def _project_state_summary(project_id: int) -> str:
+    """What the orchestrator needs to know before choosing steps."""
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        return "Du an chua co kich ban."
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        return "Du an chua co timeline."
+    with_visual = sum(1 for s in timeline if str(s.get("visual_path") or "").strip())
+    kinds: dict[str, int] = {}
+    for segment in timeline:
+        kind = str(segment.get("visual_kind") or "chua-lap-ke-hoach")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    edited = sum(1 for s in timeline if str(s.get("edit_transition") or "").strip())
+    return (
+        f"Tong so canh: {len(timeline)}. Da co hinh: {with_visual}. Con thieu: {len(timeline) - with_visual}.\n"
+        f"Ke hoach loai hinh (visual_kind): {kinds}.\n"
+        f"So canh da co ke hoach dung phim: {edited}/{len(timeline)}."
+    )
+
+
+@app.post("/api/projects/{project_id}/orchestrate")
+def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[str, Any]:
+    """Turns a plain-language request into an ordered run of the app's tools.
+
+    Routing every button through the orchestrator would put a ~11s CLI call
+    behind each click and make the app fragile. This keeps the direct
+    controls as they are and adds one place to hand over an intent: the
+    orchestrator reads the project's actual state, picks which tools to run
+    and in what order, and returns the plan. Nothing that spends generation
+    quota runs until the plan has been seen and confirmed.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+
+    system_prompt = (
+        "Ban la AI dieu phoi cua mot app san xuat video YouTube. Nguoi dung noi mong muon cua ho, "
+        "ban chon cac buoc can chay theo dung thu tu, dua tren TINH TRANG THUC TE cua du an.\n"
+        "Cac cong cu co the goi:\n"
+        "- plan_visuals: quyet dinh moi canh nen dung anh tinh / gif / video (chay TRUOC khi tao)\n"
+        "- generate_images: tao anh cho cac canh con thieu, chia deu nhieu AI de chay song song\n"
+        "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG)\n"
+        "- plan_edit: lap ke hoach dung phim (chuyen canh, hieu ung) cho tung canh\n"
+        "- nothing: khong can lam gi\n\n"
+        "Nguyen tac: khong tao lai thu da co. Neu chua lap ke hoach loai hinh ma nguoi dung muon tao hang loat, "
+        "hay plan_visuals truoc. Chi dung generate_videos khi that su can vi no ton tien. "
+        "Viet 'reason' ngan gon bang tieng Viet."
+    )
+    user_prompt = (
+        f"MONG MUON CUA NGUOI DUNG:\n{payload.intent}\n\n"
+        f"TINH TRANG DU AN:\n{_project_state_summary(project_id)}"
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, user_prompt, _ORCHESTRATE_SCHEMA)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    steps = [
+        {"action": str(step.get("action") or "nothing"), "reason": str(step.get("reason") or "")}
+        for step in (result.get("steps") or [])
+    ]
+    if payload.dry_run:
+        return {
+            "status": "planned",
+            "understanding": str(result.get("understanding") or ""),
+            "steps": steps,
+            "note": "Chưa chạy gì. Gửi lại với dry_run=false để thực hiện.",
+        }
+
+    executed: list[dict[str, Any]] = []
+    for step in steps:
+        action = step["action"]
+        try:
+            if action == "plan_visuals":
+                outcome = plan_timeline_visuals(project_id)
+            elif action == "plan_edit":
+                outcome = plan_project_edit(project_id)
+            elif action in {"generate_images", "generate_videos"}:
+                wants_video = action == "generate_videos"
+                outcome = queue_scene_generation_batch(
+                    project_id,
+                    BatchSceneGenerationRequest(
+                        providers=["flow_veo"] if wants_video else ["flow_image", "chatgpt_web_image", "gemini_web_image"],
+                        respect_plan=True,
+                        ratio="1280:720",
+                        duration_seconds=5,
+                        confirmed=True,
+                    ),
+                )
+            else:
+                outcome = {"status": "skipped"}
+        except HTTPException as exc:
+            outcome = {"status": "error", "detail": str(exc.detail)}
+        executed.append({**step, "result": outcome})
+    return {
+        "status": "done",
+        "understanding": str(result.get("understanding") or ""),
+        "steps": executed,
+    }
+
+
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
     if provider == "runway":
