@@ -32,12 +32,18 @@ def call_claude_code_cli_json(
     user_prompt: str,
     schema: dict[str, Any],
     max_tokens: int = 2000,
+    image_path: str | None = None,
 ) -> dict[str, Any]:
     """Use the locally logged-in Claude Code CLI (claude.ai subscription)
-    without an ANTHROPIC_API_KEY."""
+    without an ANTHROPIC_API_KEY.
+
+    Passing image_path lets the CLI open exactly that one file — the only way
+    it can judge a generated image, since every tool is otherwise denied and
+    it will (correctly) refuse to describe a file it cannot see.
+    """
     del max_tokens  # Claude Code CLI owns its model token budget.
     try:
-        return _call_claude_code_json(system_prompt, user_prompt, schema)
+        return _call_claude_code_json(system_prompt, user_prompt, schema, image_path=image_path)
     except ClaudeCodeBridgeError as exc:
         raise LlmError(str(exc)) from exc
 

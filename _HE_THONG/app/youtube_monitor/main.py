@@ -537,8 +537,18 @@ class CreateSceneGenerationRequest(BaseModel):
     confirmed: bool = False
 
 
+SceneProvider = Literal[
+    "openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image",
+    "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
+]
+
+
 class BatchSceneGenerationRequest(BaseModel):
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: SceneProvider = "gemini_image"
+    # Spreading a batch over several providers is what makes it run in
+    # parallel: the extension already handles concurrent jobs, but every
+    # scene going to the same site queues behind one tab.
+    providers: list[SceneProvider] = Field(default_factory=list)
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
@@ -2055,6 +2065,107 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
     }
 
 
+_REVIEW_SCENE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "saw": {"type": "string"},
+        "matches": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "issues": {"type": "string"},
+        "should_regenerate": {"type": "boolean"},
+    },
+    "required": ["saw", "matches", "score", "should_regenerate"],
+}
+
+# A scene the model simply cannot get right would otherwise regenerate
+# forever, spending paid quota on every attempt.
+_MAX_AUTO_REGENERATE = 1
+_REVIEW_PASS_SCORE = 6
+
+
+def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[str, Any]:
+    """Has the orchestrator look at a generated file and judge it.
+
+    Goes straight to the Claude Code CLI rather than through
+    _call_orchestrator_json: this needs the CLI's Read tool pointed at the
+    one file, which is what lets it actually see the image instead of
+    guessing. Asked live without it, it correctly refused to describe the
+    picture at all rather than invent one.
+    """
+    system_prompt = (
+        f"Ban la nguoi kiem tra chat luong {'video' if kind == 'video' else 'anh'} minh hoa cho video YouTube. "
+        "Hay XEM ky file duoc cung cap, roi doi chieu voi mo ta canh mong muon.\n"
+        "- 'saw': mo ta ngan gon nhung gi BAN THUC SU NHIN THAY. Neu khong xem duoc file, hay noi ro la "
+        "khong xem duoc, TUYET DOI khong bia.\n"
+        "- 'matches': noi dung co dung y mo ta canh khong.\n"
+        "- 'score': 1-10 (do khop y + chat luong hinh anh: bo cuc, chu viet, chi tiet loi).\n"
+        "- 'issues': cac loi cu the neu co (chu sai chinh ta, tay/chan bien dang, vat the thua...).\n"
+        "- 'should_regenerate': chi dat true khi loi du nghiem trong de khong dung duoc cho video."
+    )
+    user_prompt = f"Mo ta canh mong muon:\n{scene_prompt}"
+    return call_claude_code_cli_json(
+        system_prompt, user_prompt, _REVIEW_SCENE_SCHEMA, image_path=str(file_path)
+    )
+
+
+def _run_scene_review(job_id: int) -> dict[str, Any] | None:
+    """Reviews a finished job and regenerates it once if the result is poor."""
+    job = database.get_scene_generation_job(job_id)
+    if not job or str(job.get("status")) != "completed":
+        return None
+    path = Path(str(job.get("timeline_visual_path") or job.get("output_path") or ""))
+    if not path.is_file():
+        return None
+    segment_prompt = str(job.get("prompt") or "")
+    kind = "video" if path.suffix.lower() in {".mp4", ".webm", ".mov"} else "image"
+    try:
+        verdict = _review_scene_asset(path, segment_prompt, kind)
+    except LlmError as exc:
+        database.save_scene_job_review(job_id, "skipped", 0, f"Khong cham duoc: {exc}")
+        return None
+
+    score = int(verdict.get("score") or 0)
+    passed = bool(verdict.get("matches")) and score >= _REVIEW_PASS_SCORE
+    note_parts = [str(verdict.get("saw") or "").strip()]
+    if verdict.get("issues"):
+        note_parts.append(f"Loi: {verdict['issues']}")
+    note = " | ".join(part for part in note_parts if part)
+    database.save_scene_job_review(job_id, "pass" if passed else "fail", score, note)
+
+    if passed or not verdict.get("should_regenerate"):
+        return verdict
+    if int(job.get("auto_retry_count") or 0) >= _MAX_AUTO_REGENERATE:
+        return verdict
+    database.bump_scene_job_auto_retry(job_id)
+    provider = str(job.get("provider") or "")
+    if provider in database.EXTERNAL_SIDECAR_PROVIDERS:
+        database.retry_scene_generation_job(job_id)
+    else:
+        scene_generation_worker.retry(job_id)
+    return verdict
+
+
+def _review_scene_in_background(job_id: int) -> None:
+    """Reviewing takes ~15-30s of CLI time; the caller must not wait on it."""
+    threading.Thread(target=_run_scene_review, args=(job_id,), daemon=True).start()
+
+
+def _require_scene_provider_config(provider: str) -> None:
+    """Rejects a provider whose API key is missing, before any job is made."""
+    if provider == "runway":
+        runway_key, _ = settings.runway_config()
+        if not runway_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình Runway API trong Kết nối AI")
+    elif provider == "openai_image":
+        openai_key, _ = settings.openai_config()
+        if not openai_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình OPENAI_API_KEY trong Kết nối AI")
+    elif provider in {"gemini_image", "gemini_veo"}:
+        gemini_key, _, _ = settings.gemini_config()
+        if not gemini_key:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
+
+
 @app.post("/api/projects/{project_id}/scene-jobs")
 def queue_scene_generation_job(
     project_id: int,
@@ -2065,18 +2176,7 @@ def queue_scene_generation_job(
             status_code=400,
             detail="Tao canh AI se goi dich vu cloud va phat sinh chi phi; can confirmed=true",
         )
-    if payload.provider == "runway":
-        runway_key, _ = settings.runway_config()
-        if not runway_key:
-            raise HTTPException(status_code=400, detail="Chua cau hinh Runway API trong Ket noi AI")
-    if payload.provider == "openai_image":
-        openai_key, _ = settings.openai_config()
-        if not openai_key:
-            raise HTTPException(status_code=400, detail="Chua cau hinh OPENAI_API_KEY trong Ket noi AI")
-    if payload.provider in {"gemini_image", "gemini_veo"}:
-        gemini_key, _, _ = settings.gemini_config()
-        if not gemini_key:
-            raise HTTPException(status_code=400, detail="Chua cau hinh GEMINI_API_KEY trong Ket noi AI")
+    _require_scene_provider_config(payload.provider)
     if payload.reference_asset_id is not None:
         asset = database.get_project_asset(payload.reference_asset_id)
         if not asset or int(asset["project_id"]) != project_id:
@@ -2109,18 +2209,11 @@ def queue_scene_generation_job(
 def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationRequest) -> dict[str, Any]:
     if not payload.confirmed:
         raise HTTPException(status_code=400, detail="Tạo toàn bộ cảnh AI có thể phát sinh chi phí; cần confirmed=true")
-    if payload.provider == "runway":
-        runway_key, _ = settings.runway_config()
-        if not runway_key:
-            raise HTTPException(status_code=400, detail="Chưa cấu hình Runway API trong Kết nối AI")
-    elif payload.provider == "openai_image":
-        openai_key, _ = settings.openai_config()
-        if not openai_key:
-            raise HTTPException(status_code=400, detail="Chưa cấu hình OPENAI_API_KEY trong Kết nối AI")
-    elif payload.provider in {"gemini_image", "gemini_veo"}:
-        gemini_key, _, _ = settings.gemini_config()
-        if not gemini_key:
-            raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
+    # Preserve order while removing duplicates, so the round-robin below
+    # doesn't hand one provider twice the share.
+    providers = list(dict.fromkeys(payload.providers)) or [payload.provider]
+    for provider in providers:
+        _require_scene_provider_config(provider)
     project = database.get_production_project(project_id)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
@@ -2129,27 +2222,42 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     if not timeline:
         raise HTTPException(status_code=400, detail="Cần tạo timeline trước khi tạo cảnh AI")
     queued: list[dict[str, Any]] = []
+    pending = 0
     for segment in timeline:
         if str(segment.get("visual_path") or "").strip():
             continue
         prompt = str(segment.get("visual_prompt") or "").strip()
         if not prompt:
             continue
-        if payload.provider in _CHAT_IMAGE_PROVIDERS:
+        # Round-robin over the chosen providers so the scenes spread across
+        # sites and actually run at the same time.
+        provider = providers[pending % len(providers)]
+        pending += 1
+        if provider in _CHAT_IMAGE_PROVIDERS:
             prompt = _craft_image_prompt(prompt)
-        elif payload.provider in _CHAT_VIDEO_PROVIDERS:
+        elif provider in _CHAT_VIDEO_PROVIDERS:
             # Batch only ever targets segments with no visual yet (skipped
             # above), so there's never an existing image to attach here.
             prompt = _craft_video_prompt(prompt, has_reference_image=False)
         job = database.create_scene_generation_job(
-            project_id, int(segment["id"]), payload.provider, prompt,
+            project_id, int(segment["id"]), provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,
         )
         if job:
-            if payload.provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+            if provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                 scene_generation_worker.enqueue(int(job["id"]))
             queued.append(job)
-    return {"status": "queued", "jobs": queued, "queued_count": len(queued), "total_segments": len(timeline)}
+    by_provider: dict[str, int] = {}
+    for job in queued:
+        key = str(job.get("provider") or "")
+        by_provider[key] = by_provider.get(key, 0) + 1
+    return {
+        "status": "queued",
+        "jobs": queued,
+        "queued_count": len(queued),
+        "total_segments": len(timeline),
+        "by_provider": by_provider,
+    }
 
 
 @app.get("/api/antigravity/next-scene-job")
@@ -2172,6 +2280,9 @@ def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    # Judge the result and regenerate a poor one, without making the caller
+    # wait out a ~20s CLI call before it can pick up the next job.
+    _review_scene_in_background(job_id)
     return {"status": "completed", "job": finished, "asset": asset}
 
 
@@ -2232,7 +2343,24 @@ def complete_browser_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    # Judge the result and regenerate a poor one, without making the caller
+    # wait out a ~20s CLI call before it can pick up the next job.
+    _review_scene_in_background(job_id)
     return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.post("/api/scene-jobs/{job_id}/review")
+def review_scene_job(job_id: int) -> dict[str, Any]:
+    """Judge a finished scene on demand (the same check that runs automatically)."""
+    job = database.get_scene_generation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job tạo cảnh")
+    if str(job.get("status")) != "completed":
+        raise HTTPException(status_code=409, detail="Chỉ chấm được job đã hoàn thành")
+    verdict = _run_scene_review(job_id)
+    if verdict is None:
+        raise HTTPException(status_code=502, detail="Không chấm được (thiếu file hoặc orchestrator lỗi)")
+    return {"review": verdict, "job": database.get_scene_generation_job(job_id)}
 
 
 @app.get("/api/browser/trace")

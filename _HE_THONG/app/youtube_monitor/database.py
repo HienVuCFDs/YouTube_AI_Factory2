@@ -496,6 +496,14 @@ class Database:
             self._ensure_column(connection, "production_projects", "managed_channel_id", "INTEGER")
             self._ensure_column(connection, "project_publications", "thumbnail_path", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "subtitle_path", "TEXT NOT NULL DEFAULT ''")
+            # Orchestrator's verdict on a finished scene: what it actually saw
+            # in the file, whether that matches the scene, and how many times
+            # a poor result has already been regenerated (so a scene the model
+            # simply cannot get right doesn't loop forever).
+            self._ensure_column(connection, "scene_generation_jobs", "review_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "scene_generation_jobs", "review_note", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "scene_generation_jobs", "review_status", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "scene_generation_jobs", "auto_retry_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "project_render_settings", "output_profile", "TEXT NOT NULL DEFAULT 'youtube_landscape'")
             self._ensure_column(connection, "project_render_settings", "voice_provider", "TEXT NOT NULL DEFAULT 'edge_tts'")
             self._ensure_column(connection, "project_render_settings", "voice_model", "TEXT NOT NULL DEFAULT 'vi-VN-HoaiMyNeural'")
@@ -3262,6 +3270,37 @@ class Database:
                 (now, now, job_id),
             )
         return self.get_scene_generation_job(job_id)
+
+    def save_scene_job_review(
+        self,
+        job_id: int,
+        status: str,
+        score: int,
+        note: str,
+    ) -> dict[str, Any] | None:
+        """Record the orchestrator's verdict on a finished scene."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET review_status = ?, review_score = ?, review_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status.strip()[:20], max(0, min(int(score), 10)), note.strip()[:2000], utc_now(), job_id),
+            )
+        return self.get_scene_generation_job(job_id)
+
+    def bump_scene_job_auto_retry(self, job_id: int) -> int:
+        """Increments and returns how many times this job was auto-regenerated."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE scene_generation_jobs SET auto_retry_count = auto_retry_count + 1, updated_at = ? WHERE id = ?",
+                (utc_now(), job_id),
+            )
+            row = connection.execute(
+                "SELECT auto_retry_count FROM scene_generation_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return int(row["auto_retry_count"]) if row else 0
 
     def retry_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
         """Requeue a failed/cancelled scene-generation job for another attempt.
