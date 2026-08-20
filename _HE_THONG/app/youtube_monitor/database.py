@@ -500,6 +500,13 @@ class Database:
             # in the file, whether that matches the scene, and how many times
             # a poor result has already been regenerated (so a scene the model
             # simply cannot get right doesn't loop forever).
+            # What KIND of visual a scene should get — a still, a short loop,
+            # or a real clip — decided per scene rather than one setting for
+            # the whole project. asset_type already means something else here
+            # (where the material came from: ai_scene, broll, source_clip...).
+            self._ensure_column(connection, "project_timeline_segments", "visual_kind", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "visual_fps", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_timeline_segments", "visual_kind_reason", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "scene_generation_jobs", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_status", "TEXT NOT NULL DEFAULT ''")
@@ -3270,6 +3277,28 @@ class Database:
                 (now, now, job_id),
             )
         return self.get_scene_generation_job(job_id)
+
+    def set_segment_visual_kind(
+        self,
+        segment_id: int,
+        kind: str,
+        fps: int = 0,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        """Records whether this scene should be a still, a loop, or a clip."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_timeline_segments
+                SET visual_kind = ?, visual_fps = ?, visual_kind_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (kind.strip()[:20], max(0, min(int(fps), 60)), reason.strip()[:500], utc_now(), segment_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM project_timeline_segments WHERE id = ?", (segment_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def save_scene_job_review(
         self,

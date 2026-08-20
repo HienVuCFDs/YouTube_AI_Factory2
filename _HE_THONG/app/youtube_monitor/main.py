@@ -549,6 +549,10 @@ class BatchSceneGenerationRequest(BaseModel):
     # parallel: the extension already handles concurrent jobs, but every
     # scene going to the same site queues behind one tab.
     providers: list[SceneProvider] = Field(default_factory=list)
+    # Honour each scene's planned visual_kind (see plan-visuals), routing
+    # still scenes to image tools and moving ones to video tools, instead of
+    # sending every scene to the same kind of provider.
+    respect_plan: bool = False
     duration_seconds: Literal[5, 10] = 5
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
@@ -2150,6 +2154,100 @@ def _review_scene_in_background(job_id: int) -> None:
     threading.Thread(target=_run_scene_review, args=(job_id,), daemon=True).start()
 
 
+_PLAN_VISUALS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "kind": {"type": "string", "enum": ["image", "gif", "video"]},
+                    "fps": {"type": "integer"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["segment_index", "kind", "reason"],
+            },
+        },
+    },
+    "required": ["scenes"],
+}
+
+# Which providers can actually produce each kind, so a plan can be honoured
+# by picking from the right pool instead of sending a clip request to an
+# image tool.
+_IMAGE_CAPABLE_PROVIDERS = {
+    "openai_image", "gemini_image", "antigravity_image",
+    "flow_image", "gemini_web_image", "chatgpt_web_image",
+}
+_VIDEO_CAPABLE_PROVIDERS = {"gemini_veo", "runway", "flow_veo", "meta_ai_video"}
+
+
+@app.post("/api/projects/{project_id}/timeline/plan-visuals")
+def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
+    """Decides per scene whether it wants a still, a short loop, or a clip.
+
+    A talking point that holds one diagram on screen doesn't need a rendered
+    clip, while a scene whose whole meaning is a number counting up or a bar
+    growing reads as broken when frozen. Making that call per scene — rather
+    than one setting for the whole project — is what keeps motion where it
+    carries meaning and avoids paying for it where it doesn't.
+    """
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Cần tạo timeline trước")
+
+    lines = []
+    for segment in timeline:
+        lines.append(
+            f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s) "
+            f"Loi thoai: {str(segment.get('voice_text') or '')[:180]} || "
+            f"Hinh anh: {str(segment.get('visual_prompt') or '')[:260]}"
+        )
+    system_prompt = (
+        "Ban la dao dien hinh anh cho video YouTube. Voi TUNG canh duoi day, hay quyet dinh nen dung:\n"
+        "- 'image': anh TINH — khi canh chi can mot hinh minh hoa giu nguyen tren man hinh\n"
+        "- 'gif': vong lap ngan khong tieng — khi chi co MOT chuyen dong lap lai don gian "
+        "(banh rang quay, mui ten chay, so nhay). Kem 'fps' hop ly (8-15 cho hoat hoa vector phang)\n"
+        "- 'video': clip that — khi canh co nhieu buoc chuyen dong noi tiep nhau, hoac chuyen dong "
+        "chinh la NOI DUNG cua canh (so dem tang dan, bieu do lon len, so sanh hai trang thai)\n\n"
+        "Nguyen tac: chuyen dong ton kem, chi dung khi no MANG Y NGHIA. Canh chi giai thich mot so lieu "
+        "tinh thi dung 'image'. Tra ve dung so canh, moi canh mot muc, kem 'reason' ngan bang tieng Viet."
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _PLAN_VISUALS_SCHEMA)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    by_index = {int(segment.get("segment_index") or 0): segment for segment in timeline}
+    planned: list[dict[str, Any]] = []
+    for entry in result.get("scenes") or []:
+        segment = by_index.get(int(entry.get("segment_index") or -1))
+        if not segment:
+            continue
+        kind = str(entry.get("kind") or "image")
+        fps = int(entry.get("fps") or 0) if kind in {"gif", "video"} else 0
+        updated = database.set_segment_visual_kind(
+            int(segment["id"]), kind, fps=fps, reason=str(entry.get("reason") or "")
+        )
+        if updated:
+            planned.append({
+                "segment_id": updated["id"],
+                "segment_index": updated["segment_index"],
+                "kind": updated["visual_kind"],
+                "fps": updated["visual_fps"],
+                "reason": updated["visual_kind_reason"],
+            })
+    counts: dict[str, int] = {}
+    for item in planned:
+        counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+    return {"status": "planned", "scenes": planned, "by_kind": counts, "total_segments": len(timeline)}
+
+
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
     if provider == "runway":
@@ -2221,8 +2319,10 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
     if not timeline:
         raise HTTPException(status_code=400, detail="Cần tạo timeline trước khi tạo cảnh AI")
+    image_pool = [p for p in providers if p in _IMAGE_CAPABLE_PROVIDERS]
+    video_pool = [p for p in providers if p in _VIDEO_CAPABLE_PROVIDERS]
     queued: list[dict[str, Any]] = []
-    pending = 0
+    counters = {"image": 0, "video": 0}
     for segment in timeline:
         if str(segment.get("visual_path") or "").strip():
             continue
@@ -2230,9 +2330,17 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         if not prompt:
             continue
         # Round-robin over the chosen providers so the scenes spread across
-        # sites and actually run at the same time.
-        provider = providers[pending % len(providers)]
-        pending += 1
+        # sites and actually run at the same time. With respect_plan, a scene
+        # whose motion carries its meaning goes to a video tool while the
+        # rest stay on image tools — falling back to whatever pool is
+        # available rather than dropping the scene.
+        wants_video = payload.respect_plan and str(segment.get("visual_kind") or "") in {"gif", "video"}
+        pool = (video_pool or image_pool) if wants_video else (image_pool or video_pool)
+        if not pool:
+            pool = providers
+        bucket = "video" if wants_video else "image"
+        provider = pool[counters[bucket] % len(pool)]
+        counters[bucket] += 1
         if provider in _CHAT_IMAGE_PROVIDERS:
             prompt = _craft_image_prompt(prompt)
         elif provider in _CHAT_VIDEO_PROVIDERS:
