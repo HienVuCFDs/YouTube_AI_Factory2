@@ -253,6 +253,7 @@ def _segment_arguments(
     background_music: Path | None = None,
     music_volume: float = 0.12,
     transition: str = "fade",
+    effect: str = "",
 ) -> list[str]:
     if not visual:
         raise FfmpegRenderError(
@@ -277,10 +278,22 @@ def _segment_arguments(
         # Give still images a restrained Ken-Burns motion.  The image input is
         # looped at the project frame rate, therefore d=1 advances the zoom a
         # tiny amount per output frame without changing the segment duration.
-        filters.append(
-            f"zoompan=z='min(zoom+0.0007,1.055)':x='iw/2-(iw/zoom/2)':"
-            f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
-        )
+        # An edit plan can override the direction per scene, or hold a scene
+        # perfectly still — which some scenes want, e.g. a card the script
+        # deliberately parks on screen for the viewer to read or screenshot.
+        motion = str(effect or "").strip().lower()
+        if motion == "static":
+            pass
+        elif motion == "zoom_out":
+            filters.append(
+                f"zoompan=z='max(1.055-0.0007*on,1.0)':x='iw/2-(iw/zoom/2)':"
+                f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
+            )
+        else:
+            filters.append(
+                f"zoompan=z='min(zoom+0.0007,1.055)':x='iw/2-(iw/zoom/2)':"
+                f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
+            )
     filters.extend([
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
@@ -406,10 +419,15 @@ def render_timeline_with_ffmpeg(
                 duration,
             )
 
+        # An edit plan can set these per scene (see /api/projects/{id}/edit-plan);
+        # without one every scene keeps the project-wide transition and the
+        # default gentle push-in.
+        segment_transition = str(item.get("edit_transition") or transition or "fade")
+        segment_effect = str(item.get("edit_effect") or "")
         args = _segment_arguments(
             executable, item, visual, audio, segment_output, duration,
             width, height, fps, index, preferred_codec, subtitle_path,
-            background_music, music_volume, transition,
+            background_music, music_volume, segment_transition, segment_effect,
         )
         try:
             _run(args, output_dir)
@@ -421,7 +439,7 @@ def render_timeline_with_ffmpeg(
                 _segment_arguments(
                     executable, item, visual, audio, segment_output, duration,
                     width, height, fps, index, "libx264", subtitle_path,
-                    background_music, music_volume, transition,
+                    background_music, music_volume, segment_transition, segment_effect,
                 ),
                 output_dir,
             )

@@ -2248,6 +2248,93 @@ def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
     return {"status": "planned", "scenes": planned, "by_kind": counts, "total_segments": len(timeline)}
 
 
+_EDIT_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pacing": {"type": "string"},
+        "music_mood": {"type": "string"},
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "transition": {"type": "string", "enum": ["cut", "fade"]},
+                    "effect": {"type": "string", "enum": ["zoom_in", "zoom_out", "static"]},
+                    "note": {"type": "string"},
+                },
+                "required": ["segment_index", "transition", "effect"],
+            },
+        },
+    },
+    "required": ["scenes"],
+}
+
+
+@app.post("/api/projects/{project_id}/edit-plan")
+def plan_project_edit(project_id: int) -> dict[str, Any]:
+    """Plans the cut before rendering: per-scene transition and camera move.
+
+    The renderer applied one blanket transition and the same gentle push-in
+    to every scene. Deciding this per scene is what makes a sequence read as
+    edited — a hard cut where two states are being compared, a hold where the
+    viewer is meant to read something, a pull-back where the frame is opening
+    out.
+    """
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Cần tạo timeline trước")
+
+    lines = []
+    for segment in timeline:
+        lines.append(
+            f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s, "
+            f"loai hinh: {segment.get('visual_kind') or 'chua ro'}) "
+            f"Loi thoai: {str(segment.get('voice_text') or '')[:160]} || "
+            f"Hinh: {str(segment.get('visual_prompt') or '')[:200]}"
+        )
+    system_prompt = (
+        "Ban la nguoi dung phim (editor) cho video YouTube giai thich tai chinh. "
+        "Voi TUNG canh, hay quyet dinh cach vao canh va chuyen dong camera:\n"
+        "- 'transition': 'cut' (cat thang, dung khi doi y dot ngot hoac so sanh hai trang thai) "
+        "hoac 'fade' (mem, dung khi mach y chay lien tuc)\n"
+        "- 'effect': 'zoom_in' (day vao dan, tao cam giac tap trung), 'zoom_out' (keo lui, mo rong boi canh), "
+        "hoac 'static' (dung yen hoan toan — dung khi nguoi xem can DOC noi dung tren man hinh)\n"
+        "- 'note': ly do ngan bang tieng Viet\n\n"
+        "Luu y: canh loai 'video'/'gif' da co chuyen dong san, nen thuong de 'static' de khong chong chuyen dong. "
+        "Ngoai ra tra ve 'pacing' (nhip tong the) va 'music_mood' (khong khi nhac nen) cho ca video."
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _EDIT_PLAN_SCHEMA)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    by_index = {int(segment.get("segment_index") or 0): segment for segment in timeline}
+    planned: list[dict[str, Any]] = []
+    for entry in result.get("scenes") or []:
+        segment = by_index.get(int(entry.get("segment_index") or -1))
+        if not segment:
+            continue
+        transition = str(entry.get("transition") or "fade")
+        effect = str(entry.get("effect") or "zoom_in")
+        database.save_segment_edit(int(segment["id"]), transition, effect, str(entry.get("note") or ""))
+        planned.append({
+            "segment_index": segment["segment_index"],
+            "transition": transition,
+            "effect": effect,
+            "note": str(entry.get("note") or ""),
+        })
+    return {
+        "status": "planned",
+        "pacing": str(result.get("pacing") or ""),
+        "music_mood": str(result.get("music_mood") or ""),
+        "scenes": planned,
+    }
+
+
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
     if provider == "runway":

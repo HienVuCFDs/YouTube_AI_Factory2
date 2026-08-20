@@ -507,6 +507,11 @@ class Database:
             self._ensure_column(connection, "project_timeline_segments", "visual_kind", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "visual_fps", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "project_timeline_segments", "visual_kind_reason", "TEXT NOT NULL DEFAULT ''")
+            # How the final edit should treat this scene — planned before
+            # rendering rather than applying one blanket transition to all.
+            self._ensure_column(connection, "project_timeline_segments", "edit_transition", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "edit_effect", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "edit_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "scene_generation_jobs", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_status", "TEXT NOT NULL DEFAULT ''")
@@ -3277,6 +3282,24 @@ class Database:
                 (now, now, job_id),
             )
         return self.get_scene_generation_job(job_id)
+
+    def save_segment_edit(
+        self,
+        segment_id: int,
+        transition: str,
+        effect: str,
+        note: str = "",
+    ) -> None:
+        """Stores how one scene should be cut and moved in the final edit."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_timeline_segments
+                SET edit_transition = ?, edit_effect = ?, edit_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (transition.strip()[:20], effect.strip()[:20], note.strip()[:400], utc_now(), segment_id),
+            )
 
     def set_segment_visual_kind(
         self,
