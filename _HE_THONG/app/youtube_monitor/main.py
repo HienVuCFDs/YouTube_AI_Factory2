@@ -26,12 +26,14 @@ from .analysis_queue import AnalysisQueue
 from . import settings
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
-from .codex_bridge import codex_cli_status, launch_codex_login
+from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
-from .ffmpeg_renderer import ffmpeg_available, nvenc_available
+from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
+from .gif_generator import GifGenerationError, materialize_gif_asset
+from .gflow_bridge import gflow_cli_status
 from .llm_analyzer import LlmAnalysisError, resolve_analyzer
-from .llm_client import LlmError, call_claude_code_cli_json, call_codex_json
+from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_codex_json
 from .maintenance import list_database_backups, prune_database_backups
 from .oauth import OAuthError
 from .oauth import build_authorize_url as build_oauth_authorize_url
@@ -529,17 +531,19 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "gflow_cli", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
-    duration_seconds: Literal[5, 10] = 5
+    duration_seconds: int = Field(default=5, ge=1, le=30)
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     reference_asset_id: int | None = Field(default=None, ge=1)
+    requires_reference_image: bool = False
+    motion_as_gif: bool = False
     confirmed: bool = False
 
 
 SceneProvider = Literal[
     "openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image",
-    "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
+    "gflow_cli", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
 ]
 
 
@@ -553,7 +557,18 @@ class BatchSceneGenerationRequest(BaseModel):
     # still scenes to image tools and moving ones to video tools, instead of
     # sending every scene to the same kind of provider.
     respect_plan: bool = False
-    duration_seconds: Literal[5, 10] = 5
+    # Replace every planned GIF/video scene with an image-provider job that
+    # creates a 2x2 animation sheet. The app cuts its four AI-created frames
+    # into a GIF locally. No video provider is called.
+    motion_as_gif: bool = False
+    # Useful for orchestrated smoke tests: exercise a few providers without
+    # accidentally queueing an entire long project.
+    limit: int | None = Field(default=None, ge=1, le=500)
+    # When true, every video job must consume a real image asset. Segments
+    # without one first receive an image job and the video waits for it.
+    requires_reference_image: bool = False
+    reference_image_provider: SceneProvider = "flow_image"
+    duration_seconds: int = Field(default=5, ge=1, le=30)
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
     confirmed: bool = False
 
@@ -1751,7 +1766,7 @@ _CHAT_IMAGE_PROVIDERS = {"gemini_web_image", "chatgpt_web_image", "flow_image"}
 # These produce video, not a still — the "collapse to one static frame"
 # instruction _craft_image_prompt gives would be actively wrong here, so they
 # get motion-oriented crafting (_craft_video_prompt) instead.
-_CHAT_VIDEO_PROVIDERS = {"meta_ai_video", "flow_veo"}
+_CHAT_VIDEO_PROVIDERS = {"meta_ai_video", "flow_veo", "gflow_cli"}
 
 _CRAFT_IMAGE_PROMPT_SCHEMA = {
     "type": "object",
@@ -1764,35 +1779,115 @@ _CRAFT_VIDEO_PROMPT_SCHEMA = {
     "required": ["prompt"],
 }
 
+_STAGE_AGENT_PREFERENCES = {
+    "orchestration": ["codex_cli", "claude_code_cli", "antigravity"],
+    "script": ["claude_code_cli", "codex_cli", "antigravity"],
+    "storyboard": ["codex_cli", "claude_code_cli", "antigravity"],
+    "image_generation": ["antigravity", "codex_cli", "claude_code_cli"],
+    "video_generation": ["codex_cli", "claude_code_cli", "antigravity"],
+}
 
-def _call_orchestrator_json(system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
-    """Calls the configured orchestrator CLI, falling back to the other one.
 
-    The browser agent asks for a decision on every step, so a single CLI
-    hiccup used to end the whole run — one transient Claude Code error threw
-    away a 30-step Flow session that was nearly finished. Both CLIs are the
-    user's own logged-in subscriptions, so trying the other costs nothing
-    extra and covers the usual causes: a transient failure, or one provider
-    sitting in a usage-limit window while the other has reset.
-    """
-    provider = settings.orchestrator_provider()
-    primary, secondary = (
-        (call_claude_code_cli_json, call_codex_json)
-        if provider == "claude_code_cli"
-        else (call_codex_json, call_claude_code_cli_json)
-    )
-    try:
-        return primary(system_prompt, user_prompt, schema)
-    except LlmError as primary_error:
+def _auto_agent_order(stage: str, executor: str, allowed: list[str]) -> list[str]:
+    """Rank allowed subscription agents by readiness and stage fit."""
+    status_calls = {
+        "codex_cli": codex_cli_status,
+        "claude_code_cli": claude_code_cli_status,
+        "antigravity": antigravity_cli_status,
+    }
+    readiness: dict[str, bool] = {}
+    for agent in allowed:
         try:
-            return secondary(system_prompt, user_prompt, schema)
-        except LlmError as secondary_error:
-            raise LlmError(
-                f"Ca hai orchestrator deu that bai. Chinh: {primary_error} | Du phong: {secondary_error}"
-            ) from primary_error
+            state = status_calls[agent]()
+            readiness[agent] = bool(state.get("logged_in") or state.get("ready"))
+        except Exception:
+            readiness[agent] = False
+    preferred = _STAGE_AGENT_PREFERENCES.get(stage, _STAGE_AGENT_PREFERENCES["orchestration"])
+    preference_score = {agent: len(preferred) - index for index, agent in enumerate(preferred)}
+    return sorted(
+        allowed,
+        key=lambda agent: (
+            -int(readiness.get(agent, False)),
+            -(preference_score.get(agent, 0) * 10 + (8 if agent == executor else 0)),
+            agent,
+        ),
+    )
 
 
-def _craft_image_prompt(raw_prompt: str) -> str:
+def _call_orchestrator_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    *,
+    stage: str = "orchestration",
+) -> dict[str, Any]:
+    """Route a structured task through the user's per-stage agent policy."""
+    calls = {
+        "codex_cli": call_codex_json,
+        "claude_code_cli": call_claude_code_cli_json,
+        "antigravity": call_antigravity_json,
+    }
+    assignment = settings.agent_assignment(stage)
+    executor = str(assignment.get("executor") or settings.orchestrator_provider())
+    mode = str(assignment.get("mode") or "auto")
+    allowed = [str(item) for item in assignment.get("allowed_agents", []) if str(item) in calls]
+    fallbacks = [
+        str(item) for item in assignment.get("fallback_agents", [])
+        if str(item) in calls and str(item) != executor
+    ]
+    if mode == "fixed":
+        order = [executor]
+    elif mode == "fallback":
+        order = [executor, *fallbacks]
+    else:
+        auto_candidates = list(dict.fromkeys([*allowed, executor, *fallbacks]))
+        order = _auto_agent_order(
+            stage,
+            executor,
+            [agent for agent in auto_candidates if agent in calls],
+        )
+    order = list(dict.fromkeys(agent for agent in order if agent in calls and (not allowed or agent in allowed)))
+    if not order:
+        raise LlmError(f"Không có AI được phép thực hiện công đoạn {stage}")
+    errors: list[str] = []
+    first_error: LlmError | None = None
+    for agent in order:
+        try:
+            return calls[agent](system_prompt, user_prompt, schema)
+        except LlmError as exc:
+            first_error = first_error or exc
+            errors.append(f"{agent}: {exc}")
+    raise LlmError(
+        f"Các AI được gán cho công đoạn {stage} đều thất bại. " + " | ".join(errors)
+    ) from first_error
+
+
+def _scene_prompt_context(timeline: list[dict[str, Any]], position: int) -> str:
+    """Narration and neighbouring shots for the scene at `position`.
+
+    A scene's visual_prompt read on its own says nothing about who the
+    characters are or what the shot before it established, so each image came
+    back styled independently and the sequence did not look like one film.
+    """
+    if position < 0 or position >= len(timeline):
+        return ""
+    segment = timeline[position]
+    parts = [f"Canh {segment.get('segment_index')} trong tong so {len(timeline)} canh."]
+    narration = str(segment.get("voice_text") or "").strip()
+    if narration:
+        parts.append(f"Loi thoai canh nay: {narration[:400]}")
+    if position > 0:
+        previous = str(timeline[position - 1].get("visual_prompt") or "").strip()
+        if previous:
+            parts.append(f"Canh LIEN TRUOC: {previous[:220]}")
+    if position + 1 < len(timeline):
+        following = str(timeline[position + 1].get("visual_prompt") or "").strip()
+        if following:
+            parts.append(f"Canh LIEN SAU: {following[:220]}")
+    return "\n".join(parts)
+
+
+def _craft_image_prompt(raw_prompt: str, context: str = "") -> str:
     """Rewrites a storyboard's raw visual_prompt into a standalone
     single-image prompt via the app's configured orchestrator CLI (the
     user's own logged-in Claude/Codex subscription — not a metered API
@@ -1806,12 +1901,64 @@ def _craft_image_prompt(raw_prompt: str) -> str:
         "tu thoi gian — chi giu lai bo cuc/khoanh khac tinh dep nhat de minh hoa dung y chinh cua canh. "
         "Tra loi bang tieng Anh, ngan gon, khong hoi lai, khong giai thich them."
     )
+    user_prompt = raw_prompt
+    if context:
+        # The scenes are shots of one film, so the prompt is written knowing
+        # what surrounds it: same characters, same drawing style, no
+        # contradiction with the shot before or after.
+        system_prompt += (
+            " Ban duoc cho biet loi thoai va cac canh lien ke. Hay giu NHAT QUAN nhan vat, trang phuc, "
+            "boi canh va phong cach ve voi cac canh do — day la cac canh cua CUNG mot video. "
+            "Khong mo ta lai noi dung canh khac, chi ve canh duoc yeu cau."
+        )
+        user_prompt = f"NGU CANH:\n{context}\n\nMO TA CANH CAN VE:\n{raw_prompt}"
     try:
-        result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA)
+        result = _call_orchestrator_json(system_prompt, user_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA, stage="image_generation")
         crafted = str(result.get("prompt") or "").strip()
         return crafted or raw_prompt
     except LlmError:
         return raw_prompt
+
+
+def _craft_gif_sheet_prompt(raw_prompt: str, context: str = "") -> str:
+    """Ask the orchestrator to turn a scene into four successive poses.
+
+    Image websites cannot return an animated GIF directly. They can reliably
+    create one 2x2 sheet, however, so the app asks for four real animation
+    frames and later crops them into a loop. The fixed wrapper is retained
+    even if the CLI rewrite fails, ensuring a GIF job can never silently fall
+    back to the old single-still prompt.
+    """
+    system_prompt = (
+        "Ban la animation director. Hay viet lai mo ta canh thanh MOT mo ta chuyen dong vong lap ngan gom "
+        "bon khoanh khac lien tiep. Chi mot hanh dong chinh thay doi qua bon frame; nhan vat, khuon mat, "
+        "trang phuc, boi canh va camera phai giu nhat quan. Frame 4 phai co the quay nguoc ve frame 1 theo "
+        "vong ping-pong. Tra ve prompt tieng Anh ngan gon; khong giai thich, khong danh so frame."
+    )
+    user_prompt = raw_prompt
+    if context:
+        # Same reason as _craft_image_prompt: these are shots of one film, so
+        # the loop must match the characters and style around it.
+        system_prompt += (
+            " Ban duoc cho biet loi thoai va cac canh lien ke — hay giu nhat quan nhan vat, trang phuc, "
+            "boi canh va phong cach ve voi chung."
+        )
+        user_prompt = f"NGU CANH:\n{context}\n\nMO TA CANH CAN VE:\n{raw_prompt}"
+    try:
+        result = _call_orchestrator_json(system_prompt, user_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA, stage="image_generation")
+        motion_prompt = str(result.get("prompt") or "").strip() or raw_prompt
+    except LlmError:
+        motion_prompt = raw_prompt
+    return (
+        "Create ONE 16:9 image as a clean 2x2 animation sprite sheet with FOUR equal 16:9 frames. "
+        "Reading order is top-left, top-right, bottom-left, bottom-right. The four panels must show "
+        "successive phases of a seamless short animation, not four unrelated illustrations. Keep the "
+        "same character design, facial features, clothing, background, lighting, camera angle and framing "
+        "in every panel; only the intended action may change. Each quadrant must be a complete edge-to-edge "
+        "frame. No title, captions, panel numbers, borders, gutters, contact-sheet margins or watermark. "
+        "Do not return a standalone single scene.\n\nAnimation to depict:\n"
+        f"{motion_prompt}"
+    )
 
 
 def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
@@ -1841,7 +1988,7 @@ def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
         "Tra loi bang tieng Anh, ngan gon, khong hoi lai, khong giai thich them."
     )
     try:
-        result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_VIDEO_PROMPT_SCHEMA)
+        result = _call_orchestrator_json(system_prompt, raw_prompt, _CRAFT_VIDEO_PROMPT_SCHEMA, stage="video_generation")
         crafted = str(result.get("prompt") or "").strip()
         return crafted or raw_prompt
     except LlmError:
@@ -2078,7 +2225,8 @@ _REVIEW_SCENE_SCHEMA = {
         "issues": {"type": "string"},
         "should_regenerate": {"type": "boolean"},
     },
-    "required": ["saw", "matches", "score", "should_regenerate"],
+    "required": ["saw", "matches", "score", "issues", "should_regenerate"],
+    "additionalProperties": False,
 }
 
 # A scene the model simply cannot get right would otherwise regenerate
@@ -2090,11 +2238,9 @@ _REVIEW_PASS_SCORE = 6
 def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[str, Any]:
     """Has the orchestrator look at a generated file and judge it.
 
-    Goes straight to the Claude Code CLI rather than through
-    _call_orchestrator_json: this needs the CLI's Read tool pointed at the
-    one file, which is what lets it actually see the image instead of
-    guessing. Asked live without it, it correctly refused to describe the
-    picture at all rather than invent one.
+    Vision must follow the configured app orchestrator too. Both Codex and
+    Claude receive the real local image, rather than being asked to infer its
+    contents from a path or prompt.
     """
     system_prompt = (
         f"Ban la nguoi kiem tra chat luong {'video' if kind == 'video' else 'anh'} minh hoa cho video YouTube. "
@@ -2107,9 +2253,66 @@ def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[s
         "- 'should_regenerate': chi dat true khi loi du nghiem trong de khong dung duoc cho video."
     )
     user_prompt = f"Mo ta canh mong muon:\n{scene_prompt}"
-    return call_claude_code_cli_json(
-        system_prompt, user_prompt, _REVIEW_SCENE_SCHEMA, image_path=str(file_path)
-    )
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    vision_path = file_path
+    try:
+        if file_path.suffix.lower() in {".gif", ".mp4", ".webm", ".mov", ".mkv"}:
+            temporary = tempfile.TemporaryDirectory(prefix="youtube-ai-factory-motion-review-")
+            frame_path = Path(temporary.name) / "motion-contact-sheet.png"
+            duration = media_duration_seconds(file_path, FFMPEG_BINARY) or 4.0
+            review_fps = max(0.1, 4.0 / max(0.25, duration))
+            result = subprocess.run(
+                [
+                    FFMPEG_BINARY,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(file_path),
+                    "-vf",
+                    f"fps={review_fps:.6f},scale=480:-2,tile=2x2:padding=4:margin=4",
+                    "-frames:v", "1",
+                    str(frame_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode == 0 and frame_path.is_file():
+                vision_path = frame_path
+                user_prompt += (
+                    "\nFile đính kèm là contact sheet 2x2 gồm bốn thời điểm trải đều trong chuyển động. "
+                    "Hãy kiểm tra cả tính nhất quán giữa bốn ô, không chỉ ô đầu tiên."
+                )
+        assignment = settings.agent_assignment("quality_review")
+        reviewer = str(assignment.get("reviewer") or "auto")
+        executor = str(assignment.get("executor") or settings.orchestrator_provider())
+        vision_agents = ["codex_cli", "claude_code_cli"]
+        if reviewer in vision_agents:
+            order = [reviewer, *[agent for agent in vision_agents if agent != reviewer]]
+        else:
+            order = [agent for agent in vision_agents if agent != executor] + [executor]
+        errors: list[str] = []
+        for agent in dict.fromkeys(agent for agent in order if agent in vision_agents):
+            try:
+                if agent == "codex_cli":
+                    return call_codex_vision_json(
+                        system_prompt,
+                        user_prompt,
+                        _REVIEW_SCENE_SCHEMA,
+                        image_path=vision_path,
+                    )
+                return call_claude_code_cli_json(
+                    system_prompt, user_prompt, _REVIEW_SCENE_SCHEMA, image_path=str(vision_path)
+                )
+            except (LlmError, CodexBridgeError) as exc:
+                errors.append(f"{agent}: {exc}")
+        raise LlmError("Không AI vision nào nghiệm thu được cảnh. " + " | ".join(errors))
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def _run_scene_review(job_id: int) -> dict[str, Any] | None:
@@ -2120,11 +2323,16 @@ def _run_scene_review(job_id: int) -> dict[str, Any] | None:
     path = Path(str(job.get("timeline_visual_path") or job.get("output_path") or ""))
     if not path.is_file():
         return None
-    segment_prompt = str(job.get("prompt") or "")
+    segment = database.get_project_timeline_segment(int(job["timeline_segment_id"]))
+    # A GIF job's provider prompt describes the 2x2 transport format. Review
+    # the finished animation against the storyboard intent instead, otherwise
+    # the vision model would incorrectly expect to see the whole sheet in one
+    # extracted GIF frame.
+    segment_prompt = str((segment or {}).get("visual_prompt") or job.get("prompt") or "")
     kind = "video" if path.suffix.lower() in {".mp4", ".webm", ".mov"} else "image"
     try:
         verdict = _review_scene_asset(path, segment_prompt, kind)
-    except LlmError as exc:
+    except (LlmError, CodexBridgeError) as exc:
         database.save_scene_job_review(job_id, "skipped", 0, f"Khong cham duoc: {exc}")
         return None
 
@@ -2151,7 +2359,24 @@ def _run_scene_review(job_id: int) -> dict[str, Any] | None:
 
 def _review_scene_in_background(job_id: int) -> None:
     """Reviewing takes ~15-30s of CLI time; the caller must not wait on it."""
-    threading.Thread(target=_run_scene_review, args=(job_id,), daemon=True).start()
+    def review_then_release() -> None:
+        try:
+            _run_scene_review(job_id)
+        except Exception as exc:
+            database.save_scene_job_review(job_id, "skipped", 0, f"Không chấm được ảnh: {exc}")
+        finally:
+            # Image-to-video children remain in `waiting` while the image is
+            # being judged. A rejected image may be regenerated once; only
+            # the accepted/final image is allowed to become a start frame.
+            # An unavailable reviewer must not strand the pipeline forever.
+            database.release_scene_generation_dependents(job_id)
+
+    threading.Thread(target=review_then_release, daemon=True).start()
+
+
+# Internal providers (including gflow-cli) use the same cross-review gate as
+# browser/Antigravity sidecars before dependent stages are released.
+scene_generation_worker.set_completion_callback(_review_scene_in_background)
 
 
 _PLAN_VISUALS_SCHEMA = {
@@ -2181,11 +2406,14 @@ _IMAGE_CAPABLE_PROVIDERS = {
     "openai_image", "gemini_image", "antigravity_image",
     "flow_image", "gemini_web_image", "chatgpt_web_image",
 }
-_VIDEO_CAPABLE_PROVIDERS = {"gemini_veo", "runway", "flow_veo", "meta_ai_video"}
+_VIDEO_CAPABLE_PROVIDERS = {"gemini_veo", "runway", "gflow_cli", "flow_veo", "meta_ai_video"}
 
 
 @app.post("/api/projects/{project_id}/timeline/plan-visuals")
-def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
+def plan_timeline_visuals(
+    project_id: int,
+    motion_policy: Literal["balanced", "gif_only"] = "balanced",
+) -> dict[str, Any]:
     """Decides per scene whether it wants a still, a short loop, or a clip.
 
     A talking point that holds one diagram on screen doesn't need a rendered
@@ -2208,6 +2436,14 @@ def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
             f"Loi thoai: {str(segment.get('voice_text') or '')[:180]} || "
             f"Hinh anh: {str(segment.get('visual_prompt') or '')[:260]}"
         )
+    gif_policy = (
+        "\nCHINH SACH BAT BUOC CUA PROJECT NAY: KHONG dung video. Moi canh can chuyen dong, ke ca canh "
+        "co nhieu buoc, phai chon 'gif'. AI anh se tao mot animation sheet 2x2 gom bon frame lien tiep; "
+        "App cat bon frame do va ghep thanh GIF cuc bo. "
+        "Tuyet doi khong tra ve kind='video'.\n"
+        if motion_policy == "gif_only"
+        else ""
+    )
     system_prompt = (
         "Ban la dao dien hinh anh cho video YouTube. Voi TUNG canh duoi day, hay quyet dinh nen dung:\n"
         "- 'image': anh TINH — khi canh chi can mot hinh minh hoa giu nguyen tren man hinh\n"
@@ -2217,9 +2453,10 @@ def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
         "chinh la NOI DUNG cua canh (so dem tang dan, bieu do lon len, so sanh hai trang thai)\n\n"
         "Nguyen tac: chuyen dong ton kem, chi dung khi no MANG Y NGHIA. Canh chi giai thich mot so lieu "
         "tinh thi dung 'image'. Tra ve dung so canh, moi canh mot muc, kem 'reason' ngan bang tieng Viet."
+        + gif_policy
     )
     try:
-        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _PLAN_VISUALS_SCHEMA)
+        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _PLAN_VISUALS_SCHEMA, stage="storyboard")
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2230,6 +2467,8 @@ def plan_timeline_visuals(project_id: int) -> dict[str, Any]:
         if not segment:
             continue
         kind = str(entry.get("kind") or "image")
+        if motion_policy == "gif_only" and kind == "video":
+            kind = "gif"
         fps = int(entry.get("fps") or 0) if kind in {"gif", "video"} else 0
         updated = database.set_segment_visual_kind(
             int(segment["id"]), kind, fps=fps, reason=str(entry.get("reason") or "")
@@ -2308,7 +2547,7 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         "Ngoai ra tra ve 'pacing' (nhip tong the) va 'music_mood' (khong khi nhac nen) cho ca video."
     )
     try:
-        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _EDIT_PLAN_SCHEMA)
+        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _EDIT_PLAN_SCHEMA, stage="storyboard")
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2353,7 +2592,22 @@ _ORCHESTRATE_SCHEMA = {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["plan_visuals", "plan_edit", "generate_images", "generate_videos", "nothing"],
+                        "enum": [
+                            "plan_visuals", "plan_edit", "generate_images",
+                            "generate_gifs", "generate_videos", "nothing",
+                        ],
+                    },
+                    "limit": {"type": "integer"},
+                    "providers": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "flow_image", "chatgpt_web_image", "gemini_web_image",
+                                "antigravity_image", "openai_image", "gemini_image",
+                                "gflow_cli", "flow_veo", "gemini_veo", "runway",
+                            ],
+                        },
                     },
                     "reason": {"type": "string"},
                 },
@@ -2382,7 +2636,13 @@ def _project_state_summary(project_id: int) -> str:
     return (
         f"Tong so canh: {len(timeline)}. Da co hinh: {with_visual}. Con thieu: {len(timeline) - with_visual}.\n"
         f"Ke hoach loai hinh (visual_kind): {kinds}.\n"
-        f"So canh da co ke hoach dung phim: {edited}/{len(timeline)}."
+        f"So canh da co ke hoach dung phim: {edited}/{len(timeline)}.\n"
+        "Trang thai AI tao canh: "
+        + "; ".join(
+            f"{state['provider']} failures={state.get('consecutive_failures', 0)} "
+            f"last_error={str(state.get('last_error') or '')[:120]}"
+            for state in database.list_scene_provider_states()
+        )
     )
 
 
@@ -2406,11 +2666,17 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         "Cac cong cu co the goi:\n"
         "- plan_visuals: quyet dinh moi canh nen dung anh tinh / gif / video (chay TRUOC khi tao)\n"
         "- generate_images: tao anh cho cac canh con thieu, chia deu nhieu AI de chay song song\n"
+        "- generate_gifs: KHONG goi AI video; Codex viet prompt animation sheet 2x2, cac AI anh tao bon "
+        "frame lien tiep, sau do app cat frame va ghep GIF. Dung khi nguoi dung muon GIF thay video.\n"
         "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG)\n"
         "- plan_edit: lap ke hoach dung phim (chuyen canh, hieu ung) cho tung canh\n"
         "- nothing: khong can lam gi\n\n"
         "Nguyen tac: khong tao lai thu da co. Neu chua lap ke hoach loai hinh ma nguoi dung muon tao hang loat, "
         "hay plan_visuals truoc. Chi dung generate_videos khi that su can vi no ton tien. "
+        "Neu nguoi dung noi dang TEST/THU, dat 'limit'=3 de thu Flow + ChatGPT + Gemini ma khong xep ca project. "
+        "Neu nguoi dung yeu cau GIF thay video, bat buoc chon generate_gifs, khong chon generate_videos. "
+        "Moi buoc tao co the dat 'providers' bang key provider. Khi retry sau smoke test, doc trang thai provider: "
+        "neu mot provider vua timeout/loi thi chon provider vua thanh cong thay vi lap lai provider loi. "
         "Viet 'reason' ngan gon bang tieng Viet."
     )
     user_prompt = (
@@ -2423,32 +2689,52 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     steps = [
-        {"action": str(step.get("action") or "nothing"), "reason": str(step.get("reason") or "")}
+        {
+            "action": str(step.get("action") or "nothing"),
+            "reason": str(step.get("reason") or ""),
+            "limit": max(1, min(int(step.get("limit") or 0), 500)) if step.get("limit") else None,
+            "providers": list(dict.fromkeys(str(item) for item in (step.get("providers") or []))),
+        }
         for step in (result.get("steps") or [])
     ]
     if payload.dry_run:
         return {
             "status": "planned",
+            "orchestrator_provider": settings.orchestrator_provider(),
             "understanding": str(result.get("understanding") or ""),
             "steps": steps,
             "note": "Chưa chạy gì. Gửi lại với dry_run=false để thực hiện.",
         }
 
     executed: list[dict[str, Any]] = []
+    gif_only = any(step["action"] == "generate_gifs" for step in steps)
     for step in steps:
         action = step["action"]
         try:
             if action == "plan_visuals":
-                outcome = plan_timeline_visuals(project_id)
+                outcome = plan_timeline_visuals(
+                    project_id,
+                    motion_policy="gif_only" if gif_only else "balanced",
+                )
             elif action == "plan_edit":
                 outcome = plan_project_edit(project_id)
-            elif action in {"generate_images", "generate_videos"}:
+            elif action in {"generate_images", "generate_gifs", "generate_videos"}:
                 wants_video = action == "generate_videos"
+                wants_gif = action == "generate_gifs"
+                selected_providers = step.get("providers") or (
+                    ["gflow_cli"]
+                    if wants_video
+                    else ["flow_image", "chatgpt_web_image", "gemini_web_image"]
+                )
                 outcome = queue_scene_generation_batch(
                     project_id,
                     BatchSceneGenerationRequest(
-                        providers=["flow_veo"] if wants_video else ["flow_image", "chatgpt_web_image", "gemini_web_image"],
+                        providers=selected_providers,
                         respect_plan=True,
+                        motion_as_gif=wants_gif,
+                        limit=step.get("limit"),
+                        requires_reference_image=wants_video,
+                        reference_image_provider="flow_image",
                         ratio="1280:720",
                         duration_seconds=5,
                         confirmed=True,
@@ -2461,6 +2747,7 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         executed.append({**step, "result": outcome})
     return {
         "status": "done",
+        "orchestrator_provider": settings.orchestrator_provider(),
         "understanding": str(result.get("understanding") or ""),
         "steps": executed,
     }
@@ -2468,6 +2755,20 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
 
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
+    if provider == "meta_ai_video":
+        raise HTTPException(
+            status_code=400,
+            detail="Meta AI hiện không tạo được video trong luồng đã kiểm chứng; provider này tạm khóa để tránh job kẹt.",
+        )
+    provider_state = database.get_scene_provider_state(provider)
+    if provider_state.get("circuit_open"):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Provider {provider} đang tạm ngắt đến {provider_state.get('opened_until')} "
+                f"sau nhiều lỗi liên tiếp. Lỗi gần nhất: {provider_state.get('last_error') or 'không rõ'}"
+            ),
+        )
     if provider == "runway":
         runway_key, _ = settings.runway_config()
         if not runway_key:
@@ -2480,6 +2781,51 @@ def _require_scene_provider_config(provider: str) -> None:
         gemini_key, _, _ = settings.gemini_config()
         if not gemini_key:
             raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
+    elif provider == "gflow_cli":
+        gflow = gflow_cli_status()
+        if not gflow.get("installed"):
+            raise HTTPException(status_code=400, detail="Chưa cài gflow-cli; mở Kết nối AI để cài/kiểm tra lại")
+        if not gflow.get("logged_in"):
+            raise HTTPException(status_code=400, detail="Google Flow chưa đăng nhập; mở Kết nối AI và bấm Đăng nhập Google Flow")
+
+
+_SCENE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+_SCENE_VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv"}
+
+
+def _scene_failure_kind(error: str) -> str:
+    normalized = error.lower()
+    if any(key in normalized for key in ("quota", "credit", "tín dụng", "resource_exhausted", "hạn mức")):
+        return "quota"
+    if any(key in normalized for key in ("timeout", "quá lâu", "heartbeat", "mất kết nối")):
+        return "timeout"
+    return "provider"
+
+
+def _reference_image_asset_for_segment(project_id: int, segment: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve/register the timeline's still image as an asset for image-to-video."""
+    raw_path = str(segment.get("visual_path") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if path.suffix.lower() not in _SCENE_IMAGE_EXTENSIONS or not path.is_file():
+        return None
+    asset = database.find_project_asset_by_path(project_id, str(path))
+    if asset and asset.get("asset_type") == "image":
+        return asset
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return database.create_project_asset(
+        project_id,
+        "image",
+        path.name,
+        str(path),
+        mime_type=mimetypes.guess_type(path.name)[0] or "image/png",
+        file_size=path.stat().st_size,
+        sha256=digest.hexdigest(),
+    )
 
 
 @app.post("/api/projects/{project_id}/scene-jobs")
@@ -2493,6 +2839,16 @@ def queue_scene_generation_job(
             detail="Tao canh AI se goi dich vu cloud va phat sinh chi phi; can confirmed=true",
         )
     _require_scene_provider_config(payload.provider)
+    is_video_provider = payload.provider in _VIDEO_CAPABLE_PROVIDERS
+    if payload.motion_as_gif and is_video_provider:
+        raise HTTPException(status_code=400, detail="GIF chỉ nhận provider tạo ảnh")
+    if payload.requires_reference_image and not is_video_provider:
+        raise HTTPException(status_code=400, detail="Chỉ video provider mới nhận chế độ image-to-video")
+    if payload.requires_reference_image and payload.reference_asset_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cảnh chưa có ảnh nguồn. Hãy tạo/chọn ảnh cho cảnh trước khi tạo video.",
+        )
     if payload.reference_asset_id is not None:
         asset = database.get_project_asset(payload.reference_asset_id)
         if not asset or int(asset["project_id"]) != project_id:
@@ -2500,7 +2856,9 @@ def queue_scene_generation_job(
         if asset["asset_type"] != "image":
             raise HTTPException(status_code=400, detail="Chi co the dung anh lam asset tham chieu")
     prompt_text = payload.prompt
-    if payload.provider in _CHAT_IMAGE_PROVIDERS:
+    if payload.motion_as_gif:
+        prompt_text = _craft_gif_sheet_prompt(prompt_text)
+    elif payload.provider in _CHAT_IMAGE_PROVIDERS:
         prompt_text = _craft_image_prompt(prompt_text)
     elif payload.provider in _CHAT_VIDEO_PROVIDERS:
         prompt_text = _craft_video_prompt(prompt_text, has_reference_image=bool(payload.reference_asset_id))
@@ -2512,6 +2870,8 @@ def queue_scene_generation_job(
         duration_seconds=payload.duration_seconds,
         ratio=payload.ratio,
         reference_asset_id=payload.reference_asset_id,
+        job_kind="gif" if payload.motion_as_gif else ("video" if is_video_provider else "image"),
+        requires_reference_image=payload.requires_reference_image,
     )
     if not job:
         raise HTTPException(status_code=400, detail="Segment timeline khong hop le hoac khong thuoc project")
@@ -2530,6 +2890,25 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     providers = list(dict.fromkeys(payload.providers)) or [payload.provider]
     for provider in providers:
         _require_scene_provider_config(provider)
+    if payload.motion_as_gif:
+        if payload.requires_reference_image:
+            raise HTTPException(status_code=400, detail="Chế độ GIF không được đồng thời gọi pipeline video")
+        invalid_gif_providers = [provider for provider in providers if provider not in _IMAGE_CAPABLE_PROVIDERS]
+        if invalid_gif_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF chỉ dùng AI tạo ảnh, không nhận video provider: {', '.join(invalid_gif_providers)}",
+            )
+    if payload.requires_reference_image:
+        invalid_video_providers = [provider for provider in providers if provider not in _VIDEO_CAPABLE_PROVIDERS]
+        if invalid_video_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Chế độ ảnh sang video chỉ nhận video provider: {', '.join(invalid_video_providers)}",
+            )
+        if payload.reference_image_provider not in _IMAGE_CAPABLE_PROVIDERS:
+            raise HTTPException(status_code=400, detail="Provider chuẩn bị ảnh không hỗ trợ tạo ảnh")
+        _require_scene_provider_config(payload.reference_image_provider)
     project = database.get_production_project(project_id)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
@@ -2539,28 +2918,115 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         raise HTTPException(status_code=400, detail="Cần tạo timeline trước khi tạo cảnh AI")
     image_pool = [p for p in providers if p in _IMAGE_CAPABLE_PROVIDERS]
     video_pool = [p for p in providers if p in _VIDEO_CAPABLE_PROVIDERS]
+    active_segment_ids = {
+        int(job["timeline_segment_id"])
+        for job in database.list_scene_generation_jobs(project_id, limit=500)
+        if str(job.get("status") or "") in {"waiting", "queued", "running"}
+    }
     queued: list[dict[str, Any]] = []
+    preparation_jobs: list[dict[str, Any]] = []
     counters = {"image": 0, "video": 0}
-    for segment in timeline:
-        if str(segment.get("visual_path") or "").strip():
+    for position, segment in enumerate(timeline):
+        if payload.limit is not None and len(queued) >= payload.limit:
+            break
+        if int(segment["id"]) in active_segment_ids:
             continue
+        visual_path = str(segment.get("visual_path") or "").strip()
+        visual_suffix = Path(visual_path).suffix.lower() if visual_path else ""
         prompt = str(segment.get("visual_prompt") or "").strip()
         if not prompt:
+            continue
+        if payload.requires_reference_image:
+            # A video already attached means this scene has completed the
+            # image-to-video stage. A still image is resolved into an asset;
+            # when no still exists, create it first and keep the video job in
+            # `waiting` until that exact image has completed and been reviewed.
+            if visual_suffix in _SCENE_VIDEO_EXTENSIONS:
+                continue
+            # Only scenes the plan actually calls for as video go down this
+            # path. Running it over the whole timeline built an image job plus
+            # a waiting video job even for scenes planned as a still or a
+            # loop — paying for motion the scene was never meant to have.
+            # With no plan recorded, fall back to treating every scene as
+            # eligible, which is what a caller asking for video without
+            # planning first is asking for.
+            planned_kind = str(segment.get("visual_kind") or "")
+            if planned_kind and planned_kind != "video":
+                continue
+            provider = video_pool[counters["video"] % len(video_pool)]
+            counters["video"] += 1
+            reference_asset = _reference_image_asset_for_segment(project_id, segment)
+            dependency_job: dict[str, Any] | None = None
+            if reference_asset is None:
+                image_prompt = prompt
+                if payload.reference_image_provider in _CHAT_IMAGE_PROVIDERS:
+                    image_prompt = _craft_image_prompt(
+                        image_prompt, context=_scene_prompt_context(timeline, position)
+                    )
+                dependency_job = database.create_scene_generation_job(
+                    project_id,
+                    int(segment["id"]),
+                    payload.reference_image_provider,
+                    image_prompt,
+                    duration_seconds=5,
+                    ratio=payload.ratio,
+                    job_kind="image",
+                )
+                if not dependency_job:
+                    continue
+                preparation_jobs.append(dependency_job)
+                if payload.reference_image_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                    scene_generation_worker.enqueue(int(dependency_job["id"]))
+            video_prompt = prompt
+            if provider in _CHAT_VIDEO_PROVIDERS:
+                video_prompt = _craft_video_prompt(video_prompt, has_reference_image=True)
+            job = database.create_scene_generation_job(
+                project_id,
+                int(segment["id"]),
+                provider,
+                video_prompt,
+                duration_seconds=payload.duration_seconds,
+                ratio=payload.ratio,
+                reference_asset_id=int(reference_asset["id"]) if reference_asset else None,
+                job_kind="video",
+                depends_on_job_id=int(dependency_job["id"]) if dependency_job else None,
+                requires_reference_image=True,
+            )
+            if job:
+                if not dependency_job and provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                    scene_generation_worker.enqueue(int(job["id"]))
+                queued.append(job)
+            continue
+
+        if visual_path:
             continue
         # Round-robin over the chosen providers so the scenes spread across
         # sites and actually run at the same time. With respect_plan, a scene
         # whose motion carries its meaning goes to a video tool while the
         # rest stay on image tools — falling back to whatever pool is
         # available rather than dropping the scene.
-        wants_video = payload.respect_plan and str(segment.get("visual_kind") or "") in {"gif", "video"}
-        pool = (video_pool or image_pool) if wants_video else (image_pool or video_pool)
+        planned_kind = str(segment.get("visual_kind") or "")
+        wants_motion = payload.respect_plan and planned_kind in {"gif", "video"}
+        wants_gif = payload.motion_as_gif and (wants_motion or not payload.respect_plan)
+        wants_video = wants_motion and not wants_gif
+        pool = image_pool if wants_gif else ((video_pool or image_pool) if wants_video else (image_pool or video_pool))
         if not pool:
             pool = providers
         bucket = "video" if wants_video else "image"
         provider = pool[counters[bucket] % len(pool)]
         counters[bucket] += 1
-        if provider in _CHAT_IMAGE_PROVIDERS:
-            prompt = _craft_image_prompt(prompt)
+        if wants_gif and planned_kind != "gif":
+            database.set_segment_visual_kind(
+                int(segment["id"]),
+                "gif",
+                fps=int(segment.get("visual_fps") or 8),
+                reason=(str(segment.get("visual_kind_reason") or "") + " | Dùng GIF thay video theo chính sách project").strip(" |"),
+            )
+        scene_context = _scene_prompt_context(timeline, position)
+        if wants_gif:
+            prompt = _craft_gif_sheet_prompt(prompt, context=scene_context)
+        elif provider in _CHAT_IMAGE_PROVIDERS:
+            prompt = _craft_image_prompt(prompt, context=scene_context)
         elif provider in _CHAT_VIDEO_PROVIDERS:
             # Batch only ever targets segments with no visual yet (skipped
             # above), so there's never an existing image to attach here.
@@ -2568,8 +3034,10 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         job = database.create_scene_generation_job(
             project_id, int(segment["id"]), provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,
+            job_kind="gif" if wants_gif else ("video" if provider in _VIDEO_CAPABLE_PROVIDERS else "image"),
         )
         if job:
+            active_segment_ids.add(int(segment["id"]))
             if provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                 scene_generation_worker.enqueue(int(job["id"]))
             queued.append(job)
@@ -2580,8 +3048,12 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     return {
         "status": "queued",
         "jobs": queued,
+        "preparation_jobs": preparation_jobs,
         "queued_count": len(queued),
+        "preparation_count": len(preparation_jobs),
         "total_segments": len(timeline),
+        "motion_as_gif": payload.motion_as_gif,
+        "limit": payload.limit,
         "by_provider": by_provider,
     }
 
@@ -2594,6 +3066,19 @@ def claim_antigravity_scene_job() -> dict[str, Any]:
     return {"job": job}
 
 
+def _materialize_scene_job_asset(job: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
+    """Convert an AI key frame into the job's final local artifact when needed."""
+    try:
+        return materialize_gif_asset(
+            database,
+            job,
+            asset,
+            ffmpeg_binary=FFMPEG_BINARY,
+        )
+    except GifGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/antigravity/scene-jobs/{job_id}/complete")
 def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
@@ -2602,10 +3087,18 @@ def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]
         raise HTTPException(status_code=404, detail="Không tìm thấy job Antigravity")
     if not asset or int(asset["project_id"]) != int(job["project_id"]):
         raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
+    asset = _materialize_scene_job_asset(job, asset)
+    asset_id = int(asset["id"])
     attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
-    finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    finished = database.finish_scene_generation_job(
+        job_id,
+        "completed",
+        output_path=str(asset["file_path"]),
+        output_asset_id=asset_id,
+        release_dependents=False,
+    )
     # Judge the result and regenerate a poor one, without making the caller
     # wait out a ~20s CLI call before it can pick up the next job.
     _review_scene_in_background(job_id)
@@ -2617,7 +3110,13 @@ def fail_antigravity_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
     if not job or str(job.get("provider")) != "antigravity_image":
         raise HTTPException(status_code=404, detail="Không tìm thấy job Antigravity")
-    finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
+    message = error.strip() or "Sidecar báo lỗi, không có chi tiết"
+    finished = database.finish_scene_generation_job(
+        job_id,
+        "error",
+        error=message,
+        failure_kind=_scene_failure_kind(message),
+    )
     return {"status": "error", "job": finished}
 
 
@@ -2635,6 +3134,14 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
     if provider not in database.BROWSER_SIDECAR_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Provider không hợp lệ: {provider}")
     _sidecar_last_seen[provider] = datetime.now(timezone.utc)
+    if provider == "meta_ai_video":
+        return {
+            "job": None,
+            "disabled_reason": "Meta AI không tạo được video trong luồng đã kiểm chứng; provider đang bị khóa.",
+        }
+    provider_state = database.get_scene_provider_state(provider)
+    if provider_state.get("circuit_open"):
+        return {"job": None, "circuit": provider_state}
     job = database.claim_next_scene_job_for_provider(provider)
     return {"job": job}
 
@@ -2653,22 +3160,33 @@ def scene_sidecar_status() -> dict[str, Any]:
             "last_seen_at": last_seen.isoformat() if last_seen else None,
             "seconds_ago": seconds_ago,
             "alive": seconds_ago is not None and seconds_ago <= _SIDECAR_STALE_AFTER_SECONDS,
+            "circuit": database.get_scene_provider_state(provider),
         }
     return result
 
 
 @app.post("/api/browser-scene-jobs/{job_id}/complete")
-def complete_browser_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
+def complete_browser_scene_job(job_id: int, asset_id: int, claim_token: str = "") -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
     asset = database.get_project_asset(asset_id)
     if not job or str(job.get("provider")) not in database.BROWSER_SIDECAR_PROVIDERS:
         raise HTTPException(status_code=404, detail="Không tìm thấy job trình duyệt")
+    if job.get("status") != "running" or not claim_token or claim_token != str(job.get("claim_token") or ""):
+        raise HTTPException(status_code=409, detail="Lượt chạy này đã hết hạn hoặc không còn sở hữu job")
     if not asset or int(asset["project_id"]) != int(job["project_id"]):
         raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
+    asset = _materialize_scene_job_asset(job, asset)
+    asset_id = int(asset["id"])
     attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
-    finished = database.finish_scene_generation_job(job_id, "completed", output_path=str(asset["file_path"]))
+    finished = database.finish_scene_generation_job(
+        job_id,
+        "completed",
+        output_path=str(asset["file_path"]),
+        output_asset_id=asset_id,
+        release_dependents=False,
+    )
     # Judge the result and regenerate a poor one, without making the caller
     # wait out a ~20s CLI call before it can pick up the next job.
     _review_scene_in_background(job_id)
@@ -2690,7 +3208,7 @@ def review_scene_job(job_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/browser/trace")
-def browser_trace(job: int = 0, stage: str = "") -> dict[str, Any]:
+def browser_trace(job: int = 0, stage: str = "", claim_token: str = "") -> dict[str, Any]:
     """Breadcrumb endpoint for the extension's job pipeline.
 
     A stalled run is otherwise invisible from here: the job sits at
@@ -2698,15 +3216,32 @@ def browser_trace(job: int = 0, stage: str = "") -> dict[str, Any]:
     exists is the extension's own service-worker console. Each stage hits
     this so the server access log shows exactly how far a job got.
     """
+    if job > 0:
+        scene_job = database.get_scene_generation_job(job)
+        if (
+            scene_job
+            and scene_job.get("status") == "running"
+            and claim_token
+            and claim_token == str(scene_job.get("claim_token") or "")
+        ):
+            database.touch_scene_generation_job(job, stage)
     return {"ok": True, "job": job, "stage": stage[:120]}
 
 
 @app.post("/api/browser-scene-jobs/{job_id}/fail")
-def fail_browser_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
+def fail_browser_scene_job(job_id: int, error: str = "", claim_token: str = "") -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
     if not job or str(job.get("provider")) not in database.BROWSER_SIDECAR_PROVIDERS:
         raise HTTPException(status_code=404, detail="Không tìm thấy job trình duyệt")
-    finished = database.finish_scene_generation_job(job_id, "error", error=error.strip() or "Sidecar báo lỗi, không có chi tiết")
+    if job.get("status") != "running" or not claim_token or claim_token != str(job.get("claim_token") or ""):
+        raise HTTPException(status_code=409, detail="Lượt chạy này đã hết hạn hoặc không còn sở hữu job")
+    message = error.strip() or "Sidecar báo lỗi, không có chi tiết"
+    finished = database.finish_scene_generation_job(
+        job_id,
+        "error",
+        error=message,
+        failure_kind=_scene_failure_kind(message),
+    )
     return {"status": "error", "job": finished}
 
 

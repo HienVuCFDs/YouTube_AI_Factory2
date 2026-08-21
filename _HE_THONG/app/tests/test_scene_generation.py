@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from youtube_monitor.database import Database
-from youtube_monitor.scene_generator import _cloud_generation_error, _gemini_aspect_ratio, _openai_image_size, generate_gemini_image_scene, generate_openai_image_scene
+from youtube_monitor.scene_generator import _cloud_generation_error, _gemini_aspect_ratio, _openai_image_size, generate_gemini_image_scene, generate_gflow_cli_scene, generate_openai_image_scene
 
 
 class SceneGenerationDatabaseTests(unittest.TestCase):
@@ -86,10 +86,14 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             runway_job = database.create_scene_generation_job(
                 project["id"], segment["id"], "runway", "A cinematic sunrise over mountains"
             )
+            gflow_cli_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "gflow_cli", "A cinematic sunrise over mountains"
+            )
 
             # The in-process worker queue must never pick up sidecar-only jobs.
             queued_ids = database.list_queued_scene_generation_job_ids()
             self.assertIn(runway_job["id"], queued_ids)
+            self.assertIn(gflow_cli_job["id"], queued_ids)
             self.assertNotIn(antigravity_job["id"], queued_ids)
             self.assertNotIn(flow_job["id"], queued_ids)
             self.assertNotIn(meta_job["id"], queued_ids)
@@ -109,6 +113,42 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertEqual(claimed_meta["id"], meta_job["id"])
             self.assertEqual(claimed_meta["status"], "running")
             self.assertIsNone(database.claim_next_scene_job_for_provider("meta_ai_video"))  # none left
+
+    def test_gflow_scene_creates_one_cloud_project_then_reuses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            frame_path = Path(directory) / "frame.png"
+            frame_path.write_bytes(b"png")
+            frame = database.create_project_asset(
+                project["id"],
+                asset_type="ai_scene",
+                original_name="frame.png",
+                file_path=str(frame_path),
+                mime_type="image/png",
+            )
+            job = database.create_scene_generation_job(
+                project["id"], segment["id"], "gflow_cli", "Animate the frame",
+                reference_asset_id=frame["id"], requires_reference_image=True,
+            )
+            with patch(
+                "youtube_monitor.scene_generator.settings.gflow_config",
+                return_value={"profile": "default"},
+            ), patch(
+                "youtube_monitor.scene_generator.create_gflow_project",
+                return_value="flow-project-123",
+            ) as create_project, patch(
+                "youtube_monitor.scene_generator.generate_gflow_video",
+                return_value=str(Path(directory) / "scene.mp4"),
+            ) as generate:
+                generate_gflow_cli_scene(database, job, Path(directory) / "artifacts")
+                generate_gflow_cli_scene(database, job, Path(directory) / "artifacts")
+
+            create_project.assert_called_once()
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(generate.call_args.kwargs["gflow_project_id"], "flow-project-123")
+            updated = database.get_production_project(project["id"])
+            self.assertEqual(updated["gflow_project_id"], "flow-project-123")
+            self.assertEqual(updated["gflow_profile"], "default")
 
     def test_browser_provider_job_completion_attaches_video_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -133,6 +173,265 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             )
             self.assertEqual(failed["status"], "error")
             self.assertEqual(failed["error"], "Flow timed out waiting for the clip")
+
+    def test_browser_job_includes_project_title_for_flow_workspace_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_image", "Create the first storyboard frame"
+            )
+            self.assertEqual(job["project_title"], "Scene video")
+            claimed = database.claim_next_scene_job_for_provider("flow_image")
+            self.assertEqual(claimed["project_title"], "Scene video")
+
+    def test_image_job_releases_dependent_video_with_exact_reference_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            image_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_image", "Create the approved storyboard frame",
+                job_kind="image",
+            )
+            video_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "Animate this exact frame",
+                duration_seconds=8,
+                job_kind="video",
+                depends_on_job_id=image_job["id"],
+                requires_reference_image=True,
+            )
+            self.assertEqual(video_job["status"], "waiting")
+            self.assertEqual(video_job["pipeline_stage"], "waiting_for_reference")
+            self.assertIsNone(database.claim_scene_generation_job(video_job["id"]))
+
+            image_path = Path(directory) / "approved-frame.png"
+            image_path.write_bytes(b"png")
+            asset = database.create_project_asset(
+                project["id"], "image", image_path.name, str(image_path),
+                mime_type="image/png", file_size=image_path.stat().st_size,
+            )
+            database.claim_scene_generation_job(image_job["id"])
+            database.finish_scene_generation_job(
+                image_job["id"], "completed", output_path=str(image_path),
+                output_asset_id=asset["id"], release_dependents=False,
+            )
+            self.assertEqual(database.get_scene_generation_job(video_job["id"])["status"], "waiting")
+
+            released = database.release_scene_generation_dependents(image_job["id"])
+            self.assertEqual([item["id"] for item in released], [video_job["id"]])
+            claimed = database.claim_scene_generation_job(video_job["id"])
+            self.assertEqual(claimed["reference_asset_id"], asset["id"])
+            self.assertTrue(claimed["requires_reference_image"])
+            self.assertEqual(claimed["duration_seconds"], 8)
+            self.assertTrue(claimed["claim_token"])
+
+    def test_batch_video_builds_image_then_video_pipeline_when_scene_has_no_image(self):
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_veo",
+                duration_seconds=8,
+                requires_reference_image=True,
+                reference_image_provider="flow_image",
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ), patch.object(
+                main_module, "_craft_video_prompt", side_effect=lambda prompt, **_: prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(result["preparation_count"], 1)
+            self.assertEqual(result["queued_count"], 1)
+            image_job = result["preparation_jobs"][0]
+            video_job = result["jobs"][0]
+            self.assertEqual(image_job["job_kind"], "image")
+            self.assertEqual(video_job["job_kind"], "video")
+            self.assertEqual(video_job["status"], "waiting")
+            self.assertEqual(video_job["depends_on_job_id"], image_job["id"])
+            self.assertTrue(video_job["requires_reference_image"])
+            self.assertIsNone(video_job["reference_asset_id"])
+            self.assertEqual(video_job["timeline_segment_id"], segment["id"])
+
+    def test_batch_video_skips_scene_the_plan_wants_as_a_still(self):
+        """A still scene must not be dragged through the video pipeline.
+
+        The video batch used to run over the whole timeline, so a scene the
+        orchestrator had planned as an image still got an image job plus a
+        waiting video job — paying for motion the scene was never meant to
+        have.
+        """
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(
+                segment["id"], "image", reason="Holds one diagram on screen"
+            )
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_veo",
+                duration_seconds=8,
+                requires_reference_image=True,
+                reference_image_provider="flow_image",
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ), patch.object(
+                main_module, "_craft_video_prompt", side_effect=lambda prompt, **_: prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(result["queued_count"], 0)
+            self.assertEqual(result["preparation_count"], 0)
+
+    def test_batch_video_still_runs_for_a_scene_planned_as_video(self):
+        """The same batch must keep working for scenes that do want motion."""
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(
+                segment["id"], "video", reason="The movement is the point"
+            )
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_veo",
+                duration_seconds=8,
+                requires_reference_image=True,
+                reference_image_provider="flow_image",
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ), patch.object(
+                main_module, "_craft_video_prompt", side_effect=lambda prompt, **_: prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(result["queued_count"], 1)
+            self.assertEqual(result["preparation_count"], 1)
+            self.assertEqual(result["jobs"][0]["timeline_segment_id"], segment["id"])
+
+    def test_scene_prompt_context_carries_narration_and_neighbours(self):
+        """Prompts are written knowing the shots either side of them.
+
+        A visual_prompt read alone says nothing about who the characters are
+        or what the previous shot established, so each image came back styled
+        independently and the sequence did not look like one film.
+        """
+        from youtube_monitor import main as main_module
+
+        timeline = [
+            {"segment_index": 1, "voice_text": "Mo dau", "visual_prompt": "Canh mot"},
+            {"segment_index": 2, "voice_text": "Dien giai", "visual_prompt": "Canh hai"},
+            {"segment_index": 3, "voice_text": "Ket", "visual_prompt": "Canh ba"},
+        ]
+        context = main_module._scene_prompt_context(timeline, 1)
+        self.assertIn("Dien giai", context)
+        self.assertIn("Canh mot", context)
+        self.assertIn("Canh ba", context)
+        # First and last scenes simply have one fewer neighbour.
+        self.assertNotIn("LIEN TRUOC", main_module._scene_prompt_context(timeline, 0))
+        self.assertNotIn("LIEN SAU", main_module._scene_prompt_context(timeline, 2))
+
+    def test_batch_gif_routes_planned_video_to_image_provider_and_caps_smoke_test(self):
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(
+                segment["id"], "video", fps=10, reason="Scene needs motion"
+            )
+            payload = main_module.BatchSceneGenerationRequest(
+                providers=["flow_image", "chatgpt_web_image", "gemini_web_image"],
+                respect_plan=True,
+                motion_as_gif=True,
+                limit=1,
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertTrue(result["motion_as_gif"])
+            self.assertEqual(result["limit"], 1)
+            self.assertEqual(result["queued_count"], 1)
+            job = result["jobs"][0]
+            self.assertEqual(job["provider"], "flow_image")
+            self.assertEqual(job["job_kind"], "gif")
+            self.assertEqual(job["visual_kind"], "gif")
+            self.assertEqual(job["visual_fps"], 10)
+
+    def test_failed_image_review_can_requeue_parent_before_video_is_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            image_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_image", "Create frame", job_kind="image"
+            )
+            video_job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "Animate frame",
+                job_kind="video", depends_on_job_id=image_job["id"], requires_reference_image=True,
+            )
+            image_path = Path(directory) / "rejected.png"
+            image_path.write_bytes(b"png")
+            asset = database.create_project_asset(
+                project["id"], "image", image_path.name, str(image_path), mime_type="image/png"
+            )
+            database.claim_scene_generation_job(image_job["id"])
+            database.finish_scene_generation_job(
+                image_job["id"], "completed", output_path=str(image_path),
+                output_asset_id=asset["id"], release_dependents=False,
+            )
+            database.save_scene_job_review(image_job["id"], "fail", 3, "Wrong composition")
+            retried = database.retry_scene_generation_job(image_job["id"])
+            self.assertEqual(retried["status"], "queued")
+            self.assertIsNone(retried["output_asset_id"])
+            self.assertEqual(database.get_scene_generation_job(video_job["id"])["status"], "waiting")
+
+    def test_watchdog_retries_once_then_fails_stale_scene_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            job = database.create_scene_generation_job(
+                project["id"], segment["id"], "flow_veo", "A moving sunrise",
+                job_kind="video", max_attempts=2,
+            )
+            database.claim_scene_generation_job(job["id"])
+            with database._connect() as connection:
+                connection.execute(
+                    "UPDATE scene_generation_jobs SET heartbeat_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                    (job["id"],),
+                )
+            first = database.recover_stale_scene_generation_jobs(30)
+            self.assertEqual(first, [{"id": job["id"], "provider": "flow_veo", "requeued": True}])
+            self.assertEqual(database.get_scene_generation_job(job["id"])["status"], "queued")
+
+            database.claim_scene_generation_job(job["id"])
+            with database._connect() as connection:
+                connection.execute(
+                    "UPDATE scene_generation_jobs SET heartbeat_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                    (job["id"],),
+                )
+            second = database.recover_stale_scene_generation_jobs(30)
+            self.assertEqual(second, [{"id": job["id"], "provider": "flow_veo", "requeued": False}])
+            failed = database.get_scene_generation_job(job["id"])
+            self.assertEqual(failed["status"], "error")
+            self.assertEqual(failed["failure_kind"], "stale")
+
+    def test_provider_circuit_opens_after_failures_and_success_resets_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, _, _ = self._project_with_timeline(directory)
+            for index in range(3):
+                state = database.record_scene_provider_failure(
+                    "flow_veo", f"failure {index + 1}", threshold=3, cooldown_seconds=60,
+                )
+            self.assertTrue(state["circuit_open"])
+            self.assertEqual(state["consecutive_failures"], 3)
+            database.record_scene_provider_success("flow_veo")
+            reset = database.get_scene_provider_state("flow_veo")
+            self.assertFalse(reset["circuit_open"])
+            self.assertEqual(reset["consecutive_failures"], 0)
 
     def test_scene_job_requires_segment_from_same_project(self):
         with tempfile.TemporaryDirectory() as directory:
