@@ -2936,7 +2936,19 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         prompt = str(segment.get("visual_prompt") or "").strip()
         if not prompt:
             continue
-        if payload.requires_reference_image:
+        planned_kind = str(segment.get("visual_kind") or "")
+        # A scene that is to become a video ALWAYS goes through the
+        # image-first pipeline: make the still, then animate that exact
+        # still. There is deliberately no text-to-video path in a batch, so
+        # the rule does not depend on the caller remembering a flag — a clip
+        # generated from the prompt alone would not match the storyboard
+        # image the rest of the video is built around.
+        wants_video_scene = (
+            bool(video_pool)
+            and not payload.motion_as_gif
+            and (payload.requires_reference_image or planned_kind == "video")
+        )
+        if wants_video_scene:
             # A video already attached means this scene has completed the
             # image-to-video stage. A still image is resolved into an asset;
             # when no still exists, create it first and keep the video job in
@@ -2950,7 +2962,6 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             # With no plan recorded, fall back to treating every scene as
             # eligible, which is what a caller asking for video without
             # planning first is asking for.
-            planned_kind = str(segment.get("visual_kind") or "")
             if planned_kind and planned_kind != "video":
                 continue
             provider = video_pool[counters["video"] % len(video_pool)]
@@ -2958,15 +2969,21 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             reference_asset = _reference_image_asset_for_segment(project_id, segment)
             dependency_job: dict[str, Any] | None = None
             if reference_asset is None:
+                # The caller only supplies this when it asked for the video
+                # pipeline explicitly; a plan-driven video scene falls back to
+                # whichever image tool this batch already has.
+                image_provider = payload.reference_image_provider
+                if image_provider not in _IMAGE_CAPABLE_PROVIDERS:
+                    image_provider = image_pool[0] if image_pool else "flow_image"
                 image_prompt = prompt
-                if payload.reference_image_provider in _CHAT_IMAGE_PROVIDERS:
+                if image_provider in _CHAT_IMAGE_PROVIDERS:
                     image_prompt = _craft_image_prompt(
                         image_prompt, context=_scene_prompt_context(timeline, position)
                     )
                 dependency_job = database.create_scene_generation_job(
                     project_id,
                     int(segment["id"]),
-                    payload.reference_image_provider,
+                    image_provider,
                     image_prompt,
                     duration_seconds=5,
                     ratio=payload.ratio,
@@ -2975,7 +2992,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 if not dependency_job:
                     continue
                 preparation_jobs.append(dependency_job)
-                if payload.reference_image_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                if image_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                     scene_generation_worker.enqueue(int(dependency_job["id"]))
             video_prompt = prompt
             if provider in _CHAT_VIDEO_PROVIDERS:
@@ -3001,20 +3018,21 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         if visual_path:
             continue
         # Round-robin over the chosen providers so the scenes spread across
-        # sites and actually run at the same time. With respect_plan, a scene
-        # whose motion carries its meaning goes to a video tool while the
-        # rest stay on image tools — falling back to whatever pool is
-        # available rather than dropping the scene.
-        planned_kind = str(segment.get("visual_kind") or "")
+        # sites and actually run at the same time.
+        #
+        # Anything reaching here produces a still (or a GIF sheet, which is
+        # also a still). Video scenes were handled above through the
+        # image-first pipeline, so this branch never picks a video tool: doing
+        # so would be a text-to-video clip, which cannot match the storyboard
+        # image the rest of the video is built around.
         wants_motion = payload.respect_plan and planned_kind in {"gif", "video"}
         wants_gif = payload.motion_as_gif and (wants_motion or not payload.respect_plan)
-        wants_video = wants_motion and not wants_gif
-        pool = image_pool if wants_gif else ((video_pool or image_pool) if wants_video else (image_pool or video_pool))
+        pool = image_pool
         if not pool:
-            pool = providers
-        bucket = "video" if wants_video else "image"
-        provider = pool[counters[bucket] % len(pool)]
-        counters[bucket] += 1
+            fallback = payload.reference_image_provider
+            pool = [fallback if fallback in _IMAGE_CAPABLE_PROVIDERS else "flow_image"]
+        provider = pool[counters["image"] % len(pool)]
+        counters["image"] += 1
         if wants_gif and planned_kind != "gif":
             database.set_segment_visual_kind(
                 int(segment["id"]),
@@ -3025,16 +3043,12 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         scene_context = _scene_prompt_context(timeline, position)
         if wants_gif:
             prompt = _craft_gif_sheet_prompt(prompt, context=scene_context)
-        elif provider in _CHAT_IMAGE_PROVIDERS:
+        else:
             prompt = _craft_image_prompt(prompt, context=scene_context)
-        elif provider in _CHAT_VIDEO_PROVIDERS:
-            # Batch only ever targets segments with no visual yet (skipped
-            # above), so there's never an existing image to attach here.
-            prompt = _craft_video_prompt(prompt, has_reference_image=False)
         job = database.create_scene_generation_job(
             project_id, int(segment["id"]), provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,
-            job_kind="gif" if wants_gif else ("video" if provider in _VIDEO_CAPABLE_PROVIDERS else "image"),
+            job_kind="gif" if wants_gif else "image",
         )
         if job:
             active_segment_ids.add(int(segment["id"]))

@@ -313,6 +313,36 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertEqual(result["preparation_count"], 1)
             self.assertEqual(result["jobs"][0]["timeline_segment_id"], segment["id"])
 
+    def test_batch_never_creates_text_to_video_without_a_still_first(self):
+        """A video scene always gets its still made first.
+
+        Passing only video providers, with no plan and without asking for the
+        reference-image pipeline, used to produce a bare text-to-video job.
+        A clip generated from the prompt alone cannot match the storyboard
+        image the rest of the video is built around, so that path is gone: the
+        batch makes the still instead.
+        """
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            payload = main_module.BatchSceneGenerationRequest(
+                providers=["flow_veo"],
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ), patch.object(
+                main_module, "_craft_video_prompt", side_effect=lambda prompt, **_: prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            for job in result["jobs"]:
+                self.assertNotEqual(job["job_kind"], "video")
+            for job in result["jobs"] + result["preparation_jobs"]:
+                if job["job_kind"] == "video":
+                    self.assertTrue(job["requires_reference_image"])
+
     def test_scene_prompt_context_carries_narration_and_neighbours(self):
         """Prompts are written knowing the shots either side of them.
 
