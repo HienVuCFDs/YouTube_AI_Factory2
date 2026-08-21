@@ -2602,10 +2602,16 @@ _ORCHESTRATE_SCHEMA = {
                         "type": "array",
                         "items": {
                             "type": "string",
+                            # flow_veo is deliberately absent: the Flow browser
+                            # extension is the legacy path now that gflow_cli
+                            # drives Flow from the scene worker. Leaving it
+                            # selectable meant the orchestrator kept choosing
+                            # it, quietly routing video back through the
+                            # extension the plan had already retired.
                             "enum": [
                                 "flow_image", "chatgpt_web_image", "gemini_web_image",
                                 "antigravity_image", "openai_image", "gemini_image",
-                                "gflow_cli", "flow_veo", "gemini_veo", "runway",
+                                "gflow_cli", "gemini_veo", "runway",
                             ],
                         },
                     },
@@ -2668,7 +2674,10 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         "- generate_images: tao anh cho cac canh con thieu, chia deu nhieu AI de chay song song\n"
         "- generate_gifs: KHONG goi AI video; Codex viet prompt animation sheet 2x2, cac AI anh tao bon "
         "frame lien tiep, sau do app cat frame va ghep GIF. Dung khi nguoi dung muon GIF thay video.\n"
-        "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG)\n"
+        "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG). Dong co video duy nhat "
+        "hien nay la 'gflow_cli' (Google Flow/Veo chay tu worker cua app). Extension Flow ('flow_veo') da "
+        "thanh duong legacy, KHONG duoc chon. Moi canh video deu duoc tao anh tinh truoc roi moi dung "
+        "video tu chinh anh do — app tu lo viec nay.\n"
         "- plan_edit: lap ke hoach dung phim (chuyen canh, hieu ung) cho tung canh\n"
         "- nothing: khong can lam gi\n\n"
         "Nguyen tac: khong tao lai thu da co. Neu chua lap ke hoach loai hinh ma nguoi dung muon tao hang loat, "
@@ -2726,6 +2735,13 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
                     if wants_video
                     else ["flow_image", "chatgpt_web_image", "gemini_web_image"]
                 )
+                # Belt and braces alongside the schema: a CLI that ignores the
+                # enum must not be able to send video back through the retired
+                # extension path.
+                selected_providers = list(dict.fromkeys(
+                    "gflow_cli" if provider == "flow_veo" else provider
+                    for provider in selected_providers
+                ))
                 outcome = queue_scene_generation_batch(
                     project_id,
                     BatchSceneGenerationRequest(
