@@ -3015,8 +3015,6 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 queued.append(job)
             continue
 
-        if visual_path:
-            continue
         # Round-robin over the chosen providers so the scenes spread across
         # sites and actually run at the same time.
         #
@@ -3027,6 +3025,12 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         # image the rest of the video is built around.
         wants_motion = payload.respect_plan and planned_kind in {"gif", "video"}
         wants_gif = payload.motion_as_gif and (wants_motion or not payload.respect_plan)
+        # "Has a visual" is not the same as "matches the plan". A scene
+        # planned as a loop but still holding the earlier still was treated as
+        # finished and silently skipped, so a GIF batch over a fully
+        # illustrated project queued nothing at all.
+        if visual_path and not (wants_gif and visual_suffix != ".gif"):
+            continue
         pool = image_pool
         if not pool:
             fallback = payload.reference_image_provider
