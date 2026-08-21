@@ -41,6 +41,7 @@ const FLOW_ASPECT_LABELS = {
   '720:1280': '9:16',
   '1024:1024': '1:1',
 };
+const FLOW_WORKSPACE_STORAGE_KEY = 'flowProjectWorkspaces';
 // Each job opens its own independent tab, so several can genuinely run at
 // once with no DOM conflict — this just caps how many at a time (across
 // all providers combined) rather than forcing a hard 1-at-a-time queue.
@@ -237,6 +238,92 @@ async function findOrCreateTab(url, { settleMs = 1500, reuseMatch = null } = {})
   // Heavy single-page apps keep initialising well past load "complete".
   await new Promise((r) => setTimeout(r, settleMs));
   return { tabId: tab.id, created: true };
+}
+
+function flowWorkspaceName(job) {
+  const title = String(job.project_title || 'Du an khong ten').replace(/\s+/g, ' ').trim();
+  return `YT Factory P${job.project_id} - ${title}`.slice(0, 100);
+}
+
+async function getFlowWorkspace(job) {
+  const stored = await chrome.storage.local.get(FLOW_WORKSPACE_STORAGE_KEY);
+  const workspaces = stored[FLOW_WORKSPACE_STORAGE_KEY] || {};
+  const workspace = workspaces[String(job.project_id)] || null;
+  // A restored/test database can reuse a numeric id for a different project.
+  // In that case do not send its scenes into the old Flow project.
+  if (workspace && workspace.projectTitle !== String(job.project_title || '')) return null;
+  return workspace;
+}
+
+async function saveFlowWorkspace(job, tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const stored = await chrome.storage.local.get(FLOW_WORKSPACE_STORAGE_KEY);
+  const workspaces = stored[FLOW_WORKSPACE_STORAGE_KEY] || {};
+  workspaces[String(job.project_id)] = {
+    tabId,
+    url: String(tab.url || PROVIDER_URLS.flow_image),
+    name: flowWorkspaceName(job),
+    projectTitle: String(job.project_title || ''),
+    updatedAt: Date.now(),
+  };
+  await chrome.storage.local.set({ [FLOW_WORKSPACE_STORAGE_KEY]: workspaces });
+}
+
+// One Flow project is reserved for one YT Factory project. The first scene
+// opens Flow visibly and creates the workspace; later scenes reopen the
+// stored project URL (or reuse its still-open tab) instead of drifting into
+// whatever unrelated Flow project happens to be open.
+async function findOrCreateFlowWorkspaceTab(job) {
+  const workspace = await getFlowWorkspace(job);
+  if (workspace?.tabId) {
+    try {
+      const tab = await chrome.tabs.get(workspace.tabId);
+      if (String(tab.url || '').startsWith('https://labs.google/')) {
+        const savedUrl = String(workspace.url || '');
+        if (savedUrl.startsWith('https://labs.google/') && String(tab.url || '') !== savedUrl) {
+          await chrome.tabs.update(tab.id, { url: savedUrl, active: true });
+          await waitForTabComplete(tab.id);
+          await sleep(8000);
+        }
+        return { tabId: tab.id, created: false, persistent: true, mustCreateProject: false };
+      }
+    } catch { /* the saved tab was closed; reopen its project URL below */ }
+  }
+  const savedUrl = String(workspace?.url || '');
+  const targetUrl = savedUrl.startsWith('https://labs.google/')
+    ? savedUrl
+    : PROVIDER_URLS.flow_image;
+  // Flow needs a rendered foreground tab for reliable layout/snapshots, and
+  // the user explicitly expects the web workspace to open automatically.
+  const tab = await chrome.tabs.create({ url: targetUrl, active: true });
+  await waitForTabComplete(tab.id);
+  await sleep(8000);
+  return {
+    tabId: tab.id,
+    created: true,
+    persistent: true,
+    mustCreateProject: !workspace,
+  };
+}
+
+async function prepareFlowWorkspace(tabId, job) {
+  const workspaceName = flowWorkspaceName(job);
+  await ensureContentScripts(tabId);
+  await runAgentInTab(tabId, [
+    'Chuan bi MOT DU AN GOOGLE FLOW rieng de chua TOAN BO cac canh cua mot video YouTube.',
+    `Ten du an mong muon: "${workspaceName}".`,
+    '',
+    'Neu dang o trang thu vien/trang chu Flow, hay bam "Du an moi", "Tao du an" hoac nut tuong duong.',
+    'Neu Flow hien o nhap ten khi tao/doi ten, hay dat dung ten tren. Neu Flow tu tao du an ma khong hoi',
+    'ten thi van tiep tuc; khong duoc dung lai chi vi chua tim thay cho doi ten.',
+    'Neu da o trong man hinh soan cua mot du an vua tao, KHONG tao them du an thu hai.',
+    '',
+    'Chi tra ve done khi da vao ben trong workspace va thay khu vuc soan co the chon "Hinh anh"/"Video"',
+    'hoac o nhap prompt tao canh. Day chi la buoc CHUAN BI DU AN: TUYET DOI KHONG go prompt canh,',
+    'KHONG bam nut gui/tao noi dung va KHONG tieu credit.',
+    'Neu trang yeu cau dang nhap, bao loi quyen truy cap, hoac khong the tao du an, hay tra ve fail va noi ro.',
+  ].join('\n'), { maxSteps: 20 });
+  await saveFlowWorkspace(job, tabId);
 }
 
 // Providers that drive a shared, reused tab must take turns — two jobs
@@ -620,10 +707,31 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
 }
 
 function buildAgentGoal(provider, job, hasReference) {
+  if (provider === 'gemini_web_image' || provider === 'chatgpt_web_image') {
+    const site = provider === 'gemini_web_image' ? 'Gemini' : 'ChatGPT';
+    return [
+      `Tao MOT ANH TINH bang ${site} (giao dien chat web).`,
+      '',
+      'Cach lam: go doan prompt duoi day vao o nhap cua khung chat, gui di, roi cho AI ve xong anh.',
+      'Neu trang hoi lai de xac nhan bo cuc/phong cach, hay tra loi khang dinh chon phuong an hop ly',
+      'nhat va yeu cau tao ngay, dung hoi them.',
+      hasReference
+        ? 'Co san mot anh tham chieu: khi thay o dinh kem file, dung attach_image de gan vao truoc khi gui.'
+        : '',
+      '',
+      'Neu nut gui dang DISABLED, hay wait roi thu lai.',
+      'Chi tra ve done khi anh KET QUA cua luot tao nay da xuat hien, kem index cua phan tu <img> do.',
+      'Anh cu o phia tren doan chat KHONG phai ket qua.',
+      '',
+      'PROMPT CAN GUI:',
+      job.prompt,
+    ].filter(Boolean).join('\n');
+  }
   if (provider === 'flow_image') {
     const aspect = FLOW_ASPECT_LABELS[job.ratio] || '16:9';
     return [
-      'Tao MOT ANH TINH bang Google Flow trong project dang mo.',
+      `Tao MOT ANH TINH bang Google Flow trong project "${flowWorkspaceName(job)}" dang mo.`,
+      'Tat ca canh cua video nay phai nam trong CUNG project Flow nay; khong tao them project moi.',
       '',
       'GIAO DIEN: khung soan nam o DUOI CUNG giua man hinh. Ngay tren o nhap co bang tuy chon voi:',
       '- Hai the: "Hinh anh" va "Video" -> phai chon the "Hinh anh"',
@@ -645,7 +753,8 @@ function buildAgentGoal(provider, job, hasReference) {
   }
   if (provider === 'flow_veo') {
     return [
-      'Tao MOT VIDEO NGAN bang Google Flow (Veo) trong project dang mo san.',
+      `Tao MOT VIDEO NGAN bang Google Flow (Veo) trong project "${flowWorkspaceName(job)}" dang mo san.`,
+      'Tat ca canh cua video nay phai nam trong CUNG project Flow nay; khong tao them project moi.',
       '',
       'CANH BAO QUAN TRONG: Flow co ca chuc nang tao ANH va tao VIDEO. Lan truoc agent da lac vao chuc nang',
       'tao anh va bam lap lai, sinh ra 7 tam anh tinh giong nhau, tieu ton luot tra phi cua nguoi dung ma',
@@ -729,19 +838,57 @@ const REUSE_TAB_MATCH = {
   flow_image: 'https://labs.google/*',
 };
 
+// Longest a single job may occupy the extension. Veo needs minutes, so this
+// is generous — it exists only to stop a run that has silently wedged, which
+// has happened at several different points (a suspended worker, a message
+// that never gets a reply). Without it such a job holds its tab and, for
+// shared-tab providers, blocks every job behind it until the server-side
+// watchdog reclaims it many minutes later.
+const JOB_TIMEOUT_MS = 12 * 60 * 1000;
+
+async function withJobTimeout(job, promise) {
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Job ${job.id} quá ${Math.round(JOB_TIMEOUT_MS / 60000)} phút chưa xong — dừng để không giữ tab`)),
+      JOB_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([promise, guard]);
+  } catch (error) {
+    // runJob reports its own failures; this path is only reached when the
+    // guard fired, so the server still believes the job is running.
+    const message = String(error?.message || error);
+    await setJobStatus(job.id, `job ${job.id}: LỖI - ${message}`);
+    try {
+      await fetch(
+        `${FACTORY}/api/browser-scene-jobs/${job.id}/fail?error=${encodeURIComponent(message.slice(0, 2000))}`
+        + `&claim_token=${encodeURIComponent(job.claim_token || '')}`,
+        { method: 'POST' },
+      );
+    } catch { /* best-effort */ }
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function processOneJob(provider, job) {
   const shared = REUSE_TAB_MATCH[provider];
   // Keyed by the shared tab, not the provider: flow_image and flow_veo drive
   // the same Flow tab, so locking per provider would let them collide.
-  if (shared) return withProviderTabLock(shared, () => runJob(provider, job));
-  return runJob(provider, job);
+  if (shared) return withProviderTabLock(shared, () => withJobTimeout(job, runJob(provider, job)));
+  return withJobTimeout(job, runJob(provider, job));
 }
 
 // Breadcrumbs to the app's access log. A stalled run leaves no trace at all
 // otherwise — the job sits at "running" with no error and no requests, and
 // the reason lives only in the service worker's own console.
-function trace(jobId, stage) {
-  return fetch(`${FACTORY}/api/browser/trace?job=${jobId}&stage=${encodeURIComponent(stage)}`)
+function trace(jobId, stage, claimToken = '') {
+  return fetch(
+    `${FACTORY}/api/browser/trace?job=${jobId}&stage=${encodeURIComponent(stage)}&claim_token=${encodeURIComponent(claimToken)}`,
+  )
     .catch(() => { /* tracing must never break the run */ });
 }
 
@@ -750,44 +897,67 @@ async function runJob(provider, job) {
   const projectId = job.project_id;
   let tabId = null;
   let createdTab = false;
+  let persistentTab = false;
   try {
-    await trace(jobId, `bat-dau-${provider}`);
+    await trace(jobId, `bat-dau-${provider}`, job.claim_token);
     let referenceImage = null;
     if (job.reference_asset_id) {
       try {
         referenceImage = await fetchReferenceImageBase64(job.reference_asset_id);
       } catch (error) {
-        // Image-to-video is a nice-to-have on top of a working text-to-X
-        // job — a failed reference fetch shouldn't abort the whole job.
-        console.warn('YT Factory: could not fetch reference image', error);
+        if (job.requires_reference_image) {
+          throw new Error(
+            `Image-to-video bị dừng vì không tải được ảnh nguồn; không chuyển ngầm sang text-to-video: ${String(error?.message || error)}`,
+          );
+        }
+        console.warn('YT Factory: could not fetch optional reference image', error);
       }
     }
+    if (job.requires_reference_image && !referenceImage) {
+      throw new Error('Image-to-video bắt buộc có ảnh nguồn hợp lệ; job bị dừng trước khi gửi provider.');
+    }
     await setJobStatus(jobId, `[${provider}] job ${jobId}: mở tab và gửi prompt${referenceImage ? ' (kèm ảnh tham chiếu)' : ''}...`);
-    // Flow is a heavy workspace app that keeps initialising after load.
-    const opened = await findOrCreateTab(PROVIDER_URLS[provider], {
-      settleMs: provider.startsWith('flow_') ? 8000 : 1500,
-      reuseMatch: REUSE_TAB_MATCH[provider] || null,
-    });
+    // Flow gets a project-scoped persistent tab. Other providers retain the
+    // short-lived/reused tab behaviour they already had.
+    const opened = provider.startsWith('flow_')
+      ? await findOrCreateFlowWorkspaceTab(job)
+      : await findOrCreateTab(PROVIDER_URLS[provider], {
+        settleMs: 1500,
+        reuseMatch: REUSE_TAB_MATCH[provider] || null,
+      });
     tabId = opened.tabId;
     createdTab = opened.created;
-    await trace(jobId, createdTab ? 'da-mo-tab-moi' : 'dung-lai-tab-co-san');
-    if (!createdTab) {
+    persistentTab = Boolean(opened.persistent);
+    await trace(jobId, createdTab ? 'da-mo-tab-moi' : 'dung-lai-tab-co-san', job.claim_token);
+    if (!createdTab || provider.startsWith('flow_')) {
       await setJobStatus(jobId, `[${provider}] job ${jobId}: dùng lại tab đang mở sẵn`);
       await ensureContentScripts(tabId);
-      await trace(jobId, 'da-tiem-content-script');
+      await trace(jobId, 'da-tiem-content-script', job.claim_token);
+    }
+    if (provider.startsWith('flow_') && opened.mustCreateProject) {
+      await setJobStatus(jobId, `[${provider}] job ${jobId}: đang tạo project Flow riêng cho bộ cảnh...`);
+      await trace(jobId, 'bat-dau-tao-project-flow', job.claim_token);
+      await prepareFlowWorkspace(tabId, job);
+      await trace(jobId, 'da-san-sang-project-flow', job.claim_token);
+    } else if (provider.startsWith('flow_')) {
+      // Refresh tab id/URL when a saved Flow project had to be reopened.
+      await saveFlowWorkspace(job, tabId);
     }
 
     const goal = buildAgentGoal(provider, job, Boolean(referenceImage));
+    // Separate trace either side of the tab work, so "stuck right after
+    // opening the tab" can be told apart from "stuck deciding what to do".
+    await trace(jobId, goal ? 'da-co-nhiem-vu' : 'khong-co-nhiem-vu', job.claim_token);
     let result;
     if (goal) {
-      await trace(jobId, 'bat-dau-vong-lap-agent');
+      await trace(jobId, 'bat-dau-vong-lap-agent', job.claim_token);
       const finished = await runAgentInTab(tabId, goal, {
         // Veo takes minutes, so its run needs room for many wait steps.
         maxSteps: provider === 'flow_veo' ? 50 : 30,
         referenceImage,
         onStep: async (label) => {
           await setJobStatus(jobId, `[${provider}] job ${jobId}: ${label}`);
-          await trace(jobId, label.slice(0, 100));
+          await trace(jobId, label.slice(0, 100), job.claim_token);
         },
       });
       if (typeof finished.index !== 'number') {
@@ -796,16 +966,11 @@ async function runJob(provider, job) {
       result = await sendToTab(tabId, { type: 'ytf_agent_grab', index: finished.index });
       if (!result.ok) throw new Error(result.error || 'Không lấy được kết quả');
     } else {
-      // Providers still on their own scripted flow (Gemini/ChatGPT images,
-      // which already work end to end) keep the original message contract.
-      result = await chrome.tabs.sendMessage(tabId, {
-        type: 'ytf_generate', provider, jobId, prompt: job.prompt, ratio: job.ratio,
-        referenceImageBase64: referenceImage?.base64 || null,
-        referenceImageMimeType: referenceImage?.mimeType || null,
-      });
-      if (!result || !result.ok) {
-        throw new Error(result?.error || 'Content script không trả kết quả (có thể selector chưa khớp giao diện thật)');
-      }
+      // Every browser provider now runs through the agent. A provider with no
+      // goal would otherwise sit silently until the watchdog reclaimed it,
+      // which is the failure mode this whole trace/heartbeat layer exists to
+      // avoid — so say so immediately instead.
+      throw new Error(`Chưa có mô tả nhiệm vụ (goal) cho provider ${provider}`);
     }
 
     await setJobStatus(jobId, `[${provider}] job ${jobId}: đang tải kết quả lên...`);
@@ -824,7 +989,14 @@ async function runJob(provider, job) {
     } else {
       assetId = await uploadAsset(projectId, result.base64, result.mimeType, result.kind);
     }
-    await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}`, { method: 'POST' });
+    const completeResponse = await fetch(
+      `${FACTORY}/api/browser-scene-jobs/${jobId}/complete?asset_id=${assetId}&claim_token=${encodeURIComponent(job.claim_token || '')}`,
+      { method: 'POST' },
+    );
+    if (!completeResponse.ok) {
+      const detail = await completeResponse.text().catch(() => '');
+      throw new Error(`App từ chối hoàn tất job: HTTP ${completeResponse.status} ${detail.slice(0, 300)}`);
+    }
     await setJobStatus(jobId, `[${provider}] job ${jobId}: xong -> asset ${assetId}`);
   } catch (error) {
     const message = String(error?.message || error);
@@ -832,12 +1004,15 @@ async function runJob(provider, job) {
     try {
       // These reports are the only window into what actually happened on the
       // page — 500 chars kept cutting them off mid-diagnosis.
-      await fetch(`${FACTORY}/api/browser-scene-jobs/${jobId}/fail?error=${encodeURIComponent(message.slice(0, 2000))}`, { method: 'POST' });
+      await fetch(
+        `${FACTORY}/api/browser-scene-jobs/${jobId}/fail?error=${encodeURIComponent(message.slice(0, 2000))}&claim_token=${encodeURIComponent(job.claim_token || '')}`,
+        { method: 'POST' },
+      );
     } catch { /* best-effort */ }
   } finally {
     // Only close tabs we opened — the user's own tab carries the state that
     // made it usable in the first place.
-    if (tabId != null && createdTab) {
+    if (tabId != null && createdTab && !persistentTab) {
       try { await chrome.tabs.remove(tabId); } catch { /* tab may already be closed */ }
     }
   }

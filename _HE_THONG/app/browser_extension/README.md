@@ -44,25 +44,31 @@ một alarm nền mỗi 1 phút chỉ để đảm bảo việc kết nối lạ
 ngay cả khi trình duyệt tạm ngưng service worker của extension — bản thân
 alarm đó không kiểm tra job.
 
-## Nếu job báo lỗi "không tìm thấy phần tử" / "selector chưa khớp"
+## Nếu job báo lỗi "không tìm thấy phần tử"
 
-Selector (vị trí ô nhập prompt, nút gửi, khu vực ảnh kết quả) trong các file
-`content_gemini.js` / `content_chatgpt.js` / `content_meta.js` là suy đoán
-hợp lý ban đầu, **chưa được xác minh với giao diện thật** của 3 trang này.
+Không còn selector viết sẵn cho từng trang. Extension chỉ chụp lại các phần
+tử đang có trên trang (kèm nhãn, chữ, toạ độ, kích thước, class/id và chữ ở
+khối bên cạnh) rồi gửi cho AI điều phối; AI chọn thao tác tiếp theo. Cách
+tiếp cận cũ — đoán trước selector rồi viết cứng vào `content_<trang>.js` —
+đã bị bỏ vì mỗi lần đoán sai chỉ lộ ra sau trọn một vòng tạo-rồi-hỏng, và
+nó sai liên tục: giao diện hiển thị tiếng Việt, nút gửi là icon không nhãn,
+khe khung hình là `div` chứ không phải `button`.
 
-Cách sửa nhanh, không cần đăng nhập lại:
-1. Mở trang đó (vd `gemini.google.com/app`), bấm F12 mở DevTools.
-2. Bấm biểu tượng con trỏ (Inspect), click vào đúng ô nhập prompt thật —
-   xem tag/class/aria-label thật của nó.
-3. Sửa mảng selector tương ứng trong file `content_*.js`.
-4. Vào lại `chrome://extensions`, bấm nút Reload (hình mũi tên tròn) trên
-   thẻ extension này.
-5. Thử lại — không cần khởi động lại trình duyệt hay đăng nhập lại gì cả.
+Vì vậy khi có lỗi dạng này, thứ cần xem là **báo cáo của AI điều phối trong
+thông báo lỗi của job** (nó liệt kê đã thử những gì và trang hiện ra những
+gì), chứ không phải đi sửa selector.
+
+Gõ chữ và bấm chuột đi qua `chrome.debugger`, nên trình duyệt sẽ hiện dải
+băng "đang được gỡ lỗi" trong lúc chạy job. Đây là bắt buộc: các trình soạn
+thảo như Lexical (Flow, Meta AI) bỏ qua mọi sự kiện giả, nút gửi sẽ không
+bao giờ mở khoá nếu thiếu nó.
 
 ## Giới hạn đã biết
 
-- Chỉ tạo ảnh/video từ mô tả văn bản (text-to-image); chưa hỗ trợ đính kèm
-  ảnh tham chiếu (image-to-video) như bản `web_video_sidecar.py`.
+- Meta AI (`meta_ai_video`) không tạo được video — đã xác nhận cả bằng thao
+  tác tay, không phải lỗi tự động hoá. Provider này bị khoá ở API.
+- Tạo video Flow (Veo) đã qua được mọi bước thao tác nhưng chưa có lần chạy
+  nào đi hết vì hết tín dụng Flow; cần một lần chạy có tín dụng để nghiệm thu.
 - Điều khoản dịch vụ của Google/OpenAI/Meta nhìn chung không cho phép truy
   cập tự động các trang web tiêu dùng này, kể cả từ tài khoản hợp lệ. Rủi ro
   tài khoản bị giới hạn/gắn cờ là của bạn tự chịu trên tài khoản của mình.

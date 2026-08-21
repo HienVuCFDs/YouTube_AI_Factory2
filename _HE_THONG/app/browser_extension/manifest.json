@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
   "name": "YT Factory - AI Web Bridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Dieu phoi Gemini/ChatGPT/Meta AI web (tai khoan da dang nhap trong trinh duyet nay) de tao anh/video cho YouTube AI Factory. Khong dung API tra phi, khong can dang nhap rieng.",
-  "permissions": ["tabs", "scripting", "storage", "alarms", "downloads", "debugger"],
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "downloads",
+    "debugger"
+  ],
   "host_permissions": [
     "http://127.0.0.1:8787/*",
     "https://gemini.google.com/*",
@@ -22,23 +29,43 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://gemini.google.com/*"],
-      "js": ["content_common.js", "content_gemini.js"],
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "content_common.js",
+        "content_agent.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://chatgpt.com/*"],
-      "js": ["content_common.js", "content_chatgpt.js"],
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content_common.js",
+        "content_agent.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.meta.ai/*"],
-      "js": ["content_common.js", "content_agent.js"],
+      "matches": [
+        "https://www.meta.ai/*"
+      ],
+      "js": [
+        "content_common.js",
+        "content_agent.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://labs.google/*"],
-      "js": ["content_common.js", "content_agent.js"],
+      "matches": [
+        "https://labs.google/*"
+      ],
+      "js": [
+        "content_common.js",
+        "content_agent.js"
+      ],
       "run_at": "document_idle"
     }
   ],
