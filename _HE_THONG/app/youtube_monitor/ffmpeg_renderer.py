@@ -14,7 +14,8 @@ class FfmpegRenderError(RuntimeError):
     pass
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+STILL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+IMAGE_EXTENSIONS = {*STILL_IMAGE_EXTENSIONS, ".gif"}
 CARD_COLORS = ("0x0B1020", "0x111827", "0x172033", "0x0F172A")
 WINDOWS_FONT = Path("C:/Windows/Fonts/arial.ttf")
 
@@ -260,7 +261,7 @@ def _segment_arguments(
             f"Segment {index} chưa có cảnh hình ảnh. Hãy chuẩn bị cảnh nguồn, asset upload hoặc cảnh AI trước khi render."
         )
     args = [executable, "-y"]
-    if visual.suffix.lower() in IMAGE_EXTENSIONS:
+    if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
         args += ["-loop", "1", "-framerate", str(fps), "-i", str(visual)]
     else:
         # The visual is looped only to cover a sub-frame duration difference.
@@ -274,7 +275,7 @@ def _segment_arguments(
         args += ["-stream_loop", "-1", "-i", str(background_music)]
 
     filters: list[str] = []
-    if visual.suffix.lower() in IMAGE_EXTENSIONS:
+    if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
         # Give still images a restrained Ken-Burns motion.  The image input is
         # looped at the project frame rate, therefore d=1 advances the zoom a
         # tiny amount per output frame without changing the segment duration.

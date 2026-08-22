@@ -194,7 +194,7 @@ def build_quality_report(
         "no_abnormal_voice_silence": not long_silences,
         "audio_loudness_valid": loudness_valid,
         "no_audio_clipping": no_clipping,
-        "has_moving_visuals": bool(visual_kinds & {".mp4", ".mov", ".mkv", ".webm", ".avi"}),
+        "has_moving_visuals": bool(visual_kinds & {".gif", ".mp4", ".mov", ".mkv", ".webm", ".avi"}),
         "gpu_encoded": _uses_nvenc(final_file, ffmpeg_binary),
     }
     issues: list[str] = []

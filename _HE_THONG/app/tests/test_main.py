@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from youtube_monitor.main import app
+from youtube_monitor.main import (
+    BatchSceneGenerationRequest,
+    CreateSceneGenerationRequest,
+    _REVIEW_SCENE_SCHEMA,
+    _call_orchestrator_json,
+    app,
+)
 
 
 class MainApiTests(unittest.TestCase):
@@ -58,6 +65,7 @@ class MainApiTests(unittest.TestCase):
         providers = {entry["provider"] for entry in response.json()}
         self.assertIn("voxcpm", providers)
         self.assertIn("ffmpeg_builtin", providers)
+        self.assertIn("gflow_cli", providers)
 
     def test_tool_status_returns_a_list(self) -> None:
         response = self.client.get("/api/tool-status")
@@ -70,6 +78,9 @@ class MainApiTests(unittest.TestCase):
         for item in response.json():
             self.assertNotIn("api_key", item)
             self.assertNotIn("secret", item)
+        gflow = next(item for item in response.json() if item["key"] == "gflow_cli")
+        self.assertEqual(gflow["connection"], "cloud_subscription")
+        self.assertIn("installed", gflow)
 
     def test_browser_heartbeat_round_trip(self) -> None:
         response = self.client.post(
@@ -113,6 +124,82 @@ class MainApiTests(unittest.TestCase):
     def test_browser_scene_job_fail_404s_for_an_unknown_job(self) -> None:
         response = self.client.post("/api/browser-scene-jobs/999999/fail?error=boom")
         self.assertEqual(response.status_code, 404)
+
+    def test_flow_video_requests_accept_the_real_eight_second_duration(self) -> None:
+        single = CreateSceneGenerationRequest(
+            timeline_segment_id=1,
+            provider="flow_veo",
+            prompt="Animate this exact storyboard frame",
+            duration_seconds=8,
+            reference_asset_id=1,
+            requires_reference_image=True,
+            confirmed=True,
+        )
+        batch = BatchSceneGenerationRequest(
+            provider="flow_veo",
+            duration_seconds=8,
+            requires_reference_image=True,
+            confirmed=True,
+        )
+        self.assertEqual(single.duration_seconds, 8)
+        self.assertEqual(batch.duration_seconds, 8)
+
+        cli = CreateSceneGenerationRequest(
+            timeline_segment_id=1,
+            provider="gflow_cli",
+            prompt="Animate this exact storyboard frame",
+            duration_seconds=8,
+            reference_asset_id=1,
+            requires_reference_image=True,
+            confirmed=True,
+        )
+        self.assertEqual(cli.provider, "gflow_cli")
+
+    def test_codex_scene_review_schema_is_strict(self) -> None:
+        self.assertIs(_REVIEW_SCENE_SCHEMA["additionalProperties"], False)
+        self.assertEqual(
+            set(_REVIEW_SCENE_SCHEMA["required"]),
+            set(_REVIEW_SCENE_SCHEMA["properties"]),
+        )
+
+    def test_auto_agent_assignment_uses_ready_stage_specialist(self) -> None:
+        assignment = {
+            "mode": "auto",
+            "executor": "codex_cli",
+            "allowed_agents": ["codex_cli", "claude_code_cli", "antigravity"],
+            "fallback_agents": [],
+            "reviewer": "auto",
+        }
+        with patch("youtube_monitor.main.settings.agent_assignment", return_value=assignment), patch(
+            "youtube_monitor.main.codex_cli_status", return_value={"logged_in": True}
+        ), patch(
+            "youtube_monitor.main.claude_code_cli_status", return_value={"logged_in": True}
+        ), patch(
+            "youtube_monitor.main.antigravity_cli_status", return_value={"logged_in": True}
+        ), patch(
+            "youtube_monitor.main.call_antigravity_json", return_value={"prompt": "chosen"}
+        ) as antigravity, patch("youtube_monitor.main.call_codex_json") as codex:
+            result = _call_orchestrator_json(
+                "system", "user", {"type": "object"}, stage="image_generation"
+            )
+        self.assertEqual(result["prompt"], "chosen")
+        antigravity.assert_called_once()
+        codex.assert_not_called()
+
+    def test_image_to_video_rejects_a_missing_reference_before_creating_job(self) -> None:
+        response = self.client.post(
+            "/api/projects/999999/scene-jobs",
+            json={
+                "timeline_segment_id": 1,
+                "provider": "flow_veo",
+                "prompt": "Animate the existing frame",
+                "duration_seconds": 8,
+                "requires_reference_image": True,
+                "confirmed": True,
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("chưa có ảnh nguồn", response.json()["detail"])
 
 
 if __name__ == "__main__":

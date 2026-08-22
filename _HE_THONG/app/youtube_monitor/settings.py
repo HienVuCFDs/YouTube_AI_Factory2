@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import site
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -31,6 +33,10 @@ EDITABLE_INTEGRATION_KEYS = {
     "GOOGLE_OAUTH_CLIENT_SECRET",
     "GOOGLE_OAUTH_REDIRECT_URI",
     "AI_ORCHESTRATOR_PROVIDER",
+    "AI_STAGE_ASSIGNMENTS_JSON",
+    "GFLOW_CLI_PATH",
+    "GFLOW_PROFILE",
+    "GFLOW_VIDEO_MODEL",
 }
 
 
@@ -160,6 +166,23 @@ def _detect_antigravity_cli() -> str:
     default = Path(os.getenv("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"
     return str(default) if default.is_file() else ""
 
+
+def _detect_gflow_cli() -> str:
+    """Find the isolated Google Flow CLI without requiring it on PATH."""
+    configured = integration_value("GFLOW_CLI_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+    on_path = shutil.which("gflow")
+    if on_path:
+        return on_path
+    executable = "gflow.exe" if os.name == "nt" else "gflow"
+    candidates = (
+        PROJECT_ROOT / "_THU_NGHIEM" / "gflow-cli" / ".venv" / "Scripts" / executable,
+        Path(site.getuserbase()) / "Scripts" / executable,
+        Path(sys.executable).parent / "Scripts" / executable,
+    )
+    return str(next((path for path in candidates if path.is_file()), ""))
+
 DATA_DIR = Path(os.getenv("YOUTUBE_DATA_DIR", str(SYSTEM_ROOT / "data")))
 DB_PATH = Path(os.getenv("YOUTUBE_DB_PATH", str(DATA_DIR / "youtube_monitor.db")))
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
@@ -199,13 +222,95 @@ CLAUDE_CODE_CLI_PATH = _detect_claude_code_cli()
 ANTIGRAVITY_CLI_PATH = _detect_antigravity_cli()
 
 
+def gflow_config() -> dict[str, str]:
+    """Live Google Flow CLI settings managed from the local dashboard."""
+    return {
+        "path": _detect_gflow_cli(),
+        "profile": integration_value("GFLOW_PROFILE", "default") or "default",
+        # Empty means let gflow choose the safest/default model for the mode.
+        "video_model": integration_value("GFLOW_VIDEO_MODEL"),
+    }
+
+
+AGENT_IDS = ("codex_cli", "claude_code_cli", "antigravity")
+AGENT_STAGE_IDS = (
+    "orchestration",
+    "script",
+    "storyboard",
+    "image_generation",
+    "video_generation",
+    "quality_review",
+)
+
+
+def default_agent_assignments() -> dict[str, dict[str, object]]:
+    primary = orchestrator_provider()
+    fallback = [agent for agent in AGENT_IDS if agent != primary]
+    return {
+        stage: {
+            "mode": "auto" if stage not in {"orchestration"} else "fixed",
+            "executor": primary,
+            "allowed_agents": list(AGENT_IDS),
+            "fallback_agents": fallback,
+            "reviewer": "auto" if stage != "quality_review" else fallback[0],
+        }
+        for stage in AGENT_STAGE_IDS
+    }
+
+
+def agent_assignments() -> dict[str, dict[str, object]]:
+    """Return validated per-stage agent routing; malformed config is ignored."""
+    defaults = default_agent_assignments()
+    raw = integration_value("AI_STAGE_ASSIGNMENTS_JSON")
+    if not raw:
+        return defaults
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return defaults
+    if not isinstance(parsed, dict):
+        return defaults
+    for stage in AGENT_STAGE_IDS:
+        configured = parsed.get(stage)
+        if not isinstance(configured, dict):
+            continue
+        mode = str(configured.get("mode") or defaults[stage]["mode"])
+        if mode not in {"fixed", "auto", "fallback"}:
+            mode = str(defaults[stage]["mode"])
+        executor = str(configured.get("executor") or defaults[stage]["executor"])
+        if executor not in AGENT_IDS:
+            executor = str(defaults[stage]["executor"])
+        allowed = [str(item) for item in configured.get("allowed_agents", []) if str(item) in AGENT_IDS]
+        if not allowed:
+            allowed = list(AGENT_IDS)
+        fallbacks = [
+            str(item) for item in configured.get("fallback_agents", [])
+            if str(item) in AGENT_IDS and str(item) != executor
+        ]
+        reviewer = str(configured.get("reviewer") or defaults[stage]["reviewer"])
+        if reviewer not in {*AGENT_IDS, "auto"}:
+            reviewer = "auto"
+        defaults[stage] = {
+            "mode": mode,
+            "executor": executor,
+            "allowed_agents": list(dict.fromkeys(allowed)),
+            "fallback_agents": list(dict.fromkeys(fallbacks)),
+            "reviewer": reviewer,
+        }
+    return defaults
+
+
+def agent_assignment(stage: str) -> dict[str, object]:
+    assignments = agent_assignments()
+    return assignments.get(stage, assignments["orchestration"])
+
+
 def orchestrator_provider() -> str:
-    """Which locally-installed, already-logged-in CLI agent (not a metered
-    API key) orchestrates tasks like locating an element on an unfamiliar web
-    page for web_video_sidecar.py. "codex_cli" or "claude_code_cli"; a
-    function (like openai_config() etc. above), not a constant, so a change
-    saved from the dashboard (Cai dat > AI dieu phoi chinh) takes effect
-    immediately instead of requiring an app restart.
+    """Return the selected cloud agent reached through its logged-in local client.
+
+    This is a function, rather than an import-time constant, so switching among
+    Codex CLI, Claude Code CLI, and Antigravity takes effect without restarting
+    the app.
     """
     return integration_value("AI_ORCHESTRATOR_PROVIDER", "codex_cli") or "codex_cli"
 

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -439,6 +440,16 @@ class Database:
                     duration_seconds INTEGER NOT NULL DEFAULT 5,
                     ratio TEXT NOT NULL DEFAULT '1280:720',
                     reference_asset_id INTEGER,
+                    job_kind TEXT NOT NULL DEFAULT '',
+                    depends_on_job_id INTEGER,
+                    requires_reference_image INTEGER NOT NULL DEFAULT 0,
+                    output_asset_id INTEGER,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 2,
+                    heartbeat_at TEXT,
+                    claim_token TEXT NOT NULL DEFAULT '',
+                    pipeline_stage TEXT NOT NULL DEFAULT 'queued',
+                    failure_kind TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'queued',
                     task_id TEXT NOT NULL DEFAULT '',
                     output_path TEXT NOT NULL DEFAULT '',
@@ -456,6 +467,16 @@ class Database:
                     FOREIGN KEY (reference_asset_id)
                         REFERENCES project_assets(id)
                         ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS scene_provider_states (
+                    provider TEXT PRIMARY KEY,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    opened_until TEXT,
+                    last_success_at TEXT,
+                    last_failure_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_video
@@ -494,6 +515,8 @@ class Database:
             )
             self._ensure_column(connection, "videos", "local_media_path", "TEXT")
             self._ensure_column(connection, "production_projects", "managed_channel_id", "INTEGER")
+            self._ensure_column(connection, "production_projects", "gflow_project_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "production_projects", "gflow_profile", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_publications", "thumbnail_path", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "subtitle_path", "TEXT NOT NULL DEFAULT ''")
             # Orchestrator's verdict on a finished scene: what it actually saw
@@ -512,10 +535,28 @@ class Database:
             self._ensure_column(connection, "project_timeline_segments", "edit_transition", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_effect", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_note", "TEXT NOT NULL DEFAULT ''")
+            # Whether the orchestrator has written this job's prompt yet.
+            # Cannot be inferred from pipeline_stage: claiming a job
+            # overwrites that with 'running', erasing the marker.
+            self._ensure_column(connection, "scene_generation_jobs", "prompt_written", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(connection, "scene_generation_jobs", "review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "scene_generation_jobs", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_status", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "auto_retry_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "scene_generation_jobs", "job_kind", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "scene_generation_jobs", "depends_on_job_id", "INTEGER")
+            self._ensure_column(connection, "scene_generation_jobs", "requires_reference_image", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "scene_generation_jobs", "output_asset_id", "INTEGER")
+            self._ensure_column(connection, "scene_generation_jobs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "scene_generation_jobs", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
+            self._ensure_column(connection, "scene_generation_jobs", "heartbeat_at", "TEXT")
+            self._ensure_column(connection, "scene_generation_jobs", "claim_token", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "scene_generation_jobs", "pipeline_stage", "TEXT NOT NULL DEFAULT 'queued'")
+            self._ensure_column(connection, "scene_generation_jobs", "failure_kind", "TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scene_generation_jobs_dependency "
+                "ON scene_generation_jobs(depends_on_job_id, status, id ASC)"
+            )
             self._ensure_column(connection, "project_render_settings", "output_profile", "TEXT NOT NULL DEFAULT 'youtube_landscape'")
             self._ensure_column(connection, "project_render_settings", "voice_provider", "TEXT NOT NULL DEFAULT 'edge_tts'")
             self._ensure_column(connection, "project_render_settings", "voice_model", "TEXT NOT NULL DEFAULT 'vi-VN-HoaiMyNeural'")
@@ -1270,6 +1311,26 @@ class Database:
                 WHERE id = ?
                 """,
                 (next_title, next_status, next_notes, next_managed_channel_id, utc_now(), project_id),
+            )
+        return self.get_production_project(project_id)
+
+    def update_production_project_gflow(
+        self,
+        project_id: int,
+        gflow_project_id: str,
+        gflow_profile: str,
+    ) -> dict[str, Any] | None:
+        """Attach one Google Flow project to one local production project."""
+        if not self.get_production_project(project_id):
+            return None
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE production_projects
+                SET gflow_project_id = ?, gflow_profile = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (gflow_project_id.strip(), gflow_profile.strip(), utc_now(), project_id),
             )
         return self.get_production_project(project_id)
 
@@ -2401,6 +2462,23 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def find_project_asset_by_path(self, project_id: int, file_path: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.*,
+                       EXISTS(
+                           SELECT 1 FROM project_asset_transcripts t
+                           WHERE t.asset_id = a.id
+                       ) AS has_transcript
+                FROM project_assets a
+                WHERE a.project_id = ? AND a.file_path = ?
+                ORDER BY a.id DESC LIMIT 1
+                """,
+                (project_id, file_path.strip()),
+            ).fetchone()
+        return dict(row) if row else None
+
     def rename_project_asset(self, asset_id: int, original_name: str) -> dict[str, Any] | None:
         asset = self.get_project_asset(asset_id)
         if not asset:
@@ -3145,6 +3223,12 @@ class Database:
         duration_seconds: int = 5,
         ratio: str = "1280:720",
         reference_asset_id: int | None = None,
+        *,
+        job_kind: str = "",
+        depends_on_job_id: int | None = None,
+        requires_reference_image: bool = False,
+        max_attempts: int = 2,
+        prompt_pending: bool = False,
     ) -> dict[str, Any] | None:
         now = utc_now()
         with self._connect() as connection:
@@ -3161,13 +3245,34 @@ class Database:
                 ).fetchone()
                 if not asset:
                     return None
+            if depends_on_job_id is not None:
+                dependency = connection.execute(
+                    """
+                    SELECT id FROM scene_generation_jobs
+                    WHERE id = ? AND project_id = ? AND timeline_segment_id = ?
+                    """,
+                    (depends_on_job_id, project_id, timeline_segment_id),
+                ).fetchone()
+                if not dependency:
+                    return None
+            initial_status = "waiting" if depends_on_job_id is not None else "queued"
+            # "prompt_pending" means the job carries the storyboard's own
+            # words and the orchestrator will write the real prompt when the
+            # job starts. Queueing therefore costs no CLI time and a batch
+            # stays callable-off. A job waiting on its reference image keeps
+            # that stage instead; its prompt is written when it is released.
+            initial_stage = (
+                "waiting_for_reference" if depends_on_job_id is not None
+                else ("prompt_pending" if prompt_pending else "queued")
+            )
             cursor = connection.execute(
                 """
                 INSERT INTO scene_generation_jobs (
                     project_id, timeline_segment_id, provider, prompt,
-                    duration_seconds, ratio, reference_asset_id, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                    duration_seconds, ratio, reference_asset_id, job_kind,
+                    depends_on_job_id, requires_reference_image, max_attempts,
+                    status, pipeline_stage, prompt_written, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -3177,6 +3282,13 @@ class Database:
                     max(1, min(int(duration_seconds), 30)),
                     ratio.strip() or "1280:720",
                     reference_asset_id,
+                    job_kind.strip()[:20],
+                    depends_on_job_id,
+                    1 if requires_reference_image else 0,
+                    max(1, min(int(max_attempts), 5)),
+                    initial_status,
+                    initial_stage,
+                    0 if prompt_pending else 1,
                     now,
                     now,
                 ),
@@ -3188,11 +3300,17 @@ class Database:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT j.*, s.segment_index, s.visual_path AS timeline_visual_path,
-                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path
+                SELECT j.*, p.title AS project_title,
+                       s.segment_index, s.visual_kind, s.visual_fps,
+                       s.visual_path AS timeline_visual_path,
+                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path,
+                       dependency.status AS dependency_status,
+                       dependency.error AS dependency_error
                 FROM scene_generation_jobs j
+                JOIN production_projects p ON p.id = j.project_id
                 JOIN project_timeline_segments s ON s.id = j.timeline_segment_id
                 LEFT JOIN project_assets a ON a.id = j.reference_asset_id
+                LEFT JOIN scene_generation_jobs dependency ON dependency.id = j.depends_on_job_id
                 WHERE j.id = ?
                 """,
                 (job_id,),
@@ -3203,11 +3321,17 @@ class Database:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT j.*, s.segment_index, s.visual_path AS timeline_visual_path,
-                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path
+                SELECT j.*, p.title AS project_title,
+                       s.segment_index, s.visual_kind, s.visual_fps,
+                       s.visual_path AS timeline_visual_path,
+                       a.original_name AS reference_asset_name, a.file_path AS reference_asset_path,
+                       dependency.status AS dependency_status,
+                       dependency.error AS dependency_error
                 FROM scene_generation_jobs j
+                JOIN production_projects p ON p.id = j.project_id
                 JOIN project_timeline_segments s ON s.id = j.timeline_segment_id
                 LEFT JOIN project_assets a ON a.id = j.reference_asset_id
+                LEFT JOIN scene_generation_jobs dependency ON dependency.id = j.depends_on_job_id
                 WHERE j.project_id = ?
                 ORDER BY j.id DESC
                 LIMIT ?
@@ -3234,12 +3358,109 @@ class Database:
     # in-process SceneGenerationWorker.
     EXTERNAL_SIDECAR_PROVIDERS = ("antigravity_image", *BROWSER_SIDECAR_PROVIDERS)
 
+    SCENE_PROVIDER_FAILURE_THRESHOLD = 3
+    SCENE_PROVIDER_COOLDOWN_SECONDS = 60 * 60
+
+    def get_scene_provider_state(self, provider: str) -> dict[str, Any]:
+        provider_key = provider.strip().lower()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM scene_provider_states WHERE provider = ?",
+                (provider_key,),
+            ).fetchone()
+        state = dict(row) if row else {
+            "provider": provider_key,
+            "consecutive_failures": 0,
+            "opened_until": None,
+            "last_success_at": None,
+            "last_failure_at": None,
+            "last_error": "",
+            "updated_at": "",
+        }
+        opened_until = str(state.get("opened_until") or "")
+        state["circuit_open"] = bool(opened_until and opened_until > utc_now())
+        return state
+
+    def list_scene_provider_states(self) -> list[dict[str, Any]]:
+        providers = set(self.BROWSER_SIDECAR_PROVIDERS)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT provider FROM scene_provider_states ORDER BY provider"
+            ).fetchall()
+        providers.update(str(row["provider"]) for row in rows)
+        return [self.get_scene_provider_state(provider) for provider in sorted(providers)]
+
+    def record_scene_provider_success(self, provider: str) -> None:
+        provider_key = provider.strip().lower()
+        if not provider_key:
+            return
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO scene_provider_states (
+                    provider, consecutive_failures, opened_until,
+                    last_success_at, last_failure_at, last_error, updated_at
+                ) VALUES (?, 0, NULL, ?, NULL, '', ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    consecutive_failures = 0,
+                    opened_until = NULL,
+                    last_success_at = excluded.last_success_at,
+                    last_error = '',
+                    updated_at = excluded.updated_at
+                """,
+                (provider_key, now, now),
+            )
+
+    def record_scene_provider_failure(
+        self,
+        provider: str,
+        error: str,
+        *,
+        threshold: int | None = None,
+        cooldown_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        provider_key = provider.strip().lower()
+        failure_threshold = max(1, int(threshold or self.SCENE_PROVIDER_FAILURE_THRESHOLD))
+        cooldown = max(60, int(cooldown_seconds or self.SCENE_PROVIDER_COOLDOWN_SECONDS))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT consecutive_failures FROM scene_provider_states WHERE provider = ?",
+                (provider_key,),
+            ).fetchone()
+            failures = int(row["consecutive_failures"] if row else 0) + 1
+            opened_until = (
+                (now_dt + timedelta(seconds=cooldown)).isoformat()
+                if failures >= failure_threshold
+                else None
+            )
+            connection.execute(
+                """
+                INSERT INTO scene_provider_states (
+                    provider, consecutive_failures, opened_until,
+                    last_success_at, last_failure_at, last_error, updated_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    consecutive_failures = excluded.consecutive_failures,
+                    opened_until = excluded.opened_until,
+                    last_failure_at = excluded.last_failure_at,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+                """,
+                (provider_key, failures, opened_until, now, error.strip()[:2000], now),
+            )
+        return self.get_scene_provider_state(provider_key)
+
     def list_queued_scene_generation_job_ids(self, limit: int = 5000) -> list[int]:
         placeholders = ",".join("?" for _ in self.EXTERNAL_SIDECAR_PROVIDERS)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT id FROM scene_generation_jobs WHERE status = 'queued' "
-                f"AND provider NOT IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+                f"AND provider NOT IN ({placeholders}) "
+                "AND (requires_reference_image = 0 OR reference_asset_id IS NOT NULL) "
+                "ORDER BY id ASC LIMIT ?",
                 (*self.EXTERNAL_SIDECAR_PROVIDERS, max(1, min(limit, 5000))),
             ).fetchall()
         return [int(row["id"]) for row in rows]
@@ -3248,26 +3469,62 @@ class Database:
         return self.claim_next_scene_job_for_provider("antigravity_image")
 
     def claim_next_scene_job_for_provider(self, provider: str) -> dict[str, Any] | None:
+        if self.get_scene_provider_state(provider).get("circuit_open"):
+            return None
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM scene_generation_jobs WHERE status = 'queued' AND provider = ? ORDER BY id ASC LIMIT 1",
+                """
+                SELECT id FROM scene_generation_jobs
+                WHERE status = 'queued' AND provider = ?
+                  AND (requires_reference_image = 0 OR reference_asset_id IS NOT NULL)
+                ORDER BY id ASC LIMIT 1
+                """,
                 (provider,),
             ).fetchone()
         return self.claim_scene_generation_job(int(row["id"])) if row else None
 
     def claim_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
+        job = self.get_scene_generation_job(job_id)
+        if not job or self.get_scene_provider_state(str(job.get("provider") or "")).get("circuit_open"):
+            return None
         with self._connect() as connection:
+            claim_token = uuid.uuid4().hex
             cursor = connection.execute(
                 """
                 UPDATE scene_generation_jobs
-                SET status = 'running', started_at = ?, updated_at = ?, error = ''
+                SET status = 'running', started_at = ?, heartbeat_at = ?,
+                    updated_at = ?, error = '', failure_kind = '',
+                    pipeline_stage = 'running', claim_token = ?,
+                    attempt_count = attempt_count + 1
                 WHERE id = ? AND status = 'queued'
+                  AND (requires_reference_image = 0 OR reference_asset_id IS NOT NULL)
                 """,
-                (utc_now(), utc_now(), job_id),
+                (utc_now(), utc_now(), utc_now(), claim_token, job_id),
             )
             if cursor.rowcount != 1:
                 return None
         return self.get_scene_generation_job(job_id)
+
+    def cancel_pending_scene_generation_jobs(self, project_id: int) -> int:
+        """Call off every scene job of a project that has not started yet.
+
+        A batch that turns out to be wrong used to have to be unpicked one job
+        at a time, which is slow enough that jobs keep being claimed while you
+        work through the list. Jobs already running are left alone: they hold
+        a claim on a browser tab or a CLI process and will report their own
+        outcome.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET status = 'cancelled', pipeline_stage = 'cancelled',
+                    updated_at = ?, completed_at = ?
+                WHERE project_id = ? AND status IN ('queued', 'waiting')
+                """,
+                (utc_now(), utc_now(), project_id),
+            )
+        return int(cursor.rowcount or 0)
 
     def cancel_queued_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
         """Cancel a scene-generation job which has not been claimed by a worker yet."""
@@ -3323,6 +3580,25 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def save_scene_job_prompt(self, job_id: int, prompt: str) -> dict[str, Any] | None:
+        """Store the prompt written for a job once it is about to run.
+
+        Jobs are created carrying the storyboard's raw text so that queueing a
+        batch is instant and cancellable; the orchestrator writes the real
+        prompt when the job starts. Keeping that write here means a job's
+        prompt always reflects what was actually sent.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET prompt = ?, prompt_written = 1, updated_at = ?, heartbeat_at = ?
+                WHERE id = ?
+                """,
+                (prompt.strip(), utc_now(), utc_now(), job_id),
+            )
+        return self.get_scene_generation_job(job_id)
+
     def save_scene_job_review(
         self,
         job_id: int,
@@ -3369,8 +3645,15 @@ class Database:
             cursor = connection.execute(
                 f"""
                 UPDATE scene_generation_jobs
-                SET status = 'queued', started_at = NULL, completed_at = NULL, updated_at = ?, error = ''
-                WHERE id = ? AND (status IN ('error', 'cancelled') OR (status = 'running' AND provider IN ({placeholders})))
+                SET status = 'queued', started_at = NULL, completed_at = NULL,
+                    heartbeat_at = NULL, updated_at = ?, error = '', failure_kind = '',
+                    pipeline_stage = 'queued', claim_token = '', output_path = '',
+                    output_asset_id = NULL
+                WHERE id = ? AND (
+                    status IN ('error', 'cancelled')
+                    OR (status = 'completed' AND review_status = 'fail')
+                    OR (status = 'running' AND provider IN ({placeholders}))
+                )
                 """,
                 (utc_now(), job_id, *self.EXTERNAL_SIDECAR_PROVIDERS),
             )
@@ -3381,9 +3664,37 @@ class Database:
     def update_scene_generation_task(self, job_id: int, task_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE scene_generation_jobs SET task_id = ?, updated_at = ? WHERE id = ?",
-                (task_id.strip(), utc_now(), job_id),
+                """
+                UPDATE scene_generation_jobs
+                SET task_id = ?, heartbeat_at = ?, updated_at = ?, pipeline_stage = 'provider_running'
+                WHERE id = ?
+                """,
+                (task_id.strip(), utc_now(), utc_now(), job_id),
             )
+
+    def touch_scene_generation_job(self, job_id: int, pipeline_stage: str = "") -> dict[str, Any] | None:
+        now = utc_now()
+        stage = pipeline_stage.strip()[:120]
+        with self._connect() as connection:
+            if stage:
+                connection.execute(
+                    """
+                    UPDATE scene_generation_jobs
+                    SET heartbeat_at = ?, updated_at = ?, pipeline_stage = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (now, now, stage, job_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE scene_generation_jobs
+                    SET heartbeat_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (now, now, job_id),
+                )
+        return self.get_scene_generation_job(job_id)
 
     def finish_scene_generation_job(
         self,
@@ -3391,22 +3702,55 @@ class Database:
         status: str,
         output_path: str = "",
         error: str = "",
+        *,
+        output_asset_id: int | None = None,
+        failure_kind: str = "",
+        release_dependents: bool = True,
     ) -> dict[str, Any] | None:
+        if status not in {"completed", "error", "cancelled"}:
+            raise ValueError("Trạng thái scene job không hợp lệ")
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT timeline_segment_id FROM scene_generation_jobs WHERE id = ?",
+                """
+                SELECT project_id, timeline_segment_id, provider
+                FROM scene_generation_jobs WHERE id = ?
+                """,
                 (job_id,),
             ).fetchone()
             if not row:
                 return None
             now = utc_now()
+            resolved_asset_id = output_asset_id
+            if status == "completed" and output_path and resolved_asset_id is None:
+                asset_row = connection.execute(
+                    """
+                    SELECT id FROM project_assets
+                    WHERE project_id = ? AND file_path = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (row["project_id"], output_path),
+                ).fetchone()
+                resolved_asset_id = int(asset_row["id"]) if asset_row else None
             connection.execute(
                 """
                 UPDATE scene_generation_jobs
-                SET status = ?, output_path = ?, error = ?, updated_at = ?, completed_at = ?
+                SET status = ?, output_path = ?, output_asset_id = ?, error = ?,
+                    failure_kind = ?, heartbeat_at = ?, updated_at = ?, completed_at = ?,
+                    pipeline_stage = ?
                 WHERE id = ?
                 """,
-                (status, output_path, error, now, now, job_id),
+                (
+                    status,
+                    output_path,
+                    resolved_asset_id,
+                    error,
+                    failure_kind.strip()[:40],
+                    now,
+                    now,
+                    now,
+                    status,
+                    job_id,
+                ),
             )
             if status == "completed" and output_path:
                 segment = connection.execute(
@@ -3422,14 +3766,144 @@ class Database:
                     """,
                     (output_path, timeline_status, now, row["timeline_segment_id"]),
                 )
+            if status == "completed" and resolved_asset_id is not None and release_dependents:
+                connection.execute(
+                    """
+                    UPDATE scene_generation_jobs
+                    SET status = 'queued', reference_asset_id = ?, updated_at = ?,
+                        error = '', failure_kind = '', pipeline_stage = 'queued'
+                    WHERE depends_on_job_id = ?
+                      AND requires_reference_image = 1
+                      AND pipeline_stage IN ('waiting_for_reference', 'dependency_failed')
+                    """,
+                    (resolved_asset_id, now, job_id),
+                )
+            elif status in {"error", "cancelled"}:
+                connection.execute(
+                    """
+                    UPDATE scene_generation_jobs
+                    SET status = 'error', updated_at = ?, completed_at = ?,
+                        pipeline_stage = 'dependency_failed', failure_kind = 'dependency',
+                        error = ?
+                    WHERE depends_on_job_id = ? AND status = 'waiting'
+                    """,
+                    (now, now, f"Không tạo được ảnh nguồn: {error or status}", job_id),
+                )
+        provider = str(row["provider"] or "")
+        if status == "completed":
+            self.record_scene_provider_success(provider)
+        elif status == "error":
+            self.record_scene_provider_failure(provider, error or "Scene job thất bại")
         return self.get_scene_generation_job(job_id)
+
+    def release_scene_generation_dependents(self, job_id: int) -> list[dict[str, Any]]:
+        """Release image-to-video children only after their source image is accepted."""
+        now = utc_now()
+        with self._connect() as connection:
+            parent = connection.execute(
+                """
+                SELECT status, output_asset_id FROM scene_generation_jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if not parent or parent["status"] != "completed" or parent["output_asset_id"] is None:
+                return []
+            rows = connection.execute(
+                """
+                SELECT id FROM scene_generation_jobs
+                WHERE depends_on_job_id = ?
+                  AND requires_reference_image = 1
+                  AND pipeline_stage IN ('waiting_for_reference', 'dependency_failed')
+                ORDER BY id
+                """,
+                (job_id,),
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET status = 'queued', reference_asset_id = ?, updated_at = ?,
+                    error = '', failure_kind = '', pipeline_stage = 'queued'
+                WHERE depends_on_job_id = ?
+                  AND requires_reference_image = 1
+                  AND pipeline_stage IN ('waiting_for_reference', 'dependency_failed')
+                """,
+                (parent["output_asset_id"], now, job_id),
+            )
+        return [self.get_scene_generation_job(int(row["id"])) for row in rows]
+
+    def recover_stale_scene_generation_jobs(self, stale_seconds: int) -> list[dict[str, Any]]:
+        """Requeue one abandoned attempt, then fail it after max_attempts.
+
+        Browser extension service workers can disappear without delivering a
+        /fail callback. heartbeat_at is refreshed by every trace step, so a
+        truly active long Veo generation is not mistaken for an abandoned job.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(30, int(stale_seconds)))).isoformat()
+        now = utc_now()
+        recovered: list[dict[str, Any]] = []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, provider, attempt_count, max_attempts
+                FROM scene_generation_jobs
+                WHERE status = 'running'
+                  AND COALESCE(heartbeat_at, started_at, updated_at) < ?
+                ORDER BY id
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                should_retry = int(row["attempt_count"] or 0) < int(row["max_attempts"] or 1)
+                if should_retry:
+                    connection.execute(
+                        """
+                        UPDATE scene_generation_jobs
+                        SET status = 'queued', started_at = NULL, heartbeat_at = NULL,
+                            updated_at = ?, pipeline_stage = 'watchdog_retry',
+                            failure_kind = 'stale', error = ?, claim_token = ''
+                        WHERE id = ? AND status = 'running'
+                        """,
+                        (now, "Watchdog phát hiện worker mất heartbeat; tự chạy lại có giới hạn.", row["id"]),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE scene_generation_jobs
+                        SET status = 'error', heartbeat_at = ?, updated_at = ?, completed_at = ?,
+                            pipeline_stage = 'error', failure_kind = 'stale', error = ?, claim_token = ''
+                        WHERE id = ? AND status = 'running'
+                        """,
+                        (now, now, now, "Job mất heartbeat và đã hết số lần chạy lại tự động.", row["id"]),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE scene_generation_jobs
+                        SET status = 'error', updated_at = ?, completed_at = ?,
+                            pipeline_stage = 'dependency_failed', failure_kind = 'dependency',
+                            error = 'Không tạo được ảnh nguồn vì job cha mất heartbeat.'
+                        WHERE depends_on_job_id = ? AND status = 'waiting'
+                        """,
+                        (now, now, row["id"]),
+                    )
+                recovered.append({
+                    "id": int(row["id"]),
+                    "provider": str(row["provider"]),
+                    "requeued": should_retry,
+                })
+        for item in recovered:
+            self.record_scene_provider_failure(
+                item["provider"],
+                "Worker mất heartbeat trong khi tạo cảnh",
+            )
+        return recovered
 
     def requeue_interrupted_scene_generation_jobs(self) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE scene_generation_jobs
-                SET status = 'queued', started_at = NULL, updated_at = ?,
+                SET status = 'queued', started_at = NULL, heartbeat_at = NULL, updated_at = ?,
+                    pipeline_stage = 'queued', claim_token = '',
                     error = 'Scene worker restarted before completion'
                 WHERE status = 'running'
                 """,
@@ -3445,18 +3919,20 @@ class Database:
             ).fetchone()
         return int(row["n"]) if row else 0
 
-    def scene_generation_queue_status(self) -> dict[str, int]:
+    def scene_generation_queue_status(self) -> dict[str, Any]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM scene_generation_jobs GROUP BY status"
             ).fetchall()
         counts = {str(row["status"]): int(row["count"]) for row in rows}
         return {
+            "waiting": counts.get("waiting", 0),
             "queued": counts.get("queued", 0),
             "running": counts.get("running", 0),
             "completed": counts.get("completed", 0),
             "error": counts.get("error", 0),
             "cancelled": counts.get("cancelled", 0),
+            "providers": self.list_scene_provider_states(),
         }
 
     def summary(self) -> dict[str, int]:

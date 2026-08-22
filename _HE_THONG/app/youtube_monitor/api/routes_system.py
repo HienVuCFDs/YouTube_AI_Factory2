@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +15,7 @@ from ..antigravity_bridge import antigravity_cli_status
 from ..claude_code_bridge import ClaudeCodeBridgeError, call_claude_code_json, claude_code_cli_status
 from ..codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
 from ..ffmpeg_renderer import ffmpeg_available, nvenc_available
+from ..gflow_bridge import gflow_cli_status, launch_gflow_login
 from ..maintenance import list_database_backups, prune_database_backups
 from ..oauth import status as oauth_status
 from ..settings import (
@@ -94,6 +96,7 @@ def health() -> dict[str, Any]:
     codex = codex_cli_status()
     claude_code = claude_code_cli_status()
     antigravity = antigravity_cli_status()
+    gflow = gflow_cli_status()
     oauth = oauth_status()
     openmontage_status = openmontage_adapter.status()
     return {
@@ -144,6 +147,9 @@ def health() -> dict[str, Any]:
         "claude_code_cli_logged_in": bool(claude_code["logged_in"]),
         "antigravity_cli_installed": bool(antigravity["installed"]),
         "antigravity_cli_logged_in": bool(antigravity["logged_in"]),
+        "gflow_cli_installed": bool(gflow["installed"]),
+        "gflow_cli_logged_in": bool(gflow["logged_in"]),
+        "gflow_cli_profile": str(gflow.get("profile") or "default"),
         "ai_orchestrator_provider": settings.orchestrator_provider(),
         "openmontage": openmontage_status,
     }
@@ -190,6 +196,7 @@ def _integration_status() -> list[dict[str, Any]]:
     codex = codex_cli_status()
     claude_code = claude_code_cli_status()
     antigravity = antigravity_cli_status()
+    gflow = gflow_cli_status()
     oauth = oauth_status()
     return [
         {
@@ -273,6 +280,18 @@ def _integration_status() -> list[dict[str, Any]]:
             "detail": str(antigravity["detail"]),
         },
         {
+            "key": "gflow_cli",
+            "label": "Google Flow/Veo qua gflow-cli",
+            "category": "Tạo video bằng gói Google Flow đã đăng ký",
+            "ready": bool(gflow["logged_in"]),
+            "connection": "cloud_subscription",
+            "installed": bool(gflow["installed"]),
+            "profile": str(gflow.get("profile") or "default"),
+            "version": str(gflow.get("version") or ""),
+            "model": settings.gflow_config().get("video_model") or "Flow/Veo mặc định",
+            "detail": str(gflow["detail"]),
+        },
+        {
             "key": "openmontage",
             "label": "OpenMontage video engine",
             "category": "Dựng, chuyển cảnh và render local",
@@ -333,12 +352,27 @@ def begin_codex_login() -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/api/integrations/gflow/login")
+def begin_gflow_login() -> dict[str, Any]:
+    try:
+        return {"status": "login_started", "integration": launch_gflow_login()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/integrations/gflow/status")
+def refresh_gflow_status() -> dict[str, Any]:
+    return {"status": "ready", "integration": gflow_cli_status(force=True)}
+
+
 @router.get("/api/openmontage/status")
 def openmontage_status() -> dict[str, Any]:
     return openmontage_adapter.status()
 
 
-OrchestratorProvider = Literal["codex_cli", "claude_code_cli"]
+OrchestratorProvider = Literal["codex_cli", "claude_code_cli", "antigravity"]
+AssignmentMode = Literal["fixed", "auto", "fallback"]
+AgentProvider = Literal["codex_cli", "claude_code_cli", "antigravity"]
 
 
 class OrchestratorSettingsRequest(BaseModel):
@@ -351,6 +385,7 @@ def _orchestrator_settings() -> dict[str, Any]:
         "options": [
             {"key": "codex_cli", "label": "Codex CLI", **codex_cli_status()},
             {"key": "claude_code_cli", "label": "Claude Code CLI", **claude_code_cli_status()},
+            {"key": "antigravity", "label": "Google Antigravity", **antigravity_cli_status()},
         ],
     }
 
@@ -365,8 +400,80 @@ def get_orchestrator_settings() -> dict[str, Any]:
 
 @router.post("/api/settings/orchestrator")
 def save_orchestrator_settings(payload: OrchestratorSettingsRequest) -> dict[str, Any]:
-    settings.save_integration_values({"AI_ORCHESTRATOR_PROVIDER": payload.provider})
+    assignments = settings.agent_assignments()
+    assignments["orchestration"] = {
+        **assignments["orchestration"],
+        "mode": "fixed",
+        "executor": payload.provider,
+    }
+    settings.save_integration_values({
+        "AI_ORCHESTRATOR_PROVIDER": payload.provider,
+        "AI_STAGE_ASSIGNMENTS_JSON": json.dumps(assignments, ensure_ascii=False, separators=(",", ":")),
+    })
     return _orchestrator_settings()
+
+
+class StageAgentAssignmentRequest(BaseModel):
+    mode: AssignmentMode = "auto"
+    executor: AgentProvider
+    allowed_agents: list[AgentProvider] = Field(default_factory=list)
+    fallback_agents: list[AgentProvider] = Field(default_factory=list)
+    reviewer: Literal["auto", "codex_cli", "claude_code_cli", "antigravity"] = "auto"
+
+
+class AgentAssignmentsRequest(BaseModel):
+    assignments: dict[str, StageAgentAssignmentRequest]
+
+
+def _agent_options() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "codex_cli", "label": "Codex CLI", **codex_cli_status(),
+            "capabilities": ["structured_json", "vision", "code", "browser_control"],
+        },
+        {
+            "key": "claude_code_cli", "label": "Claude Code CLI", **claude_code_cli_status(),
+            "capabilities": ["structured_json", "vision", "code", "browser_control"],
+        },
+        {
+            "key": "antigravity", "label": "Google Antigravity", **antigravity_cli_status(),
+            "capabilities": ["structured_json", "image_generation", "mcp_tools"],
+        },
+    ]
+
+
+@router.get("/api/settings/agent-assignments")
+def get_agent_assignments() -> dict[str, Any]:
+    return {
+        "stages": list(settings.AGENT_STAGE_IDS),
+        "agents": _agent_options(),
+        "assignments": settings.agent_assignments(),
+    }
+
+
+@router.post("/api/settings/agent-assignments")
+def save_agent_assignments(payload: AgentAssignmentsRequest) -> dict[str, Any]:
+    invalid_stages = set(payload.assignments) - set(settings.AGENT_STAGE_IDS)
+    if invalid_stages:
+        raise HTTPException(status_code=400, detail=f"Công đoạn không hợp lệ: {', '.join(sorted(invalid_stages))}")
+    current = settings.agent_assignments()
+    for stage, assignment in payload.assignments.items():
+        allowed = list(dict.fromkeys(assignment.allowed_agents or list(settings.AGENT_IDS)))
+        if assignment.executor not in allowed:
+            allowed.insert(0, assignment.executor)
+        current[stage] = {
+            "mode": assignment.mode,
+            "executor": assignment.executor,
+            "allowed_agents": allowed,
+            "fallback_agents": list(dict.fromkeys(
+                agent for agent in assignment.fallback_agents if agent != assignment.executor
+            )),
+            "reviewer": assignment.reviewer,
+        }
+    settings.save_integration_values({
+        "AI_STAGE_ASSIGNMENTS_JSON": json.dumps(current, ensure_ascii=False, separators=(",", ":")),
+    })
+    return get_agent_assignments()
 
 
 class LocateElementRequest(BaseModel):
@@ -425,11 +532,12 @@ def model_catalog() -> list[dict[str, Any]]:
     anthropic_key, anthropic_model = settings.anthropic_config()
     openai_key, openai_model = settings.openai_config()
     runway_key, runway_model = settings.runway_config()
+    gflow = gflow_cli_status()
     whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
     return [
-        {"stage": "LLM", "provider": "codex_cli", "model": "Codex local session", "mode": "local_handoff", "ready": bool(codex_cli_status()["logged_in"]), "vram": "—"},
-        {"stage": "LLM", "provider": "claude_code_cli", "model": "Claude Code local session", "mode": "local_handoff", "ready": bool(claude_code_cli_status()["logged_in"]), "vram": "—"},
-        {"stage": "LLM", "provider": "antigravity", "model": "Antigravity local session", "mode": "local_handoff", "ready": bool(antigravity_cli_status()["logged_in"]), "vram": "—"},
+        {"stage": "LLM", "provider": "codex_cli", "model": "Codex cloud qua CLI", "mode": "cloud_account", "ready": bool(codex_cli_status()["logged_in"]), "vram": "Cloud"},
+        {"stage": "LLM", "provider": "claude_code_cli", "model": "Claude cloud qua CLI", "mode": "cloud_account", "ready": bool(claude_code_cli_status()["logged_in"]), "vram": "Cloud"},
+        {"stage": "LLM", "provider": "antigravity", "model": "Google cloud qua Antigravity", "mode": "cloud_account", "ready": bool(antigravity_cli_status()["logged_in"]), "vram": "Cloud"},
         {"stage": "LLM", "provider": "openai_gpt", "model": openai_model, "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "Image AI", "provider": "openai_image", "model": "gpt-image-1", "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "LLM", "provider": "anthropic_claude", "model": anthropic_model, "mode": "cloud", "ready": bool(anthropic_key), "vram": "Cloud"},
@@ -438,6 +546,7 @@ def model_catalog() -> list[dict[str, Any]]:
         {"stage": "TTS", "provider": "pyvideotrans", "model": PYVIDEOTRANS_VOICE_ROLE, "mode": "local_gpu", "ready": PYVIDEOTRANS_RUNTIME_READY, "vram": "Theo engine"},
         {"stage": "TTS", "provider": "edge_tts", "model": "Neural voices", "mode": "cloud", "ready": EDGE_TTS_RUNTIME_READY, "vram": "Cloud"},
         {"stage": "Video AI", "provider": "runway", "model": runway_model, "mode": "cloud", "ready": bool(runway_key), "vram": "Cloud"},
+        {"stage": "Video AI", "provider": "gflow_cli", "model": settings.gflow_config().get("video_model") or "Flow/Veo mặc định", "mode": "cloud_subscription", "ready": bool(gflow["logged_in"]), "vram": "Cloud"},
         {"stage": "Render", "provider": "ffmpeg_builtin", "model": "H.264/AAC + NVENC", "mode": "local_gpu", "ready": ffmpeg_available(FFMPEG_BINARY) and nvenc_available(FFMPEG_BINARY), "vram": "~2 GB"},
     ]
 
@@ -451,6 +560,7 @@ def tool_status() -> list[dict[str, Any]]:
     codex = codex_cli_status()
     claude_code = claude_code_cli_status()
     antigravity = antigravity_cli_status()
+    gflow = gflow_cli_status()
     premiere_plugin = SYSTEM_ROOT / "premiere_plugin"
     whisper_ready = bool(importlib.util.find_spec("faster_whisper")) and ffmpeg_available(FFMPEG_BINARY)
     try:
@@ -513,6 +623,13 @@ def tool_status() -> list[dict[str, Any]]:
             "ready": bool(antigravity["logged_in"]),
             "phase": "ready" if antigravity["logged_in"] else "configure",
             "detail": str(antigravity["detail"]),
+        },
+        {
+            "key": "gflow_cli",
+            "label": "Google Flow Video · gflow-cli",
+            "ready": bool(gflow["logged_in"]),
+            "phase": "ready" if gflow["logged_in"] else "configure",
+            "detail": str(gflow["detail"]),
         },
         {
             "key": "pyvideotrans",

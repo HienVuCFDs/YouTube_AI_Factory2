@@ -310,13 +310,19 @@ def get_next_job(provider: str) -> dict[str, Any] | None:
     return _api_get(f"/api/browser-scene-jobs/next?provider={provider}").get("job")
 
 
-def complete_job(job_id: int, asset_id: int) -> None:
-    _api_post(f"/api/browser-scene-jobs/{job_id}/complete?asset_id={asset_id}")
+def complete_job(job_id: int, asset_id: int, claim_token: str) -> None:
+    _api_post(
+        f"/api/browser-scene-jobs/{job_id}/complete?asset_id={asset_id}"
+        f"&claim_token={urllib.parse.quote(claim_token)}"
+    )
 
 
-def fail_job(job_id: int, error: str) -> None:
+def fail_job(job_id: int, error: str, claim_token: str) -> None:
     try:
-        _api_post(f"/api/browser-scene-jobs/{job_id}/fail?error={urllib.parse.quote(error[:500])}")
+        _api_post(
+            f"/api/browser-scene-jobs/{job_id}/fail?error={urllib.parse.quote(error[:500])}"
+            f"&claim_token={urllib.parse.quote(claim_token)}"
+        )
     except Exception:
         pass  # best-effort; don't let a failed failure-report crash the loop
 
@@ -377,24 +383,17 @@ def _click(page, kind: str, target) -> None:
 
 
 def _attach_reference_image(page, config: ProviderConfig, image_path: Path) -> None:
-    """Best-effort image-to-video: attach an existing scene image as the
-    starting frame before generating. Not yet verified against either site's
-    live DOM (see module docstring, step 4) — falls back to AI vision like
-    every other target here, and a failure here must not abort the whole
-    job, since a from-scratch text-to-video clip is still a useful result."""
+    """Attach the required starting frame or fail before spending credits."""
     if not config.image_upload_selectors:
+        raise WebVideoError("Provider chưa cấu hình thao tác đính kèm ảnh; không thể chạy image-to-video")
+    file_input = page.locator("input[type='file']").first
+    if file_input.count() > 0:
+        file_input.set_input_files(str(image_path))
         return
-    try:
-        file_input = page.locator("input[type='file']").first
-        if file_input.count() > 0:
-            file_input.set_input_files(str(image_path))
-            return
-        kind, target = _resolve_target(page, config.image_upload_selectors, config.image_upload_instruction, timeout_ms=8_000)
-        with page.expect_file_chooser(timeout=8_000) as chooser_info:
-            _click(page, kind, target)
-        chooser_info.value.set_files(str(image_path))
-    except Exception as exc:  # noqa: BLE001 - image-to-video is a nice-to-have, not a hard requirement
-        print(f"Không đính kèm được ảnh tham chiếu ({image_path.name}), tiếp tục tạo video từ prompt: {exc}", flush=True)
+    kind, target = _resolve_target(page, config.image_upload_selectors, config.image_upload_instruction, timeout_ms=8_000)
+    with page.expect_file_chooser(timeout=8_000) as chooser_info:
+        _click(page, kind, target)
+    chooser_info.value.set_files(str(image_path))
 
 
 _IMAGE_MIME_BY_EXT_REVERSE = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
@@ -477,8 +476,11 @@ def _capture_video_download(page, config: ProviderConfig, download_dir: Path) ->
 def generate_video(
     page, config: ProviderConfig, prompt: str, download_dir: Path,
     ratio: str = "", reference_image_path: Path | None = None,
+    requires_reference_image: bool = False,
 ) -> Path:
     page.goto(config.url, wait_until="domcontentloaded")
+    if requires_reference_image and (reference_image_path is None or not reference_image_path.is_file()):
+        raise WebVideoError("Image-to-video bắt buộc có ảnh nguồn hợp lệ; không chuyển sang text-to-video")
     if reference_image_path is not None and reference_image_path.is_file():
         _attach_reference_image(page, config, reference_image_path)
     kind, target = _resolve_target(page, config.prompt_selectors, config.prompt_instruction)
@@ -583,23 +585,26 @@ def run_loop(provider: str, config: ProviderConfig) -> None:
                     time.sleep(10)
                     continue
                 job_id = int(job["id"])
+                claim_token = str(job.get("claim_token") or "")
                 project_id = int(job["project_id"])
                 prompt = str(job.get("prompt") or "")
                 ratio = str(job.get("ratio") or "")
                 reference_asset_path = job.get("reference_asset_path")
                 reference_image_path = Path(str(reference_asset_path)) if reference_asset_path else None
+                requires_reference_image = bool(job.get("requires_reference_image"))
                 print(f"[{provider}] job {job_id}: generating...", flush=True)
                 try:
                     video_path = generate_video(
                         page, config, prompt, _download_dir(provider),
                         ratio=ratio, reference_image_path=reference_image_path,
+                        requires_reference_image=requires_reference_image,
                     )
                     asset_id = _upload_asset(project_id, video_path)
-                    complete_job(job_id, asset_id)
+                    complete_job(job_id, asset_id, claim_token)
                     print(f"[{provider}] job {job_id}: done -> asset {asset_id}", flush=True)
                 except Exception as exc:  # noqa: BLE001 - report to the app, keep the loop alive
                     print(f"[{provider}] job {job_id}: FAILED - {exc}", flush=True)
-                    fail_job(job_id, str(exc))
+                    fail_job(job_id, str(exc), claim_token)
                 # Human-paced gap between jobs, not back-to-back automation.
                 time.sleep(20)
             except (urllib.error.URLError, urllib.error.HTTPError) as exc:

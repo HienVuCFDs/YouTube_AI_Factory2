@@ -423,8 +423,8 @@
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="flow_veo">Flow (Veo 3) · video theo gói thuê bao</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo · tạo video thật</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI cho các cảnh</button></div>
-          <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Video sẽ được tạo cho mỗi cảnh chưa có hình.</div>
+          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
+          <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
         </div>
         <div id="studioStep5" class="studio-step" data-studio-step="5" hidden>
@@ -533,9 +533,12 @@
       <section id="orchestratorSettings" class="panel workspace-panel" style="margin-bottom:14px">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">◈</span> AI ĐIỀU PHỐI CHÍNH</div><div class="panel-sub">CLI đã đăng nhập trên máy (không phải API key) dùng để tự tìm phần tử trên web app lạ — ví dụ nút Generate/Download trong web_video_sidecar.py khi selector cố định không khớp.</div></div></div>
         <div class="panel-body">
-          <div class="studio-field"><label for="orchestratorProviderSelect">Chọn AI điều phối</label><select id="orchestratorProviderSelect"><option value="codex_cli">Codex CLI</option><option value="claude_code_cli">Claude Code CLI</option></select></div>
+          <div class="studio-field"><label for="orchestratorProviderSelect">Chọn AI điều phối</label><select id="orchestratorProviderSelect"><option value="codex_cli">Codex CLI</option><option value="claude_code_cli">Claude Code CLI</option><option value="antigravity">Google Antigravity</option></select></div>
           <div id="orchestratorProviderHint" class="secondary-text" style="margin-top:6px">Đang kiểm tra trạng thái đăng nhập...</div>
           <div class="queue-controls" style="margin-top:8px"><button class="btn small primary" type="button" onclick="saveOrchestratorProvider()">Lưu lựa chọn</button><button class="btn small ghost" type="button" onclick="loadOrchestratorSettings()">Kiểm tra lại</button></div>
+          <div class="panel-sub" style="margin-top:16px">PHÂN CÔNG AI THEO CÔNG ĐOẠN</div>
+          <div id="agentAssignmentsBody" style="margin-top:8px"><div class="empty">Đang tải quy tắc phân công...</div></div>
+          <div class="queue-controls" style="margin-top:8px"><button class="btn small primary" type="button" onclick="saveAgentAssignments()">Lưu phân công</button><button class="btn small ghost" type="button" onclick="loadAgentAssignments()">Nạp lại</button></div>
         </div>
       </section>
 
@@ -1088,6 +1091,15 @@
         <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
       </div>`;
     }
+    if (item.connection === 'cloud_subscription' && item.key === 'gflow_cli') {
+      const stateLabel = item.ready ? 'ĐÃ ĐĂNG NHẬP' : item.installed ? 'CẦN ĐĂNG NHẬP' : 'CHƯA CÀI CLI';
+      return `<div class="integration-card ${item.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${stateLabel}</span></div>
+        <div class="secondary-text">${esc(item.category)} · profile ${esc(item.profile || 'default')} ${item.version ? `· ${esc(item.version)}` : ''}</div>
+        <div class="secondary-text" style="margin-top:6px">${esc(item.detail)}</div>
+        <div class="queue-controls">${item.ready ? '<span class="tag green">Sẵn sàng tạo video</span>' : item.installed ? '<button class="btn small primary" type="button" onclick="beginGFlowLogin()">Đăng nhập Google Flow</button>' : ''}<button class="btn small ghost" type="button" onclick="reloadGFlowStatus()">Kiểm tra lại</button></div>
+      </div>`;
+    }
     if (item.connection === 'handoff') {
       return `<div class="integration-card ${cardClass}">
         <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag cyan">${status}</span></div>
@@ -1119,7 +1131,7 @@
     const connected = state.integrations.filter((item) => item.connection === 'api_key' && item.ready).length;
     const cloud = state.integrations.filter((item) => item.connection === 'api_key').length;
     $('integrationSummary').textContent = `${connected}/${cloud} AI CLOUD ĐÃ KẾT NỐI`;
-    $('integrationBody').innerHTML = `<div class="integration-grid">${state.integrations.map(renderIntegrationCard).join('')}</div><div class="workflow-hint"><span class="tag orange">GHI CHÚ</span><span>Claude Desktop và Codex trên máy không phải API để app điều khiển trực tiếp. Dùng API cloud để tự động chạy; dùng JSON handoff khi muốn tiếp tục làm việc trong app desktop.</span></div>`;
+    $('integrationBody').innerHTML = `<div class="integration-grid">${state.integrations.map(renderIntegrationCard).join('')}</div><div class="workflow-hint"><span class="tag cyan">KIẾN TRÚC</span><span>Codex CLI, Claude Code CLI và Antigravity là các client của AI cloud đã đăng nhập. App giao việc theo từng công đoạn; Google Flow/Veo là trình tạo video mặc định và không cần API key.</span></div>`;
     updateStudioSceneGenerationAvailability();
   }
 
@@ -1167,6 +1179,22 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  async function beginGFlowLogin() {
+    setMessage('Đang mở Chrome để đăng nhập Google Flow...');
+    try {
+      const response = await api('/api/integrations/gflow/login', {method: 'POST'});
+      setMessage(response.integration.detail, 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function reloadGFlowStatus() {
+    try {
+      const response = await api('/api/integrations/gflow/status', {method: 'POST'});
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadModelCatalog()]);
+      setMessage(response.integration.logged_in ? 'Google Flow đã đăng nhập và sẵn sàng.' : response.integration.detail, response.integration.logged_in ? 'success' : 'error');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function reloadIntegrationsAndTools() {
     try {
       await Promise.all([loadIntegrations(), loadToolStatus(), loadAnalysisProviders()]);
@@ -1182,8 +1210,10 @@
     if (hint) {
       const codex = data.options.find((item) => item.key === 'codex_cli');
       const claude = data.options.find((item) => item.key === 'claude_code_cli');
-      hint.innerHTML = `Codex CLI: ${codex?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Claude Code CLI: ${claude?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'}`;
+      const antigravity = data.options.find((item) => item.key === 'antigravity');
+      hint.innerHTML = `Codex: ${codex?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Claude: ${claude?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Antigravity: ${antigravity?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'}`;
     }
+    await loadAgentAssignments();
   }
 
   async function saveOrchestratorProvider() {
@@ -1193,6 +1223,61 @@
       setMessage('Đã lưu AI điều phối chính.', 'success');
       await loadOrchestratorSettings();
     } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  const AGENT_STAGE_LABELS = {
+    orchestration: 'Điều phối chính', script: 'Kịch bản', storyboard: 'Storyboard & kế hoạch',
+    image_generation: 'Tạo ảnh', video_generation: 'Tạo video', quality_review: 'Nghiệm thu chất lượng',
+  };
+  const AGENT_LABELS = {codex_cli: 'Codex CLI', claude_code_cli: 'Claude Code CLI', antigravity: 'Google Antigravity'};
+
+  function agentOptions(selected, includeAuto = false, disableAntigravity = false) {
+    const auto = includeAuto ? `<option value="auto" ${selected === 'auto' ? 'selected' : ''}>Tự chọn AI khác executor</option>` : '';
+    return auto + Object.entries(AGENT_LABELS).map(([key, label]) =>
+      `<option value="${key}" ${selected === key ? 'selected' : ''} ${disableAntigravity && key === 'antigravity' ? 'disabled' : ''}>${label}</option>`
+    ).join('');
+  }
+
+  async function loadAgentAssignments() {
+    const target = $('agentAssignmentsBody');
+    if (!target) return;
+    try {
+      const data = await api('/api/settings/agent-assignments');
+      state.agentAssignments = data;
+      target.innerHTML = (data.stages || []).map((stage) => {
+        const item = data.assignments?.[stage] || {};
+        const reviewerDisabled = stage === 'quality_review';
+        const fallback = (item.fallback_agents || [])[0] || '';
+        return `<div class="studio-actions" style="align-items:end;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <div class="studio-field" style="min-width:190px"><label>${esc(AGENT_STAGE_LABELS[stage] || stage)}</label><select id="agentMode-${stage}"><option value="fixed" ${item.mode === 'fixed' ? 'selected' : ''}>Khóa theo người dùng</option><option value="auto" ${item.mode === 'auto' ? 'selected' : ''}>AI điều phối tự chọn</option><option value="fallback" ${item.mode === 'fallback' ? 'selected' : ''}>Ưu tiên + dự phòng</option></select></div>
+          <div class="studio-field" style="min-width:170px"><label>AI thực hiện</label><select id="agentExecutor-${stage}">${agentOptions(item.executor)}</select></div>
+          <div class="studio-field" style="min-width:170px"><label>AI dự phòng</label><select id="agentFallback-${stage}"><option value="">Không đặt</option>${agentOptions(fallback)}</select></div>
+          <div class="studio-field" style="min-width:190px"><label>AI nghiệm thu</label><select id="agentReviewer-${stage}">${agentOptions(item.reviewer || 'auto', true, reviewerDisabled)}</select></div>
+        </div>`;
+      }).join('');
+    } catch (error) {
+      target.innerHTML = `<div class="empty">Không tải được phân công AI: ${esc(error.message)}</div>`;
+    }
+  }
+
+  async function saveAgentAssignments() {
+    const stages = state.agentAssignments?.stages || Object.keys(AGENT_STAGE_LABELS);
+    const assignments = {};
+    stages.forEach((stage) => {
+      const executor = $(`agentExecutor-${stage}`)?.value || 'codex_cli';
+      const fallback = $(`agentFallback-${stage}`)?.value || '';
+      assignments[stage] = {
+        mode: $(`agentMode-${stage}`)?.value || 'auto', executor,
+        allowed_agents: Object.keys(AGENT_LABELS),
+        fallback_agents: fallback && fallback !== executor ? [fallback] : [],
+        reviewer: $(`agentReviewer-${stage}`)?.value || 'auto',
+      };
+    });
+    try {
+      await api('/api/settings/agent-assignments', {method: 'POST', body: JSON.stringify({assignments})});
+      setMessage('Đã lưu phân công AI theo công đoạn.', 'success');
+      await loadAgentAssignments();
+    } catch (error) { setMessage(`Không lưu được phân công AI: ${error.message}`, 'error'); }
   }
 
   async function loadAnalysisProviders() {
@@ -1751,7 +1836,7 @@
       <div class="storyboard-card">
         <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1}</span>${shot.status ? shotStatusTag(shot.status) : ''}</div>
         <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}<div class="storyboard-prompt">${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Tạo video AI từ mô tả cho cảnh'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
+        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}<div class="storyboard-prompt">${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
       </div>`;
     }).join('')}</div>`;
   }
@@ -1762,14 +1847,16 @@
   // wiring up another web app in web_video_sidecar.py.
   const SUBSCRIPTION_PROVIDER_HINTS = {
     antigravity_image: 'Antigravity sẽ dùng gói AI đã đăng nhập để tạo ảnh và tự gắn vào storyboard. Cần bật sidecar YT Factory một lần trong Antigravity.',
-    flow_veo: 'Flow (Veo 3) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập để tạo video và tự gắn vào storyboard. Cần chạy `python web_video_sidecar.py --provider flow_veo` và đăng nhập Google một lần.',
+    gflow_cli: 'Google Flow/Veo sẽ dùng gói Google đã đăng ký qua gflow-cli. App tự chạy worker, nhận MP4 và gắn vào timeline; không cần Extension.',
+    flow_veo: 'Flow Extension (legacy) giữ lại làm dự phòng. Cần Extension trình duyệt đang kết nối.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập để tạo video miễn phí và tự gắn vào storyboard. Cần chạy `python web_video_sidecar.py --provider meta_ai_video` và đăng nhập một lần.',
     gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập để tạo ảnh qua giao diện chat, không cần API key. Cần chạy `python web_video_sidecar.py --provider gemini_web_image --login` và đăng nhập Google một lần.',
     chatgpt_web_image: 'ChatGPT (web) sẽ dùng tài khoản ChatGPT Plus/Pro đã đăng nhập để tạo ảnh qua giao diện chat, không cần API key. Cần chạy `python web_video_sidecar.py --provider chatgpt_web_image --login` và đăng nhập một lần.',
   };
   const SUBSCRIPTION_PROVIDER_SHORT = {
     antigravity_image: 'Antigravity sẽ dùng gói đã đăng nhập.',
-    flow_veo: 'Flow (Veo 3) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập.',
+    gflow_cli: 'Google Flow/Veo sẽ dùng gói Google đã đăng ký qua gflow-cli.',
+    flow_veo: 'Flow Extension legacy sẽ dùng gói Google đã đăng nhập.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập (miễn phí).',
     gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập.',
     chatgpt_web_image: 'ChatGPT (web) sẽ dùng tài khoản ChatGPT Plus/Pro đã đăng nhập.',
@@ -1778,6 +1865,10 @@
 
   async function sidecarWarningText(provider) {
     if (!isSubscriptionProvider(provider)) return '';
+    if (provider === 'gflow_cli') {
+      const ready = Boolean(state.integrations?.find((item) => item.key === 'gflow_cli')?.ready);
+      return ready ? '' : '⚠ gflow-cli chưa sẵn sàng. Cần cài tool và đăng nhập Google Flow một lần trước khi tạo video.';
+    }
     try {
       const status = await api('/api/scene-sidecar-status');
       const info = status[provider];
@@ -1820,8 +1911,10 @@
     const videoButton = $('studioGenerateVideosButton');
     const videoHint = $('studioSceneVideoHint');
     if (videoButton) {
-      const provider = $('studioSceneVideoProviderSelect')?.value || 'flow_veo';
-      const providerReady = isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === 'google_gemini')?.ready);
+      const provider = $('studioSceneVideoProviderSelect')?.value || 'gflow_cli';
+      const providerReady = provider === 'gflow_cli'
+        ? Boolean(state.integrations?.find((item) => item.key === 'gflow_cli')?.ready)
+        : isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === 'google_gemini')?.ready);
       videoButton.disabled = !hasProject;
       if (videoHint) {
         videoHint.innerHTML = isSubscriptionProvider(provider)
@@ -1948,7 +2041,7 @@
       return setMessage(`Hãy nhập ${provider.startsWith('gemini_') ? 'GEMINI_API_KEY tại thẻ Google Gemini Image + Veo' : 'OPENAI_API_KEY tại thẻ OpenAI GPT + Image API'}, bấm “Lưu & bật”, sau đó quay lại Storyboard.`, 'error');
     }
     const sidecarWarning = await sidecarWarningText(provider);
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho mọi cảnh chưa có hình? ${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
+    if (!confirm(`${isVeo ? 'Tạo video từ ảnh storyboard' : 'Tạo ảnh AI'} bằng ${sceneProviderLabel(provider)} cho các cảnh? ${isVeo ? 'Cảnh chưa có ảnh sẽ được tạo ảnh trước; video không bao giờ tự chuyển sang text-to-video. ' : ''}${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
     const button = $(buttonId);
     if (button) button.disabled = true;
     setStudioProgress(5, `Đang tạo timeline trước khi gửi ${isVeo ? 'video' : 'ảnh'} sang ${sceneProviderLabel(provider)}...`);
@@ -1957,8 +2050,13 @@
       await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
       setStudioProgress(15, 'Timeline đã sẵn sàng, đang xếp hàng tạo cảnh...');
       const ratio = $('studioSceneRatioSelect')?.value || '1280:720';
+      const selectedImageProvider = $('studioSceneImageProviderSelect')?.value || 'flow_image';
+      const referenceImageProvider = selectedImageProvider === 'auto_parallel' ? 'flow_image' : selectedImageProvider;
       const result = await api(`/api/projects/${state.studioProjectId}/scene-jobs/batch`, {
-        method: 'POST', body: JSON.stringify({...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true}),
+        method: 'POST', body: JSON.stringify({
+          ...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio,
+          requires_reference_image: isVeo, reference_image_provider: referenceImageProvider, confirmed: true,
+        }),
       });
       const jobs = result.jobs || [];
       if (!jobs.length) {
@@ -1980,7 +2078,7 @@
   }
 
   async function generateStudioSceneVideosBatch() {
-    const provider = $('studioSceneVideoProviderSelect')?.value || 'flow_veo';
+    const provider = $('studioSceneVideoProviderSelect')?.value || 'gflow_cli';
     await runStudioSceneBatch(provider, true, 'studioGenerateVideosButton');
   }
 
@@ -2753,7 +2851,7 @@
             <select id="shotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select>
             <button class="btn small primary" type="button" onclick="generateShotImage(${project.id}, ${shot.id})">Tạo ảnh AI cho cảnh</button>
             <select id="shotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select>
-            <button class="btn small primary" type="button" onclick="generateShotVideo(${project.id}, ${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(visualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Tạo video AI từ mô tả cho cảnh'}</button>
+            <button class="btn small primary" type="button" onclick="generateShotVideo(${project.id}, ${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(visualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button>
             <button class="btn small ghost" type="button" onclick="regenerateShotVoice(${project.id}, ${shot.id})">Tạo lại giọng đọc cảnh này</button>
           </div>
         </div>
@@ -2781,7 +2879,7 @@
         <select id="sceneImageProvider-${segment.id}" aria-label="Engine tạo ảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select>
         <button class="btn small primary" onclick="generateSceneImage(${project.id}, ${segment.id})">Tạo ảnh AI</button>
         <select id="sceneVideoProvider-${segment.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select>
-        <button class="btn small primary" onclick="generateSceneVideo(${project.id}, ${segment.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(String(segment.visual_path || '')) ? 'Tạo video AI từ ảnh' : 'Tạo video AI từ mô tả'}</button>`;
+        <button class="btn small primary" onclick="generateSceneVideo(${project.id}, ${segment.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(String(segment.visual_path || '')) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button>`;
       return `
       <div class="job-row" style="align-items:flex-start">
         <span class="job-dot ${segment.status === 'done' || segment.status === 'ready' ? 'completed' : segment.status === 'voice_ready' || segment.status === 'asset_ready' ? 'running' : ''}"></span>
@@ -3249,7 +3347,7 @@
 
   function sceneProviderLabel(provider) {
     return {
-      antigravity_image: 'Antigravity', flow_veo: 'Flow (Veo 3)', meta_ai_video: 'Meta AI (Vibes)',
+      antigravity_image: 'Antigravity', gflow_cli: 'Google Flow/Veo (gflow-cli)', flow_veo: 'Flow Extension (legacy)', meta_ai_video: 'Meta AI (Vibes)',
       gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
       gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)', flow_image: 'Flow (ảnh)', auto_parallel: 'nhiều AI song song',
     }[provider] || provider || 'AI';
@@ -3260,7 +3358,7 @@
   // the extension already runs jobs concurrently, but scenes sent to one site
   // queue behind that site's single tab.
   const PARALLEL_IMAGE_PROVIDERS = ['flow_image', 'chatgpt_web_image', 'gemini_web_image'];
-  const PARALLEL_VIDEO_PROVIDERS = ['flow_veo'];
+  const PARALLEL_VIDEO_PROVIDERS = ['gflow_cli'];
   function batchProviderPayload(provider, isVeo) {
     if (provider !== 'auto_parallel') return {provider};
     return {providers: isVeo ? PARALLEL_VIDEO_PROVIDERS : PARALLEL_IMAGE_PROVIDERS};
@@ -3304,13 +3402,13 @@ Chạy các bước này?`)) return;
       setMessage(`AI điều phối lỗi: ${error.message}`, 'error');
     }
   }
-  const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'flow_veo', 'meta_ai_video', 'runway']);
+  const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
-  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
   const IMAGE_PROVIDER_OPTIONS = '<option value="auto_parallel">Nhiều AI song song</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
-  const VIDEO_PROVIDER_OPTIONS = '<option value="flow_veo">Flow (Veo 3) · video theo gói</option><option value="meta_ai_video">Meta AI (Vibes) · video miễn phí</option><option value="gemini_veo">Google Veo (API)</option>';
+  const VIDEO_PROVIDER_OPTIONS = '<option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo (API)</option>';
 
   async function findReferenceImageAssetId(projectId, visualPath) {
     if (!visualPath) return null;
@@ -3368,6 +3466,10 @@ Chạy các bước này?`)) return;
     const usesSubscription = SUBSCRIPTION_SCENE_PROVIDERS.has(provider);
     const segment = await ensureSegmentForShot(projectId, shotId);
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
+    if (isVeo && !referenceAssetId) {
+      setMessage('Cảnh chưa có ảnh nguồn. Hãy tạo hoặc gắn ảnh cho cảnh trước khi tạo video.', 'error');
+      return null;
+    }
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
     const sidecarWarning = await sidecarWarningText(provider);
     if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
@@ -3378,6 +3480,7 @@ Chạy các bước này?`)) return;
         timeline_segment_id: segment.id, provider, prompt: promptText,
         duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true,
         reference_asset_id: referenceAssetId,
+        requires_reference_image: isVeo,
       }),
     });
     setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
@@ -3398,7 +3501,7 @@ Chạy các bước này?`)) return;
 
   async function generateShotVideo(projectId, shotId) {
     const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
-    const provider = $(`shotVideoProvider-${shotId}`)?.value || 'flow_veo';
+    const provider = $(`shotVideoProvider-${shotId}`)?.value || 'gflow_cli';
     const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
     try {
       const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
@@ -3430,7 +3533,7 @@ Chạy các bước này?`)) return;
     if (!projectId) return;
     const shot = state.shots?.find((item) => Number(item.id) === Number(shotId));
     const promptText = (shot?.visual_prompt || '').trim();
-    const provider = $(`studioShotVideoProvider-${shotId}`)?.value || 'flow_veo';
+    const provider = $(`studioShotVideoProvider-${shotId}`)?.value || 'gflow_cli';
     const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
     try {
       const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
@@ -3569,6 +3672,10 @@ Chạy các bước này?`)) return;
   async function createTimelineSceneJob(projectId, segmentId, promptText, provider, ratio, isVeo) {
     if (promptText.length < 3) throw new Error('Hãy nhập visual prompt cho đoạn này trước.');
     const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, $(`timelineVisual-${segmentId}`)?.value || '') : null;
+    if (isVeo && !referenceAssetId) {
+      setMessage('Đoạn này chưa có ảnh nguồn. Hãy tạo hoặc gắn ảnh trước khi tạo video.', 'error');
+      return null;
+    }
     const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
     const sidecarWarning = await sidecarWarningText(provider);
     if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${SUBSCRIPTION_SCENE_PROVIDERS.has(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
@@ -3582,6 +3689,7 @@ Chạy các bước này?`)) return;
         duration_seconds: isVeo ? 8 : 5,
         ratio,
         reference_asset_id: referenceAssetId,
+        requires_reference_image: isVeo,
         confirmed: true,
       }),
     });
@@ -3603,7 +3711,7 @@ Chạy các bước này?`)) return;
 
   async function generateSceneVideo(projectId, segmentId) {
     const prompt = $(`timelinePrompt-${segmentId}`)?.value?.trim() || '';
-    const provider = $(`sceneVideoProvider-${segmentId}`)?.value || 'flow_veo';
+    const provider = $(`sceneVideoProvider-${segmentId}`)?.value || 'gflow_cli';
     const ratio = $(`sceneRatio-${segmentId}`)?.value || '1280:720';
     try {
       const response = await createTimelineSceneJob(projectId, segmentId, prompt, provider, ratio, true);
@@ -3632,11 +3740,15 @@ Chạy các bước này?`)) return;
 
   async function runTimelineSceneBatch(projectId, provider, ratio, isVeo) {
     const sidecarWarning = await sidecarWarningText(provider);
-    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh chưa có visual? Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
+    if (!confirm(`${isVeo ? 'Tạo video từ ảnh storyboard' : 'Tạo ảnh AI'} bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh? ${isVeo ? 'Cảnh chưa có ảnh sẽ được tạo ảnh trước; video không chuyển ngầm sang text-to-video. ' : ''}Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
     setMessage(`Đang đưa các cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
     try {
+      const referenceImageProvider = $(`batchImageProvider-${projectId}`)?.value || 'flow_image';
       const response = await api(`/api/projects/${projectId}/scene-jobs/batch`, {
-        method: 'POST', body: JSON.stringify({...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true}),
+        method: 'POST', body: JSON.stringify({
+          ...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio,
+          requires_reference_image: isVeo, reference_image_provider: referenceImageProvider, confirmed: true,
+        }),
       });
       const jobs = response.jobs || [];
       if (!jobs.length) return setMessage('Không có cảnh nào cần tạo thêm; hãy kiểm tra storyboard.', 'success');
@@ -3653,7 +3765,7 @@ Chạy các bước này?`)) return;
   }
 
   async function generateAllSceneVideos(projectId) {
-    const provider = $(`batchVideoProvider-${projectId}`)?.value || 'flow_veo';
+    const provider = $(`batchVideoProvider-${projectId}`)?.value || 'gflow_cli';
     const ratio = $(`batchSceneRatio-${projectId}`)?.value || '1280:720';
     await runTimelineSceneBatch(projectId, provider, ratio, true);
   }

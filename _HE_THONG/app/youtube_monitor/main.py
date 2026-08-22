@@ -2781,6 +2781,44 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
     }
 
 
+def _write_job_prompt(job: dict[str, Any]) -> str:
+    """Write the prompt for a job that is about to run.
+
+    Jobs are queued carrying the storyboard's own words, so this is where the
+    real prompt gets written — one CLI call per job, off the request path.
+    Reads the scene's neighbours for continuity, the same as before.
+    """
+    raw_prompt = str(job.get("prompt") or "").strip()
+    if not raw_prompt:
+        return ""
+    segment_id = int(job.get("timeline_segment_id") or 0)
+    context = ""
+    segment = database.get_project_timeline_segment(segment_id) if segment_id else None
+    if segment:
+        timeline = database.list_project_timeline(
+            int(job["project_id"]), script_id=int(segment.get("script_id") or 0) or None
+        )
+        position = next(
+            (index for index, item in enumerate(timeline) if int(item["id"]) == segment_id),
+            -1,
+        )
+        context = _scene_prompt_context(timeline, position)
+
+    kind = str(job.get("job_kind") or "")
+    if kind == "gif":
+        return _craft_gif_sheet_prompt(raw_prompt, context=context)
+    if kind == "video":
+        return _craft_video_prompt(
+            raw_prompt, has_reference_image=bool(job.get("requires_reference_image"))
+        )
+    return _craft_image_prompt(raw_prompt, context=context)
+
+
+# Registered here, after the definition above: the worker only calls it
+# once a job actually starts, so queueing never waits on the CLI.
+scene_generation_worker.set_prompt_crafter(_write_job_prompt)
+
+
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
     if provider == "meta_ai_video":
@@ -2883,13 +2921,9 @@ def queue_scene_generation_job(
             raise HTTPException(status_code=400, detail="Asset tham chieu khong thuoc project")
         if asset["asset_type"] != "image":
             raise HTTPException(status_code=400, detail="Chi co the dung anh lam asset tham chieu")
+    # The prompt is written when the job runs, not here — see
+    # _write_job_prompt. Queueing stays instant and callable-off.
     prompt_text = payload.prompt
-    if payload.motion_as_gif:
-        prompt_text = _craft_gif_sheet_prompt(prompt_text)
-    elif payload.provider in _CHAT_IMAGE_PROVIDERS:
-        prompt_text = _craft_image_prompt(prompt_text)
-    elif payload.provider in _CHAT_VIDEO_PROVIDERS:
-        prompt_text = _craft_video_prompt(prompt_text, has_reference_image=bool(payload.reference_asset_id))
     job = database.create_scene_generation_job(
         project_id,
         payload.timeline_segment_id,
@@ -2900,6 +2934,7 @@ def queue_scene_generation_job(
         reference_asset_id=payload.reference_asset_id,
         job_kind="gif" if payload.motion_as_gif else ("video" if is_video_provider else "image"),
         requires_reference_image=payload.requires_reference_image,
+        prompt_pending=True,
     )
     if not job:
         raise HTTPException(status_code=400, detail="Segment timeline khong hop le hoac khong thuoc project")
@@ -3003,39 +3038,33 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 image_provider = payload.reference_image_provider
                 if image_provider not in _IMAGE_CAPABLE_PROVIDERS:
                     image_provider = image_pool[0] if image_pool else "flow_image"
-                image_prompt = prompt
-                if image_provider in _CHAT_IMAGE_PROVIDERS:
-                    image_prompt = _craft_image_prompt(
-                        image_prompt, context=_scene_prompt_context(timeline, position)
-                    )
                 dependency_job = database.create_scene_generation_job(
                     project_id,
                     int(segment["id"]),
                     image_provider,
-                    image_prompt,
+                    prompt,
                     duration_seconds=5,
                     ratio=payload.ratio,
                     job_kind="image",
+                    prompt_pending=True,
                 )
                 if not dependency_job:
                     continue
                 preparation_jobs.append(dependency_job)
                 if image_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                     scene_generation_worker.enqueue(int(dependency_job["id"]))
-            video_prompt = prompt
-            if provider in _CHAT_VIDEO_PROVIDERS:
-                video_prompt = _craft_video_prompt(video_prompt, has_reference_image=True)
             job = database.create_scene_generation_job(
                 project_id,
                 int(segment["id"]),
                 provider,
-                video_prompt,
+                prompt,
                 duration_seconds=payload.duration_seconds,
                 ratio=payload.ratio,
                 reference_asset_id=int(reference_asset["id"]) if reference_asset else None,
                 job_kind="video",
                 depends_on_job_id=int(dependency_job["id"]) if dependency_job else None,
                 requires_reference_image=True,
+                prompt_pending=True,
             )
             if job:
                 if not dependency_job and provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
@@ -3088,15 +3117,11 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 fps=int(segment.get("visual_fps") or 8),
                 reason=(str(segment.get("visual_kind_reason") or "") + " | Dùng GIF thay video theo chính sách project").strip(" |"),
             )
-        scene_context = _scene_prompt_context(timeline, position)
-        if wants_gif:
-            prompt = _craft_gif_sheet_prompt(prompt, context=scene_context)
-        else:
-            prompt = _craft_image_prompt(prompt, context=scene_context)
         job = database.create_scene_generation_job(
             project_id, int(segment["id"]), provider, prompt,
             duration_seconds=payload.duration_seconds, ratio=payload.ratio,
             job_kind="gif" if wants_gif else "image",
+            prompt_pending=True,
         )
         if job:
             active_segment_ids.add(int(segment["id"]))
@@ -3205,6 +3230,18 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
     if provider_state.get("circuit_open"):
         return {"job": None, "circuit": provider_state}
     job = database.claim_next_scene_job_for_provider(provider)
+    if job and not job.get("prompt_written"):
+        # These jobs never pass through SceneGenerationWorker, so this is
+        # their equivalent of _ensure_prompt_written: the prompt is written
+        # now, on the claim, rather than when the batch was queued.
+        try:
+            written = _write_job_prompt(job)
+        except LlmError:
+            written = ""
+        if written.strip():
+            job = database.save_scene_job_prompt(int(job["id"]), written) or job
+        else:
+            database.touch_scene_generation_job(int(job["id"]), "prompt_ready")
     return {"job": job}
 
 
@@ -3253,6 +3290,20 @@ def complete_browser_scene_job(job_id: int, asset_id: int, claim_token: str = ""
     # wait out a ~20s CLI call before it can pick up the next job.
     _review_scene_in_background(job_id)
     return {"status": "completed", "job": finished, "asset": asset}
+
+
+@app.post("/api/projects/{project_id}/scene-jobs/cancel-pending")
+def cancel_pending_scene_jobs(project_id: int) -> dict[str, Any]:
+    """Call off every scene job of this project that has not started yet.
+
+    A batch that turns out to be wrong needs one action to undo, not one per
+    job: cancelling them individually is slow enough that more get claimed
+    while you work down the list. Running jobs are left to finish and report.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Khong tim thay du an")
+    cancelled = database.cancel_pending_scene_generation_jobs(project_id)
+    return {"status": "cancelled", "cancelled_count": cancelled}
 
 
 @app.post("/api/scene-jobs/{job_id}/review")

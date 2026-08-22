@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,43 @@ class SaveIntegrationValuesTests(unittest.TestCase):
             self.assertIn("OPENAI_MODEL=gpt-4o-mini", content)
             self.assertIn("ANTHROPIC_MODEL=claude-opus-5", content)
             self.assertIn("EXISTING_KEY=keep", content)
+
+
+class AgentAssignmentTests(unittest.TestCase):
+    def test_malformed_assignment_json_uses_defaults(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"AI_STAGE_ASSIGNMENTS_JSON": "not-json", "AI_ORCHESTRATOR_PROVIDER": "codex_cli"},
+            clear=False,
+        ):
+            assignments = settings.agent_assignments()
+        self.assertEqual(assignments["orchestration"]["executor"], "codex_cli")
+        self.assertEqual(assignments["video_generation"]["mode"], "auto")
+
+    def test_valid_stage_assignment_is_normalized(self) -> None:
+        configured = {
+            "video_generation": {
+                "mode": "fallback",
+                "executor": "claude_code_cli",
+                "allowed_agents": ["claude_code_cli", "codex_cli", "invalid"],
+                "fallback_agents": ["codex_cli", "codex_cli", "claude_code_cli"],
+                "reviewer": "codex_cli",
+            }
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AI_STAGE_ASSIGNMENTS_JSON": json.dumps(configured),
+                "AI_ORCHESTRATOR_PROVIDER": "codex_cli",
+            },
+            clear=False,
+        ):
+            assignment = settings.agent_assignment("video_generation")
+        self.assertEqual(assignment["mode"], "fallback")
+        self.assertEqual(assignment["executor"], "claude_code_cli")
+        self.assertEqual(assignment["allowed_agents"], ["claude_code_cli", "codex_cli"])
+        self.assertEqual(assignment["fallback_agents"], ["codex_cli"])
+        self.assertEqual(assignment["reviewer"], "codex_cli")
 
 
 if __name__ == "__main__":

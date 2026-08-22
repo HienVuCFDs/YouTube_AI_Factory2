@@ -600,3 +600,55 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScenePromptTimingTests(unittest.TestCase):
+    """Queueing must not wait on the orchestrator, and must be callable off."""
+
+    def _project_with_timeline(self, directory: str):
+        return SceneGenerationDatabaseTests._project_with_timeline(self, directory)
+
+    def test_batch_queues_raw_prompts_without_calling_the_orchestrator(self):
+        """A batch writes rows only — the prompt is written when a job runs.
+
+        Crafting inline held the HTTP request for 11-30s per scene, so a
+        30-scene batch never returned and could not be called off once the
+        client gave up.
+        """
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            payload = main_module.BatchSceneGenerationRequest(
+                providers=["flow_image"], confirmed=True
+            )
+            crafted = []
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda *a, **k: crafted.append(a)
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(crafted, [], "batch phai khong goi AI soan prompt")
+            self.assertEqual(result["queued_count"], 1)
+            job = result["jobs"][0]
+            self.assertFalse(job["prompt_written"])
+            self.assertEqual(job["prompt"], segment["visual_prompt"])
+
+    def test_cancel_pending_clears_the_queue_in_one_call(self):
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, _ = self._project_with_timeline(directory)
+            payload = main_module.BatchSceneGenerationRequest(
+                providers=["flow_image"], confirmed=True
+            )
+            with patch.object(main_module, "database", database):
+                main_module.queue_scene_generation_batch(project["id"], payload)
+                outcome = main_module.cancel_pending_scene_jobs(project["id"])
+
+            self.assertEqual(outcome["cancelled_count"], 1)
+            remaining = [
+                job for job in database.list_scene_generation_jobs(project["id"], limit=50)
+                if job["status"] in {"queued", "waiting"}
+            ]
+            self.assertEqual(remaining, [])

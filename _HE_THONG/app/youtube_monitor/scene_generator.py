@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
+import os
 import random
 import time
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 from . import settings
 from .database import Database
+from .gif_generator import materialize_gif_asset
+from .gflow_bridge import GFlowCliError, create_gflow_project, generate_gflow_video
 from .project_layout import ensure_project_layout
 
 
@@ -116,6 +120,7 @@ def generate_runway_scene(
         task: dict[str, Any] = {}
         while time.monotonic() < deadline:
             time.sleep(poll_interval_seconds + random.uniform(0, 0.4))
+            database.touch_scene_generation_job(int(job["id"]), "provider_poll")
             task_response = client.get(
                 f"https://api.dev.runwayml.com/v1/tasks/{task_id}", headers=headers
             )
@@ -302,6 +307,7 @@ def generate_gemini_veo_scene(database: Database, job: dict[str, Any], artifact_
         operation: dict[str, Any] = {}
         while time.monotonic() < deadline:
             time.sleep(poll_interval_seconds + random.uniform(0, 0.4))
+            database.touch_scene_generation_job(int(job["id"]), "provider_poll")
             status = client.get(f"{base_url}/{operation_name}", headers=headers)
             if status.status_code >= 400:
                 raise SceneGenerationError(f"Khong doc duoc trang thai Veo: {_error_detail(status)}")
@@ -330,6 +336,45 @@ def generate_gemini_veo_scene(database: Database, job: dict[str, Any], artifact_
     return str(output_path)
 
 
+def generate_gflow_cli_scene(database: Database, job: dict[str, Any], artifact_root: Path) -> str:
+    """Generate one Flow/Veo clip through the user's logged-in gflow profile."""
+    project = database.get_production_project(int(job["project_id"]))
+    if not project:
+        raise GFlowCliError("Không tìm thấy production project", kind="input")
+    profile = str(settings.gflow_config().get("profile") or "default")
+    gflow_project_id = str(project.get("gflow_project_id") or "").strip()
+    if not gflow_project_id or str(project.get("gflow_profile") or "") != profile:
+        gflow_project_id = create_gflow_project(
+            f"YTAF {int(project['id'])} - {project.get('title') or project.get('source_title') or 'Video'}",
+            heartbeat=lambda: database.touch_scene_generation_job(int(job["id"]), "gflow_project_create"),
+        )
+        database.update_production_project_gflow(int(project["id"]), gflow_project_id, profile)
+    reference_path: Path | None = None
+    reference_asset_id = job.get("reference_asset_id")
+    if reference_asset_id:
+        asset = database.get_project_asset(int(reference_asset_id))
+        if not asset:
+            raise GFlowCliError("Không tìm thấy ảnh nguồn trong project", kind="input")
+        reference_path = Path(str(asset.get("file_path") or ""))
+        mime_type = str(asset.get("mime_type") or mimetypes.guess_type(reference_path.name)[0] or "")
+        if not reference_path.is_file():
+            raise GFlowCliError("Ảnh nguồn không còn tồn tại trên máy", kind="input")
+        if not mime_type.startswith("image/"):
+            raise GFlowCliError("gflow I2V chỉ nhận ảnh làm khung hình đầu", kind="input")
+    output_dir = ensure_project_layout(artifact_root, job["project_id"])["assets"] / "generated_scenes"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / (
+        f"gflow-segment-{int(job['timeline_segment_id'])}-job-{int(job['id'])}.mp4"
+    )
+    return generate_gflow_video(
+        job,
+        reference_path,
+        output_path,
+        gflow_project_id=gflow_project_id,
+        heartbeat=lambda: database.touch_scene_generation_job(int(job["id"]), "gflow_rendering"),
+    )
+
+
 class SceneGenerationWorker:
     """Persistent local worker for paid cloud scene-generation jobs."""
 
@@ -341,6 +386,24 @@ class SceneGenerationWorker:
         self._lock = Lock()
         self._paused = False
         self._thread: Thread | None = None
+        self._watchdog_thread: Thread | None = None
+        self._completion_callback: Callable[[int], None] | None = None
+        # Writing a scene's prompt takes a CLI round trip, so it happens when
+        # the job runs rather than when it is queued — otherwise queueing a
+        # batch of 30 scenes held the HTTP request for minutes and could not
+        # be called off once started. Injected from main.py, which owns the
+        # orchestrator, so this module needn't import back into it.
+        self._prompt_crafter: Callable[[dict[str, Any]], str] | None = None
+        self.stale_seconds = max(60, int(os.getenv("SCENE_JOB_STALE_SECONDS", "900")))
+        self.watchdog_interval_seconds = max(5, int(os.getenv("SCENE_WATCHDOG_INTERVAL_SECONDS", "30")))
+
+    def set_completion_callback(self, callback: Callable[[int], None] | None) -> None:
+        """Run app-level review after an internal provider creates its asset."""
+        self._completion_callback = callback
+
+    def set_prompt_crafter(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        """Let the app write a job's prompt just before the job runs."""
+        self._prompt_crafter = callback
 
     def start(self) -> None:
         with self._lock:
@@ -353,6 +416,12 @@ class SceneGenerationWorker:
                 self._jobs.put(job_id)
             self._thread = Thread(target=self._run, name="scene-generation-worker", daemon=True)
             self._thread.start()
+            self._watchdog_thread = Thread(
+                target=self._watchdog_loop,
+                name="scene-generation-watchdog",
+                daemon=True,
+            )
+            self._watchdog_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -360,7 +429,11 @@ class SceneGenerationWorker:
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
+        watchdog = self._watchdog_thread
+        if watchdog and watchdog.is_alive():
+            watchdog.join(timeout=5)
         self._thread = None
+        self._watchdog_thread = None
 
     def enqueue(self, job_id: int) -> None:
         self._jobs.put(job_id)
@@ -386,13 +459,21 @@ class SceneGenerationWorker:
             **self.database.scene_generation_queue_status(),
             "paused": paused,
             "worker_running": bool(self._thread and self._thread.is_alive()),
+            "watchdog_running": bool(self._watchdog_thread and self._watchdog_thread.is_alive()),
+            "stale_seconds": self.stale_seconds,
         }
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            job_id = self._jobs.get()
+            try:
+                job_id = self._jobs.get(timeout=2.0)
+            except Empty:
+                queued = self.database.list_queued_scene_generation_job_ids(limit=1)
+                job_id = queued[0] if queued else None
             if job_id is None:
-                return
+                if self._stop.is_set():
+                    return
+                continue
             while True:
                 with self._lock:
                     paused = self._paused
@@ -402,11 +483,62 @@ class SceneGenerationWorker:
                 return
             self._process(job_id)
 
+    def _watchdog_loop(self) -> None:
+        while not self._stop.wait(self.watchdog_interval_seconds):
+            recovered = self.database.recover_stale_scene_generation_jobs(self.stale_seconds)
+            for item in recovered:
+                if item.get("requeued") and item.get("provider") not in self.database.EXTERNAL_SIDECAR_PROVIDERS:
+                    self._jobs.put(int(item["id"]))
+
+    def _register_output_asset(self, job: dict[str, Any], output_path: str) -> dict[str, Any] | None:
+        path = Path(output_path)
+        if not path.is_file():
+            return None
+        existing = self.database.find_project_asset_by_path(int(job["project_id"]), str(path))
+        if existing:
+            return existing
+        suffix = path.suffix.lower()
+        asset_type = "video" if suffix in {".mp4", ".mov", ".webm", ".mkv"} else "image"
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        return self.database.create_project_asset(
+            int(job["project_id"]),
+            asset_type,
+            path.name,
+            str(path),
+            mime_type=mimetypes.guess_type(path.name)[0] or "",
+            file_size=path.stat().st_size,
+            sha256=digest,
+        )
+
+    def _ensure_prompt_written(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Have the orchestrator write this job's prompt, if it hasn't yet.
+
+        Touches the heartbeat around the call: writing a prompt takes tens of
+        seconds, which is long enough for the watchdog to decide the job had
+        stalled and hand it to someone else.
+        """
+        if job.get("prompt_written") or self._prompt_crafter is None:
+            return job
+        job_id = int(job["id"])
+        self.database.touch_scene_generation_job(job_id, "writing_prompt")
+        try:
+            prompt = self._prompt_crafter(job)
+        except Exception:
+            # A prompt the orchestrator could not improve is still the
+            # storyboard's own description — good enough to generate from.
+            self.database.touch_scene_generation_job(job_id, "prompt_ready")
+            return job
+        if not prompt.strip():
+            return job
+        return self.database.save_scene_job_prompt(job_id, prompt) or job
+
     def _process(self, job_id: int) -> None:
         job = self.database.claim_scene_generation_job(job_id)
         if not job:
             return
         try:
+            job = self._ensure_prompt_written(job)
             provider = str(job.get("provider") or "").strip().lower()
             if provider == "runway":
                 output_path = generate_runway_scene(self.database, job, self.artifact_root)
@@ -416,8 +548,46 @@ class SceneGenerationWorker:
                 output_path = generate_gemini_image_scene(self.database, job, self.artifact_root)
             elif provider == "gemini_veo":
                 output_path = generate_gemini_veo_scene(self.database, job, self.artifact_root)
+            elif provider == "gflow_cli":
+                output_path = generate_gflow_cli_scene(self.database, job, self.artifact_root)
             else:
                 raise SceneGenerationError(f"Scene provider chua duoc ho tro: {provider}")
-            self.database.finish_scene_generation_job(job_id, "completed", output_path=output_path)
+            asset = self._register_output_asset(job, output_path)
+            if asset and str(job.get("job_kind") or "") == "gif":
+                asset = materialize_gif_asset(
+                    self.database,
+                    job,
+                    asset,
+                    ffmpeg_binary=settings.FFMPEG_BINARY,
+                )
+                output_path = str(asset["file_path"])
+            self.database.finish_scene_generation_job(
+                job_id,
+                "completed",
+                output_path=output_path,
+                output_asset_id=int(asset["id"]) if asset else None,
+                release_dependents=self._completion_callback is None,
+            )
+            if self._completion_callback is not None:
+                try:
+                    self._completion_callback(job_id)
+                except Exception:
+                    # Review is a quality gate, not a reason to strand the
+                    # downstream I2V dependency forever.
+                    self.database.release_scene_generation_dependents(job_id)
+            for queued_id in self.database.list_queued_scene_generation_job_ids(limit=20):
+                self._jobs.put(queued_id)
         except Exception as exc:
-            self.database.finish_scene_generation_job(job_id, "error", error=str(exc))
+            message = str(exc)
+            normalized = message.lower()
+            failure_kind = (
+                exc.kind if isinstance(exc, GFlowCliError) else
+                "quota" if any(key in normalized for key in ("quota", "credit", "tín dụng", "resource_exhausted")) else
+                "provider"
+            )
+            self.database.finish_scene_generation_job(
+                job_id,
+                "error",
+                error=message,
+                failure_kind=failure_kind,
+            )
