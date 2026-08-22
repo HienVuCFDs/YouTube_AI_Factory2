@@ -30,7 +30,7 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
-from .gif_generator import GifGenerationError, materialize_gif_asset
+from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
 from .gflow_bridge import gflow_cli_status
 from .llm_analyzer import LlmAnalysisError, resolve_analyzer
 from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_codex_json
@@ -531,7 +531,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "gflow_cli", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "gflow_cli", "gflow_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: int = Field(default=5, ge=1, le=30)
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -543,7 +543,7 @@ class CreateSceneGenerationRequest(BaseModel):
 
 SceneProvider = Literal[
     "openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image",
-    "gflow_cli", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
+    "gflow_cli", "gflow_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
 ]
 
 
@@ -2631,7 +2631,9 @@ _ORCHESTRATOR_TOOLS: dict[str, dict[str, str]] = {
             "Canh video luon duoc tao anh tinh truoc roi moi dung video tu chinh anh do."
         ),
         "args": (
-            "kind: 'image' | 'gif' | 'video'; providers (tuy chon): danh sach key provider; "
+            "kind: 'image' | 'gif' | 'video'; providers (tuy chon): danh sach key provider "
+            "('gflow_image' = Flow CLI, khong can trinh duyet, tao GIF bang chuoi khung noi tiep; "
+            "'chatgpt_web_image', 'gemini_web_image' = qua Extension); "
             "limit (tuy chon): so canh toi da"
         ),
         "cost": "image/gif: theo goi thue bao. video: TON TIN DUNG",
@@ -2737,7 +2739,7 @@ def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, A
         providers = [str(item) for item in (step.get("providers") or [])]
         if not providers:
             providers = ["gflow_cli"] if wants_video else [
-                "flow_image", "chatgpt_web_image", "gemini_web_image",
+                "gflow_image", "chatgpt_web_image", "gemini_web_image",
             ]
         # The Flow browser extension is retired; anything still naming it is
         # rewritten rather than quietly routed back through it.
@@ -2820,6 +2822,9 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         "'plan_scene_kinds' voi motion_policy='gif_only', roi 'create_scene_jobs' voi kind='gif'.\n"
         "- Nguoi dung noi dang TEST/THU: dat 'limit' nho (vi du 3).\n"
         "- Dong co video duy nhat la 'gflow_cli'; extension Flow ('flow_veo') da nghi.\n"
+        "- Tao anh/GIF: uu tien 'gflow_image' (Flow CLI, khong can trinh duyet mo san; GIF duoc ve "
+        "thanh chuoi khung noi tiep nen NOI DUNG that su chuyen dong). Them 'chatgpt_web_image' va "
+        "'gemini_web_image' de chay song song khi can nhieu canh cung luc.\n"
         "- Provider vua timeout/loi thi chon provider khac, dung lap lai provider vua hong.\n"
         "- Khong can lam gi thi tra ve 'steps' rong va giai thich trong 'understanding'.\n"
         "Viet 'reason' ngan gon bang tieng Viet."
@@ -2870,6 +2875,54 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
     }
 
 
+_CRAFT_GIF_FRAMES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "frames": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["frames"],
+}
+
+
+def _craft_gif_frame_prompts(raw_prompt: str, context: str = "", count: int = GFLOW_GIF_FRAME_COUNT) -> list[str]:
+    """Write one prompt per frame of a motion loop, as a progression.
+
+    The sheet route asks a single drawing to hold four moments at quarter
+    size, and what came back moved the wallpaper while the subject of the
+    scene sat still. Flow draws each frame full size from the one before it,
+    so the orchestrator is asked for the steps of the movement instead: what
+    has advanced by frame two, by frame three. Each step names its own change,
+    which is the part the sheet prompt could only ask for and not enforce.
+    """
+    system_prompt = (
+        f"Ban la animation director. Hay chia MOT chuyen dong ngan thanh {count} KHUNG lien tiep.\n"
+        "AI ve se ve khung 1 truoc, roi dung chinh khung do lam ANH THAM CHIEU de ve khung 2, va cu the. "
+        "Vi vay:\n"
+        f"- 'frames': dung {count} prompt tieng Anh, theo dung thu tu.\n"
+        "- Khung 1: mo ta day du canh (nhan vat, boi canh, anh sang, goc may, phong cach ve).\n"
+        "- Cac khung sau: KHONG mo ta lai toan canh. Viet dang 'same shot as the reference image, but ...' "
+        "va chi noi RO DIEU GI DA THAY DOI so voi khung truoc.\n"
+        "Dieu QUAN TRONG NHAT: thu thay doi phai la NOI DUNG CHINH cua canh — con so tang len, o duoc to "
+        "dan, tay chi dich chuyen, cot bieu do cao them — chu KHONG phai chi co hau canh nhap nhay. "
+        "Moi khung phai khac khung truoc du de nhin thay ngay.\n"
+        "Chuyen dong nen di mot chieu tu khung 1 den khung cuoi (app se phat xuoi roi nguoc de tao vong lap)."
+    )
+    user_prompt = raw_prompt
+    if context:
+        system_prompt += (
+            " Ban duoc cho biet loi thoai va cac canh lien ke — hay giu nhat quan nhan vat, trang phuc, "
+            "boi canh va phong cach ve voi chung."
+        )
+        user_prompt = f"NGU CANH:\n{context}\n\nMO TA CANH CAN VE:\n{raw_prompt}"
+    result = _call_orchestrator_json(
+        system_prompt, user_prompt, _CRAFT_GIF_FRAMES_SCHEMA, stage="image_generation"
+    )
+    frames = [str(item).strip() for item in (result.get("frames") or []) if str(item).strip()]
+    if len(frames) < 2:
+        raise LlmError("Orchestrator khong tra ve du khung hinh cho GIF")
+    return frames[:count]
+
+
 def _write_job_prompt(job: dict[str, Any]) -> str:
     """Write the prompt for a job that is about to run.
 
@@ -2895,6 +2948,15 @@ def _write_job_prompt(job: dict[str, Any]) -> str:
 
     kind = str(job.get("job_kind") or "")
     if kind == "gif":
+        # Flow redraws each frame from the previous one, so it gets the steps
+        # of the movement rather than a single sheet request. Sites reached
+        # through the browser cannot chain like that and keep the sheet.
+        if str(job.get("provider") or "") == "gflow_image":
+            try:
+                frames = _craft_gif_frame_prompts(raw_prompt, context=context)
+            except LlmError:
+                return _craft_gif_sheet_prompt(raw_prompt, context=context)
+            return json.dumps({"frames": frames}, ensure_ascii=False)
         return _craft_gif_sheet_prompt(raw_prompt, context=context)
     if kind == "video":
         return _craft_video_prompt(
@@ -2936,7 +2998,7 @@ def _require_scene_provider_config(provider: str) -> None:
         gemini_key, _, _ = settings.gemini_config()
         if not gemini_key:
             raise HTTPException(status_code=400, detail="Chưa cấu hình GEMINI_API_KEY trong Kết nối AI")
-    elif provider == "gflow_cli":
+    elif provider in {"gflow_cli", "gflow_image"}:
         gflow = gflow_cli_status()
         if not gflow.get("installed"):
             raise HTTPException(status_code=400, detail="Chưa cài gflow-cli; mở Kết nối AI để cài/kiểm tra lại")

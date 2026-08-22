@@ -282,6 +282,55 @@ def create_gflow_project(
     return project_id
 
 
+def generate_gflow_image(
+    job: dict[str, Any],
+    reference_path: Path | None,
+    output_path: Path,
+    *,
+    gflow_project_id: str = "",
+    heartbeat: Callable[[], None] | None = None,
+) -> str:
+    """Draw one still through the signed-in Flow profile instead of a browser.
+
+    Flow's Imagen still generates while its video side is out of credit, and
+    the CLI reaches it without the extension - no tab to keep open, no page
+    layout to break. With a reference image it runs ``image i2i``, which is
+    what lets a GIF's later frames inherit the earlier one instead of each
+    frame being drawn from scratch.
+    """
+    prompt = str(job.get("prompt") or "").strip()
+    if not prompt:
+        raise GFlowCliError("Prompt tạo ảnh đang trống", kind="input")
+    aspect = {
+        "1280:720": "16:9",
+        "720:1280": "9:16",
+        "1024:1024": "1:1",
+    }.get(str(job.get("ratio") or ""), "16:9")
+    args = ["image", "i2i" if reference_path is not None else "t2i", prompt]
+    if reference_path is not None:
+        if not reference_path.is_file():
+            raise GFlowCliError("Ảnh tham chiếu không còn tồn tại trên máy", kind="input")
+        args.extend(["--ref", str(reference_path)])
+    args.extend(["--aspect", aspect, "-o", str(output_path), "--json"])
+    model = str(settings.gflow_config().get("image_model") or "").strip()
+    if model:
+        args.extend(["--model", model])
+    if gflow_project_id.strip():
+        args.extend(["--project", gflow_project_id.strip()])
+    args.extend(_profile_args())
+    result = run_gflow_json(
+        args,
+        timeout_seconds=max(60, int(os.getenv("GFLOW_IMAGE_TIMEOUT_SECONDS", "600"))),
+        heartbeat=heartbeat,
+    )
+    if result.get("succeeded") is False or str(result.get("status") or "").lower() in {"failed", "error"}:
+        raise _classify_failure(1, result, "")
+    result_path = Path(str(result.get("local_path") or output_path))
+    if not result_path.is_file() or result_path.stat().st_size == 0:
+        raise GFlowCliError("Flow báo thành công nhưng không tìm thấy ảnh đã tải", kind="download", retryable=True)
+    return str(result_path)
+
+
 def generate_gflow_video(
     job: dict[str, Any],
     reference_path: Path | None,

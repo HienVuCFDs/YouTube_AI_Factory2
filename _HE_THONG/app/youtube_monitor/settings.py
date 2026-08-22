@@ -229,6 +229,7 @@ def gflow_config() -> dict[str, str]:
         "profile": integration_value("GFLOW_PROFILE", "default") or "default",
         # Empty means let gflow choose the safest/default model for the mode.
         "video_model": integration_value("GFLOW_VIDEO_MODEL"),
+        "image_model": integration_value("GFLOW_IMAGE_MODEL"),
     }
 
 

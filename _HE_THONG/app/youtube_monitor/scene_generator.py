@@ -16,8 +16,17 @@ import httpx
 
 from . import settings
 from .database import Database
-from .gif_generator import materialize_gif_asset
-from .gflow_bridge import GFlowCliError, create_gflow_project, generate_gflow_video
+from .gif_generator import (
+    GFLOW_GIF_FRAME_COUNT,
+    create_gif_from_frames,
+    materialize_gif_asset,
+)
+from .gflow_bridge import (
+    GFlowCliError,
+    create_gflow_project,
+    generate_gflow_image,
+    generate_gflow_video,
+)
 from .project_layout import ensure_project_layout
 
 
@@ -375,6 +384,95 @@ def generate_gflow_cli_scene(database: Database, job: dict[str, Any], artifact_r
     )
 
 
+def _gflow_frame_prompts(job: dict[str, Any]) -> list[str]:
+    """Read the per-frame prompts main.py wrote for a chained GIF job."""
+    raw = str(job.get("prompt") or "").strip()
+    if not raw:
+        raise GFlowCliError("Prompt tao GIF dang trong", kind="input")
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        payload = None
+    frames = payload.get("frames") if isinstance(payload, dict) else None
+    if isinstance(frames, list):
+        cleaned = [str(item).strip() for item in frames if str(item).strip()]
+        if len(cleaned) >= 2:
+            return cleaned
+    # The orchestrator was unreachable when the prompt was written, so the job
+    # carries one plain description. Rather than fail, ask for the same shot
+    # advanced a step at a time — weaker than authored steps, but still motion.
+    return [
+        raw if index == 0 else
+        f"Same shot, same characters, same style as the reference image. "
+        f"Advance the motion to stage {index + 1} of {GFLOW_GIF_FRAME_COUNT}: {raw}"
+        for index in range(GFLOW_GIF_FRAME_COUNT)
+    ]
+
+
+def generate_gflow_image_scene(database: Database, job: dict[str, Any], artifact_root: Path) -> str:
+    """Draw a scene's still — or the frames of its loop — through Flow's CLI.
+
+    Flow's image side still works while its video side is out of credit, and
+    it needs no browser tab held open. For a GIF the frames are drawn one
+    after another, each passed the previous frame as reference, which is what
+    keeps the subject of the scene moving instead of only the background.
+    """
+    project = database.get_production_project(int(job["project_id"]))
+    if not project:
+        raise GFlowCliError("Không tìm thấy production project", kind="input")
+    profile = str(settings.gflow_config().get("profile") or "default")
+    gflow_project_id = str(project.get("gflow_project_id") or "").strip()
+    if not gflow_project_id or str(project.get("gflow_profile") or "") != profile:
+        gflow_project_id = create_gflow_project(
+            f"YTAF {int(project['id'])} - {project.get('title') or project.get('source_title') or 'Video'}",
+            heartbeat=lambda: database.touch_scene_generation_job(int(job["id"]), "gflow_project_create"),
+        )
+        database.update_production_project_gflow(int(project["id"]), gflow_project_id, profile)
+    reference_path: Path | None = None
+    reference_asset_id = job.get("reference_asset_id")
+    if reference_asset_id:
+        asset = database.get_project_asset(int(reference_asset_id))
+        if asset:
+            candidate = Path(str(asset.get("file_path") or ""))
+            if candidate.is_file():
+                reference_path = candidate
+    output_dir = ensure_project_layout(artifact_root, job["project_id"])["assets"] / "generated_scenes"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"gflow-image-segment-{int(job['timeline_segment_id'])}-job-{int(job['id'])}"
+
+    def beat(stage: str) -> Callable[[], None]:
+        return lambda: database.touch_scene_generation_job(int(job["id"]), stage)
+
+    if str(job.get("job_kind") or "") != "gif":
+        return generate_gflow_image(
+            job,
+            reference_path,
+            output_dir / f"{stem}.png",
+            gflow_project_id=gflow_project_id,
+            heartbeat=beat("gflow_image"),
+        )
+    prompts = _gflow_frame_prompts(job)
+    frames: list[Path] = []
+    previous = reference_path
+    for index, frame_prompt in enumerate(prompts):
+        drawn = generate_gflow_image(
+            {**job, "prompt": frame_prompt},
+            previous,
+            output_dir / f"{stem}-frame{index + 1}.png",
+            gflow_project_id=gflow_project_id,
+            heartbeat=beat(f"gflow_gif_frame_{index + 1}"),
+        )
+        frames.append(Path(drawn))
+        previous = frames[-1]
+    return create_gif_from_frames(
+        list(frames),
+        output_dir / f"{stem}.gif",
+        duration_seconds=float(job.get("duration_seconds") or 5),
+        fps=int(job.get("visual_fps") or job.get("gif_fps") or 8),
+        ffmpeg_binary=settings.FFMPEG_BINARY,
+    )
+
+
 class SceneGenerationWorker:
     """Persistent local worker for paid cloud scene-generation jobs."""
 
@@ -550,6 +648,8 @@ class SceneGenerationWorker:
                 output_path = generate_gemini_veo_scene(self.database, job, self.artifact_root)
             elif provider == "gflow_cli":
                 output_path = generate_gflow_cli_scene(self.database, job, self.artifact_root)
+            elif provider == "gflow_image":
+                output_path = generate_gflow_image_scene(self.database, job, self.artifact_root)
             else:
                 raise SceneGenerationError(f"Scene provider chua duoc ho tro: {provider}")
             asset = self._register_output_asset(job, output_path)
