@@ -2592,6 +2592,65 @@ class OrchestrateRequest(BaseModel):
     dry_run: bool = True
 
 
+# The orchestrator's tools, as data rather than a hand-written enum.
+#
+# It used to pick from six fixed action names whose behaviour lived in an
+# if/elif chain below, so the workflow was Python's and the orchestrator only
+# decorated it. A goal nobody had anticipated — "redo the three worst-scoring
+# scenes" — had no way to be expressed at all. Tools are registered here
+# instead: adding a capability is adding an entry, and the orchestrator
+# composes its own sequence with its own arguments.
+#
+# Cost is stated plainly because it is the fact it most needs when choosing,
+# and paid quota has been spent carelessly before.
+_ORCHESTRATOR_TOOLS: dict[str, dict[str, str]] = {
+    "read_scenes": {
+        "description": (
+            "Doc chi tiet tung canh: loai hinh da lap ke hoach, da co hinh chua, ke hoach dung. "
+            "Dung khi can biet ro truoc khi quyet dinh."
+        ),
+        "args": "khong co",
+        "cost": "mien phi",
+    },
+    "plan_scene_kinds": {
+        "description": (
+            "Quyet dinh moi canh nen dung anh tinh / gif / video, kem fps va ly do. "
+            "Chay TRUOC khi tao hinh."
+        ),
+        "args": "motion_policy (tuy chon): 'balanced' | 'gif_only'",
+        "cost": "mien phi (chi goi AI dieu phoi)",
+    },
+    "plan_edit": {
+        "description": "Lap ke hoach dung phim tung canh: cat hay mo, day vao / keo lui / dung yen.",
+        "args": "khong co",
+        "cost": "mien phi (chi goi AI dieu phoi)",
+    },
+    "create_scene_jobs": {
+        "description": (
+            "Xep hang tao hinh cho cac canh CON THIEU; tra ve ngay, khong cho AI ve xong. "
+            "Canh video luon duoc tao anh tinh truoc roi moi dung video tu chinh anh do."
+        ),
+        "args": (
+            "kind: 'image' | 'gif' | 'video'; providers (tuy chon): danh sach key provider; "
+            "limit (tuy chon): so canh toi da"
+        ),
+        "cost": "image/gif: theo goi thue bao. video: TON TIN DUNG",
+    },
+    "cancel_pending_jobs": {
+        "description": "Huy moi job cua du an chua bat dau. Dung khi xep nham hoac muon dung lai.",
+        "args": "khong co",
+        "cost": "mien phi",
+    },
+    "review_scene": {
+        "description": (
+            "Cham lai mot canh da hoan thanh: AI mo file ra xem va cho diem. "
+            "Dung khi muon kiem tra lai truoc khi quyet dinh tao lai."
+        ),
+        "args": "job_id: so hieu job da hoan thanh",
+        "cost": "mien phi (chi goi AI cham)",
+    },
+}
+
 _ORCHESTRATE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -2601,39 +2660,85 @@ _ORCHESTRATE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": [
-                            "plan_visuals", "plan_edit", "generate_images",
-                            "generate_gifs", "generate_videos", "nothing",
-                        ],
-                    },
+                    # Generated from the registry above, so registering a tool
+                    # is all it takes to make it selectable.
+                    "tool": {"type": "string", "enum": sorted(_ORCHESTRATOR_TOOLS)},
+                    "kind": {"type": "string"},
+                    "motion_policy": {"type": "string"},
+                    "job_id": {"type": "integer"},
                     "limit": {"type": "integer"},
-                    "providers": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            # flow_veo is deliberately absent: the Flow browser
-                            # extension is the legacy path now that gflow_cli
-                            # drives Flow from the scene worker. Leaving it
-                            # selectable meant the orchestrator kept choosing
-                            # it, quietly routing video back through the
-                            # extension the plan had already retired.
-                            "enum": [
-                                "flow_image", "chatgpt_web_image", "gemini_web_image",
-                                "antigravity_image", "openai_image", "gemini_image",
-                                "gflow_cli", "gemini_veo", "runway",
-                            ],
-                        },
-                    },
+                    "providers": {"type": "array", "items": {"type": "string"}},
                     "reason": {"type": "string"},
                 },
-                "required": ["action", "reason"],
+                "required": ["tool", "reason"],
             },
         },
     },
     "required": ["understanding", "steps"],
 }
+
+
+def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, Any]:
+    """Carry out one tool the orchestrator asked for."""
+    tool = str(step.get("tool") or "")
+    if tool == "read_scenes":
+        script = database.get_latest_project_script(project_id)
+        timeline = database.list_project_timeline(
+            project_id, script_id=int(script["id"]) if script else None
+        )
+        return {
+            "status": "ok",
+            "scenes": [
+                {
+                    "segment_index": segment.get("segment_index"),
+                    "visual_kind": segment.get("visual_kind") or "",
+                    "has_visual": bool(str(segment.get("visual_path") or "").strip()),
+                    "edit_transition": segment.get("edit_transition") or "",
+                }
+                for segment in timeline
+            ],
+        }
+    if tool == "plan_scene_kinds":
+        policy = "gif_only" if str(step.get("motion_policy") or "") == "gif_only" else "balanced"
+        return plan_timeline_visuals(project_id, motion_policy=policy)
+    if tool == "plan_edit":
+        return plan_project_edit(project_id)
+    if tool == "cancel_pending_jobs":
+        return cancel_pending_scene_jobs(project_id)
+    if tool == "review_scene":
+        job_id = int(step.get("job_id") or 0)
+        if job_id <= 0:
+            return {"status": "error", "detail": "review_scene can 'job_id'"}
+        return review_scene_job(job_id)
+    if tool == "create_scene_jobs":
+        kind = str(step.get("kind") or "image")
+        wants_video = kind == "video"
+        providers = [str(item) for item in (step.get("providers") or [])]
+        if not providers:
+            providers = ["gflow_cli"] if wants_video else [
+                "flow_image", "chatgpt_web_image", "gemini_web_image",
+            ]
+        # The Flow browser extension is retired; anything still naming it is
+        # rewritten rather than quietly routed back through it.
+        providers = list(dict.fromkeys(
+            "gflow_cli" if provider == "flow_veo" else provider for provider in providers
+        ))
+        limit = step.get("limit")
+        return queue_scene_generation_batch(
+            project_id,
+            BatchSceneGenerationRequest(
+                providers=providers,
+                respect_plan=True,
+                motion_as_gif=kind == "gif",
+                limit=max(1, min(int(limit), 500)) if limit else None,
+                requires_reference_image=wants_video,
+                reference_image_provider="flow_image",
+                ratio="1280:720",
+                duration_seconds=5,
+                confirmed=True,
+            ),
+        )
+    return {"status": "error", "detail": f"Cong cu khong ton tai: {tool}"}
 
 
 def _project_state_summary(project_id: int) -> str:
@@ -2677,27 +2782,25 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
 
+    catalogue = "\n".join(
+        f"- {name}: {spec['description']}\n  Tham so: {spec['args']}\n  Chi phi: {spec['cost']}"
+        for name, spec in sorted(_ORCHESTRATOR_TOOLS.items())
+    )
     system_prompt = (
-        "Ban la AI dieu phoi cua mot app san xuat video YouTube. Nguoi dung noi mong muon cua ho, "
-        "ban chon cac buoc can chay theo dung thu tu, dua tren TINH TRANG THUC TE cua du an.\n"
-        "Cac cong cu co the goi:\n"
-        "- plan_visuals: quyet dinh moi canh nen dung anh tinh / gif / video (chay TRUOC khi tao)\n"
-        "- generate_images: tao anh cho cac canh con thieu, chia deu nhieu AI de chay song song\n"
-        "- generate_gifs: KHONG goi AI video va KHONG ton tin dung. AI dieu phoi tu viet yeu cau gui cho "
-        "AI web: co the xin thang mot file GIF dong, hoac xin bon khung hinh lien tiep de app ghep lai. "
-        "Dung khi nguoi dung muon GIF thay video.\n"
-        "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG). Dong co video duy nhat "
-        "hien nay la 'gflow_cli' (Google Flow/Veo chay tu worker cua app). Extension Flow ('flow_veo') da "
-        "thanh duong legacy, KHONG duoc chon. Moi canh video deu duoc tao anh tinh truoc roi moi dung "
-        "video tu chinh anh do — app tu lo viec nay.\n"
-        "- plan_edit: lap ke hoach dung phim (chuyen canh, hieu ung) cho tung canh\n"
-        "- nothing: khong can lam gi\n\n"
-        "Nguyen tac: khong tao lai thu da co. Neu chua lap ke hoach loai hinh ma nguoi dung muon tao hang loat, "
-        "hay plan_visuals truoc. Chi dung generate_videos khi that su can vi no ton tien. "
-        "Neu nguoi dung noi dang TEST/THU, dat 'limit'=3 de thu Flow + ChatGPT + Gemini ma khong xep ca project. "
-        "Neu nguoi dung yeu cau GIF thay video, bat buoc chon generate_gifs, khong chon generate_videos. "
-        "Moi buoc tao co the dat 'providers' bang key provider. Khi retry sau smoke test, doc trang thai provider: "
-        "neu mot provider vua timeout/loi thi chon provider vua thanh cong thay vi lap lai provider loi. "
+        "Ban la AI dieu phoi cua mot app san xuat video YouTube. Nguoi dung noi mong muon cua ho; "
+        "ban TU quyet dinh cac buoc va thu tu dua tren tinh trang thuc te cua du an.\n\n"
+        f"CAC CONG CU BAN CO THE GOI:\n{catalogue}\n\n"
+        "Hay tu ghep cac cong cu tren thanh chuoi buoc phu hop voi yeu cau — khong bi rang buoc vao "
+        "mot quy trinh co san. Neu can biet ro hon truoc khi quyet dinh, goi 'read_scenes' truoc.\n\n"
+        "NGUYEN TAC:\n"
+        "- Khong tao lai thu da co va dang dung duoc.\n"
+        "- Chua co ke hoach loai hinh ma nguoi dung muon tao hang loat: goi 'plan_scene_kinds' truoc.\n"
+        "- Chi tao video khi that su can vi no TON TIEN. Neu nguoi dung muon GIF thay video: "
+        "'plan_scene_kinds' voi motion_policy='gif_only', roi 'create_scene_jobs' voi kind='gif'.\n"
+        "- Nguoi dung noi dang TEST/THU: dat 'limit' nho (vi du 3).\n"
+        "- Dong co video duy nhat la 'gflow_cli'; extension Flow ('flow_veo') da nghi.\n"
+        "- Provider vua timeout/loi thi chon provider khac, dung lap lai provider vua hong.\n"
+        "- Khong can lam gi thi tra ve 'steps' rong va giai thich trong 'understanding'.\n"
         "Viet 'reason' ngan gon bang tieng Viet."
     )
     user_prompt = (
@@ -2711,12 +2814,16 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
 
     steps = [
         {
-            "action": str(step.get("action") or "nothing"),
+            "tool": str(step.get("tool") or ""),
             "reason": str(step.get("reason") or ""),
-            "limit": max(1, min(int(step.get("limit") or 0), 500)) if step.get("limit") else None,
-            "providers": list(dict.fromkeys(str(item) for item in (step.get("providers") or []))),
+            **{
+                key: step[key]
+                for key in ("kind", "motion_policy", "job_id", "limit", "providers")
+                if step.get(key) not in (None, "", [])
+            },
         }
         for step in (result.get("steps") or [])
+        if str(step.get("tool") or "") in _ORCHESTRATOR_TOOLS
     ]
     if payload.dry_run:
         return {
@@ -2728,48 +2835,9 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         }
 
     executed: list[dict[str, Any]] = []
-    gif_only = any(step["action"] == "generate_gifs" for step in steps)
     for step in steps:
-        action = step["action"]
         try:
-            if action == "plan_visuals":
-                outcome = plan_timeline_visuals(
-                    project_id,
-                    motion_policy="gif_only" if gif_only else "balanced",
-                )
-            elif action == "plan_edit":
-                outcome = plan_project_edit(project_id)
-            elif action in {"generate_images", "generate_gifs", "generate_videos"}:
-                wants_video = action == "generate_videos"
-                wants_gif = action == "generate_gifs"
-                selected_providers = step.get("providers") or (
-                    ["gflow_cli"]
-                    if wants_video
-                    else ["flow_image", "chatgpt_web_image", "gemini_web_image"]
-                )
-                # Belt and braces alongside the schema: a CLI that ignores the
-                # enum must not be able to send video back through the retired
-                # extension path.
-                selected_providers = list(dict.fromkeys(
-                    "gflow_cli" if provider == "flow_veo" else provider
-                    for provider in selected_providers
-                ))
-                outcome = queue_scene_generation_batch(
-                    project_id,
-                    BatchSceneGenerationRequest(
-                        providers=selected_providers,
-                        respect_plan=True,
-                        motion_as_gif=wants_gif,
-                        limit=step.get("limit"),
-                        requires_reference_image=wants_video,
-                        reference_image_provider="flow_image",
-                        ratio="1280:720",
-                        duration_seconds=5,
-                        confirmed=True,
-                    ),
-                )
-            else:
-                outcome = {"status": "skipped"}
+            outcome = _run_orchestrator_tool(project_id, step)
         except HTTPException as exc:
             outcome = {"status": "error", "detail": str(exc.detail)}
         executed.append({**step, "result": outcome})
