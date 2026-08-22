@@ -450,7 +450,7 @@
             </div>
           </div>
           <div id="studioVoiceSummary" class="studio-checklist"><div class="studio-check"><b>→</b><span>Chưa lưu lựa chọn giọng và phụ đề cho project.</span></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(3)">← Kịch bản</button><button id="studioSaveVoiceButton" class="btn primary">Lưu cấu hình</button><button id="studioGenerateVoiceoverButton" class="btn primary">Tạo giọng đọc cho các cảnh</button><button class="btn primary" onclick="setStudioStep(5)">Nghe trong storyboard →</button></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(3)">← Kịch bản</button><button id="studioSaveVoiceButton" class="btn primary">Lưu cấu hình</button><button id="studioGenerateVoiceoverButton" class="btn primary">Tạo giọng đọc cho các cảnh</button><button id="studioReviewVoiceButton" class="btn">AI nghe lại giọng đọc</button><button class="btn primary" onclick="setStudioStep(5)">Nghe trong storyboard →</button></div>
         </div>
         <div id="studioStep6" class="studio-step" data-studio-step="6" hidden>
           <p class="studio-step-note">Xưởng dựng nằm ngay trong luồng này: tạo timeline, kiểm tra giọng đọc rồi dựng MP4. Bạn không cần mở màn hình nào khác.</p>
@@ -1813,7 +1813,7 @@
       <div class="studio-result-columns"><div class="studio-result-card"><h3>Câu chuyện mới do AI tạo</h3><p><b>Ý tưởng:</b> ${esc(writer.new_story_concept || writer.summary || '—')}\n<b>Hướng biến tấu:</b> ${esc(writer.creative_direction || '—')}</p><div class="eyebrow" style="margin-top:10px">Tiêu đề gợi ý</div><ul class="studio-result-list">${titles}</ul></div><div class="studio-result-card"><h3>Mô tả &amp; phong cách áp dụng</h3><p>${esc(writer.new_description || '—')}</p><div class="keyword-list" style="margin-top:9px">${(writer.style_application || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || hashtags}</div></div></div>
       <div class="studio-summary-grid"><div class="studio-summary-card"><label>Kịch bản để đọc</label><strong>${productionScenes.length} cảnh · ${productionWords.toLocaleString('vi-VN')} từ</strong></div><div class="studio-summary-card"><label>Thời lượng storyboard</label><strong>${formatStudioDuration(productionSeconds || targetSeconds)}${targetSeconds ? ` / mục tiêu ${formatStudioDuration(targetSeconds)}` : ''}</strong></div></div>
       <div class="studio-checklist"><div class="studio-check"><b>✓</b><span><b>Nguồn giọng đọc:</b> lời dẫn trong từng cảnh của Storyboard — không lấy từ ô “Mô tả &amp; phong cách áp dụng”. Sau khi sửa kịch bản, hãy tạo lại Storyboard để đồng bộ lời dẫn.</span></div></div>
-      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
+      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
     $('studioChatBox').hidden = false;
     $('studioToRenderButton').disabled = false;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
@@ -2408,6 +2408,47 @@
       setMessage(`Đã lưu kịch bản v${response.script.version}.`, 'success');
       await loadProjects();
     } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function aiReviewStudioScript() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    setMessage('AI đang đọc lại kịch bản...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/script/review`, {method: 'POST'});
+      const review = result.review || {};
+      const issues = (review.issues || []).map((item) => `<li>${esc(item)}</li>`).join('');
+      const suggestions = (review.suggestions || []).map((item) => `<li>${esc(item)}</li>`).join('');
+      const target = $('studioScriptResult');
+      if (target) {
+        const card = document.createElement('div');
+        card.className = 'studio-result-card';
+        card.innerHTML = `<h3>AI duyệt kịch bản · ${esc(review.score ?? '—')}/10${review.should_rewrite ? ' · nên viết lại' : ''}</h3>
+          ${review.hook_verdict ? `<p class="hint"><b>Hook:</b> ${esc(review.hook_verdict)}</p>` : ''}
+          ${issues ? `<p class="hint"><b>Vấn đề</b></p><ul>${issues}</ul>` : ''}
+          ${suggestions ? `<p class="hint"><b>Đề xuất</b></p><ul>${suggestions}</ul>` : ''}`;
+        target.prepend(card);
+      }
+      setMessage(`AI chấm ${review.score ?? '—'}/10. Kịch bản chuyển sang chờ duyệt.`, 'success');
+      await loadProjects();
+    } catch (error) { setMessage(`Không duyệt được kịch bản: ${error.message}`, 'error'); }
+  }
+
+  async function reviewStudioVoiceover() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const button = $('studioReviewVoiceButton');
+    if (button) button.disabled = true;
+    setMessage('AI đang nghe lại từng đoạn giọng đọc và đối chiếu với lời thoại...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/voice/review`, {method: 'POST'});
+      const bad = (result.segments || []).filter((item) => item.status === 'ok' && !item.matches);
+      if (!bad.length) {
+        setMessage(`Đã nghe lại ${result.checked} đoạn, không đoạn nào đọc sai lệch ý.`, 'success');
+      } else {
+        const detail = bad.map((item) => `cảnh ${item.segment_index} (${item.score}/10)`).join(', ');
+        setMessage(`${bad.length}/${result.checked} đoạn đọc lệch so với kịch bản: ${detail}. Xem chi tiết trong storyboard.`, 'error');
+      }
+    } catch (error) { setMessage(`Không kiểm tra được giọng đọc: ${error.message}`, 'error'); }
+    finally { if (button) button.disabled = false; }
   }
 
   async function reviewStudioScript() { await saveStudioScript('review'); }
@@ -4667,6 +4708,7 @@ Chạy các bước này?`)) return;
   $('studioTargetDurationSeconds').addEventListener('input', updateStudioDurationHint);
   $('studioSaveVoiceButton').addEventListener('click', saveStudioVoiceSettings);
   $('studioGenerateVoiceoverButton').addEventListener('click', generateStudioVoiceover);
+  $('studioReviewVoiceButton')?.addEventListener('click', () => void reviewStudioVoiceover());
   $('studioGenerateTimelineButton').addEventListener('click', generateStudioTimeline);
   $('studioQueueRenderButton').addEventListener('click', queueStudioRender);
   $('studioOpenProjectButton')?.addEventListener('click', openStudioProject);
