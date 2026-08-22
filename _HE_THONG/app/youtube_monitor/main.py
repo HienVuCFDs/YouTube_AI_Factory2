@@ -1232,6 +1232,54 @@ def update_timeline_segment(
     return {"status": "saved", "segment": segment}
 
 
+class UpdateScenePlanRequest(BaseModel):
+    """A person overriding what the orchestrator decided for one scene."""
+
+    visual_kind: Literal["image", "gif", "video"] | None = None
+    visual_fps: int | None = Field(default=None, ge=0, le=24)
+    transition: Literal["cut", "fade"] | None = None
+    effect: Literal["zoom_in", "zoom_out", "static"] | None = None
+    note: str | None = Field(default=None, max_length=400)
+
+
+@app.patch("/api/timeline/{segment_id}/plan")
+def update_timeline_segment_plan(segment_id: int, payload: UpdateScenePlanRequest) -> dict[str, Any]:
+    """Change one scene's planned kind or its place in the edit.
+
+    Both plans are written by an AI reading the script, which is right more
+    often than a blanket setting but not always right. Being able to correct
+    a single scene is what makes it safe to run the planners at all — the
+    alternative was re-running the whole plan to fix one row.
+    """
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
+    if payload.visual_kind is not None:
+        fps = payload.visual_fps if payload.visual_fps is not None else int(segment.get("visual_fps") or 0)
+        segment = database.set_segment_visual_kind(
+            segment_id,
+            payload.visual_kind,
+            fps=fps if payload.visual_kind in {"gif", "video"} else 0,
+            reason="Người dùng chọn tay",
+        ) or segment
+    elif payload.visual_fps is not None:
+        segment = database.set_segment_visual_kind(
+            segment_id,
+            str(segment.get("visual_kind") or "image"),
+            fps=payload.visual_fps,
+            reason=str(segment.get("visual_kind_reason") or ""),
+        ) or segment
+    if payload.transition is not None or payload.effect is not None or payload.note is not None:
+        database.save_segment_edit(
+            segment_id,
+            payload.transition if payload.transition is not None else str(segment.get("edit_transition") or "fade"),
+            payload.effect if payload.effect is not None else str(segment.get("edit_effect") or "zoom_in"),
+            payload.note if payload.note is not None else str(segment.get("edit_note") or ""),
+        )
+        segment = database.get_project_timeline_segment(segment_id) or segment
+    return {"status": "saved", "segment": segment}
+
+
 @app.get("/api/projects/{project_id}/timeline/manifest")
 def export_project_timeline_manifest(project_id: int) -> dict[str, Any]:
     project = database.get_production_project(project_id)
@@ -2572,6 +2620,7 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         effect = str(entry.get("effect") or "zoom_in")
         database.save_segment_edit(int(segment["id"]), transition, effect, str(entry.get("note") or ""))
         planned.append({
+            "segment_id": segment["id"],
             "segment_index": segment["segment_index"],
             "transition": transition,
             "effect": effect,

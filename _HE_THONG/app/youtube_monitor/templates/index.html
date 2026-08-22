@@ -216,6 +216,12 @@
     .studio-field label { display: block; color: var(--muted); font-size: 10px; letter-spacing: .08em; margin-bottom: 6px; text-transform: uppercase; }
     .studio-field select, .studio-field input, .studio-chat textarea, .studio-script textarea, .studio-script input { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(9,11,16,.72); outline: none; font-size: 12px; }
     .studio-field select:focus, .studio-field input:focus, .studio-chat textarea:focus, .studio-script textarea:focus, .studio-script input:focus { border-color: rgba(245,158,11,.65); box-shadow: 0 0 0 2px rgba(245,158,11,.1); }
+    .plan-table-wrap { overflow-x: auto; }
+    .plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .plan-table th, .plan-table td { padding: 6px 8px; border-bottom: 1px solid #e6e6e6; text-align: left; vertical-align: top; }
+    .plan-table th { font-weight: 600; white-space: nowrap; }
+    .plan-table .plan-reason { color: #555; }
+    .plan-select { padding: 3px 6px; }
     .studio-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 13px; }
     .studio-video-preview { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; margin-top: 13px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(21,26,34,.7); }
     .studio-video-preview img { width: 112px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
@@ -422,7 +428,7 @@
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
-          <div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
+          <div class="studio-actions" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
@@ -453,7 +459,7 @@
             <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option></select></div></div>
           </div>
           <div id="studioRenderSummary" class="studio-summary-grid"><div class="studio-summary-card"><label>Timeline</label><strong>Chưa tạo</strong></div><div class="studio-summary-card"><label>Voice</label><strong>Chưa lưu</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>YouTube ngang</strong></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div>
         </div>
         <div id="studioStep7" class="studio-step" data-studio-step="7" hidden>
           <p class="studio-step-note">Video sau khi render sẽ nằm trong project. Bạn có thể xem lại, tải xuống hoặc chuyển sang lịch đăng của kênh đích.</p>
@@ -1908,6 +1914,11 @@
       }
     }
 
+    const planVisualsButton = $('studioPlanVisualsButton');
+    if (planVisualsButton) planVisualsButton.disabled = !hasProject;
+    const planEditButton = $('studioPlanEditButton');
+    if (planEditButton) planEditButton.disabled = !hasProject;
+
     const videoButton = $('studioGenerateVideosButton');
     const videoHint = $('studioSceneVideoHint');
     if (videoButton) {
@@ -1925,6 +1936,112 @@
         void sidecarWarningHtml(provider).then((warning) => { if (warning) videoHint.innerHTML += warning; });
       }
     }
+  }
+
+  const VISUAL_KIND_LABELS = {image: 'Ảnh tĩnh', gif: 'Ảnh động (GIF)', video: 'Video'};
+  const TRANSITION_LABELS = {cut: 'Cắt thẳng', fade: 'Mờ dần'};
+  const EFFECT_LABELS = {zoom_in: 'Đẩy vào', zoom_out: 'Kéo lui', static: 'Đứng yên'};
+
+  function planSelect(segmentId, field, value, labels) {
+    const options = Object.entries(labels)
+      .map(([key, label]) => `<option value="${key}"${key === value ? ' selected' : ''}>${esc(label)}</option>`)
+      .join('');
+    return `<select class="plan-select" data-segment="${segmentId}" data-field="${field}">${options}</select>`;
+  }
+
+  async function saveScenePlanField(segmentId, field, value) {
+    const body = {};
+    body[field] = field === 'visual_fps' ? Number(value) : value;
+    try {
+      await api(`/api/timeline/${segmentId}/plan`, {method: 'PATCH', body: JSON.stringify(body)});
+      setMessage('Đã lưu thay đổi cho cảnh.', 'success');
+    } catch (error) { setMessage(`Không lưu được: ${error.message}`, 'error'); }
+  }
+
+  function bindPlanSelects(container) {
+    container.querySelectorAll('.plan-select').forEach((select) => {
+      select.addEventListener('change', () => void saveScenePlanField(
+        select.dataset.segment, select.dataset.field, select.value,
+      ));
+    });
+  }
+
+  async function planStudioVisuals() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const policy = $('studioMotionPolicySelect')?.value || 'balanced';
+    const button = $('studioPlanVisualsButton');
+    const target = $('studioVisualPlan');
+    if (button) button.disabled = true;
+    if (target) target.innerHTML = '<div class="studio-empty">AI đang đọc kịch bản để quyết định từng cảnh...</div>';
+    setMessage('Đang phân tích loại hình cho từng cảnh...');
+    try {
+      const result = await api(
+        `/api/projects/${state.studioProjectId}/timeline/plan-visuals?motion_policy=${policy}`,
+        {method: 'POST'},
+      );
+      renderStudioVisualPlan(result);
+      const summary = Object.entries(result.by_kind || {})
+        .map(([kind, count]) => `${count} ${VISUAL_KIND_LABELS[kind] || kind}`).join(' · ');
+      setMessage(`Đã lên kế hoạch ${result.scenes?.length || 0} cảnh: ${summary}`, 'success');
+    } catch (error) {
+      if (target) target.innerHTML = '';
+      setMessage(`Không phân tích được: ${error.message}`, 'error');
+    } finally { if (button) button.disabled = false; }
+  }
+
+  function renderStudioVisualPlan(result) {
+    const target = $('studioVisualPlan');
+    if (!target) return;
+    const scenes = result.scenes || [];
+    if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa có cảnh nào được lên kế hoạch.</div>');
+    const rows = scenes.map((scene) => `<tr>
+      <td>${esc(scene.segment_index)}</td>
+      <td>${planSelect(scene.segment_id, 'visual_kind', scene.kind, VISUAL_KIND_LABELS)}</td>
+      <td>${scene.fps ? `${esc(scene.fps)} fps` : '—'}</td>
+      <td class="plan-reason">${esc(scene.reason || '')}</td>
+    </tr>`).join('');
+    target.innerHTML = `<div class="studio-result-card"><h3>Loại hình từng cảnh</h3>
+      <p class="hint">AI quyết định dựa trên kịch bản; đổi ở đây nếu bạn thấy chưa đúng, thay đổi được lưu ngay.</p>
+      <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
+      <th>Cảnh</th><th>Loại hình</th><th>FPS</th><th>Lý do</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    bindPlanSelects(target);
+  }
+
+  async function planStudioEdit() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const button = $('studioPlanEditButton');
+    const target = $('studioEditPlan');
+    if (button) button.disabled = true;
+    if (target) target.innerHTML = '<div class="studio-empty">AI đang lên kế hoạch dựng...</div>';
+    setMessage('Đang lập kế hoạch dựng...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/edit-plan`, {method: 'POST'});
+      renderStudioEditPlan(result);
+      setMessage(`Đã lên kế hoạch dựng cho ${result.scenes?.length || 0} cảnh.`, 'success');
+    } catch (error) {
+      if (target) target.innerHTML = '';
+      setMessage(`Không lập được kế hoạch dựng: ${error.message}`, 'error');
+    } finally { if (button) button.disabled = false; }
+  }
+
+  function renderStudioEditPlan(result) {
+    const target = $('studioEditPlan');
+    if (!target) return;
+    const scenes = result.scenes || [];
+    if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa có cảnh nào trong kế hoạch dựng.</div>');
+    const rows = scenes.map((scene) => `<tr>
+      <td>${esc(scene.segment_index)}</td>
+      <td>${planSelect(scene.segment_id, 'transition', scene.transition, TRANSITION_LABELS)}</td>
+      <td>${planSelect(scene.segment_id, 'effect', scene.effect, EFFECT_LABELS)}</td>
+      <td class="plan-reason">${esc(scene.note || '')}</td>
+    </tr>`).join('');
+    const header = [result.pacing, result.music_mood].filter(Boolean).map(esc).join(' · ');
+    target.innerHTML = `<div class="studio-result-card"><h3>Kế hoạch dựng</h3>
+      ${header ? `<p class="hint">${header}</p>` : ''}
+      <p class="hint">Chuyển cảnh và hiệu ứng được áp dụng khi render; sửa ở đây trước khi dựng.</p>
+      <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
+      <th>Cảnh</th><th>Chuyển cảnh</th><th>Hiệu ứng</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    bindPlanSelects(target);
   }
 
   async function editStudioScene(shotId, segmentId) {
@@ -4542,6 +4659,8 @@ Chạy các bước này?`)) return;
   $('studioGenerateStoryboardButton').addEventListener('click', generateStudioStoryboard);
   $('studioGenerateImagesButton').addEventListener('click', generateStudioSceneImagesBatch);
   $('studioGenerateVideosButton').addEventListener('click', generateStudioSceneVideosBatch);
+  $('studioPlanVisualsButton')?.addEventListener('click', () => void planStudioVisuals());
+  $('studioPlanEditButton')?.addEventListener('click', () => void planStudioEdit());
   $('studioSceneImageProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioSceneVideoProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioScriptInstructionInput').addEventListener('input', inferStudioDurationFromPrompt);
