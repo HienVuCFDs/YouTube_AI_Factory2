@@ -343,6 +343,39 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
                 if job["job_kind"] == "video":
                     self.assertTrue(job["requires_reference_image"])
 
+    def test_gif_batch_leaves_scenes_the_plan_marked_as_video_alone(self):
+        """Asking for GIFs must not rewrite the plan.
+
+        A GIF batch used to convert every moving scene, video included, and
+        overwrite its recorded visual_kind — so a request for the two planned
+        loops silently took over seven scenes the user had planned as video.
+        Turning video scenes into loops is a planning decision
+        (motion_policy="gif_only"), where it is recorded with a reason.
+        """
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(
+                segment["id"], "video", reason="The movement is the point"
+            )
+            payload = main_module.BatchSceneGenerationRequest(
+                providers=["flow_image"],
+                respect_plan=True,
+                motion_as_gif=True,
+                confirmed=True,
+            )
+            with patch.object(main_module, "database", database), patch.object(
+                main_module, "_craft_image_prompt", side_effect=lambda prompt, context="": prompt
+            ), patch.object(
+                main_module, "_craft_gif_sheet_prompt", side_effect=lambda prompt, context="": prompt
+            ):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(result["queued_count"], 0)
+            after = database.get_project_timeline_segment(segment["id"])
+            self.assertEqual(after["visual_kind"], "video")
+
     def test_scene_prompt_context_carries_narration_and_neighbours(self):
         """Prompts are written knowing the shots either side of them.
 
@@ -366,6 +399,12 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
         self.assertNotIn("LIEN SAU", main_module._scene_prompt_context(timeline, 2))
 
     def test_batch_gif_routes_planned_video_to_image_provider_and_caps_smoke_test(self):
+        """Opting out of the plan converts a video scene into a loop.
+
+        respect_plan is off here, which is the caller explicitly saying "this
+        project makes no video at all". With respect_plan on, the same request
+        must leave a video scene alone — see the test above.
+        """
         from youtube_monitor import main as main_module
 
         with tempfile.TemporaryDirectory() as directory:
@@ -375,7 +414,7 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             )
             payload = main_module.BatchSceneGenerationRequest(
                 providers=["flow_image", "chatgpt_web_image", "gemini_web_image"],
-                respect_plan=True,
+                respect_plan=False,
                 motion_as_gif=True,
                 limit=1,
                 confirmed=True,

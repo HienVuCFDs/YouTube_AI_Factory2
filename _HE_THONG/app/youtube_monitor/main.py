@@ -3051,8 +3051,21 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         # image-first pipeline, so this branch never picks a video tool: doing
         # so would be a text-to-video clip, which cannot match the storyboard
         # image the rest of the video is built around.
-        wants_motion = payload.respect_plan and planned_kind in {"gif", "video"}
-        wants_gif = payload.motion_as_gif and (wants_motion or not payload.respect_plan)
+        # Asking for GIFs means "make the scenes planned as loops", not "turn
+        # every moving scene into a loop". Treating them the same silently
+        # rewrote seven scenes the plan had marked as video — twice — and the
+        # plan is the user's decision to change, not a side effect of a
+        # generate call. Converting video scenes to loops is what
+        # plan_visuals(motion_policy="gif_only") is for: it records the change
+        # and its reason where it can be seen.
+        wants_gif = payload.motion_as_gif and (
+            planned_kind == "gif" if payload.respect_plan else True
+        )
+        # A GIF batch is about the loops only. A scene planned as video
+        # belongs to the video pipeline, so leave it for that call rather than
+        # quietly producing a still for it here.
+        if payload.motion_as_gif and payload.respect_plan and planned_kind == "video":
+            continue
         # "Has a visual" is not the same as "matches the plan". A scene
         # planned as a loop but still holding the earlier still was treated as
         # finished and silently skipped, so a GIF batch over a fully
@@ -3065,7 +3078,10 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             pool = [fallback if fallback in _IMAGE_CAPABLE_PROVIDERS else "flow_image"]
         provider = pool[counters["image"] % len(pool)]
         counters["image"] += 1
-        if wants_gif and planned_kind != "gif":
+        if wants_gif and not payload.respect_plan and planned_kind != "gif":
+            # Only when the caller deliberately opted out of the plan. While
+            # this also ran under respect_plan it quietly rewrote the recorded
+            # decision for scenes the user had planned as video.
             database.set_segment_visual_kind(
                 int(segment["id"]),
                 "gif",
