@@ -2649,6 +2649,22 @@ _ORCHESTRATOR_TOOLS: dict[str, dict[str, str]] = {
         "args": "job_id: so hieu job da hoan thanh",
         "cost": "mien phi (chi goi AI cham)",
     },
+    "review_script": {
+        "description": (
+            "Cho MOT AI KHAC doc soat kich ban: mach logic, suc giu chan cua hook, so lieu dang ngo, "
+            "doan thua. Nen chay TRUOC khi dung storyboard vi loi o day lan sang moi canh."
+        ),
+        "args": "khong co",
+        "cost": "mien phi (chi goi AI soat)",
+    },
+    "review_voice": {
+        "description": (
+            "Nghe lai giong doc va doi chieu voi loi thoai: cau bi bo, tu doc sai, so lieu doc lech. "
+            "May nghe lai chay cuc bo tren PC."
+        ),
+        "args": "limit (tuy chon): so canh toi da can kiem tra",
+        "cost": "mien phi, nhung cham vi phai nghe lai tung file",
+    },
 }
 
 _ORCHESTRATE_SCHEMA = {
@@ -2710,6 +2726,11 @@ def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, A
         if job_id <= 0:
             return {"status": "error", "detail": "review_scene can 'job_id'"}
         return review_scene_job(job_id)
+    if tool == "review_script":
+        return review_project_script(project_id)
+    if tool == "review_voice":
+        limit = step.get("limit")
+        return review_project_voice(project_id, limit=max(0, min(int(limit), 200)) if limit else 0)
     if tool == "create_scene_jobs":
         kind = str(step.get("kind") or "image")
         wants_video = kind == "video"
@@ -3372,6 +3393,166 @@ def cancel_pending_scene_jobs(project_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Khong tim thay du an")
     cancelled = database.cancel_pending_scene_generation_jobs(project_id)
     return {"status": "cancelled", "cancelled_count": cancelled}
+
+
+_SCRIPT_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "hook_verdict": {"type": "string"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+        "suggestions": {"type": "array", "items": {"type": "string"}},
+        "should_rewrite": {"type": "boolean"},
+    },
+    "required": ["score", "issues", "should_rewrite"],
+}
+
+
+@app.post("/api/projects/{project_id}/script/review")
+def review_project_script(project_id: int) -> dict[str, Any]:
+    """Have a second AI read the script before anything is built from it.
+
+    The `script` stage has been selectable in the agent settings all along and
+    nothing ever called it, so a script went from written to storyboarded
+    without another pair of eyes — while a generated image, far cheaper to
+    redo, was reviewed. Errors here propagate into every scene, the narration
+    and the render.
+    """
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+
+    body = "\n\n".join(
+        part for part in (
+            f"TIEU DE: {script.get('script_title') or ''}",
+            f"HOOK:\n{script.get('hook') or ''}",
+            f"MO DAU:\n{script.get('intro') or ''}",
+            f"NOI DUNG:\n{script.get('main_content') or ''}",
+            f"KEU GOI CUOI:\n{script.get('cta') or ''}",
+        ) if part.strip()
+    )
+    system_prompt = (
+        "Ban la bien tap vien soat kich ban video YouTube do MOT AI KHAC viet. Hay doc ky va cham that, "
+        "khong khen xa giao.\n"
+        "- 'score': 1-10 cho tong the (mach logic, suc giu chan nguoi xem, do chinh xac).\n"
+        "- 'hook_verdict': 15 giay dau co du suc giu nguoi xem khong, vi sao.\n"
+        "- 'issues': liet ke loi CU THE — so lieu dang ngo hoac mau thuan, doan lap y, doan thua co the cat, "
+        "cho chuyen y bi hut, tuyen bo qua manh ma khong co can cu.\n"
+        "- 'suggestions': cach sua ngan gon cho tung loi quan trong.\n"
+        "- 'should_rewrite': true chi khi kich ban co loi du nang de khong nen dung.\n"
+        "Viet bang tieng Viet."
+    )
+    try:
+        verdict = _call_orchestrator_json(system_prompt, body, _SCRIPT_REVIEW_SCHEMA, stage="script")
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    issues = [str(item) for item in (verdict.get("issues") or [])]
+    suggestions = [str(item) for item in (verdict.get("suggestions") or [])]
+    note_parts = [str(verdict.get("hook_verdict") or "").strip()]
+    if issues:
+        note_parts.append("Vấn đề: " + " | ".join(issues))
+    if suggestions:
+        note_parts.append("Đề xuất: " + " | ".join(suggestions))
+    updated = database.save_script_review(
+        int(script["id"]),
+        int(verdict.get("score") or 0),
+        " || ".join(part for part in note_parts if part),
+        settings.agent_assignment("script").get("executor") or "",
+    )
+    return {"status": "reviewed", "review": verdict, "script": updated}
+
+
+_VOICE_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "matches": {"type": "boolean"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["score", "matches"],
+}
+
+
+@app.post("/api/projects/{project_id}/voice/review")
+def review_project_voice(project_id: int, limit: int = Query(default=0, ge=0, le=200)) -> dict[str, Any]:
+    """Check that each scene's narration actually says what the script asked.
+
+    Nothing listened back before: the app could tell you a scene had audio and
+    how loud it was, but not whether a sentence had been dropped or a number
+    misread. Faster-Whisper is already used for source transcripts, so the
+    audio is transcribed locally and an AI compares it against voice_text —
+    a mismatch here would otherwise only surface once the video is rendered.
+    """
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    pending = [
+        segment for segment in timeline
+        if str(segment.get("audio_path") or "").strip()
+        and Path(str(segment["audio_path"])).is_file()
+        and str(segment.get("voice_text") or "").strip()
+    ]
+    if not pending:
+        raise HTTPException(status_code=400, detail="Chưa có cảnh nào có sẵn file giọng đọc để kiểm tra")
+    if limit:
+        pending = pending[:limit]
+
+    reviewed: list[dict[str, Any]] = []
+    for segment in pending:
+        expected = str(segment["voice_text"]).strip()
+        try:
+            heard = str(
+                transcribe_local_file(
+                    str(segment["audio_path"]), f"segment-{segment['id']}", language="vi"
+                ).get("text") or ""
+            ).strip()
+        except Exception as exc:  # noqa: BLE001 - one bad clip must not end the run
+            reviewed.append({
+                "segment_index": segment.get("segment_index"),
+                "status": "skipped",
+                "detail": str(exc)[:200],
+            })
+            continue
+        system_prompt = (
+            "Ban doi chieu LOI DOC THUC TE (do may nghe lai tu file am thanh) voi LOI THOAI MONG MUON.\n"
+            "- 'score': 1-10 theo do khop.\n"
+            "- 'matches': co doc dung va du y khong.\n"
+            "- 'issues': liet ke cu the — cau bi bo, tu doc sai, so lieu doc lech, thu tu dao.\n"
+            "Luu y: may nghe lai co the sai chinh ta hoac dau cau; chi bao loi khi Y NGHIA khac nhau, "
+            "khong bat be tung dau phay. Viet bang tieng Viet."
+        )
+        user_prompt = f"LOI THOAI MONG MUON:\n{expected}\n\nLOI DOC THUC TE:\n{heard}"
+        try:
+            verdict = _call_orchestrator_json(
+                system_prompt, user_prompt, _VOICE_REVIEW_SCHEMA, stage="quality_review"
+            )
+        except LlmError as exc:
+            reviewed.append({
+                "segment_index": segment.get("segment_index"),
+                "status": "skipped",
+                "detail": str(exc)[:200],
+            })
+            continue
+        issues = [str(item) for item in (verdict.get("issues") or [])]
+        database.save_segment_voice_review(
+            int(segment["id"]), int(verdict.get("score") or 0), " | ".join(issues)
+        )
+        reviewed.append({
+            "segment_index": segment.get("segment_index"),
+            "status": "ok",
+            "score": int(verdict.get("score") or 0),
+            "matches": bool(verdict.get("matches")),
+            "issues": issues,
+        })
+    failed = [item for item in reviewed if item.get("status") == "ok" and not item.get("matches")]
+    return {
+        "status": "reviewed",
+        "checked": len(reviewed),
+        "mismatched": len(failed),
+        "segments": reviewed,
+    }
 
 
 @app.post("/api/scene-jobs/{job_id}/review")

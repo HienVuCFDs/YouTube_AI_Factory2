@@ -535,6 +535,17 @@ class Database:
             self._ensure_column(connection, "project_timeline_segments", "edit_transition", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_effect", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_note", "TEXT NOT NULL DEFAULT ''")
+            # A second AI's verdict on the script, so the stage that was
+            # declared in the agent settings but never called has somewhere to
+            # record its findings. status already had draft/review/approved;
+            # nothing ever moved a script into review.
+            self._ensure_column(connection, "project_scripts", "review_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_scripts", "review_note", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_scripts", "review_agent", "TEXT NOT NULL DEFAULT ''")
+            # Same for the narration of a scene: whether it actually says what
+            # the script asked it to say.
+            self._ensure_column(connection, "project_timeline_segments", "voice_review_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_timeline_segments", "voice_review_note", "TEXT NOT NULL DEFAULT ''")
             # Whether the orchestrator has written this job's prompt yet.
             # Cannot be inferred from pipeline_stage: claiming a job
             # overwrites that with 'running', erasing the marker.
@@ -3579,6 +3590,46 @@ class Database:
                 "SELECT * FROM project_timeline_segments WHERE id = ?", (segment_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def save_script_review(
+        self,
+        script_id: int,
+        score: int,
+        note: str,
+        agent: str,
+        status: str = "review",
+    ) -> dict[str, Any] | None:
+        """Record a second AI's verdict on a script and move it into review."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_scripts
+                SET review_score = ?, review_note = ?, review_agent = ?,
+                    status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    max(0, min(int(score), 10)),
+                    note.strip()[:4000],
+                    agent.strip()[:40],
+                    status.strip() or "review",
+                    utc_now(),
+                    script_id,
+                ),
+            )
+        return self.get_project_script(script_id)
+
+    def save_segment_voice_review(self, segment_id: int, score: int, note: str) -> None:
+        """Record whether a scene's narration says what the script asked."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_timeline_segments
+                SET voice_review_score = ?, voice_review_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (max(0, min(int(score), 10)), note.strip()[:2000], utc_now(), segment_id),
+            )
 
     def save_scene_job_prompt(self, job_id: int, prompt: str) -> dict[str, Any] | None:
         """Store the prompt written for a job once it is about to run.
