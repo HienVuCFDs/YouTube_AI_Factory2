@@ -1921,19 +1921,28 @@ def _craft_image_prompt(raw_prompt: str, context: str = "") -> str:
 
 
 def _craft_gif_sheet_prompt(raw_prompt: str, context: str = "") -> str:
-    """Ask the orchestrator to turn a scene into four successive poses.
+    """Ask the orchestrator to write the request for an animated scene.
 
-    Image websites cannot return an animated GIF directly. They can reliably
-    create one 2x2 sheet, however, so the app asks for four real animation
-    frames and later crops them into a loop. The fixed wrapper is retained
-    even if the CLI rewrite fails, ensuring a GIF job can never silently fall
-    back to the old single-still prompt.
+    This used to wrap everything in a fixed "2x2 sprite sheet" instruction,
+    on the premise that image sites cannot return an animated GIF. That
+    premise is wrong — asked directly, ChatGPT and Gemini do produce one —
+    and the workaround produced poor results: the four panels came back
+    nearly identical, so the assembled loop barely moved and reviews scored
+    it 4-5/10. The orchestrator now writes the actual request, and may ask
+    for a real GIF or for successive frames, whichever suits the scene.
     """
     system_prompt = (
-        "Ban la animation director. Hay viet lai mo ta canh thanh MOT mo ta chuyen dong vong lap ngan gom "
-        "bon khoanh khac lien tiep. Chi mot hanh dong chinh thay doi qua bon frame; nhan vat, khuon mat, "
-        "trang phuc, boi canh va camera phai giu nhat quan. Frame 4 phai co the quay nguoc ve frame 1 theo "
-        "vong ping-pong. Tra ve prompt tieng Anh ngan gon; khong giai thich, khong danh so frame."
+        "Ban la animation director, dang viet YEU CAU gui cho mot AI web (ChatGPT/Gemini) de co mot canh "
+        "CO CHUYEN DONG cho video.\n"
+        "Muc tieu: mot vong lap ngan, muot, lap lai duoc (khoang 3-6 giay).\n"
+        "Ban duoc TU CHON cach dat van de, vi du:\n"
+        "- Yeu cau thang mot file GIF dong (cac trang nay lam duoc, hay noi ro muon file .gif tai ve duoc)\n"
+        "- Hoac yeu cau mot bang 2x2 gom bon khung hinh lien tiep de app tu ghep thanh GIF\n"
+        "Dieu QUAN TRONG NHAT: chuyen dong phai THAY DOI RO RET giua cac khoanh khac. Loi thuong gap la "
+        "bon khung gan nhu giong het nhau khien vong lap nhu dung yen — hay mo ta cu the vat the nao di "
+        "chuyen tu dau den dau, thay doi bao nhieu, de khac biet nhin thay duoc ngay.\n"
+        "Giu nhat quan nhan vat, trang phuc, boi canh, phong cach ve va goc camera. "
+        "Tra ve prompt tieng Anh, ro rang, khong giai thich them."
     )
     user_prompt = raw_prompt
     if context:
@@ -1948,17 +1957,19 @@ def _craft_gif_sheet_prompt(raw_prompt: str, context: str = "") -> str:
         result = _call_orchestrator_json(system_prompt, user_prompt, _CRAFT_IMAGE_PROMPT_SCHEMA, stage="image_generation")
         motion_prompt = str(result.get("prompt") or "").strip() or raw_prompt
     except LlmError:
-        motion_prompt = raw_prompt
-    return (
-        "Create ONE 16:9 image as a clean 2x2 animation sprite sheet with FOUR equal 16:9 frames. "
-        "Reading order is top-left, top-right, bottom-left, bottom-right. The four panels must show "
-        "successive phases of a seamless short animation, not four unrelated illustrations. Keep the "
-        "same character design, facial features, clothing, background, lighting, camera angle and framing "
-        "in every panel; only the intended action may change. Each quadrant must be a complete edge-to-edge "
-        "frame. No title, captions, panel numbers, borders, gutters, contact-sheet margins or watermark. "
-        "Do not return a standalone single scene.\n\nAnimation to depict:\n"
-        f"{motion_prompt}"
-    )
+        # Only when the orchestrator itself failed: fall back to the fixed
+        # sheet request rather than sending a plain still-image prompt to a
+        # job that must come back with motion.
+        return (
+            "Create ONE 16:9 image as a clean 2x2 animation sprite sheet with FOUR equal 16:9 frames "
+            "showing successive phases of a seamless short animation, reading top-left, top-right, "
+            "bottom-left, bottom-right. Keep the same character design, clothing, background, lighting "
+            "and camera in every panel; only the action changes, and it must change VISIBLY between "
+            "panels. Each quadrant is a complete edge-to-edge frame. No captions, panel numbers, "
+            "borders or watermark.\n\nAnimation to depict:\n"
+            f"{raw_prompt}"
+        )
+    return motion_prompt
 
 
 def _craft_video_prompt(raw_prompt: str, has_reference_image: bool) -> str:
@@ -2438,8 +2449,8 @@ def plan_timeline_visuals(
         )
     gif_policy = (
         "\nCHINH SACH BAT BUOC CUA PROJECT NAY: KHONG dung video. Moi canh can chuyen dong, ke ca canh "
-        "co nhieu buoc, phai chon 'gif'. AI anh se tao mot animation sheet 2x2 gom bon frame lien tiep; "
-        "App cat bon frame do va ghep thanh GIF cuc bo. "
+        "co nhieu buoc, phai chon 'gif'. AI tao anh se lo phan chuyen dong (co the tra thang mot file GIF "
+        "dong, hoac bon khung hinh lien tiep de App ghep lai). "
         "Tuyet doi khong tra ve kind='video'.\n"
         if motion_policy == "gif_only"
         else ""
@@ -2672,8 +2683,9 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         "Cac cong cu co the goi:\n"
         "- plan_visuals: quyet dinh moi canh nen dung anh tinh / gif / video (chay TRUOC khi tao)\n"
         "- generate_images: tao anh cho cac canh con thieu, chia deu nhieu AI de chay song song\n"
-        "- generate_gifs: KHONG goi AI video; Codex viet prompt animation sheet 2x2, cac AI anh tao bon "
-        "frame lien tiep, sau do app cat frame va ghep GIF. Dung khi nguoi dung muon GIF thay video.\n"
+        "- generate_gifs: KHONG goi AI video va KHONG ton tin dung. AI dieu phoi tu viet yeu cau gui cho "
+        "AI web: co the xin thang mot file GIF dong, hoac xin bon khung hinh lien tiep de app ghep lai. "
+        "Dung khi nguoi dung muon GIF thay video.\n"
         "- generate_videos: tao video cho cac canh can chuyen dong (TON TIN DUNG). Dong co video duy nhat "
         "hien nay la 'gflow_cli' (Google Flow/Veo chay tu worker cua app). Extension Flow ('flow_veo') da "
         "thanh duong legacy, KHONG duoc chon. Moi canh video deu duoc tao anh tinh truoc roi moi dung "
