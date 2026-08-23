@@ -345,7 +345,7 @@
       <button class="nav-item" data-workspace-nav="source" onclick="setWorkspace('source')"><span class="nav-icon">▣</span> Video tham khảo</button>
       <button class="nav-item" data-workspace-nav="production" onclick="setWorkspace('production')"><span class="nav-icon">✎</span> Dự án</button>
       <button class="nav-item" data-workspace-nav="managed" onclick="setWorkspace('managed')"><span class="nav-icon">◎</span> Kênh xuất bản</button>
-      <button class="nav-item" data-workspace-nav="workflows" onclick="setWorkspace('workflows')"><span class="nav-icon">⁙</span> Quy trình</button>
+      <button class="nav-item" data-workspace-nav="workflows" onclick="setWorkspace('workflows')"><span class="nav-icon">⁙</span> WorkFlow</button>
       <div class="nav-label" style="margin-top:12px">Hệ thống</div>
       <button class="nav-item" data-workspace-nav="settings" onclick="setWorkspace('settings')"><span class="nav-icon">⌘</span> Công cụ & kết nối</button>
     </nav>
@@ -408,7 +408,7 @@
             <div id="studioWorkflowSummary" class="studio-managed-summary">Chọn kênh của tôi để áp dụng workflow đã gắn.</div>
           </div>
           <div class="studio-grid" style="margin-top:10px">
-            <div class="studio-model-note" data-wf="revoice" hidden style="margin-top:9px">Quy trình này <b>kể lại đúng nội dung gốc</b>: nhân vật, tên riêng, số liệu, thứ tự sự việc và cái kết đều giữ nguyên. AI chỉ đổi <b>cách dẫn chuyện</b>. Ô hướng dẫn ở trên vì vậy chỉ dùng để mô tả giọng kể, không dùng để đổi nội dung.</div><div class="studio-field" data-wf="content"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
+            <div class="studio-model-note" data-wf="reup" hidden style="margin-top:9px">WF Reup <b>kể lại đúng nội dung gốc</b>: nhân vật, tên riêng, số liệu, thứ tự sự việc và cái kết đều giữ nguyên. AI chỉ đổi <b>cách dẫn chuyện</b>. Ô hướng dẫn ở trên vì vậy chỉ dùng để mô tả giọng kể, không dùng để đổi nội dung.</div><div class="studio-field" data-wf="content"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
             <div class="studio-field"><label for="studioCreativeDirectionInput">Yêu cầu video mới</label><textarea id="studioCreativeDirectionInput" placeholder="Ví dụ: Vẫn giải thích lãi suất cho người mới; dùng tình huống vay mua điện thoại thay vì ví dụ gốc; giọng rõ ràng, thực tế, gần bằng thời lượng video mẫu."></textarea></div>
           </div>
           <div class="studio-actions"><button id="studioAnalyzeButton" class="btn primary" disabled>1. Phân tích tham chiếu</button><button class="btn ghost" onclick="setWorkspace('source')">Chọn video mẫu khác</button></div>
@@ -439,7 +439,7 @@
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
-          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="revoice" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn">1. Tải video nguồn về máy</button><button id="studioPlanSourceCuesButton" class="btn">2. Chọn đoạn hình cho từng cảnh</button><button id="studioCutSourceScenesButton" class="btn primary">3. Cắt cảnh từ video gốc</button></div><div class="studio-model-note" data-wf="revoice" style="margin-top:6px" hidden>Hình lấy từ chính video gốc, không gọi AI tạo ảnh. Mỗi cảnh được cắt đúng bằng độ dài giọng đọc thật và đã tắt tiếng gốc.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
+          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn">1. Tải video nguồn về máy</button><button id="studioPlanSourceCuesButton" class="btn">2. Chọn đoạn hình cho từng cảnh</button><button id="studioCutSourceScenesButton" class="btn primary">3. Cắt cảnh từ video gốc</button></div><div class="studio-model-note" data-wf="reup" style="margin-top:6px" hidden>Hình lấy từ chính video gốc, không gọi AI tạo ảnh. Mỗi cảnh được cắt đúng bằng độ dài giọng đọc thật và đã tắt tiếng gốc.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
@@ -470,7 +470,7 @@
             <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option></select></div></div>
           </div>
           <div id="studioRenderSummary" class="studio-summary-grid"><div class="studio-summary-card"><label>Timeline</label><strong>Chưa tạo</strong></div><div class="studio-summary-card"><label>Voice</label><strong>Chưa lưu</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>YouTube ngang</strong></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="revoice" style="margin-top:8px" hidden><button id="studioRenderRevoiceButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioRenderReupButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
         </div>
         <div id="studioStep7" class="studio-step" data-studio-step="7" hidden>
           <p class="studio-step-note">Video sau khi render sẽ nằm trong project. Bạn có thể xem lại, tải xuống hoặc chuyển sang lịch đăng của kênh đích.</p>
@@ -481,7 +481,7 @@
       </section>
 
       <section id="workflowsPanel" class="panel workspace-panel">
-        <div class="panel-head"><div><div class="panel-title"><span class="mark">⁙</span> QUY TRÌNH SẢN XUẤT</div><div class="panel-sub">Chọn một quy trình; wizard Tạo video sẽ đổi nhãn các bước và đổi hàng nút cho khớp.</div></div></div>
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">⁙</span> WORKFLOW</div><div class="panel-sub">Chọn một WF; tab Tạo video sẽ áp dụng đúng WF đó — đổi nhãn các bước và đổi hàng nút cho khớp.</div></div></div>
         <div id="workflowsList" class="studio-result"></div>
       </section>
       <section id="managedChannelsPanel" class="panel workspace-panel">
@@ -720,22 +720,25 @@
   const WORKFLOWS = {
     content: {
       label: 'WF Content',
-      summary: 'Viết kịch bản mới rồi để AI vẽ hình cho từng cảnh.',
+      state: 'Đang dang dở ở bước tạo hình',
+      summary: 'Viết kịch bản mới, rồi để AI vẽ hình cho từng cảnh.',
       tabs: ['Nguồn', 'Phân tích', 'Kịch bản', 'Giọng đọc', 'Storyboard', 'Xưởng dựng', 'Xuất bản'],
       notes: [
         'Hình do AI tạo: ChatGPT/Gemini qua Extension, Google Flow qua CLI.',
         'Cảnh cần video sẽ tạo ảnh tĩnh trước rồi mới dựng video từ chính ảnh đó.',
-        'Khâu tạo video TỐN TÍN DỤNG Flow; ảnh và GIF thì không.',
+        'CHƯA XONG: khâu tạo hình còn hỏng nhiều — Antigravity 9/81, ChatGPT web 11/32, Gemini API 0/30; tạo video qua Flow chưa từng chạy trọn một lần.',
       ],
     },
-    revoice: {
-      label: 'WF Lồng tiếng',
-      summary: 'Tải video gốc về, viết lại lời bình, dịch, rồi cắt hình từ chính video đó.',
+    reup: {
+      label: 'WF Reup',
+      state: 'Đang làm',
+      summary: 'Tải video gốc về, kể lại lời bình theo cách khác, dịch, rồi cắt hình từ chính video đó.',
       tabs: ['Nguồn', 'Phân tích', 'Lời bình', 'Giọng đọc', 'Cảnh gốc', 'Xưởng dựng', 'Xuất bản'],
       notes: [
-        'Không tạo ảnh AI: hình lấy từ video gốc đã tải, nên không phụ thuộc Extension.',
+        'Nội dung gốc giữ nguyên: nhân vật, tên riêng, số liệu, thứ tự sự việc, cái kết. Chỉ đổi cách dẫn chuyện.',
+        'Không tạo ảnh AI: hình cắt từ video gốc đã tải, nên không phụ thuộc Extension và không tốn tín dụng.',
         'AI đọc transcript có mốc thời gian để chọn đoạn hình cho từng câu bình luận.',
-        'Không tốn tín dụng của bất kỳ dịch vụ tạo hình nào.',
+        'CHƯA CHẠY THẬT: bước cắt cảnh và dựng MP4 chưa nghiệm thu trọn một lần trong luồng này.',
       ],
     },
   };
@@ -765,12 +768,12 @@
       const notes = flow.notes.map((note) => `<li>${esc(note)}</li>`).join('');
       return `<div class="studio-result-card${active ? ' wf-active' : ''}">
         <h3>${esc(flow.label)}${active ? ' · đang dùng' : ''}</h3>
-        <p class="hint">${esc(flow.summary)}</p>
+        <p class="hint"><b>${esc(flow.state || '')}</b> — ${esc(flow.summary)}</p>
         <div class="wf-steps">${steps}</div>
         <ul class="hint">${notes}</ul>
         <div class="studio-actions">
           <button class="btn ${active ? 'ghost' : 'primary'}" onclick="setStudioWorkflow('${key}')">
-            ${active ? 'Mở xưởng tạo video' : 'Dùng quy trình này'}
+            ${active ? 'Mở tab Tạo video' : 'Dùng WF này'}
           </button>
         </div>
       </div>`;
@@ -799,8 +802,8 @@
       panels: ['projects', 'projectDetail'],
     },
     workflows: {
-      label: 'Quy trình', eyebrow: 'CHỌN CÁCH LÀM VIDEO', title: 'Quy trình sản xuất',
-      description: 'Mỗi quy trình dùng chung một xưởng nhưng khác nhau ở khâu tạo hình. Chọn một cái, wizard Tạo video sẽ tự đổi theo.',
+      label: 'WorkFlow', eyebrow: 'CHỌN WORKFLOW', title: 'WorkFlow sản xuất',
+      description: 'Nơi lưu các WorkFlow. Chọn một WF thì tab Tạo video sẽ áp dụng đúng WF đó.',
       panels: ['workflowsPanel'],
     },
     settings: {
@@ -1907,7 +1910,7 @@
       <div class="studio-result-columns"><div class="studio-result-card"><h3>Câu chuyện mới do AI tạo</h3><p><b>Ý tưởng:</b> ${esc(writer.new_story_concept || writer.summary || '—')}\n<b>Hướng biến tấu:</b> ${esc(writer.creative_direction || '—')}</p><div class="eyebrow" style="margin-top:10px">Tiêu đề gợi ý</div><ul class="studio-result-list">${titles}</ul></div><div class="studio-result-card"><h3>Mô tả &amp; phong cách áp dụng</h3><p>${esc(writer.new_description || '—')}</p><div class="keyword-list" style="margin-top:9px">${(writer.style_application || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || hashtags}</div></div></div>
       <div class="studio-summary-grid"><div class="studio-summary-card"><label>Kịch bản để đọc</label><strong>${productionScenes.length} cảnh · ${productionWords.toLocaleString('vi-VN')} từ</strong></div><div class="studio-summary-card"><label>Thời lượng storyboard</label><strong>${formatStudioDuration(productionSeconds || targetSeconds)}${targetSeconds ? ` / mục tiêu ${formatStudioDuration(targetSeconds)}` : ''}</strong></div></div>
       <div class="studio-checklist"><div class="studio-check"><b>✓</b><span><b>Nguồn giọng đọc:</b> lời dẫn trong từng cảnh của Storyboard — không lấy từ ô “Mô tả &amp; phong cách áp dụng”. Sau khi sửa kịch bản, hãy tạo lại Storyboard để đồng bộ lời dẫn.</span></div></div>
-      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="revoice" hidden><button class="btn small" onclick="checkStudioFidelity()">Soát đúng nội dung gốc</button><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
+      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="reup" hidden><button class="btn small" onclick="checkStudioFidelity()">Soát đúng nội dung gốc</button><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
     $('studioChatBox').hidden = false;
     $('studioToRenderButton').disabled = false;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
@@ -2255,7 +2258,7 @@
     }
   }
 
-  async function renderStudioRevoice() {
+  async function renderStudioReup() {
     await queueStudioProductionJob('render', 'ffmpeg_builtin', 'Dựng MP4');
   }
 
@@ -2589,7 +2592,7 @@
     button.disabled = true;
     // WF Lồng tiếng kể lại đúng nội dung nguồn, nên nó không đi qua chế độ
     // sáng tác lại - chế độ đó được viết để ĐỔI nhân vật và tình tiết.
-    const retelling = state.studioWorkflow === 'revoice';
+    const retelling = state.studioWorkflow === 'reup';
     setStudioProgress(10, retelling
       ? 'AI đang viết lại cách dẫn chuyện, giữ nguyên nội dung gốc...'
       : 'AI đang viết câu chuyện mới từ ý tưởng của bạn...');
@@ -5025,7 +5028,7 @@ Chạy các bước này?`)) return;
   $('studioDownloadSourceButton')?.addEventListener('click', () => void downloadStudioSource());
   $('studioPlanSourceCuesButton')?.addEventListener('click', () => void planStudioSourceCues());
   $('studioCutSourceScenesButton')?.addEventListener('click', () => void cutStudioSourceScenes());
-  $('studioRenderRevoiceButton')?.addEventListener('click', () => void renderStudioRevoice());
+  $('studioRenderReupButton')?.addEventListener('click', () => void renderStudioReup());
   $('studioSceneImageProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioSceneVideoProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioScriptInstructionInput').addEventListener('input', inferStudioDurationFromPrompt);

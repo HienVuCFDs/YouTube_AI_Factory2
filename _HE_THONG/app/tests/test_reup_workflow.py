@@ -32,7 +32,7 @@ def _project(slug: str, with_transcript: bool = True) -> dict[str, Any]:
     a transcript or a workflow left behind by one test would decide the result
     of the next.
     """
-    video_id = f"video-revoice-{slug}"
+    video_id = f"video-reup-{slug}"
     database.upsert_channel({
         "youtube_channel_id": "UC0000000000000000000009",
         "channel_url": "https://www.youtube.com/channel/UC0000000000000000000009",
@@ -53,7 +53,7 @@ def _project(slug: str, with_transcript: bool = True) -> dict[str, Any]:
         database.save_transcript(
             video_id, json.dumps(SOURCE_LINES), transcript_format="json", language="en"
         )
-    project = database.create_production_project(video_id, title="Revoice")
+    project = database.create_production_project(video_id, title="Reup")
     script = database.create_project_script(int(project["id"]), script_title="Loi binh")
     database.create_project_timeline(
         int(project["id"]),
@@ -80,9 +80,9 @@ def test_workflow_choice_is_stored_on_the_project() -> None:
     """It belongs to the project, not the browser: reopening must restore it."""
     project = _project("wf-store")
 
-    result = update_project_workflow(int(project["id"]), UpdateProjectWorkflowRequest(workflow="revoice"))
+    result = update_project_workflow(int(project["id"]), UpdateProjectWorkflowRequest(workflow="reup"))
 
-    assert result["project"]["workflow"] == "revoice"
+    assert result["project"]["workflow"] == "reup"
 
 
 def test_existing_projects_default_to_the_original_workflow() -> None:

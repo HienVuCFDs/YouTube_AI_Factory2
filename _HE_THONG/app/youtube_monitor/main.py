@@ -1251,7 +1251,7 @@ def update_timeline_segment(
 class UpdateProjectWorkflowRequest(BaseModel):
     """Which production workflow this project follows."""
 
-    workflow: Literal["content", "revoice"] = "content"
+    workflow: Literal["content", "reup"] = "content"
 
 
 @app.patch("/api/projects/{project_id}/workflow")
