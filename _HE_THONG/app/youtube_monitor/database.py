@@ -546,6 +546,18 @@ class Database:
             # the script asked it to say.
             self._ensure_column(connection, "project_timeline_segments", "voice_review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "project_timeline_segments", "voice_review_note", "TEXT NOT NULL DEFAULT ''")
+            # Which production workflow a project follows. Existing projects
+            # all predate the idea, and every one of them was made the one way
+            # the app used to work, so 'content' is the honest default.
+            self._ensure_column(connection, "production_projects", "workflow", "TEXT NOT NULL DEFAULT 'content'")
+            # Where in the downloaded source video this scene's picture comes
+            # from. -1 means nobody has chosen yet; 0 is a legitimate choice
+            # (the opening frames), so the two cannot share a value.
+            self._ensure_column(connection, "project_timeline_segments", "source_start_seconds", "REAL NOT NULL DEFAULT -1")
+            self._ensure_column(connection, "project_timeline_segments", "source_cue_reason", "TEXT NOT NULL DEFAULT ''")
+            # The narration before translation, kept so a translated line can
+            # be checked against what was actually said.
+            self._ensure_column(connection, "project_timeline_segments", "source_voice_text", "TEXT NOT NULL DEFAULT ''")
             # Whether the orchestrator has written this job's prompt yet.
             # Cannot be inferred from pipeline_stage: claiming a job
             # overwrites that with 'running', erasing the marker.
@@ -3630,6 +3642,61 @@ class Database:
                 """,
                 (max(0, min(int(score), 10)), note.strip()[:2000], utc_now(), segment_id),
             )
+
+    def set_project_workflow(self, project_id: int, workflow: str) -> dict[str, Any] | None:
+        """Record which production workflow this project follows."""
+        chosen = str(workflow or "").strip().lower() or "content"
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE production_projects SET workflow = ?, updated_at = ? WHERE id = ?",
+                (chosen, utc_now(), project_id),
+            )
+        return self.get_production_project(project_id)
+
+    def save_segment_source_cue(
+        self,
+        segment_id: int,
+        source_start_seconds: float,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        """Record which moment of the source video this scene should show."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_timeline_segments
+                SET source_start_seconds = ?, source_cue_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (max(0.0, float(source_start_seconds)), reason.strip()[:600], utc_now(), segment_id),
+            )
+        return self.get_project_timeline_segment(segment_id)
+
+    def save_segment_translation(
+        self,
+        segment_id: int,
+        voice_text: str,
+        source_voice_text: str = "",
+    ) -> dict[str, Any] | None:
+        """Replace a scene's narration, keeping the pre-translation wording.
+
+        The original is only stored the first time, so translating twice does
+        not overwrite it with an already-translated line.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE project_timeline_segments
+                SET voice_text = ?,
+                    source_voice_text = CASE
+                        WHEN COALESCE(source_voice_text, '') = '' THEN ?
+                        ELSE source_voice_text
+                    END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (voice_text.strip(), source_voice_text.strip(), utc_now(), segment_id),
+            )
+        return self.get_project_timeline_segment(segment_id)
 
     def save_scene_job_prompt(self, job_id: int, prompt: str) -> dict[str, Any] | None:
         """Store the prompt written for a job once it is about to run.

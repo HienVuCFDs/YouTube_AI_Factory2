@@ -29,11 +29,17 @@ def chapter_cues(description: str) -> list[tuple[float, str]]:
 
 
 def _cue_for_segment(item: dict[str, Any], index: int, cues: list[tuple[float, str]]) -> float:
-    """Choose a chapter whose topic best matches the narrated Vietnamese segment.
+    """Choose which moment of the source video this scene should show.
 
-    This deliberately remains a deterministic first draft.  A later director pass
-    can replace the clip by attaching a user asset or an AI-generated scene.
+    A planned cue wins outright: an AI that has read the source transcript with
+    its timestamps knows which moment matches this narration, which is more
+    than the keyword table below can tell. The table only ever worked on videos
+    whose description carried chapters, and only for the vocabulary someone
+    typed into it — with neither, every scene cut from the very first second.
     """
+    planned = item.get("source_start_seconds")
+    if planned is not None and float(planned) >= 0:
+        return float(planned)
     if not cues:
         return 0.0
     text = " ".join(

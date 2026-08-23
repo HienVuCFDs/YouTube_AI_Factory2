@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import json
 import mimetypes
 import os
 import shlex
@@ -1230,6 +1231,25 @@ def update_timeline_segment(
     if not segment:
         raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
     return {"status": "saved", "segment": segment}
+
+
+class UpdateProjectWorkflowRequest(BaseModel):
+    """Which production workflow this project follows."""
+
+    workflow: Literal["content", "revoice"] = "content"
+
+
+@app.patch("/api/projects/{project_id}/workflow")
+def update_project_workflow(project_id: int, payload: UpdateProjectWorkflowRequest) -> dict[str, Any]:
+    """Remember the workflow so reopening a project restores the right steps.
+
+    The choice lives on the project, not the browser: the same project opened
+    on another machine has to come back as the workflow it was built with, or
+    the wizard would offer steps that do not match what is already there.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return {"status": "saved", "project": database.set_project_workflow(project_id, payload.workflow)}
 
 
 class UpdateScenePlanRequest(BaseModel):
@@ -3572,6 +3592,268 @@ def review_project_script(project_id: int) -> dict[str, Any]:
         settings.agent_assignment("script").get("executor") or "",
     )
     return {"status": "reviewed", "review": verdict, "script": updated}
+
+
+_SOURCE_CUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "source_start_seconds": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["segment_index", "source_start_seconds"],
+            },
+        },
+    },
+    "required": ["cues"],
+}
+
+
+def _condense_transcript(segments: list[dict[str, Any]], block_seconds: float = 20.0) -> str:
+    """Fold a word-level transcript into readable time blocks.
+
+    Whisper returns a line every few seconds — 495 of them for a 20 minute
+    video — which is both too long to send and too fine to choose from. Blocks
+    of roughly this length are what a person would actually cut on.
+    """
+    blocks: list[tuple[float, list[str]]] = []
+    for item in segments:
+        try:
+            start = float(item.get("start") or 0)
+        except (TypeError, ValueError):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if not blocks or start - blocks[-1][0] >= block_seconds:
+            blocks.append((start, [text]))
+        else:
+            blocks[-1][1].append(text)
+    lines = []
+    for start, texts in blocks:
+        minutes, seconds = divmod(int(start), 60)
+        lines.append(f"[{start:.0f}s = {minutes}:{seconds:02d}] " + " ".join(texts)[:400])
+    return "\n".join(lines)
+
+
+@app.post("/api/projects/{project_id}/timeline/plan-source-cues")
+def plan_timeline_source_cues(project_id: int) -> dict[str, Any]:
+    """Decide which moment of the source video each scene should show.
+
+    Until now the cut point came from a keyword table written for one
+    particular video, and it only ran at all when the source description
+    carried chapters. Without them every scene was cut from the first second
+    of the source. The transcript is already stored with its timestamps, so
+    the AI reads what is being said when, and matches it to the narration.
+    """
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Dự án chưa có timeline")
+
+    video_id = str(project.get("youtube_video_id") or "")
+    transcript = database.get_transcript(video_id, transcript_format="json")
+    if not transcript:
+        raise HTTPException(
+            status_code=400,
+            detail="Video nguồn chưa có transcript dạng json. Chạy Whisper cho video này trước.",
+        )
+    try:
+        segments = json.loads(str(transcript.get("content_text") or "[]"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Transcript json hỏng: {exc}") from exc
+    if not isinstance(segments, list) or not segments:
+        raise HTTPException(status_code=400, detail="Transcript json rỗng")
+
+    video = database.get_video(video_id) or {}
+    source_duration = float(video.get("duration_seconds") or 0)
+    if not source_duration:
+        try:
+            source_duration = float(segments[-1].get("end") or 0)
+        except (AttributeError, TypeError, ValueError):
+            source_duration = 0.0
+
+    scenes = "\n".join(
+        f"[{int(item.get('segment_index') or 0)}] ({int(item.get('duration_seconds') or 0)}s) "
+        f"{str(item.get('voice_text') or '').strip()[:300]}"
+        for item in timeline
+    )
+    system_prompt = (
+        "Ban chon doan HINH cua video goc de minh hoa cho tung cau binh luan moi.\n"
+        "Dau vao: ban ghi loi noi cua video goc kem moc giay, va danh sach cac canh binh luan moi.\n"
+        "- 'cues': moi canh mot phan tu, gom 'segment_index', 'source_start_seconds' (giay trong "
+        "video goc) va 'reason' ngan bang tieng Viet.\n"
+        "- Chon doan ma HINH ANH luc do khop voi dieu cau binh luan dang noi toi.\n"
+        "- Cac canh nen di THEO MACH cua video goc (moc giay tang dan), tru khi noi dung doi hoi quay lai.\n"
+        "- KHONG dat nhieu canh vao cung mot moc; moi canh mot doan khac nhau.\n"
+        "- Tranh vai giay dau video (thuong la intro/title card).\n"
+        f"- Video goc dai khoang {int(source_duration)} giay; moc chon phai nho hon so nay."
+    )
+    body = (
+        f"BAN GHI VIDEO GOC:\n{_condense_transcript(segments)}\n\n"
+        f"CAC CANH BINH LUAN MOI:\n{scenes}"
+    )
+    try:
+        result = _call_orchestrator_json(system_prompt, body, _SOURCE_CUE_SCHEMA, stage="storyboard")
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=f"AI không chọn được đoạn nguồn: {exc}") from exc
+
+    by_index = {int(item.get("segment_index") or 0): item for item in timeline}
+    planned: list[dict[str, Any]] = []
+    for entry in result.get("cues") or []:
+        segment = by_index.get(int(entry.get("segment_index") or -1))
+        if not segment:
+            continue
+        start = max(0.0, float(entry.get("source_start_seconds") or 0))
+        if source_duration:
+            # A cue past the end would silently become a black clip.
+            start = min(start, max(0.0, source_duration - 1.0))
+        updated = database.save_segment_source_cue(
+            int(segment["id"]), start, str(entry.get("reason") or "")
+        )
+        planned.append({
+            "segment_id": segment["id"],
+            "segment_index": segment.get("segment_index"),
+            "source_start_seconds": (updated or {}).get("source_start_seconds", start),
+            "reason": (updated or {}).get("source_cue_reason", ""),
+        })
+    if not planned:
+        raise HTTPException(status_code=502, detail="AI không trả về đoạn nguồn nào dùng được")
+    distinct = len({round(float(item["source_start_seconds"]), 1) for item in planned})
+    return {
+        "status": "planned",
+        "scenes": planned,
+        "planned": len(planned),
+        "total_segments": len(timeline),
+        "distinct_cues": distinct,
+        "source_duration_seconds": source_duration,
+    }
+
+
+_TRANSLATE_SEGMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "text": {"type": "string"},
+                },
+                "required": ["segment_index", "text"],
+            },
+        },
+    },
+    "required": ["lines"],
+}
+
+_LANGUAGE_NAMES = {
+    "vi": "tieng Viet",
+    "en": "tieng Anh",
+    "zh": "tieng Trung",
+    "ja": "tieng Nhat",
+    "ko": "tieng Han",
+    "th": "tieng Thai",
+    "es": "tieng Tay Ban Nha",
+    "fr": "tieng Phap",
+}
+
+
+@app.post("/api/projects/{project_id}/script/translate")
+def translate_project_narration(
+    project_id: int,
+    target_language: str = Query(default="vi", max_length=12),
+    batch_size: int = Query(default=8, ge=1, le=30),
+) -> dict[str, Any]:
+    """Translate each scene's narration in place, scene by scene.
+
+    Translating the script as one block would come back as prose that no
+    longer divides where the timeline divides, and every scene's timing is
+    already pinned to its own line. Going scene by scene keeps the count and
+    the boundaries fixed; only the words change. The pre-translation wording
+    is kept so a translated line can still be checked against what was said.
+    """
+    script = database.get_latest_project_script(project_id)
+    if not database.get_production_project(project_id) or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    pending = [item for item in timeline if str(item.get("voice_text") or "").strip()]
+    if not pending:
+        raise HTTPException(status_code=400, detail="Timeline chưa có lời đọc để dịch")
+
+    language = str(target_language or "vi").strip().lower()
+    language_name = _LANGUAGE_NAMES.get(language, language)
+    system_prompt = (
+        f"Ban dich loi BINH LUAN cho video sang {language_name}.\n"
+        "- Tra ve 'lines': moi phan tu gom 'segment_index' dung nhu dau vao va 'text' da dich.\n"
+        "- Tra ve DUNG SO DONG nhu dau vao, khong gop, khong tach, khong bo dong nao.\n"
+        "- Day la loi DE DOC THANH TIENG: uu tien tu nhien khi noi hon la sat tung chu. "
+        "Tranh cau qua dai, tranh cau bi dong nang ne.\n"
+        "- GIU NGUYEN moi con so, don vi, ngay thang, ten rieng, ten thuong hieu.\n"
+        "- Do dai moi dong nen tuong duong ban goc, vi thoi luong doc da duoc tinh theo dong do.\n"
+        "- Khong them loi binh cua ban, khong giai thich."
+    )
+
+    translated: list[dict[str, Any]] = []
+    failed: list[int] = []
+    errors: list[str] = []
+    for start in range(0, len(pending), batch_size):
+        chunk = pending[start:start + batch_size]
+        body = "\n".join(
+            f"[{int(item.get('segment_index') or 0)}] {str(item['voice_text']).strip()}"
+            for item in chunk
+        )
+        try:
+            result = _call_orchestrator_json(
+                system_prompt, body, _TRANSLATE_SEGMENT_SCHEMA, stage="script"
+            )
+        except LlmError as exc:
+            # One bad batch must not lose the batches that did translate, but
+            # it must not vanish either: the reason travels back in the reply.
+            failed.extend(int(item.get("segment_index") or 0) for item in chunk)
+            errors.append(str(exc)[:200])
+            continue
+        by_index = {int(item.get("segment_index") or 0): item for item in chunk}
+        for line in result.get("lines") or []:
+            segment = by_index.get(int(line.get("segment_index") or -1))
+            text = str(line.get("text") or "").strip()
+            if not segment or not text:
+                continue
+            updated = database.save_segment_translation(
+                int(segment["id"]), text, str(segment.get("voice_text") or "")
+            )
+            translated.append({
+                "segment_index": segment.get("segment_index"),
+                "source_voice_text": (updated or {}).get("source_voice_text", ""),
+                "voice_text": (updated or {}).get("voice_text", text),
+            })
+
+    if not translated:
+        detail = "Không dịch được đoạn nào; kiểm tra AI điều phối"
+        if errors:
+            detail += f". Lỗi đầu tiên: {errors[0]}"
+        raise HTTPException(status_code=502, detail=detail)
+    missing = sorted({int(item.get("segment_index") or 0) for item in pending}
+                     - {int(item["segment_index"]) for item in translated})
+    return {
+        "status": "translated",
+        "target_language": language,
+        "total": len(pending),
+        "translated": len(translated),
+        "missing_segments": missing,
+        "failed_segments": sorted(set(failed)),
+        "errors": errors,
+        "segments": translated,
+    }
 
 
 _VOICE_REVIEW_SCHEMA = {

@@ -216,6 +216,9 @@
     .studio-field label { display: block; color: var(--muted); font-size: 10px; letter-spacing: .08em; margin-bottom: 6px; text-transform: uppercase; }
     .studio-field select, .studio-field input, .studio-chat textarea, .studio-script textarea, .studio-script input { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(9,11,16,.72); outline: none; font-size: 12px; }
     .studio-field select:focus, .studio-field input:focus, .studio-chat textarea:focus, .studio-script textarea:focus, .studio-script input:focus { border-color: rgba(245,158,11,.65); box-shadow: 0 0 0 2px rgba(245,158,11,.1); }
+    .wf-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    .wf-step { border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--muted); }
+    .studio-result-card.wf-active { border-color: rgba(245,158,11,.55); }
     .plan-table-wrap { overflow-x: auto; }
     .plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .plan-table th, .plan-table td { padding: 6px 8px; border-bottom: 1px solid #e6e6e6; text-align: left; vertical-align: top; }
@@ -336,6 +339,7 @@
       <button class="nav-item" data-workspace-nav="source" onclick="setWorkspace('source')"><span class="nav-icon">▣</span> Video tham khảo</button>
       <button class="nav-item" data-workspace-nav="production" onclick="setWorkspace('production')"><span class="nav-icon">✎</span> Dự án</button>
       <button class="nav-item" data-workspace-nav="managed" onclick="setWorkspace('managed')"><span class="nav-icon">◎</span> Kênh xuất bản</button>
+      <button class="nav-item" data-workspace-nav="workflows" onclick="setWorkspace('workflows')"><span class="nav-icon">⁙</span> Quy trình</button>
       <div class="nav-label" style="margin-top:12px">Hệ thống</div>
       <button class="nav-item" data-workspace-nav="settings" onclick="setWorkspace('settings')"><span class="nav-icon">⌘</span> Công cụ & kết nối</button>
     </nav>
@@ -427,10 +431,10 @@
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
-          <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
-          <div class="studio-actions" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
-          <div id="studioSceneVideoHint" class="studio-model-note" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
+          <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
+          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="revoice" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn">1. Tải video nguồn về máy</button><button id="studioPlanSourceCuesButton" class="btn">2. Chọn đoạn hình cho từng cảnh</button><button id="studioCutSourceScenesButton" class="btn primary">3. Cắt cảnh từ video gốc</button></div><div class="studio-model-note" data-wf="revoice" style="margin-top:6px" hidden>Hình lấy từ chính video gốc, không gọi AI tạo ảnh. Mỗi cảnh được cắt đúng bằng độ dài giọng đọc thật và đã tắt tiếng gốc.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
+          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
+          <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
         </div>
         <div id="studioStep5" class="studio-step" data-studio-step="5" hidden>
@@ -459,7 +463,7 @@
             <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option></select></div></div>
           </div>
           <div id="studioRenderSummary" class="studio-summary-grid"><div class="studio-summary-card"><label>Timeline</label><strong>Chưa tạo</strong></div><div class="studio-summary-card"><label>Voice</label><strong>Chưa lưu</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>YouTube ngang</strong></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="revoice" style="margin-top:8px" hidden><button id="studioRenderRevoiceButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
         </div>
         <div id="studioStep7" class="studio-step" data-studio-step="7" hidden>
           <p class="studio-step-note">Video sau khi render sẽ nằm trong project. Bạn có thể xem lại, tải xuống hoặc chuyển sang lịch đăng của kênh đích.</p>
@@ -469,6 +473,10 @@
         </div>
       </section>
 
+      <section id="workflowsPanel" class="panel workspace-panel">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">⁙</span> QUY TRÌNH SẢN XUẤT</div><div class="panel-sub">Chọn một quy trình; wizard Tạo video sẽ đổi nhãn các bước và đổi hàng nút cho khớp.</div></div></div>
+        <div id="workflowsList" class="studio-result"></div>
+      </section>
       <section id="managedChannelsPanel" class="panel workspace-panel">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">◎</span> KÊNH CỦA TÔI</div><div class="panel-sub">Quản lý kênh xuất bản, workflow tham khảo và lịch đăng. Publisher sẽ dùng lịch này khi module upload được bật.</div></div><span id="managedChannelCountLabel" class="tag cyan">0 KÊNH</span></div>
         <div class="panel-body">
@@ -638,7 +646,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null };
+  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content' };
   const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const number = (value) => value == null ? '—' : Number(value).toLocaleString('vi-VN');
   const date = (value) => value ? new Date(value).toLocaleString('vi-VN', {dateStyle:'short', timeStyle:'short'}) : '—';
@@ -699,6 +707,69 @@
     } catch (_) { return null; }
   }
 
+  // Hai quy trinh dung CHUNG bay panel cua wizard. Chung chi khac nhau o
+  // nhan tung buoc va o hang nut nao duoc bat trong hai panel - nen doi quy
+  // trinh khong phai dung mot giao dien thu hai.
+  const WORKFLOWS = {
+    content: {
+      label: 'WF Content',
+      summary: 'Viết kịch bản mới rồi để AI vẽ hình cho từng cảnh.',
+      tabs: ['Nguồn', 'Phân tích', 'Kịch bản', 'Giọng đọc', 'Storyboard', 'Xưởng dựng', 'Xuất bản'],
+      notes: [
+        'Hình do AI tạo: ChatGPT/Gemini qua Extension, Google Flow qua CLI.',
+        'Cảnh cần video sẽ tạo ảnh tĩnh trước rồi mới dựng video từ chính ảnh đó.',
+        'Khâu tạo video TỐN TÍN DỤNG Flow; ảnh và GIF thì không.',
+      ],
+    },
+    revoice: {
+      label: 'WF Lồng tiếng',
+      summary: 'Tải video gốc về, viết lại lời bình, dịch, rồi cắt hình từ chính video đó.',
+      tabs: ['Nguồn', 'Phân tích', 'Lời bình', 'Giọng đọc', 'Cảnh gốc', 'Xưởng dựng', 'Xuất bản'],
+      notes: [
+        'Không tạo ảnh AI: hình lấy từ video gốc đã tải, nên không phụ thuộc Extension.',
+        'AI đọc transcript có mốc thời gian để chọn đoạn hình cho từng câu bình luận.',
+        'Không tốn tín dụng của bất kỳ dịch vụ tạo hình nào.',
+      ],
+    },
+  };
+
+  function setStudioWorkflow(key, jump = true) {
+    state.studioWorkflow = WORKFLOWS[key] ? key : 'content';
+    renderWorkflowsPanel();
+    setStudioStep(state.studioStep || 1);
+    if (state.studioProjectId) {
+      void api(`/api/projects/${state.studioProjectId}/workflow`, {
+        method: 'PATCH', body: JSON.stringify({workflow: state.studioWorkflow}),
+      }).catch(() => {});
+    }
+    try { localStorage.setItem('ytFactory.workflow', state.studioWorkflow); } catch (_) {}
+    if (jump) {
+      setMessage(`Đang dùng ${WORKFLOWS[state.studioWorkflow].label}.`, 'success');
+      setWorkspace('dashboard');
+    }
+  }
+
+  function renderWorkflowsPanel() {
+    const target = $('workflowsList');
+    if (!target) return;
+    target.innerHTML = Object.entries(WORKFLOWS).map(([key, flow]) => {
+      const active = key === state.studioWorkflow;
+      const steps = flow.tabs.map((label, index) => `<span class="wf-step">${index + 1}. ${esc(label)}</span>`).join('');
+      const notes = flow.notes.map((note) => `<li>${esc(note)}</li>`).join('');
+      return `<div class="studio-result-card${active ? ' wf-active' : ''}">
+        <h3>${esc(flow.label)}${active ? ' · đang dùng' : ''}</h3>
+        <p class="hint">${esc(flow.summary)}</p>
+        <div class="wf-steps">${steps}</div>
+        <ul class="hint">${notes}</ul>
+        <div class="studio-actions">
+          <button class="btn ${active ? 'ghost' : 'primary'}" onclick="setStudioWorkflow('${key}')">
+            ${active ? 'Mở xưởng tạo video' : 'Dùng quy trình này'}
+          </button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
   const workspaces = {
     dashboard: {
       label: 'Tạo video', eyebrow: 'WIZARD 7 BƯỚC', title: 'Tạo một video mới',
@@ -719,6 +790,11 @@
       label: 'Dự án', eyebrow: 'CHỈNH SỬA CHI TIẾT', title: 'Dự án và xưởng dựng',
       description: 'Mỗi dự án gom toàn bộ kịch bản, audio, tài nguyên, Premiere và video cuối vào một nơi.',
       panels: ['projects', 'projectDetail'],
+    },
+    workflows: {
+      label: 'Quy trình', eyebrow: 'CHỌN CÁCH LÀM VIDEO', title: 'Quy trình sản xuất',
+      description: 'Mỗi quy trình dùng chung một xưởng nhưng khác nhau ở khâu tạo hình. Chọn một cái, wizard Tạo video sẽ tự đổi theo.',
+      panels: ['workflowsPanel'],
     },
     settings: {
       label: 'Cài đặt', eyebrow: 'HỆ THỐNG', title: 'Công cụ, model và kết nối',
@@ -1364,7 +1440,8 @@
 
   function setStudioStep(step) {
     const next = Math.max(1, Math.min(7, Number(step) || 1));
-    const labels = {1: 'CHỌN VIDEO', 2: 'KẾT QUẢ PHÂN TÍCH', 3: 'KỊCH BẢN AI', 4: 'GIỌNG ĐỌC', 5: 'STORYBOARD', 6: 'XƯỞNG DỰNG', 7: 'HOÀN TẤT'};
+    const flow = WORKFLOWS[state.studioWorkflow] || WORKFLOWS.content;
+    const labels = Object.fromEntries(flow.tabs.map((label, index) => [index + 1, label.toUpperCase()]));
     state.studioStep = next;
     if (next === 3 && $('studioScriptInstructionInput') && !$('studioScriptInstructionInput').value.trim()) $('studioScriptInstructionInput').value = $('studioCreativeDirectionInput')?.value || '';
     if (next === 3 && $('studioTargetDurationSeconds') && !$('studioTargetDurationSeconds').value.trim()) {
@@ -1379,6 +1456,12 @@
       const value = Number(tab.dataset.studioTab);
       tab.classList.toggle('active', value === next);
       tab.classList.toggle('done', value < next);
+      const label = tab.querySelector('strong');
+      if (label && flow.tabs[value - 1]) label.textContent = flow.tabs[value - 1];
+    });
+    // Hang nao khong gan data-wf thi thuoc ca hai quy trinh.
+    document.querySelectorAll('[data-wf]').forEach((row) => {
+      row.hidden = row.dataset.wf !== state.studioWorkflow;
     });
     if ($('studioStatusTag')) $('studioStatusTag').textContent = labels[next] || 'TẠO VIDEO';
     if (next === 4) {
@@ -1679,6 +1762,10 @@
     try {
       const bundle = await api(`/api/projects/${existingProject.id}`);
       state.studioProjectId = existingProject.id;
+      // Quy trinh thuoc ve du an, khong thuoc ve trinh duyet: mo lai mot du an
+      // cu phai tra dung cac buoc ma no da duoc dung nen.
+      const savedWorkflow = bundle.project?.workflow || existingProject.workflow;
+      if (WORKFLOWS[savedWorkflow]) state.studioWorkflow = savedWorkflow;
       if ((bundle.reference_analysis || bundle.metadata_analysis)?.result) {
         state.studioAnalysis = bundle.reference_analysis || bundle.metadata_analysis;
         state.studioReference = bundle.reference_analysis || null;
@@ -1813,7 +1900,7 @@
       <div class="studio-result-columns"><div class="studio-result-card"><h3>Câu chuyện mới do AI tạo</h3><p><b>Ý tưởng:</b> ${esc(writer.new_story_concept || writer.summary || '—')}\n<b>Hướng biến tấu:</b> ${esc(writer.creative_direction || '—')}</p><div class="eyebrow" style="margin-top:10px">Tiêu đề gợi ý</div><ul class="studio-result-list">${titles}</ul></div><div class="studio-result-card"><h3>Mô tả &amp; phong cách áp dụng</h3><p>${esc(writer.new_description || '—')}</p><div class="keyword-list" style="margin-top:9px">${(writer.style_application || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || hashtags}</div></div></div>
       <div class="studio-summary-grid"><div class="studio-summary-card"><label>Kịch bản để đọc</label><strong>${productionScenes.length} cảnh · ${productionWords.toLocaleString('vi-VN')} từ</strong></div><div class="studio-summary-card"><label>Thời lượng storyboard</label><strong>${formatStudioDuration(productionSeconds || targetSeconds)}${targetSeconds ? ` / mục tiêu ${formatStudioDuration(targetSeconds)}` : ''}</strong></div></div>
       <div class="studio-checklist"><div class="studio-check"><b>✓</b><span><b>Nguồn giọng đọc:</b> lời dẫn trong từng cảnh của Storyboard — không lấy từ ô “Mô tả &amp; phong cách áp dụng”. Sau khi sửa kịch bản, hãy tạo lại Storyboard để đồng bộ lời dẫn.</span></div></div>
-      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
+      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="revoice" hidden><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
     $('studioChatBox').hidden = false;
     $('studioToRenderButton').disabled = false;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
@@ -2042,6 +2129,147 @@
       <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
       <th>Cảnh</th><th>Chuyển cảnh</th><th>Hiệu ứng</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
     bindPlanSelects(target);
+  }
+
+  // WF Lồng tiếng gọi đúng những endpoint mà panel Dự án vẫn gọi. Khác biệt
+  // duy nhất: không gọi openProjectDetail, vì làm vậy sẽ kéo người dùng ra
+  // khỏi wizard giữa chừng một bước.
+  function studioProjectVideoId() {
+    const project = state.projects?.find((item) => Number(item.id) === Number(state.studioProjectId));
+    return project?.youtube_video_id || state.studioVideoId || '';
+  }
+
+  async function watchStudioProductionJob(jobId, jobType) {
+    for (let attempt = 0; attempt < 1200; attempt += 1) {
+      try {
+        const job = await api(`/api/jobs/${jobId}`);
+        if (job.status === 'completed') {
+          setStudioProgress(100, `${jobType} đã hoàn tất.`, 'success');
+          setMessage(`${jobType} đã hoàn tất.`, 'success');
+          return job;
+        }
+        if (job.status === 'error') {
+          setStudioProgress(0, `${jobType} thất bại.`, 'error');
+          setMessage(`${jobType} thất bại: ${job.error || 'Lỗi không xác định.'}`, 'error');
+          return job;
+        }
+        if (attempt % 4 === 0) setStudioProgress(50, `${jobType} đang xử lý... (${job.status})`);
+      } catch (error) {
+        setMessage(`Không đọc được trạng thái ${jobType}: ${error.message}`, 'error');
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    setMessage(`${jobType} chạy quá lâu; mở thẻ Dự án để xem trạng thái.`, 'error');
+    return null;
+  }
+
+  async function queueStudioProductionJob(jobType, provider, label) {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    setStudioProgress(10, `Đang đưa ${label} vào worker...`);
+    setMessage(`Đang đưa ${label} vào worker...`);
+    try {
+      const response = await api(`/api/projects/${state.studioProjectId}/jobs`, {
+        method: 'POST',
+        body: JSON.stringify({job_type: jobType, provider, confirmed: true}),
+      });
+      if (response.job?.id) return await watchStudioProductionJob(response.job.id, label);
+      return response;
+    } catch (error) {
+      setStudioProgress(0, `${label} thất bại: ${error.message}`, 'error');
+      setMessage(error.message, 'error');
+      return null;
+    }
+  }
+
+  async function downloadStudioSource() {
+    const videoId = studioProjectVideoId();
+    if (!videoId) return setMessage('Chưa chọn video nguồn.', 'error');
+    if (!confirm('Tải video gốc về máy để cắt hình cho các cảnh? App không dùng cookie hay tài khoản YouTube.')) return;
+    const button = $('studioDownloadSourceButton');
+    if (button) button.disabled = true;
+    setStudioProgress(10, 'Đang tải video gốc về máy...');
+    setMessage('Đang tải video gốc; thời gian phụ thuộc độ dài video và kết nối.');
+    try {
+      const result = await api(`/api/videos/${encodeURIComponent(videoId)}/download?media_type=video&confirmed=true`, {method: 'POST'});
+      setStudioProgress(100, 'Đã tải xong video gốc.', 'success');
+      setMessage(`Đã tải video gốc: ${result.path}`, 'success');
+    } catch (error) {
+      setStudioProgress(0, `Tải video gốc thất bại: ${error.message}`, 'error');
+      setMessage(error.message, 'error');
+    } finally { if (button) button.disabled = false; }
+  }
+
+  async function planStudioSourceCues() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const button = $('studioPlanSourceCuesButton');
+    const target = $('studioSourceCuePlan');
+    if (button) button.disabled = true;
+    if (target) target.innerHTML = '<div class="studio-empty">AI đang đọc lời video gốc để chọn đoạn hình...</div>';
+    setMessage('Đang chọn đoạn hình từ video gốc cho từng cảnh...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/timeline/plan-source-cues`, {method: 'POST'});
+      renderStudioSourceCuePlan(result);
+      setMessage(`Đã chọn ${result.planned}/${result.total_segments} cảnh, ${result.distinct_cues} mốc khác nhau.`, 'success');
+    } catch (error) {
+      if (target) target.innerHTML = '';
+      setMessage(`Không chọn được đoạn nguồn: ${error.message}`, 'error');
+    } finally { if (button) button.disabled = false; }
+  }
+
+  function renderStudioSourceCuePlan(result) {
+    const target = $('studioSourceCuePlan');
+    if (!target) return;
+    const scenes = result.scenes || [];
+    if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa chọn được cảnh nào.</div>');
+    const clock = (seconds) => {
+      const total = Math.max(0, Math.round(Number(seconds) || 0));
+      return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+    };
+    const rows = scenes.map((scene) => `<tr>
+      <td>${esc(scene.segment_index)}</td>
+      <td>${clock(scene.source_start_seconds)}</td>
+      <td class="plan-reason">${esc(scene.reason || '')}</td>
+    </tr>`).join('');
+    const warning = Number(result.distinct_cues) < scenes.length
+      ? '<p class="hint" style="color:#c0392b">Có cảnh trùng mốc — nên chạy lại hoặc sửa tay trước khi cắt.</p>'
+      : '';
+    target.innerHTML = `<div class="studio-result-card"><h3>Đoạn hình lấy từ video gốc</h3>
+      <p class="hint">AI đọc lời video gốc kèm mốc thời gian rồi khớp với từng câu bình luận.</p>${warning}
+      <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
+      <th>Cảnh</th><th>Mốc trong video gốc</th><th>Lý do</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+
+  async function cutStudioSourceScenes() {
+    const job = await queueStudioProductionJob('source_visuals', 'source_video', 'Cắt cảnh từ video gốc');
+    if (job && state.studioProjectId) {
+      const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+    }
+  }
+
+  async function renderStudioRevoice() {
+    await queueStudioProductionJob('render', 'ffmpeg_builtin', 'Dựng MP4');
+  }
+
+  async function translateStudioNarration() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const language = $('studioTranslateLanguage')?.value || 'vi';
+    setMessage('AI đang dịch lời bình từng cảnh...');
+    try {
+      const result = await api(
+        `/api/projects/${state.studioProjectId}/script/translate?target_language=${encodeURIComponent(language)}`,
+        {method: 'POST'},
+      );
+      const leftover = (result.missing_segments || []).length;
+      if (leftover) {
+        setMessage(`Đã dịch ${result.translated}/${result.total} cảnh; còn ${leftover} cảnh chưa dịch được. ${(result.errors || [])[0] || ''}`, 'error');
+      } else {
+        setMessage(`Đã dịch xong ${result.translated}/${result.total} cảnh sang ${language}.`, 'success');
+      }
+      const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+    } catch (error) { setMessage(`Không dịch được: ${error.message}`, 'error'); }
   }
 
   async function editStudioScene(shotId, segmentId) {
@@ -2335,6 +2563,11 @@
       setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
       const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});
       state.studioProjectId = projectResponse.project?.id || projectResponse.id || null;
+      if (state.studioProjectId) {
+        await api(`/api/projects/${state.studioProjectId}/workflow`, {
+          method: 'PATCH', body: JSON.stringify({workflow: state.studioWorkflow}),
+        }).catch(() => {});
+      }
       setStudioProgress(80, 'Đang tạo kịch bản có thể chỉnh sửa...');
       const scriptResponse = await api(`/api/projects/${state.studioProjectId}/script/draft`, {method: 'POST'});
       renderStudioScript(scriptResponse.script, response);
@@ -4702,6 +4935,10 @@ Chạy các bước này?`)) return;
   $('studioGenerateVideosButton').addEventListener('click', generateStudioSceneVideosBatch);
   $('studioPlanVisualsButton')?.addEventListener('click', () => void planStudioVisuals());
   $('studioPlanEditButton')?.addEventListener('click', () => void planStudioEdit());
+  $('studioDownloadSourceButton')?.addEventListener('click', () => void downloadStudioSource());
+  $('studioPlanSourceCuesButton')?.addEventListener('click', () => void planStudioSourceCues());
+  $('studioCutSourceScenesButton')?.addEventListener('click', () => void cutStudioSourceScenes());
+  $('studioRenderRevoiceButton')?.addEventListener('click', () => void renderStudioRevoice());
   $('studioSceneImageProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioSceneVideoProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioScriptInstructionInput').addEventListener('input', inferStudioDurationFromPrompt);
@@ -4744,6 +4981,9 @@ Chạy các bước này?`)) return;
   $('closeWriter').addEventListener('click', () => $('writerDetail').classList.remove('open'));
   restorePanel('channels');
   restorePanel('videos');
+  try { state.studioWorkflow = WORKFLOWS[localStorage.getItem('ytFactory.workflow')] ? localStorage.getItem('ytFactory.workflow') : 'content'; } catch (_) {}
+  renderWorkflowsPanel();
+  setStudioStep(state.studioStep || 1);
   try { setWorkspace(localStorage.getItem('ytFactory.workspace') || 'dashboard', false); } catch (_) { setWorkspace('dashboard', false); }
   startBrowserLease();
   async function initializeApp() {
