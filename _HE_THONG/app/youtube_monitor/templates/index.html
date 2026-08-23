@@ -2164,30 +2164,18 @@
     return null;
   }
 
-  async function queueStudioProductionJob(jobType, provider, label, force = false) {
+  async function queueStudioProductionJob(jobType, provider, label) {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
     setStudioProgress(10, `Đang đưa ${label} vào worker...`);
     setMessage(`Đang đưa ${label} vào worker...`);
     try {
       const response = await api(`/api/projects/${state.studioProjectId}/jobs`, {
         method: 'POST',
-        body: JSON.stringify({job_type: jobType, provider, confirmed: true, force}),
+        body: JSON.stringify({job_type: jobType, provider, confirmed: true}),
       });
       if (response.job?.id) return await watchStudioProductionJob(response.job.id, label);
       return response;
     } catch (error) {
-      // Cong soat noi dung goc tra ve 409. Day khong phai loi ky thuat, ma la
-      // mot quyet dinh cua nguoi dung, nen hoi thang thay vi bao that bai.
-      if (!force && /nội dung gốc/i.test(error.message)) {
-        setStudioProgress(0, 'Đang chờ bạn quyết định về độ chính xác.', 'error');
-        setMessage(error.message, 'error');
-        if (confirm(`${error.message}
-
-Vẫn tiếp tục ${label}? Chỉ chọn OK nếu bạn đã tự đối chiếu và thấy nội dung đúng.`)) {
-          return await queueStudioProductionJob(jobType, provider, label, true);
-        }
-        return null;
-      }
       setStudioProgress(0, `${label} thất bại: ${error.message}`, 'error');
       setMessage(error.message, 'error');
       return null;

@@ -93,6 +93,48 @@ def test_the_retelling_brief_pins_the_content_and_frees_the_telling() -> None:
     assert "source_clip" in prompt, "hinh cua WF nay cat tu video goc"
 
 
+def test_the_brief_lists_the_names_the_source_actually_contains() -> None:
+    """Telling a model not to change names leaves it deciding what a name is.
+
+    Handing it the list, pulled from the source by machine, makes it a closed
+    set - and it is the same extraction the review compares against later, so
+    the rule the writer gets is the rule it is judged by.
+    """
+    prompt = _build_prompt(
+        {"title": "Su tich trau cau", "description": ""},
+        FOLK_TALE,
+        remake_mode=FAITHFUL_RETELL_MODE,
+    )
+
+    assert "TÊN RIÊNG ĐƯỢC PHÉP DÙNG" in prompt
+    listing = prompt.split("TÊN RIÊNG ĐƯỢC PHÉP DÙNG")[1].splitlines()[1]
+    for name in ("Cao", "Tan", "Lang", "Hung"):
+        assert name in listing, f"thieu ten co that trong nguon: {name}"
+    assert "Vua" not in listing.split(", "), "chuc danh khong phai ten rieng"
+
+
+def test_numbers_in_the_source_are_listed_and_others_forbidden() -> None:
+    prompt = _build_prompt(
+        {"title": "x", "description": ""},
+        "Ong tho 87 tuoi, co 3 nguoi con.",
+        remake_mode=FAITHFUL_RETELL_MODE,
+    )
+
+    assert "CON SỐ ĐƯỢC PHÉP DÙNG" in prompt
+    assert "87" in prompt and "3" in prompt
+
+
+def test_a_source_without_names_does_not_get_an_empty_list() -> None:
+    """An empty allow-list would read as 'no names permitted at all'."""
+    prompt = _build_prompt(
+        {"title": "x", "description": ""},
+        "hom nay troi mua rat to va duong pho ngap nuoc",
+        remake_mode=FAITHFUL_RETELL_MODE,
+    )
+
+    assert "TÊN RIÊNG ĐƯỢC PHÉP DÙNG" not in prompt
+
+
 def test_the_ordinary_brief_is_untouched() -> None:
     assert system_prompt_for("new_angle_same_topic") is writer._SYSTEM_PROMPT
 

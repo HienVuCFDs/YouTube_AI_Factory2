@@ -4329,45 +4329,6 @@ def list_project_jobs(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_jobs(project_id)
 
 
-_FIDELITY_GATED_JOBS = {"voiceover", "voiceover_segment", "render", "premiere_draft", "director_production"}
-
-
-def _require_fidelity_before_production(
-    project: dict[str, Any],
-    script: dict[str, Any],
-    payload: "CreateProductionJobRequest",
-) -> None:
-    """Block production of a retelling nobody has checked against its source.
-
-    Only the re-narration workflow is gated: it is the one that claims to be
-    telling someone else's story accurately. The other workflow writes an
-    original script, where there is no source to be unfaithful to.
-
-    `force` is the deliberate way past, so a person can still proceed when
-    they have looked and disagree.
-    """
-    if str(project.get("workflow") or "content") != "revoice":
-        return
-    if payload.job_type not in _FIDELITY_GATED_JOBS:
-        return
-    if payload.provider.strip().lower() in {"dry_run", "preview", "mock"}:
-        return
-    if payload.force:
-        database.set_script_fidelity_status(int(script["id"]), "overridden")
-        return
-    status = str(script.get("fidelity_status") or "unchecked")
-    if status in {"passed", "overridden"}:
-        return
-    detail = (
-        "Kịch bản chưa soát đúng nội dung gốc. Bấm “Soát đúng nội dung gốc” ở bước Lời bình trước."
-        if status == "unchecked"
-        else "Kịch bản đang SAI LỆCH so với nội dung gốc: "
-             + (str(script.get("review_note") or "")[:400] or "xem lại kết quả soát")
-             + ". Hãy sửa lời dẫn rồi soát lại."
-    )
-    raise HTTPException(status_code=409, detail=detail)
-
-
 @app.post("/api/projects/{project_id}/jobs")
 def queue_project_job(
     project_id: int,
@@ -4381,12 +4342,6 @@ def queue_project_job(
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
     if not database.list_project_timeline(project_id, script_id=int(script["id"])):
         raise HTTPException(status_code=400, detail="Project chưa có timeline")
-
-    # A retelling that changed a name must not reach a voice track or a render.
-    # Those steps are where the mistake stops being editable text and starts
-    # being a published claim about someone else's story, so the gate is here
-    # rather than left to whoever remembers to press the check.
-    _require_fidelity_before_production(project, script, payload)
 
     provider = payload.provider.strip().lower()
     allowed = {

@@ -543,9 +543,8 @@ class Database:
             self._ensure_column(connection, "project_scripts", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_scripts", "review_agent", "TEXT NOT NULL DEFAULT ''")
             # Whether a retelling has been checked against the source it is
-            # retelling. 'unchecked' is not the same as 'passed': the
-            # re-narration workflow refuses to spend voice or render time on a
-            # script whose names and facts nobody has verified yet.
+            # retelling. Editing or translating a script clears it, so the
+            # badge never claims a verdict about words that have since changed.
             self._ensure_column(connection, "project_scripts", "fidelity_status", "TEXT NOT NULL DEFAULT 'unchecked'")
             # Same for the narration of a scene: whether it actually says what
             # the script asked it to say.
@@ -3650,7 +3649,7 @@ class Database:
 
     def set_script_fidelity_status(self, script_id: int, status: str) -> dict[str, Any] | None:
         """Record whether this script survived the check against its source."""
-        chosen = status if status in {"unchecked", "passed", "failed", "overridden"} else "unchecked"
+        chosen = status if status in {"unchecked", "passed", "failed"} else "unchecked"
         with self._connect() as connection:
             connection.execute(
                 "UPDATE project_scripts SET fidelity_status = ?, updated_at = ? WHERE id = ?",

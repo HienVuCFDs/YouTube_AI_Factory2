@@ -8,6 +8,7 @@ from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_js
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status
+from .fidelity_guard import allowed_names, numbers
 from .folklore_research import source_animal
 from . import settings
 
@@ -246,9 +247,33 @@ def _build_faithful_prompt(
         + " Yêu cầu này chỉ áp dụng cho GIỌNG KỂ và CÁCH DIỄN ĐẠT — không được dùng nó "
           "để thêm, bớt hay đổi bất cứ nội dung nào."
     )
+    # Telling a model not to change names leaves it to decide what counts as a
+    # name. Handing it the actual list, pulled out of the source by machine,
+    # turns that into a closed set it can check itself against - and the same
+    # extraction is what the review afterwards compares against, so the rule
+    # the writer is given and the rule it is judged by are the same rule.
+    names = allowed_names(transcript_text)
+    if names:
+        parts.append(
+            "TÊN RIÊNG ĐƯỢC PHÉP DÙNG — đây là TOÀN BỘ danh sách, rút thẳng từ nội dung nguồn:\n"
+            + ", ".join(names)
+            + "\nBạn CHỈ được dùng những tên trong danh sách này, và phải viết đúng y như vậy. "
+              "Tuyệt đối không đặt thêm tên nhân vật, tên địa danh, tên triều đại hay tên riêng nào "
+              "khác — kể cả khi nghe hợp lý hơn hoặc bạn nghĩ nguồn đang nói tới nó. "
+              "Không đổi vai của nhân vật: ai làm gì, ai là anh, ai là em phải đúng như nguồn."
+        )
+    source_numbers = numbers(transcript_text)
+    if source_numbers:
+        parts.append(
+            "CON SỐ ĐƯỢC PHÉP DÙNG — toàn bộ con số có trong nguồn: "
+            + ", ".join(source_numbers)
+            + ". Không được nêu con số nào khác, không làm tròn, không ước lượng thêm."
+        )
     parts.append(
-        "TỰ KIỂM TRA trước khi trả lời: mọi tên riêng, con số, địa danh và mốc thời gian trong bài "
-        "viết của bạn phải tìm được trong nội dung nguồn ở trên. Chi tiết nào không có ở đó thì bỏ đi."
+        "TỰ KIỂM TRA trước khi trả lời: đọc lại bài viết của bạn và soi từng tên riêng, con số, "
+        "địa danh, mốc thời gian. Cái nào không có trong nội dung nguồn ở trên thì XOÁ ĐI hoặc thay "
+        "bằng cách diễn đạt chung (ví dụ 'nhà vua' thay vì đặt tên một vị vua). "
+        "Thà kể chung chung còn hơn kể sai."
     )
     parts.append(
         f"Quy tắc CTA: {'Nhắc đúng tên kênh là ' + channel_name + ' khi kêu gọi đăng ký.' if channel_name else 'Không có tên kênh cụ thể — tuyệt đối không bịa tên kênh; chỉ dùng lời kêu gọi chung chung.'}"

@@ -72,6 +72,31 @@ def proper_nouns(text: str) -> list[str]:
     return [found[key] for key in sorted(found)]
 
 
+def allowed_names(text: str) -> list[str]:
+    """Every name a retelling of this source is permitted to use.
+
+    Deliberately more generous than proper_nouns(). That one answers "is this
+    a name?" and so ignores the first word of a sentence, where Vietnamese
+    capitalises everything. Here the cost of the two mistakes is reversed: a
+    common word slipping into the list permits a word that was permitted
+    anyway, while a real name left out would tell the writer it may not use a
+    name the source actually contains. So sentence-initial words count too.
+    """
+    found: dict[str, str] = {}
+    for sentence in _SENTENCE_SPLIT.split(text or ""):
+        for word in _WORD.findall(sentence):
+            if not word[:1].isupper():
+                continue
+            folded = _fold(word)
+            # Titles are dropped for the same reason the check drops them:
+            # "Vua" is a common noun that happens to precede a name, and
+            # listing it as a permitted name only invites it to be used as one.
+            if len(folded) < 2 or folded in _SENTENCE_WORDS or folded in _TITLE_WORDS:
+                continue
+            found.setdefault(folded, word)
+    return [found[key] for key in sorted(found)]
+
+
 def numbers(text: str) -> list[str]:
     """Digit groups, normalised so 1.000 and 1,000 are one number."""
     seen: dict[str, str] = {}
