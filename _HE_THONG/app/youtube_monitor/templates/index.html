@@ -401,7 +401,7 @@
             <div id="studioWorkflowSummary" class="studio-managed-summary">Chọn kênh của tôi để áp dụng workflow đã gắn.</div>
           </div>
           <div class="studio-grid" style="margin-top:10px">
-            <div class="studio-field"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
+            <div class="studio-model-note" data-wf="revoice" hidden style="margin-top:9px">Quy trình này <b>kể lại đúng nội dung gốc</b>: nhân vật, tên riêng, số liệu, thứ tự sự việc và cái kết đều giữ nguyên. AI chỉ đổi <b>cách dẫn chuyện</b>. Ô hướng dẫn ở trên vì vậy chỉ dùng để mô tả giọng kể, không dùng để đổi nội dung.</div><div class="studio-field" data-wf="content"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
             <div class="studio-field"><label for="studioCreativeDirectionInput">Yêu cầu video mới</label><textarea id="studioCreativeDirectionInput" placeholder="Ví dụ: Vẫn giải thích lãi suất cho người mới; dùng tình huống vay mua điện thoại thay vì ví dụ gốc; giọng rõ ràng, thực tế, gần bằng thời lượng video mẫu."></textarea></div>
           </div>
           <div class="studio-actions"><button id="studioAnalyzeButton" class="btn primary" disabled>1. Phân tích tham chiếu</button><button class="btn ghost" onclick="setWorkspace('source')">Chọn video mẫu khác</button></div>
@@ -416,7 +416,7 @@
             <div class="studio-field"><label for="studioTargetDurationSeconds">Thời lượng video mục tiêu</label><input id="studioTargetDurationSeconds" type="text" inputmode="text" maxlength="40" placeholder="Ví dụ: 00:12:00, 12:00, 12 phút" /><div id="studioDurationHint" class="studio-model-note">Nhập giờ : phút : giây, phút : giây, hoặc chữ. Ví dụ: 01:12:30 · 12:00 · 12 phút 30 giây.</div></div>
           </div>
           <div class="studio-field" style="margin-top:10px"><label for="studioScriptInstructionInput">Yêu cầu cho kịch bản &amp; lời dẫn</label><textarea id="studioScriptInstructionInput" placeholder="Ví dụ: Video 90 giây. Kể rõ từng tình huống theo thứ tự, lời dẫn dễ nghe và có nguyên nhân–kết quả. Nhân vật chính là mèo; giọng ấm áp, kết thúc có bài học về lòng tốt."></textarea><div class="studio-model-note">Yêu cầu này điều khiển câu chuyện, độ chi tiết lời dẫn, phong cách kể và thời lượng. Bạn vẫn có thể chat để chỉnh tiếp sau khi AI viết.</div></div>
-          <label class="studio-model-note" style="display:flex;align-items:center;gap:8px;margin-top:9px;text-transform:none;letter-spacing:0"><input id="studioFolkloreResearchEnabled" type="checkbox" checked> Tìm gợi ý web cho truyện cổ tích/“sự tích”; chỉ dùng để chọn mô-típ, AI vẫn viết câu chuyện hoàn toàn mới.</label>
+          <label class="studio-model-note" data-wf="content" style="display:flex;align-items:center;gap:8px;margin-top:9px;text-transform:none;letter-spacing:0"><input id="studioFolkloreResearchEnabled" type="checkbox" checked> Tìm gợi ý web cho truyện cổ tích/“sự tích”; chỉ dùng để chọn mô-típ, AI vẫn viết câu chuyện hoàn toàn mới.</label>
           <div class="studio-empty" style="padding:10px;margin-top:10px">AI giữ đúng format, chủ đề và giọng trình bày của video tham chiếu; thay ví dụ, tình huống và hình minh họa để tạo video mới. Video kiến thức sẽ không bị đổi thành truyện kể.</div>
           <div class="studio-actions"><button id="studioWriteButton" class="btn primary" disabled>Viết kịch bản bằng AI</button></div>
           <div id="studioScriptResult" class="studio-result"><div class="studio-empty">Chưa có kịch bản. Chọn model rồi bấm “Viết kịch bản bằng AI”.</div></div>
@@ -1900,7 +1900,7 @@
       <div class="studio-result-columns"><div class="studio-result-card"><h3>Câu chuyện mới do AI tạo</h3><p><b>Ý tưởng:</b> ${esc(writer.new_story_concept || writer.summary || '—')}\n<b>Hướng biến tấu:</b> ${esc(writer.creative_direction || '—')}</p><div class="eyebrow" style="margin-top:10px">Tiêu đề gợi ý</div><ul class="studio-result-list">${titles}</ul></div><div class="studio-result-card"><h3>Mô tả &amp; phong cách áp dụng</h3><p>${esc(writer.new_description || '—')}</p><div class="keyword-list" style="margin-top:9px">${(writer.style_application || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || hashtags}</div></div></div>
       <div class="studio-summary-grid"><div class="studio-summary-card"><label>Kịch bản để đọc</label><strong>${productionScenes.length} cảnh · ${productionWords.toLocaleString('vi-VN')} từ</strong></div><div class="studio-summary-card"><label>Thời lượng storyboard</label><strong>${formatStudioDuration(productionSeconds || targetSeconds)}${targetSeconds ? ` / mục tiêu ${formatStudioDuration(targetSeconds)}` : ''}</strong></div></div>
       <div class="studio-checklist"><div class="studio-check"><b>✓</b><span><b>Nguồn giọng đọc:</b> lời dẫn trong từng cảnh của Storyboard — không lấy từ ô “Mô tả &amp; phong cách áp dụng”. Sau khi sửa kịch bản, hãy tạo lại Storyboard để đồng bộ lời dẫn.</span></div></div>
-      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="revoice" hidden><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
+      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="revoice" hidden><button class="btn small" onclick="checkStudioFidelity()">Soát đúng nội dung gốc</button><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
     $('studioChatBox').hidden = false;
     $('studioToRenderButton').disabled = false;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
@@ -2252,6 +2252,33 @@
     await queueStudioProductionJob('render', 'ffmpeg_builtin', 'Dựng MP4');
   }
 
+  async function checkStudioFidelity() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    setMessage('AI đang đối chiếu bản kể lại với nội dung video gốc...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/script/fidelity-check`, {method: 'POST'});
+      const group = (title, items) => items.length
+        ? `<p class="hint"><b>${title}</b></p><ul>${items.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`
+        : '';
+      const target = $('studioScriptResult');
+      if (target) {
+        const card = document.createElement('div');
+        card.className = 'studio-result-card';
+        card.innerHTML = `<h3>Soát đúng nội dung gốc · ${esc(result.score)}/10 · ${result.faithful ? 'đúng nội dung' : 'CÓ SAI LỆCH'}</h3>
+          ${result.ending_verdict ? `<p class="hint"><b>Kết cục:</b> ${esc(result.ending_verdict)}</p>` : ''}
+          ${group('AI tự nghĩ ra (nặng nhất)', result.invented || [])}
+          ${group('Bị đổi so với gốc', result.altered || [])}
+          ${group('Thiếu so với gốc', result.missing || [])}`;
+        target.prepend(card);
+      }
+      const faults = (result.invented || []).length + (result.altered || []).length;
+      setMessage(result.faithful
+        ? `Bản kể lại đúng nội dung gốc (${result.score}/10).`
+        : `${faults} chỗ sai lệch so với nội dung gốc (${result.score}/10). Xem chi tiết phía trên kịch bản.`,
+        result.faithful ? 'success' : 'error');
+    } catch (error) { setMessage(`Không soát được: ${error.message}`, 'error'); }
+  }
+
   async function translateStudioNarration() {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
     const language = $('studioTranslateLanguage')?.value || 'vi';
@@ -2550,15 +2577,22 @@
     const provider = $('studioWriterProviderSelect').value || 'codex_cli';
     const button = $('studioWriteButton');
     button.disabled = true;
-    setStudioProgress(10, 'AI đang viết câu chuyện mới từ ý tưởng của bạn...');
-    setMessage('Đang viết một câu chuyện mới và blueprint cảnh AI...');
+    // WF Lồng tiếng kể lại đúng nội dung nguồn, nên nó không đi qua chế độ
+    // sáng tác lại - chế độ đó được viết để ĐỔI nhân vật và tình tiết.
+    const retelling = state.studioWorkflow === 'revoice';
+    setStudioProgress(10, retelling
+      ? 'AI đang viết lại cách dẫn chuyện, giữ nguyên nội dung gốc...'
+      : 'AI đang viết câu chuyện mới từ ý tưởng của bạn...');
+    setMessage(retelling
+      ? 'Đang kể lại đúng nội dung video gốc bằng một cách dẫn khác...'
+      : 'Đang viết một câu chuyện mới và blueprint cảnh AI...');
     try {
       const prompt = $('studioScriptInstructionInput')?.value || $('studioCreativeDirectionInput')?.value || '';
       const durationInput = $('studioTargetDurationSeconds')?.value.trim() || '';
       const localDuration = parseStudioDuration(durationInput);
       if (durationInput && !localDuration) return setMessage('Không hiểu thời lượng. Nhập ví dụ: 00:12:00, 12:00, 12 phút hoặc 720 giây.', 'error');
       if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: $('studioRemakeModeSelect')?.value || 'new_angle_same_topic', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: $('studioFolkloreResearchEnabled')?.checked !== false})});
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? 'faithful_retell' : ($('studioRemakeModeSelect')?.value || 'new_angle_same_topic'), target_duration_seconds: null, target_duration_text: durationInput, use_web_research: retelling ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
       state.studioWriter = response;
       setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
       const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});

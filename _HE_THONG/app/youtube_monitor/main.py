@@ -373,7 +373,7 @@ class WriterRequest(BaseModel):
     provider: str | None = None
     managed_channel_id: int | None = Field(default=None, ge=1)
     creative_direction: str = Field(default="", max_length=4000)
-    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only"] = "new_angle_same_topic"
+    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only", "faithful_retell"] = "new_angle_same_topic"
     target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
     target_duration_text: str = Field(default="", max_length=40)
     use_web_research: bool = True
@@ -507,7 +507,7 @@ DirectorProvider = Literal["codex_cli", "openai_gpt", "anthropic_claude", "claud
 class DirectorDraftRequest(BaseModel):
     provider: DirectorProvider = "codex_cli"
     creative_direction: str = Field(default="", max_length=4000)
-    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only"] = "new_angle_same_topic"
+    remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only", "faithful_retell"] = "new_angle_same_topic"
     target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
     target_duration_text: str = Field(default="", max_length=40)
     use_web_research: bool = True
@@ -3735,6 +3735,117 @@ def plan_timeline_source_cues(project_id: int) -> dict[str, Any]:
         "total_segments": len(timeline),
         "distinct_cues": distinct,
         "source_duration_seconds": source_duration,
+    }
+
+
+_FIDELITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "faithful": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "invented": {"type": "array", "items": {"type": "string"}},
+        "altered": {"type": "array", "items": {"type": "string"}},
+        "missing": {"type": "array", "items": {"type": "string"}},
+        "ending_verdict": {"type": "string"},
+    },
+    "required": ["faithful", "score"],
+}
+
+
+@app.post("/api/projects/{project_id}/script/fidelity-check")
+def check_script_fidelity(project_id: int) -> dict[str, Any]:
+    """Check a retelling against the source it is supposed to be retelling.
+
+    The re-narration workflow exists for material that has to be right: a folk
+    tale people grew up with, a piece of history someone can look up. Telling
+    it a different way is the point; changing a name, a number or the ending
+    is the failure, and it is the kind of failure that reads perfectly well
+    and so survives every other check in the app.
+
+    Deliberately one-directional. A retelling is shorter than its source, so
+    what the source has and the retelling omits is usually just compression.
+    What the retelling asserts and the source never said is the real fault,
+    and that is what this weighs.
+    """
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+
+    video_id = str(project.get("youtube_video_id") or "")
+    source = (
+        database.get_transcript(video_id, transcript_format="txt")
+        or database.get_transcript(video_id)
+    )
+    source_text = str((source or {}).get("content_text") or "").strip()
+    if not source_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Video nguồn chưa có transcript để đối chiếu. Chạy Whisper cho video này trước.",
+        )
+
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    narration = "\n".join(
+        str(item.get("voice_text") or "").strip()
+        for item in timeline
+        if str(item.get("voice_text") or "").strip()
+    )
+    if not narration:
+        narration = "\n".join(
+            str(script.get(field) or "").strip()
+            for field in ("hook", "intro", "main_content", "cta")
+        ).strip()
+    if not narration:
+        raise HTTPException(status_code=400, detail="Chưa có lời dẫn để đối chiếu")
+
+    system_prompt = (
+        "Ban doi chieu mot BAN KE LAI voi NOI DUNG GOC ma no phai ke lai.\n"
+        "Muc dich: ban ke lai duoc phep doi CACH KE, nhung KHONG duoc doi NOI DUNG.\n"
+        "- 'invented': dieu ban ke lai KHANG DINH ma nguon khong he noi — ten, so lieu, tinh tiet, "
+        "nhan vat, bai hoc tu nghi ra. Day la loi NANG NHAT.\n"
+        "- 'altered': dieu co trong ca hai nhung DA BI DOI — sai ten, sai so, sai dia danh, sai thu tu "
+        "su viec, sai quan he nhan vat, sai ket cuc.\n"
+        "- 'missing': su viec quan trong cua nguon bi bo hoan toan.\n"
+        "- 'ending_verdict': ket cuc ban ke lai co dung ket cuc cua nguon khong.\n"
+        "- 'score': 1-10 theo do trung thanh ve NOI DUNG. Dien dat khac di thi KHONG tru diem; "
+        "chi tru diem khi SU THAT khac di.\n"
+        "- 'faithful': false neu co bat ky muc 'invented' hoac 'altered' nao dang ke.\n"
+        "Luu y: ban ke lai thuong NGAN HON nguon, nen viec rut gon la binh thuong — dung coi moi cho "
+        "rut gon la loi. Viet bang tieng Viet."
+    )
+    body = f"NOI DUNG GOC:\n{source_text[:40000]}\n\nBAN KE LAI:\n{narration[:20000]}"
+    try:
+        verdict = _call_orchestrator_json(
+            system_prompt, body, _FIDELITY_SCHEMA, stage="quality_review"
+        )
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=f"Không soát được độ chính xác: {exc}") from exc
+
+    invented = [str(item) for item in (verdict.get("invented") or [])]
+    altered = [str(item) for item in (verdict.get("altered") or [])]
+    missing = [str(item) for item in (verdict.get("missing") or [])]
+    note_parts = [f"Kết cục: {verdict.get('ending_verdict') or ''}".strip()]
+    if invented:
+        note_parts.append("Tự nghĩ ra: " + " | ".join(invented))
+    if altered:
+        note_parts.append("Bị đổi: " + " | ".join(altered))
+    if missing:
+        note_parts.append("Thiếu: " + " | ".join(missing))
+    updated = database.save_script_review(
+        int(script["id"]),
+        int(verdict.get("score") or 0),
+        " || ".join(part for part in note_parts if part and part != "Kết cục:"),
+        settings.agent_assignment("quality_review").get("reviewer") or "",
+    )
+    return {
+        "status": "checked",
+        "faithful": bool(verdict.get("faithful")),
+        "score": int(verdict.get("score") or 0),
+        "invented": invented,
+        "altered": altered,
+        "missing": missing,
+        "ending_verdict": str(verdict.get("ending_verdict") or ""),
+        "script": updated,
     }
 
 

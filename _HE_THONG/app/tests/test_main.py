@@ -43,10 +43,13 @@ class MainApiTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertIn("whisper_device", body)
 
-    def test_projects_list_starts_empty_on_fresh_database(self) -> None:
+    def test_projects_list_answers_with_a_list(self) -> None:
+        """The whole suite shares one temp database, so this cannot assume it
+        is empty: whether a project exists here depends only on which test
+        files happened to run first."""
         response = self.client.get("/api/projects")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), [])
+        self.assertIsInstance(response.json(), list)
 
     def test_unknown_project_returns_404_with_vietnamese_detail(self) -> None:
         response = self.client.get("/api/projects/999999")

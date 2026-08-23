@@ -166,6 +166,115 @@ def validate_voiceover_plan(content: dict[str, Any], target_duration_seconds: in
     return warnings
 
 
+FAITHFUL_RETELL_MODE = "faithful_retell"
+
+# A retelling is judged against the source, so the source has to arrive whole.
+# The ordinary writing path can afford to see the first 8000 characters of a
+# transcript because it is inventing anyway; here the ending is usually the
+# part that matters most - a folk tale is its ending - and quietly dropping it
+# is how a retelling starts making things up.
+_MAX_FAITHFUL_TRANSCRIPT_CHARS = 40000
+
+_FAITHFUL_SYSTEM_PROMPT = (
+    "Bạn là người DẪN CHUYỆN kể lại đúng nội dung của một video có sẵn. "
+    "Bạn KHÔNG phải biên kịch sáng tạo, và đây KHÔNG phải bản chuyển thể.\n"
+    "Nội dung là BẤT BIẾN: mọi sự việc, nhân vật, tên riêng, địa danh, con số, mốc thời gian, "
+    "thứ tự diễn biến và cái kết đều phải giữ đúng như nguồn.\n"
+    "Bạn CHỈ được đổi CÁCH KỂ: cách đặt câu, nhịp kể, cách chọn từ, cách mở đầu và cách nối các đoạn.\n"
+    "TUYỆT ĐỐI KHÔNG: thêm nhân vật, thêm tình tiết, thêm chi tiết trang trí, đổi tên, đổi số liệu, "
+    "đổi kết cục, đảo thứ tự sự việc, hay rút ra bài học mà nguồn không nói.\n"
+    "Nguồn nói mơ hồ chỗ nào thì kể mơ hồ chỗ đó; không được đoán rồi kể như thật.\n"
+    "Đây là truyện dân gian, tin tức hoặc nội dung lịch sử: người xem tra được, sai một chi tiết là hỏng cả video.\n"
+    "Trả về đúng JSON."
+)
+
+
+def _faithful_source_text(transcript_text: str) -> str:
+    """Give the retelling the whole source, or both of its ends.
+
+    Cutting only the tail would hide the ending, which is exactly the part a
+    retelling must not get wrong. When the source really is too long, the gap
+    is marked so the model knows it is missing a middle rather than believing
+    the story stops there.
+    """
+    text = transcript_text.strip()
+    if len(text) <= _MAX_FAITHFUL_TRANSCRIPT_CHARS:
+        return text
+    half = _MAX_FAITHFUL_TRANSCRIPT_CHARS // 2
+    return (
+        text[:half]
+        + "\n\n[...PHẦN GIỮA BỊ LƯỢC BỚT VÌ QUÁ DÀI — "
+        "đừng suy diễn nội dung đoạn này, chỉ kể phần bạn đọc được...]\n\n"
+        + text[-half:]
+    )
+
+
+def _build_faithful_prompt(
+    video: dict[str, Any],
+    transcript_text: str | None,
+    workflow_context: dict[str, Any] | None = None,
+    creative_direction: str | None = None,
+    target_duration_seconds: int = 90,
+    source_duration_seconds: int | None = None,
+) -> str:
+    """Ask for the same content told a different way, and nothing more."""
+    title = str(video.get("title") or "").strip()
+    channel_name = str((workflow_context or {}).get("managed_channel_name") or "").strip()
+    duration = max(30, int(target_duration_seconds or 90))
+    scene_count = max(6, min(48, -(-duration // 20)))
+    parts = [
+        f"Tiêu đề video nguồn: {title}",
+        f"Mô tả nguồn: {str(video.get('description') or '').strip()[:1500]}",
+        f"Thời lượng video nguồn: {int(source_duration_seconds or 0)} giây.",
+    ]
+    if not transcript_text or not transcript_text.strip():
+        # Without the source there is nothing to be faithful to, and inventing
+        # is the one thing this mode exists to prevent.
+        raise WriterError(
+            "Chế độ kể lại trung thành bắt buộc phải có transcript của video nguồn. "
+            "Hãy chạy Whisper cho video này trước."
+        )
+    parts.append(
+        "NỘI DUNG NGUỒN (đây là sự thật duy nhất, kể lại đúng chừng này, không hơn):\n"
+        + _faithful_source_text(transcript_text)
+    )
+    direction = (creative_direction or "").strip()
+    parts.append(
+        "YÊU CẦU VỀ CÁCH KỂ: "
+        + (direction if direction else
+           "Kể lại mạch lạc, tự nhiên, dễ nghe; giọng dẫn chuyện ấm và rõ ràng.")
+        + " Yêu cầu này chỉ áp dụng cho GIỌNG KỂ và CÁCH DIỄN ĐẠT — không được dùng nó "
+          "để thêm, bớt hay đổi bất cứ nội dung nào."
+    )
+    parts.append(
+        "TỰ KIỂM TRA trước khi trả lời: mọi tên riêng, con số, địa danh và mốc thời gian trong bài "
+        "viết của bạn phải tìm được trong nội dung nguồn ở trên. Chi tiết nào không có ở đó thì bỏ đi."
+    )
+    parts.append(
+        f"Quy tắc CTA: {'Nhắc đúng tên kênh là ' + channel_name + ' khi kêu gọi đăng ký.' if channel_name else 'Không có tên kênh cụ thể — tuyệt đối không bịa tên kênh; chỉ dùng lời kêu gọi chung chung.'}"
+    )
+    parts.append(
+        f"Video đích dài khoảng {duration} giây. Chia thành {scene_count} cảnh, mỗi cảnh khoảng 15-25 giây. "
+        f"Tổng scene_blueprints.duration_seconds phải nằm trong khoảng 10% của {duration}."
+    )
+    parts.append(
+        "Mỗi scene_blueprints.narration là lời đọc thật: 2-5 câu hoàn chỉnh, kể tiếp đúng mạch của nguồn. "
+        f"Viết đủ dài để lấp thời lượng cảnh ở tốc độ khoảng {VIETNAMESE_VOICE_TOKENS_PER_SECOND:.1f} "
+        "âm tiết tiếng Việt mỗi giây.\n"
+        "Hình của video này được CẮT TỪ CHÍNH VIDEO NGUỒN, không phải ảnh AI. Vì vậy mỗi visual_prompt "
+        "hãy mô tả ĐOẠN NÀO CỦA VIDEO NGUỒN nên xuất hiện ở cảnh đó (nhìn thấy gì trên màn hình lúc ấy), "
+        "chứ không phải mô tả một bức tranh cần vẽ. asset_type để là 'source_clip'.\n"
+        "new_titles: giữ đúng chủ đề và nội dung của nguồn, chỉ đổi cách đặt câu chữ. "
+        "new_story_concept: nói rõ đây là bản kể lại, và cách kể khác nguồn ở chỗ nào."
+    )
+    return "\n\n".join(parts)
+
+
+def system_prompt_for(remake_mode: str) -> str:
+    """Which brief the writer works under: invent a new video, or retell this one."""
+    return _FAITHFUL_SYSTEM_PROMPT if remake_mode == FAITHFUL_RETELL_MODE else _SYSTEM_PROMPT
+
+
 def _build_prompt(
     video: dict[str, Any],
     transcript_text: str | None,
@@ -177,6 +286,19 @@ def _build_prompt(
     research_context: dict[str, Any] | None = None,
     reference_analysis: dict[str, Any] | None = None,
 ) -> str:
+    if remake_mode == FAITHFUL_RETELL_MODE:
+        # Everything below asks for a new story: different examples, a
+        # different animal, no reuse of the source's characters or plot. A
+        # retelling wants the opposite, so it takes its own path rather than
+        # trying to switch off those rules one by one.
+        return _build_faithful_prompt(
+            video,
+            transcript_text,
+            workflow_context=workflow_context,
+            creative_direction=creative_direction,
+            target_duration_seconds=target_duration_seconds,
+            source_duration_seconds=source_duration_seconds,
+        )
     title = str(video.get("title") or "").strip()
     description = str(video.get("description") or "").strip()
     tags = ", ".join(str(tag) for tag in (video.get("tags") or []))
@@ -291,7 +413,7 @@ class ClaudeWriter:
 
     def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
         parsed = call_claude_json(
-            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -303,7 +425,7 @@ class OpenAiWriter:
 
     def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
         parsed = call_openai_json(
-            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -315,7 +437,7 @@ class CodexWriter:
 
     def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
         parsed = call_codex_json(
-            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -327,7 +449,7 @@ class ClaudeCodeCliWriter:
 
     def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
         parsed = call_claude_code_cli_json(
-            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -339,7 +461,7 @@ class AntigravityWriter:
 
     def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
         parsed = call_antigravity_json(
-            _SYSTEM_PROMPT, _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
