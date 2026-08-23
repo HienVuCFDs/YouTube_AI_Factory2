@@ -154,6 +154,7 @@ def _prompt(
     output_language: str = languages.DEFAULT_LANGUAGE,
     part: int = 1,
     total_parts: int = 1,
+    known_characters: list[dict[str, Any]] | None = None,
 ) -> str:
     parts = [
         f"Tiêu đề nguồn: {str(video.get('title') or '').strip()}",
@@ -162,7 +163,20 @@ def _prompt(
     if total_parts > 1:
         parts.append(
             f"Đây là PHẦN {part}/{total_parts} của bản ghi. Chỉ ghi lại những gì có trong phần này; "
-            "đừng tóm tắt lại các phần khác và đừng đoán phần chưa đọc tới."
+            "đừng tóm tắt lại các phần khác và đừng đoán phần chưa đọc tới. "
+            "content_summary chỉ kể nội dung phần này, KHÔNG ghi thêm nhãn 'PHẦN x/y' vào đầu."
+        )
+    # Each part is read on its own, so without this the same person is renamed
+    # every time - "nhan vat chinh", then "trang si", then his actual name -
+    # and one character comes back as three.
+    if known_characters:
+        listing = "; ".join(
+            f"{str(person.get('name') or '').strip()} ({str(person.get('role') or '').strip()[:60]})"
+            for person in known_characters if str(person.get("name") or "").strip()
+        )
+        parts.append(
+            "NHÂN VẬT ĐÃ ĐẶT TÊN Ở CÁC PHẦN TRƯỚC — nếu người nói ở phần này là một trong số họ, "
+            "hãy dùng ĐÚNG cái tên đó, đừng đặt tên mới:\n" + listing
         )
     if transcript_text:
         parts.append(
@@ -256,14 +270,16 @@ def analyze_reference(
         result = _call(provider, _SYSTEM_PROMPT, _prompt(video, None, output_language))
         parts_read = 0
     else:
-        readings = [
-            _call(
+        readings: list[dict[str, Any]] = []
+        cast: list[dict[str, Any]] = []
+        for index, piece in enumerate(pieces):
+            reading = _call(
                 provider,
                 _SYSTEM_PROMPT,
-                _prompt(video, piece, output_language, index + 1, len(pieces)),
+                _prompt(video, piece, output_language, index + 1, len(pieces), cast),
             )
-            for index, piece in enumerate(pieces)
-        ]
+            readings.append(reading)
+            cast = _merge(readings)["characters"]
         result = _merge(readings) if len(readings) > 1 else readings[0]
         parts_read = len(pieces)
     return {

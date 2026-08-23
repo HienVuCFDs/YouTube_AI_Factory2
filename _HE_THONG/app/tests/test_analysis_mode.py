@@ -211,3 +211,48 @@ def test_dialogue_must_be_translated_not_left_in_the_source_language() -> None:
     from youtube_monitor import languages
 
     assert "LOI THOAI cung phai DICH" in languages.instruction("vi")
+
+
+def test_later_parts_are_told_who_has_already_been_named() -> None:
+    """Read on its own, each part renames the same person - "nhan vat chinh",
+    then "trang si", then his actual name - and one character becomes three."""
+    prompt = _prompt(
+        VIDEO, "[3s] a", "vi", part=2, total_parts=3,
+        known_characters=[{"name": "Tào Tháo", "role": "chủ công"}],
+    )
+
+    assert "NHÂN VẬT ĐÃ ĐẶT TÊN Ở CÁC PHẦN TRƯỚC" in prompt
+    assert "Tào Tháo (chủ công)" in prompt
+
+
+def test_the_first_part_is_not_given_a_cast() -> None:
+    prompt = _prompt(VIDEO, "[3s] a", "vi", part=1, total_parts=3, known_characters=[])
+
+    assert "NHÂN VẬT ĐÃ ĐẶT TÊN" not in prompt
+
+
+def test_a_part_summary_is_not_labelled_with_its_number() -> None:
+    """The joined summary otherwise reads "PHAN 1/6." before the story starts."""
+    prompt = _prompt(VIDEO, "[3s] a", "vi", part=1, total_parts=6)
+
+    assert "KHÔNG ghi thêm nhãn 'PHẦN x/y'" in prompt
+
+
+def test_the_cast_grows_across_parts_instead_of_restarting(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    casts = [
+        [{"name": "Tào Tháo", "role": "chủ công"}],
+        [{"name": "Tào Tháo", "role": "chủ công"}, {"name": "Điển Vi", "role": "mãnh tướng"}],
+    ]
+
+    def fake(system_prompt, user_prompt, schema, max_tokens=0):
+        seen.append(user_prompt)
+        return _reading(characters=casts[min(len(seen) - 1, len(casts) - 1)])
+
+    monkeypatch.setattr(reference_analyzer, "call_claude_code_cli_json", fake)
+    body = "\n".join(f"[{index}s] luot {index}" for index in range(200))
+
+    result = reference_analyzer.analyze_reference(VIDEO, body, "claude_code_cli")
+
+    assert "Tào Tháo" in seen[1], "phan sau phai biet ten da dat o phan truoc"
+    assert [person["name"] for person in result["characters"]] == ["Tào Tháo", "Điển Vi"]
