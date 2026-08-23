@@ -1999,10 +1999,7 @@
       const transcript = await ensureTranscriptForAnalysis(state.studioVideoId, (text) => setStudioProgress(35, text));
       setStudioProgress(45, `Đã có transcript (${number(transcript.word_count || 0)} từ). Đang phân tích cấu trúc, cảnh và phong cách...`);
       const analysisLanguage = $('studioAnalysisLanguage')?.value || 'vi';
-      // WF Reup giữ nguyên nội dung, nên bước phân tích phải mô tả nguồn đúng như nó là,
-      // không được sinh ra 'quy tắc remake' bảo đổi bối cảnh và nhân vật.
-      const analysisMode = state.studioWorkflow === 'reup' ? 'faithful' : 'remake';
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/reference-analysis?provider=${encodeURIComponent(provider)}&output_language=${encodeURIComponent(analysisLanguage)}&mode=${analysisMode}`, {method: 'POST'});
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/reference-analysis?provider=${encodeURIComponent(provider)}&output_language=${encodeURIComponent(analysisLanguage)}`, {method: 'POST'});
       state.studioAnalysis = response;
       state.studioReference = response;
       renderStudioAnalysis(response);
@@ -2032,15 +2029,20 @@
     const formula = (result.narrative_formula || []).map((item, index) => `<li><b>${index + 1}.</b> ${esc(item)}</li>`).join('') || '<li>Chưa xác định được cấu trúc.</li>';
     const scenes = (result.scene_map || []).map((item, index) => `<div class="studio-result-card"><h3>Cảnh ${esc(item.order || index + 1)} · ${esc(item.story_beat || 'Nhịp kể')}</h3><p><b>Diễn biến:</b> ${esc(item.what_happens || '—')}\n<b>Hình ảnh:</b> ${esc(item.visual_direction || '—')}\n<b>Nhịp dựng:</b> ${esc(item.editing_pacing || '—')}</p></div>`).join('');
     const recipe = (style.style_recipe || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || '<span class="secondary-text">Chưa có công thức phong cách.</span>';
-    const guardrails = (result.remake_guardrails || []).map((item) => `<li>${esc(item)}</li>`).join('');
+    // Bộ phân tích trả về hai loại dòng: 'GIU:' là nội dung bắt buộc giữ nguyên,
+    // 'DOI:' là những thứ thuộc về cách trình bày. Trộn chung một danh sách là
+    // cách cũ đã khiến người đọc tưởng mình được phép đổi cả nội dung.
+    const rules = (result.remake_guardrails || []).map((item) => String(item));
+    const strip = (item) => item.replace(/^(GIU|GIỮ|DOI|ĐỔI)\s*:\s*/i, '');
+    const mustKeep = rules.filter((item) => /^(GIU|GIỮ)\s*:/i.test(item));
+    const mayChange = rules.filter((item) => /^(DOI|ĐỔI)\s*:/i.test(item));
+    const unmarked = rules.filter((item) => !mustKeep.includes(item) && !mayChange.includes(item));
+    const bullets = (items) => items.map((item) => `<li>${esc(strip(item))}</li>`).join('');
     const limitations = (result.limitations || []).map((item) => `<li>${esc(item)}</li>`).join('') || '<li>Dữ liệu tham chiếu chưa đầy đủ.</li>';
-    // Cùng một bộ khoá nhưng hai nghĩa ngược nhau: ở WF Reup, remake_guardrails
-    // là những thứ phải GIỮ, không phải những thứ phải ĐỔI.
-    const faithful = result.mode === 'faithful';
     $('studioAnalysisResult').innerHTML = `
-      <div class="studio-result-card"><h3>${faithful ? 'Nội dung nguồn và trình tự sự việc' : 'Nội dung và công thức kể chuyện'}</h3><p>${esc(result.content_summary || '—')}</p><ol class="studio-result-list">${formula}</ol><p style="margin-top:10px"><b>Nhịp tổng thể:</b> ${esc(result.pacing || '—')}</p></div>
-      <div class="studio-result-columns"><div class="studio-result-card"><h3>Ngôn ngữ hình ảnh</h3><p><b>Art direction:</b> ${esc(style.art_direction || '—')}\n<b>Nhân vật/bối cảnh:</b> ${esc(style.subjects_and_setting || '—')}\n<b>Màu & ánh sáng:</b> ${esc(style.lighting_palette || '—')}\n<b>Camera/bố cục:</b> ${esc(style.camera_composition || '—')}\n<b>Chuyển động/dựng:</b> ${esc(style.motion_editing || '—')}\n<b>Chữ/đồ hoạ:</b> ${esc(style.text_graphics || '—')}</p><div class="keyword-list">${recipe}</div></div><div class="studio-result-card"><h3>${faithful ? 'Những chi tiết PHẢI GIỮ ĐÚNG' : 'Quy tắc remake nguyên bản'}</h3><ul class="studio-result-list">${guardrails || (faithful ? '<li>Chưa rút được chi tiết bắt buộc giữ.</li>' : '<li>Tạo nhân vật, bối cảnh và diễn biến mới.</li>')}</ul><div class="eyebrow" style="margin-top:12px">Độ tin cậy / giới hạn</div><ul class="studio-result-list">${limitations}</ul></div></div>
-      <div class="studio-result-card"><h3>${faithful ? 'Các cảnh của video nguồn' : 'Bản đồ cảnh tham chiếu'}</h3><div class="studio-result-columns">${scenes}</div></div>
+      <div class="studio-result-card"><h3>Nội dung nguồn và trình tự sự việc</h3><p>${esc(result.content_summary || '—')}</p><ol class="studio-result-list">${formula}</ol><p style="margin-top:10px"><b>Nhịp tổng thể:</b> ${esc(result.pacing || '—')}</p></div>
+      <div class="studio-result-columns"><div class="studio-result-card"><h3>Ngôn ngữ hình ảnh</h3><p><b>Art direction:</b> ${esc(style.art_direction || '—')}\n<b>Nhân vật/bối cảnh:</b> ${esc(style.subjects_and_setting || '—')}\n<b>Màu & ánh sáng:</b> ${esc(style.lighting_palette || '—')}\n<b>Camera/bố cục:</b> ${esc(style.camera_composition || '—')}\n<b>Chuyển động/dựng:</b> ${esc(style.motion_editing || '—')}\n<b>Chữ/đồ hoạ:</b> ${esc(style.text_graphics || '—')}</p><div class="keyword-list">${recipe}</div></div><div class="studio-result-card"><h3>Giữ nguyên nội dung gốc</h3><ul class="studio-result-list">${bullets(mustKeep.concat(unmarked)) || '<li>Chưa rút được chi tiết bắt buộc giữ.</li>'}</ul>${mayChange.length ? `<div class="eyebrow" style="margin-top:12px">Chỉ được đổi cách trình bày</div><ul class="studio-result-list">${bullets(mayChange)}</ul>` : ''}<div class="eyebrow" style="margin-top:12px">Độ tin cậy / giới hạn</div><ul class="studio-result-list">${limitations}</ul></div></div>
+      <div class="studio-result-card"><h3>Các cảnh của video nguồn</h3><div class="studio-result-columns">${scenes}</div></div>
       <details class="studio-result-card"><summary>Xem dữ liệu phân tích đầy đủ (JSON)</summary><pre class="studio-json">${esc(JSON.stringify(result, null, 2))}</pre></details>`;
   }
 

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -4169,6 +4170,120 @@ def check_script_fidelity(project_id: int) -> dict[str, Any]:
     }
 
 
+_TRANSLATE_SOURCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "source_language": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["text"],
+}
+
+
+@app.post("/api/videos/{video_id}/transcript/translate")
+def translate_source_transcript(
+    video_id: str,
+    target_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
+    chunk_chars: int = Query(default=6000, ge=1000, le=20000),
+) -> dict[str, Any]:
+    """Translate the source's own transcript, before anything is written from it.
+
+    Analysis and scripting both read the transcript, and a model reading a
+    foreign-language source translates it silently in its head - differently
+    each time, with names and numbers drifting. Doing it once, on purpose, and
+    storing the result means every later step reads the same Vietnamese text,
+    and a person can check that text against the original.
+
+    Stored as its own transcript row rather than replacing the original: the
+    source's own words stay available as the thing a retelling is judged
+    against.
+    """
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video")
+    source = database.get_transcript(video_id, transcript_format="txt") or database.get_transcript(video_id)
+    original = str((source or {}).get("content_text") or "").strip()
+    if not original:
+        raise HTTPException(
+            status_code=400,
+            detail="Video chưa có transcript để dịch. Chạy Whisper cho video này trước.",
+        )
+    record = languages.resolve(target_language)
+    if str((source or {}).get("language") or "").lower().startswith(str(target_language).lower()):
+        return {
+            "status": "skipped",
+            "detail": f"Transcript đã ở {record['label']}, không cần dịch.",
+            "target_language": target_language,
+        }
+
+    system_prompt = (
+        f"Ban dich BAN GHI LOI NOI cua mot video sang {record['name']} ({record['english_name']}).\n"
+        "- Dich DAY DU, khong tom tat, khong bo doan nao, khong them loi binh cua ban.\n"
+        "- LOI THOAI NHAN VAT dich thanh loi thoai, giu dung giong dieu cua tung nhan vat.\n"
+        "- GIU NGUYEN ten rieng, ten dia danh, con so, don vi, ngay thang.\n"
+        "- Ban ghi do may nghe lai nen co the sai chinh ta hoac dinh cac tu; hay dich theo Y "
+        "cua cau, va neu mot cho that su khong doan duoc thi ghi [khong ro] thay vi bia ra.\n"
+        "- 'source_language': ngon ngu cua ban goc.\n"
+        "- 'notes': nhung cho ban khong chac, neu co.\n"
+        "Chi tra ve ban dich trong 'text'."
+    )
+
+    pieces: list[str] = []
+    notes: list[str] = []
+    detected = ""
+    # Split on blank lines first so a paragraph is not cut mid-sentence.
+    paragraphs = [part for part in re.split(r"\n\s*\n", original) if part.strip()] or [original]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if current and len(current) + len(paragraph) > chunk_chars:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = f"{current}\n\n{paragraph}" if current else paragraph
+    if current:
+        chunks.append(current)
+
+    for index, chunk in enumerate(chunks, start=1):
+        try:
+            result = _call_orchestrator_json(
+                system_prompt,
+                f"PHAN {index}/{len(chunks)} CUA BAN GHI:\n{chunk}",
+                _TRANSLATE_SOURCE_SCHEMA,
+                stage="script",
+            )
+        except LlmError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Dịch transcript thất bại ở phần {index}/{len(chunks)}: {exc}",
+            ) from exc
+        pieces.append(str(result.get("text") or "").strip())
+        notes.extend(str(item) for item in (result.get("notes") or []))
+        detected = detected or str(result.get("source_language") or "")
+
+    translated = "\n\n".join(part for part in pieces if part)
+    if not translated:
+        raise HTTPException(status_code=502, detail="AI không trả về nội dung dịch")
+    stored = database.save_transcript(
+        video_id,
+        translated,
+        source_type=f"translated_{target_language}",
+        language=target_language,
+        transcript_format="txt",
+    )
+    return {
+        "status": "translated",
+        "target_language": target_language,
+        "source_language": detected,
+        "chunks": len(chunks),
+        "original_chars": len(original),
+        "translated_chars": len(translated),
+        "notes": notes[:20],
+        "transcript": stored,
+    }
+
+
 _TRANSLATE_SEGMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -5255,7 +5370,6 @@ def create_reference_analysis(
     video_id: str,
     provider: str = Query(default="codex_cli"),
     output_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
-    mode: Literal["remake", "faithful"] = Query(default="remake"),
 ) -> dict[str, Any]:
     """Analyse structure and style as a remake reference, not a viewer-facing recap."""
     video = database.get_video(video_id)
@@ -5277,9 +5391,7 @@ def create_reference_analysis(
             transcript = save_transcript_result(database, video_id, whisper_result)
             transcript_text = str(transcript.get("content_text") or "").strip()
             transcript_generated = True
-        result = analyze_reference(
-            video, transcript_text, provider, output_language=output_language, mode=mode
-        )
+        result = analyze_reference(video, transcript_text, provider, output_language=output_language)
         database.save_video_analysis(
             video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
         )
