@@ -542,6 +542,11 @@ class Database:
             self._ensure_column(connection, "project_scripts", "review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "project_scripts", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_scripts", "review_agent", "TEXT NOT NULL DEFAULT ''")
+            # Whether a retelling has been checked against the source it is
+            # retelling. 'unchecked' is not the same as 'passed': the
+            # re-narration workflow refuses to spend voice or render time on a
+            # script whose names and facts nobody has verified yet.
+            self._ensure_column(connection, "project_scripts", "fidelity_status", "TEXT NOT NULL DEFAULT 'unchecked'")
             # Same for the narration of a scene: whether it actually says what
             # the script asked it to say.
             self._ensure_column(connection, "project_timeline_segments", "voice_review_score", "INTEGER NOT NULL DEFAULT 0")
@@ -3642,6 +3647,16 @@ class Database:
                 """,
                 (max(0, min(int(score), 10)), note.strip()[:2000], utc_now(), segment_id),
             )
+
+    def set_script_fidelity_status(self, script_id: int, status: str) -> dict[str, Any] | None:
+        """Record whether this script survived the check against its source."""
+        chosen = status if status in {"unchecked", "passed", "failed", "overridden"} else "unchecked"
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE project_scripts SET fidelity_status = ?, updated_at = ? WHERE id = ?",
+                (chosen, utc_now(), script_id),
+            )
+        return self.get_project_script(script_id)
 
     def set_project_workflow(self, project_id: int, workflow: str) -> dict[str, Any] | None:
         """Record which production workflow this project follows."""

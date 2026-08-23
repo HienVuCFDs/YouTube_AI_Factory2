@@ -2164,18 +2164,30 @@
     return null;
   }
 
-  async function queueStudioProductionJob(jobType, provider, label) {
+  async function queueStudioProductionJob(jobType, provider, label, force = false) {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
     setStudioProgress(10, `Đang đưa ${label} vào worker...`);
     setMessage(`Đang đưa ${label} vào worker...`);
     try {
       const response = await api(`/api/projects/${state.studioProjectId}/jobs`, {
         method: 'POST',
-        body: JSON.stringify({job_type: jobType, provider, confirmed: true}),
+        body: JSON.stringify({job_type: jobType, provider, confirmed: true, force}),
       });
       if (response.job?.id) return await watchStudioProductionJob(response.job.id, label);
       return response;
     } catch (error) {
+      // Cong soat noi dung goc tra ve 409. Day khong phai loi ky thuat, ma la
+      // mot quyet dinh cua nguoi dung, nen hoi thang thay vi bao that bai.
+      if (!force && /nội dung gốc/i.test(error.message)) {
+        setStudioProgress(0, 'Đang chờ bạn quyết định về độ chính xác.', 'error');
+        setMessage(error.message, 'error');
+        if (confirm(`${error.message}
+
+Vẫn tiếp tục ${label}? Chỉ chọn OK nếu bạn đã tự đối chiếu và thấy nội dung đúng.`)) {
+          return await queueStudioProductionJob(jobType, provider, label, true);
+        }
+        return null;
+      }
       setStudioProgress(0, `${label} thất bại: ${error.message}`, 'error');
       setMessage(error.message, 'error');
       return null;
@@ -2266,12 +2278,15 @@
         card.className = 'studio-result-card';
         card.innerHTML = `<h3>Soát đúng nội dung gốc · ${esc(result.score)}/10 · ${result.faithful ? 'đúng nội dung' : 'CÓ SAI LỆCH'}</h3>
           ${result.ending_verdict ? `<p class="hint"><b>Kết cục:</b> ${esc(result.ending_verdict)}</p>` : ''}
+          ${group('Tên riêng KHÔNG có trong nguồn (máy đối chiếu)', result.unsourced_names || [])}
+          ${group('Con số KHÔNG có trong nguồn (máy đối chiếu)', result.unsourced_numbers || [])}
           ${group('AI tự nghĩ ra (nặng nhất)', result.invented || [])}
           ${group('Bị đổi so với gốc', result.altered || [])}
           ${group('Thiếu so với gốc', result.missing || [])}`;
         target.prepend(card);
       }
-      const faults = (result.invented || []).length + (result.altered || []).length;
+      const faults = (result.invented || []).length + (result.altered || []).length
+        + (result.unsourced_names || []).length + (result.unsourced_numbers || []).length;
       setMessage(result.faithful
         ? `Bản kể lại đúng nội dung gốc (${result.score}/10).`
         : `${faults} chỗ sai lệch so với nội dung gốc (${result.score}/10). Xem chi tiết phía trên kịch bản.`,

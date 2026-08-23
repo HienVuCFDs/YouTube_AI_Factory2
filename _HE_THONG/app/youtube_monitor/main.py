@@ -31,6 +31,7 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
+from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
 from .gflow_bridge import gflow_cli_status
 from .llm_analyzer import LlmAnalysisError, resolve_analyzer
@@ -949,6 +950,10 @@ def update_script(script_id: int, payload: UpdateScriptRequest) -> dict[str, Any
     )
     if not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    # Editing the words invalidates any earlier verdict about them: a checked
+    # script that is then changed must not keep walking through the gate.
+    if str(script.get("fidelity_status") or "unchecked") != "unchecked":
+        script = database.set_script_fidelity_status(script_id, "unchecked") or script
     project = database.get_production_project(int(script["project_id"]))
     if project:
         _write_project_document(int(script["project_id"]), "kich-ban.md", script_to_markdown(script, project))
@@ -3824,6 +3829,12 @@ def check_script_fidelity(project_id: int) -> dict[str, Any]:
     invented = [str(item) for item in (verdict.get("invented") or [])]
     altered = [str(item) for item in (verdict.get("altered") or [])]
     missing = [str(item) for item in (verdict.get("missing") or [])]
+    # The reviewer is the same kind of system that wrote the text, so its
+    # opinion is not the last word. Names and numbers are compared by machine,
+    # and anything the retelling states that the source never did fails the
+    # check whatever the reviewer concluded.
+    mechanical = unsourced_details(source_text, narration)
+    faithful = bool(verdict.get("faithful")) and not mechanical["names"] and not mechanical["numbers"]
     note_parts = [f"Kết cục: {verdict.get('ending_verdict') or ''}".strip()]
     if invented:
         note_parts.append("Tự nghĩ ra: " + " | ".join(invented))
@@ -3831,15 +3842,24 @@ def check_script_fidelity(project_id: int) -> dict[str, Any]:
         note_parts.append("Bị đổi: " + " | ".join(altered))
     if missing:
         note_parts.append("Thiếu: " + " | ".join(missing))
-    updated = database.save_script_review(
+    if mechanical["names"]:
+        note_parts.append("Tên không có trong nguồn: " + " | ".join(mechanical["names"]))
+    if mechanical["numbers"]:
+        note_parts.append("Số không có trong nguồn: " + " | ".join(mechanical["numbers"]))
+    database.save_script_review(
         int(script["id"]),
         int(verdict.get("score") or 0),
         " || ".join(part for part in note_parts if part and part != "Kết cục:"),
         settings.agent_assignment("quality_review").get("reviewer") or "",
     )
+    updated = database.set_script_fidelity_status(
+        int(script["id"]), "passed" if faithful else "failed"
+    )
     return {
         "status": "checked",
-        "faithful": bool(verdict.get("faithful")),
+        "faithful": faithful,
+        "unsourced_names": mechanical["names"],
+        "unsourced_numbers": mechanical["numbers"],
         "score": int(verdict.get("score") or 0),
         "invented": invented,
         "altered": altered,
@@ -3947,6 +3967,10 @@ def translate_project_narration(
                 "source_voice_text": (updated or {}).get("source_voice_text", ""),
                 "voice_text": (updated or {}).get("voice_text", text),
             })
+
+    # Translation can rewrite a proper noun as easily as any other word, so a
+    # translated script has to be checked again before it may be produced.
+    database.set_script_fidelity_status(int(script["id"]), "unchecked")
 
     if not translated:
         detail = "Không dịch được đoạn nào; kiểm tra AI điều phối"
@@ -4305,6 +4329,45 @@ def list_project_jobs(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_jobs(project_id)
 
 
+_FIDELITY_GATED_JOBS = {"voiceover", "voiceover_segment", "render", "premiere_draft", "director_production"}
+
+
+def _require_fidelity_before_production(
+    project: dict[str, Any],
+    script: dict[str, Any],
+    payload: "CreateProductionJobRequest",
+) -> None:
+    """Block production of a retelling nobody has checked against its source.
+
+    Only the re-narration workflow is gated: it is the one that claims to be
+    telling someone else's story accurately. The other workflow writes an
+    original script, where there is no source to be unfaithful to.
+
+    `force` is the deliberate way past, so a person can still proceed when
+    they have looked and disagree.
+    """
+    if str(project.get("workflow") or "content") != "revoice":
+        return
+    if payload.job_type not in _FIDELITY_GATED_JOBS:
+        return
+    if payload.provider.strip().lower() in {"dry_run", "preview", "mock"}:
+        return
+    if payload.force:
+        database.set_script_fidelity_status(int(script["id"]), "overridden")
+        return
+    status = str(script.get("fidelity_status") or "unchecked")
+    if status in {"passed", "overridden"}:
+        return
+    detail = (
+        "Kịch bản chưa soát đúng nội dung gốc. Bấm “Soát đúng nội dung gốc” ở bước Lời bình trước."
+        if status == "unchecked"
+        else "Kịch bản đang SAI LỆCH so với nội dung gốc: "
+             + (str(script.get("review_note") or "")[:400] or "xem lại kết quả soát")
+             + ". Hãy sửa lời dẫn rồi soát lại."
+    )
+    raise HTTPException(status_code=409, detail=detail)
+
+
 @app.post("/api/projects/{project_id}/jobs")
 def queue_project_job(
     project_id: int,
@@ -4318,6 +4381,12 @@ def queue_project_job(
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
     if not database.list_project_timeline(project_id, script_id=int(script["id"])):
         raise HTTPException(status_code=400, detail="Project chưa có timeline")
+
+    # A retelling that changed a name must not reach a voice track or a render.
+    # Those steps are where the mistake stops being editable text and starts
+    # being a published claim about someone else's story, so the gate is here
+    # rather than left to whoever remembers to press the check.
+    _require_fidelity_before_production(project, script, payload)
 
     provider = payload.provider.strip().lower()
     allowed = {
