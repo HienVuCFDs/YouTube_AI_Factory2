@@ -31,6 +31,7 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
+from . import usage_limits
 from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
 from .gflow_bridge import gflow_cli_status
@@ -107,6 +108,15 @@ from .youtube_client import YouTubeApiError, YouTubeClient
 
 
 database = Database(DB_PATH)
+
+# Running out of a subscription is a normal weekly event here, not a bug, and
+# it used to vanish into a job's error column while the orchestrator quietly
+# fell back to another agent. The bridges sit below this layer, so they are
+# handed somewhere to write what they notice.
+usage_limits.set_sink(
+    database.record_provider_usage_limit,
+    database.clear_provider_usage_limit,
+)
 youtube = YouTubeClient(YOUTUBE_API_KEY)
 service = SyncService(database, youtube, YOUTUBE_MAX_INITIAL_VIDEOS)
 metadata_queue = AnalysisQueue(database)
@@ -3755,6 +3765,50 @@ _FIDELITY_SCHEMA = {
     },
     "required": ["faithful", "score"],
 }
+
+
+# Provider keys are internal; a banner has to name the thing the user pays for.
+_PROVIDER_LABELS = {
+    "codex_cli": "Codex CLI (ChatGPT)",
+    "claude_code_cli": "Claude Code CLI",
+    "antigravity": "Google Antigravity",
+    "gflow_cli": "Google Flow (video)",
+    "gflow_image": "Google Flow (ảnh)",
+    "gemini_image": "Google Gemini API",
+    "gemini_veo": "Google Veo API",
+    "openai_image": "OpenAI Image API",
+    "runway": "Runway",
+    "chatgpt_web_image": "ChatGPT web",
+    "gemini_web_image": "Gemini web",
+    "antigravity_image": "Antigravity (ảnh)",
+}
+
+
+@app.get("/api/usage-limits")
+def list_usage_limits() -> dict[str, Any]:
+    """Which models are out of quota right now, and when they come back."""
+    limits = database.list_active_usage_limits()
+    now = datetime.now(timezone.utc)
+    active: list[dict[str, Any]] = []
+    for item in limits:
+        resets_at = str(item.get("resets_at") or "")
+        if resets_at:
+            try:
+                # A provider that said when it would return, and has, is no
+                # longer worth warning about; the next successful call clears
+                # the row properly.
+                if datetime.fromisoformat(resets_at) <= now:
+                    continue
+            except ValueError:
+                pass
+        active.append({
+            "provider": item.get("provider"),
+            "label": _PROVIDER_LABELS.get(str(item.get("provider")), str(item.get("provider"))),
+            "message": item.get("message"),
+            "detected_at": item.get("detected_at"),
+            "resets_at": resets_at or None,
+        })
+    return {"limits": active, "count": len(active)}
 
 
 @app.post("/api/projects/{project_id}/script/fidelity-check")

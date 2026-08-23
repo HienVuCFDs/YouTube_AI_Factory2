@@ -479,6 +479,14 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS provider_usage_limits (
+                    provider TEXT PRIMARY KEY,
+                    message TEXT NOT NULL DEFAULT '',
+                    detected_at TEXT NOT NULL,
+                    resets_at TEXT,
+                    cleared_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_video
                     ON analysis_jobs(youtube_video_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_video_analyses_video
@@ -3656,6 +3664,65 @@ class Database:
                 (chosen, utc_now(), script_id),
             )
         return self.get_project_script(script_id)
+
+    def record_provider_usage_limit(
+        self,
+        provider: str,
+        message: str,
+        resets_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Note that a provider has run out, keeping the first time it did.
+
+        detected_at is not refreshed on repeat failures: what the user wants
+        to know is when the model stopped working, not when it was last
+        retried. cleared_at is wiped so an old recovery cannot make a fresh
+        outage look resolved.
+        """
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO provider_usage_limits (provider, message, detected_at, resets_at, cleared_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(provider) DO UPDATE SET
+                    message = excluded.message,
+                    resets_at = excluded.resets_at,
+                    detected_at = CASE
+                        WHEN provider_usage_limits.cleared_at IS NULL THEN provider_usage_limits.detected_at
+                        ELSE excluded.detected_at
+                    END,
+                    cleared_at = NULL
+                """,
+                (provider, message.strip()[:600], now, resets_at),
+            )
+        return self.get_provider_usage_limit(provider)
+
+    def clear_provider_usage_limit(self, provider: str) -> None:
+        """Mark a provider as working again, after a call actually succeeded."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE provider_usage_limits SET cleared_at = ? WHERE provider = ? AND cleared_at IS NULL",
+                (utc_now(), provider),
+            )
+
+    def get_provider_usage_limit(self, provider: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM provider_usage_limits WHERE provider = ?", (provider,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_active_usage_limits(self) -> list[dict[str, Any]]:
+        """Providers currently out, most recently hit first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM provider_usage_limits
+                WHERE cleared_at IS NULL
+                ORDER BY detected_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def set_project_workflow(self, project_id: int, workflow: str) -> dict[str, Any] | None:
         """Record which production workflow this project follows."""

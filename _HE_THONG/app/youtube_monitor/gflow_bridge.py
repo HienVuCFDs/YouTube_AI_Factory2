@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import settings
+from . import settings, usage_limits
 
 
 class GFlowCliError(RuntimeError):
@@ -183,6 +183,7 @@ def _classify_failure(exit_code: int, payload: dict[str, Any], stderr: str) -> G
         kind = "selector_drift"
     elif any(key in normalized for key in ("quota", "credit", "tín dụng", "insufficient")):
         kind = "quota"
+        usage_limits.note_failure("gflow_cli", detail or normalized)
         retryable = False
     elif exit_code in {9, 27} or "initial frame" in normalized or "upload" in normalized:
         kind = "input"

@@ -7,6 +7,7 @@ from . import settings
 from .antigravity_bridge import AntigravityBridgeError, call_antigravity_json as _call_antigravity_json
 from .claude_code_bridge import ClaudeCodeBridgeError, call_claude_code_json as _call_claude_code_json
 from .codex_bridge import CodexBridgeError, call_codex_json as _call_codex_json
+from . import usage_limits
 
 
 class LlmError(RuntimeError):
@@ -22,9 +23,12 @@ def call_codex_json(
     """Use the locally logged-in Codex CLI without an OpenAI API key."""
     del max_tokens  # Codex CLI owns its model token budget.
     try:
-        return _call_codex_json(system_prompt, user_prompt, schema)
+        result = _call_codex_json(system_prompt, user_prompt, schema)
     except CodexBridgeError as exc:
+        usage_limits.note_failure("codex_cli", str(exc))
         raise LlmError(str(exc)) from exc
+    usage_limits.note_success("codex_cli")
+    return result
 
 
 def call_claude_code_cli_json(
@@ -43,9 +47,12 @@ def call_claude_code_cli_json(
     """
     del max_tokens  # Claude Code CLI owns its model token budget.
     try:
-        return _call_claude_code_json(system_prompt, user_prompt, schema, image_path=image_path)
+        result = _call_claude_code_json(system_prompt, user_prompt, schema, image_path=image_path)
     except ClaudeCodeBridgeError as exc:
+        usage_limits.note_failure("claude_code_cli", str(exc))
         raise LlmError(str(exc)) from exc
+    usage_limits.note_success("claude_code_cli")
+    return result
 
 
 def call_antigravity_json(
@@ -57,9 +64,12 @@ def call_antigravity_json(
     """Use the locally logged-in Antigravity CLI (Google account) without an API key."""
     del max_tokens  # Antigravity CLI owns its model token budget.
     try:
-        return _call_antigravity_json(system_prompt, user_prompt, schema)
+        result = _call_antigravity_json(system_prompt, user_prompt, schema)
     except AntigravityBridgeError as exc:
+        usage_limits.note_failure("antigravity", str(exc))
         raise LlmError(str(exc)) from exc
+    usage_limits.note_success("antigravity")
+    return result
 
 
 def call_claude_json(

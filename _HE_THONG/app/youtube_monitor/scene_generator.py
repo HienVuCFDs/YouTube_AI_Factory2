@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import httpx
 
-from . import settings
+from . import settings, usage_limits
 from .database import Database
 from .gif_generator import (
     GFLOW_GIF_FRAME_COUNT,
@@ -680,9 +680,13 @@ class SceneGenerationWorker:
         except Exception as exc:
             message = str(exc)
             normalized = message.lower()
+            # Read from the job rather than the local: a failure before the
+            # provider is chosen would leave that name unbound.
+            failed_provider = str((job or {}).get("provider") or "").strip().lower()
             failure_kind = (
                 exc.kind if isinstance(exc, GFlowCliError) else
-                "quota" if any(key in normalized for key in ("quota", "credit", "tín dụng", "resource_exhausted")) else
+                "quota" if usage_limits.note_failure(failed_provider, message)
+                or any(key in normalized for key in ("quota", "credit", "tín dụng", "resource_exhausted")) else
                 "provider"
             )
             self.database.finish_scene_generation_job(

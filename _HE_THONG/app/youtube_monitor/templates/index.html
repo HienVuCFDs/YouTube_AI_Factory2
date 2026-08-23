@@ -219,6 +219,12 @@
     .wf-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .wf-step { border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--muted); }
     .studio-result-card.wf-active { border-color: rgba(245,158,11,.55); }
+    .usage-limit-banner { width: 100%; margin-top: 10px; border: 1px solid rgba(192,57,43,.55);
+      border-radius: 8px; background: rgba(192,57,43,.10); padding: 9px 12px; font-size: 13px; }
+    .usage-limit-banner .usage-limit-title { font-weight: 600; margin-bottom: 4px; }
+    .usage-limit-banner ul { margin: 0; padding-left: 18px; }
+    .usage-limit-banner li { margin: 2px 0; }
+    .usage-limit-banner .usage-limit-when { color: var(--muted); }
     .plan-table-wrap { overflow-x: auto; }
     .plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .plan-table th, .plan-table td { padding: 6px 8px; border-bottom: 1px solid #e6e6e6; text-align: left; vertical-align: top; }
@@ -363,6 +369,7 @@
         <button id="oauthConnectButton" class="btn small ghost">Kết nối YouTube OAuth</button>
         <span class="status-pill ok"><span class="dot"></span> KHÔNG TỰ ĐỘNG TẢI VIDEO</span>
       </div>
+      <div id="usageLimitBanner" class="usage-limit-banner" hidden></div>
     </header>
 
     <main id="overview" class="content">
@@ -646,7 +653,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content' };
+  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [] };
   const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const number = (value) => value == null ? '—' : Number(value).toLocaleString('vi-VN');
   const date = (value) => value ? new Date(value).toLocaleString('vi-VN', {dateStyle:'short', timeStyle:'short'}) : '—';
@@ -4646,9 +4653,52 @@ Chạy các bước này?`)) return;
     if (gpuOnly) select.value = 'ffmpeg_builtin';
   }
 
+  // Hết hạn mức là chuyện thường hằng tuần với các gói thuê bao, không phải
+  // lỗi. Trước đây nó chìm vào cột error của job còn AI điều phối lặng lẽ
+  // chuyển sang agent khác, nên người dùng không hề biết model nào đã dừng.
+  function formatLimitReset(value) {
+    if (!value) return 'chưa rõ thời điểm khôi phục';
+    const when = new Date(value);
+    if (Number.isNaN(when.getTime())) return 'chưa rõ thời điểm khôi phục';
+    const hours = (when - new Date()) / 3600000;
+    const stamp = when.toLocaleString('vi-VN', {dateStyle: 'short', timeStyle: 'short'});
+    if (hours <= 0) return `dự kiến đã khôi phục (${stamp})`;
+    if (hours < 24) return `khôi phục lúc ${stamp} (còn ~${Math.max(1, Math.round(hours))} giờ)`;
+    return `khôi phục lúc ${stamp} (còn ~${Math.round(hours / 24)} ngày)`;
+  }
+
+  async function loadUsageLimits() {
+    const banner = $('usageLimitBanner');
+    if (!banner) return;
+    try {
+      const result = await api('/api/usage-limits');
+      const limits = result.limits || [];
+      if (!limits.length) {
+        banner.hidden = true;
+        banner.innerHTML = '';
+        state.usageLimits = [];
+        return;
+      }
+      // Chỉ báo một lần cho mỗi model, không nhắc lại mỗi vòng refresh.
+      const fresh = limits
+        .filter((item) => !(state.usageLimits || []).some((seen) => seen.provider === item.provider))
+        .map((item) => item.label);
+      state.usageLimits = limits;
+      banner.hidden = false;
+      banner.innerHTML = `<div class="usage-limit-title">⚠ ${limits.length} model đang hết hạn mức</div>
+        <ul>${limits.map((item) => `<li><b>${esc(item.label)}</b> — ${esc(formatLimitReset(item.resets_at))}
+          <div class="usage-limit-when">${esc(item.message || '')}</div></li>`).join('')}</ul>`;
+      if (fresh.length) {
+        setMessage(`Hết hạn mức: ${fresh.join(', ')}. Các bước dùng model này sẽ chuyển sang model khác hoặc dừng lại.`, 'error');
+      }
+    } catch (_) {
+      // Không để việc báo hạn mức làm hỏng vòng refresh.
+    }
+  }
+
   async function refresh() {
     try {
-      await Promise.all([loadHealth(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
+      await Promise.all([loadHealth(), loadUsageLimits(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();
