@@ -5365,6 +5365,41 @@ def get_reference_analysis(video_id: str) -> dict[str, Any]:
     return analysis or {"youtube_video_id": video_id, "status": "pending"}
 
 
+def _analysis_transcript(video_id: str) -> str:
+    """Give the analysis one utterance per line, with its timestamp.
+
+    The plain-text transcript is every fragment run together into a wall with
+    no punctuation, which throws away the one clue an automatic transcript
+    does carry: where each utterance ended. In a drama that boundary is
+    usually a change of speaker, so reading the timed version is the
+    difference between being able to attribute dialogue and not.
+    """
+    timed = database.get_transcript(video_id, transcript_format="json")
+    if timed:
+        try:
+            segments = json.loads(str(timed.get("content_text") or "[]"))
+        except (TypeError, ValueError):
+            segments = []
+        lines = [
+            f"[{float(item.get('start') or 0):.0f}s] {str(item.get('text') or '').strip()}"
+            for item in segments
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        if lines:
+            return "\n".join(lines)
+    subtitles = database.get_transcript(video_id, transcript_format="srt")
+    if subtitles:
+        body = str(subtitles.get("content_text") or "")
+        lines = [
+            line.strip() for line in body.splitlines()
+            if line.strip() and not line.strip().isdigit() and "-->" not in line
+        ]
+        if lines:
+            return "\n".join(lines)
+    plain = database.get_transcript(video_id, transcript_format="txt") or database.get_transcript(video_id)
+    return str((plain or {}).get("content_text") or "").strip()
+
+
 @app.post("/api/videos/{video_id}/reference-analysis")
 def create_reference_analysis(
     video_id: str,
@@ -5375,8 +5410,7 @@ def create_reference_analysis(
     video = database.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Không tìm thấy video")
-    transcript = database.get_transcript(video_id, transcript_format="txt")
-    transcript_text = str(transcript.get("content_text") or "").strip() if transcript else ""
+    transcript_text = _analysis_transcript(video_id)
     job_id = database.start_analysis_job(video_id, "reference", provider)
     try:
         # Do not rely solely on the browser to enforce this workflow.  Reference

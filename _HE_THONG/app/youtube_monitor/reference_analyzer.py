@@ -33,8 +33,12 @@ from .llm_client import (
 
 ReferenceAnalysisError = LlmError
 
-# Roughly what fits comfortably in one call while leaving room for the answer.
-_CHUNK_CHARS = 9000
+# The answer is bigger than the question here: every utterance comes back
+# attributed and translated, so a chunk is capped by how many lines it holds
+# rather than by its own size. 511 lines in one call ran out of output budget
+# and timed out; in pieces this size each call returns comfortably.
+_CHUNK_CHARS = 4500
+_CHUNK_LINES = 90
 
 REFERENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -104,24 +108,28 @@ mark the rest. Put every such gap in limitations, so nobody later mistakes a gue
 Return only the requested JSON."""
 
 
-def _chunks(text: str, size: int = _CHUNK_CHARS) -> list[str]:
-    """Split on blank lines, then sentences, so no line is cut in half."""
+def _chunks(text: str, size: int = _CHUNK_CHARS, lines: int = _CHUNK_LINES) -> list[str]:
+    """Break the transcript into readable pieces without cutting a line."""
     body = (text or "").strip()
-    if len(body) <= size:
-        return [body] if body else []
-    paragraphs = [part for part in re.split(r"\n\s*\n", body) if part.strip()]
-    if len(paragraphs) == 1:
-        paragraphs = [part for part in re.split(r"(?<=[.!?…])\s+", body) if part.strip()]
+    if not body:
+        return []
+    units = [line for line in body.splitlines() if line.strip()]
+    if len(units) <= 1:
+        # A wall of text with no line breaks: fall back to sentence boundaries.
+        units = [part for part in re.split(r"(?<=[.!?…])\s+", body) if part.strip()]
+    if len(units) <= lines and len(body) <= size:
+        return [body]
     pieces: list[str] = []
-    current = ""
-    for paragraph in paragraphs:
-        if current and len(current) + len(paragraph) + 2 > size:
-            pieces.append(current)
-            current = paragraph
-        else:
-            current = f"{current}\n\n{paragraph}" if current else paragraph
+    current: list[str] = []
+    length = 0
+    for unit in units:
+        if len(current) >= lines or (current and length + len(unit) + 1 > size):
+            pieces.append("\n".join(current))
+            current, length = [], 0
+        current.append(unit)
+        length += len(unit) + 1
     if current:
-        pieces.append(current)
+        pieces.append("\n".join(current))
     return pieces
 
 
@@ -137,7 +145,7 @@ def _call(provider: str, system_prompt: str, user_prompt: str) -> dict[str, Any]
     caller = callers.get(name)
     if caller is None:
         raise ReferenceAnalysisError(f"Provider không được hỗ trợ cho phân tích tham chiếu: {provider}")
-    return caller(system_prompt, user_prompt, REFERENCE_SCHEMA, max_tokens=8000)
+    return caller(system_prompt, user_prompt, REFERENCE_SCHEMA, max_tokens=16000)
 
 
 def _prompt(
@@ -157,7 +165,13 @@ def _prompt(
             "đừng tóm tắt lại các phần khác và đừng đoán phần chưa đọc tới."
         )
     if transcript_text:
-        parts.append(f"BẢN GHI LỜI NÓI:\n{transcript_text}")
+        parts.append(
+            "BẢN GHI LỜI NÓI. Mỗi dòng là MỘT lượt nói, theo đúng thứ tự, kèm mốc giây. "
+            "Bản ghi do máy nghe lại nên KHÔNG có tên người nói và thường KHÔNG có dấu câu — "
+            "bạn phải tự suy ra ai đang nói dựa vào nội dung, cách xưng hô và mạch đối đáp. "
+            "Chỗ nào không suy ra được thì ghi 'Không rõ', đừng gán bừa cho một nhân vật.\n"
+            f"{transcript_text}"
+        )
     else:
         parts.append(
             "Không có bản ghi lời nói và không có khung hình nào. Đừng giả vờ đã xem video: "
@@ -168,9 +182,10 @@ def _prompt(
         "- content_summary: TOÀN BỘ câu chuyện/nội dung, kể tuần tự từ đầu đến hết. Đủ chi tiết để "
         "người đọc kể lại được mà không cần xem video.\n"
         "- characters: những ai xuất hiện, mỗi người một dòng ngắn.\n"
-        "- dialogue: TỪNG CÂU THOẠI, theo đúng thứ tự, kèm người nói. Lời dẫn chuyện ghi người nói "
-        "là 'Người dẫn'. Không được rút gọn, không được gộp nhiều câu thành một, không được mô tả "
-        "thay vì trích lời.\n"
+        "- dialogue: TỪNG LƯỢT NÓI, theo đúng thứ tự, kèm người nói. Gộp các dòng liền nhau của "
+        "cùng một người thành một lượt; đổi người nói thì sang lượt mới. Lời dẫn chuyện ghi người "
+        "nói là 'Người dẫn'. Không được rút gọn, không được bỏ lượt nào, không được mô tả thay vì "
+        "trích lời.\n"
         "- scene_map: các đoạn nội dung theo thứ tự, mỗi đoạn một câu chuyện gì đang xảy ra.\n"
         "- visual_style: một hai câu về hình ảnh, ngắn thôi.\n"
         "- limitations: chỗ nào nghe không rõ, không biết ai nói, hoặc không xác định được."

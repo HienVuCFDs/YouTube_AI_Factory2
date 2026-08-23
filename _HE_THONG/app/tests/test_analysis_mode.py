@@ -27,7 +27,7 @@ def test_the_brief_asks_for_every_line_of_dialogue() -> None:
     """Dialogue is what a retelling loses first, so it is asked for by name."""
     prompt = _prompt(VIDEO, SOURCE, "vi")
 
-    assert "TỪNG CÂU THOẠI" in prompt
+    assert "TỪNG LƯỢT NÓI" in prompt
     assert "Không được rút gọn" in prompt or "không được rút gọn" in prompt.lower()
 
 
@@ -79,18 +79,19 @@ def test_a_long_transcript_is_split_without_losing_anything() -> None:
     paragraphs = [f"Doan so {index}." for index in range(400)]
     body = "\n\n".join(paragraphs)
 
-    pieces = _chunks(body, size=2000)
+    pieces = _chunks(body)
 
     assert len(pieces) > 1
     assert "Doan so 0." in pieces[0]
     assert "Doan so 399." in pieces[-1]
-    assert sum(len(piece) for piece in pieces) >= len(body) - 4 * len(pieces)
+    rejoined = "\n".join(pieces)
+    assert all(f"Doan so {index}." in rejoined for index in range(400)), "khong duoc mat dong nao"
 
 
 def test_a_wall_of_text_still_splits_on_sentences() -> None:
     body = " ".join(f"Cau so {index}." for index in range(500))
 
-    pieces = _chunks(body, size=1500)
+    pieces = _chunks(body)
 
     assert len(pieces) > 1
     assert not any(piece.endswith("Cau so") for piece in pieces), "khong duoc cat giua cau"
@@ -174,3 +175,39 @@ def test_a_source_without_a_transcript_is_still_read_once(monkeypatch: pytest.Mo
     assert result["source_type"] == "metadata"
     assert result["transcript_parts_read"] == 0
     assert "Đừng giả vờ đã xem video" in seen[0]
+
+
+def test_a_chunk_is_capped_by_how_many_lines_it_holds() -> None:
+    """Every line comes back attributed and translated, so the answer is larger
+    than the question. 511 lines in one call ran out of output budget."""
+    body = "\n".join(f"[{index}s] a" for index in range(500))
+
+    pieces = _chunks(body)
+
+    assert all(len(piece.splitlines()) <= 90 for piece in pieces)
+    assert len(pieces) >= 6
+
+
+def test_a_line_is_never_cut_in_half() -> None:
+    body = "\n".join(f"[{index}s] mot luot noi day du so {index}" for index in range(300))
+
+    for piece in _chunks(body):
+        for line in piece.splitlines():
+            assert line.startswith("["), f"dong bi cat: {line!r}"
+
+
+def test_the_brief_says_the_transcript_has_no_speaker_labels() -> None:
+    """A real ASR transcript names nobody; without saying so the model either
+    guesses confidently or calls everything narration."""
+    prompt = _prompt(VIDEO, "[3s] anh noi gi", "vi")
+
+    assert "KHÔNG có tên người nói" in prompt
+    assert "Không rõ" in prompt
+
+
+def test_dialogue_must_be_translated_not_left_in_the_source_language() -> None:
+    """A model treats a quote as something to reproduce verbatim, which leaves
+    Chinese lines sitting in a Vietnamese brief."""
+    from youtube_monitor import languages
+
+    assert "LOI THOAI cung phai DICH" in languages.instruction("vi")

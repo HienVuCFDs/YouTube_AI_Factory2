@@ -99,5 +99,10 @@ def instruction(code: str | None) -> str:
     record = resolve(code)
     return (
         f"NGON NGU DAU RA: viet TOAN BO ket qua bang {record['name']} ({record['english_name']}), "
-        "ke ca khi nguon dung ngon ngu khac. Giu nguyen ten rieng va thuat ngu rieng."
+        "ke ca khi nguon dung ngon ngu khac.\n"
+        # Quoted lines are the part a model most often leaves in the source
+        # language, on the reasoning that a quote should be verbatim. Here the
+        # whole point is that a Vietnamese writer can read them.
+        "LOI THOAI cung phai DICH sang ngon ngu nay - khong duoc giu nguyen tieng goc, "
+        "khong duoc phien am. Chi giu nguyen ten rieng, dia danh va con so."
     )
