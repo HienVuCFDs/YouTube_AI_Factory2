@@ -9,7 +9,6 @@ from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status
 from .fidelity_guard import allowed_names, numbers
-from .folklore_research import source_animal
 from . import languages
 from . import settings
 
@@ -59,14 +58,22 @@ RESULT_SCHEMA = {
     "additionalProperties": False,
 }
 
+# This is where the rules live. The analysis stage only reports what the source
+# contains; deciding what a new video keeps and what it changes belongs to the
+# person writing the script, and to this brief.
 _SYSTEM_PROMPT = (
-    "Bạn là biên kịch YouTube chuyên chuyển thể sáng tạo. Trước khi viết, hãy xác định ĐÚNG "
-    "loại nội dung của video nguồn (giải thích kiến thức, hướng dẫn, bình luận, truyện kể...). "
-    "Mặc định phải giữ chính loại nội dung, chủ đề có ích, đối tượng, nhịp trình bày và giọng điệu của nguồn. "
-    "Chỉ sửa đổi góc nhìn, ví dụ, tình huống và hình minh họa để tạo video độc lập; không biến "
-    "video kiến thức thành truyện cổ tích hoặc đổi từ thể loại này sang thể loại khác, trừ khi người dùng nêu rõ. "
-    "Không sao chép câu chữ, ví dụ đặc trưng, nhân vật, diễn biến hay bố cục hình ảnh của nguồn. "
-    "Từng scene_blueprints phải là cảnh AI mới có prompt hình ảnh cụ thể để tạo video. Trả về đúng JSON."
+    "Bạn là biên kịch YouTube. Video mới được dựng TRÊN NỀN video nguồn, không phải lấy nguồn "
+    "làm gợi ý để bịa ra chuyện khác.\n"
+    "GIỮ NGUYÊN — không được đổi: sự việc, nhân vật, tên riêng, con số, ngày tháng, địa danh, "
+    "thứ tự diễn biến và kết cục. Loại nội dung, đối tượng người xem và mục đích của nguồn cũng giữ.\n"
+    "ĐƯỢC ĐỔI — và nên đổi: câu chữ và cách diễn đạt (viết mới hoàn toàn, không chép lời nguồn), "
+    "cách mở đầu và dẫn dắt, nhịp kể, hình minh hoạ, đồ hoạ, nhạc và cách dựng. Không dùng lại "
+    "footage, logo hay bản tiếng của nguồn.\n"
+    "Với truyện dân gian, lịch sử và tin tức, ranh giới này là tuyệt đối: đổi một cái tên hay một "
+    "cái kết không làm ra tác phẩm mới, nó làm ra một video SAI.\n"
+    "Chỗ nào bản phân tích ghi là KHÔNG XÁC ĐỊNH ĐƯỢC thì để trống hoặc nói chung chung — tuyệt "
+    "đối không tự nghĩ ra chi tiết để lấp vào.\n"
+    "Từng scene_blueprints phải có prompt hình ảnh cụ thể để dựng cảnh. Trả về đúng JSON."
 )
 
 _MAX_TRANSCRIPT_CHARS = 8000
@@ -360,20 +367,35 @@ def _build_prompt(
     )
     if reference_analysis:
         scene_map = reference_analysis.get("scene_map") if isinstance(reference_analysis.get("scene_map"), list) else []
+        # The analysis reports the source in full and rules on nothing; every
+        # rule about what may be kept or changed is stated here instead.
         reference_beats = "\n".join(
-            f"- Rhythm {index + 1}: {item.get('story_beat', '')} | pacing: {item.get('editing_pacing', '')}"
-            for index, item in enumerate(scene_map[:12]) if isinstance(item, dict)
+            f"- {index + 1}. {item.get('what_happens', '')}"
+            for index, item in enumerate(scene_map) if isinstance(item, dict)
+        )
+        people = ", ".join(
+            f"{item.get('name', '')} ({item.get('role', '')})"
+            for item in (reference_analysis.get("characters") or []) if isinstance(item, dict)
+        )
+        # Dialogue is what a retelling loses first, so it arrives as the
+        # characters' own words rather than as a note that they spoke.
+        spoken = "\n".join(
+            f"{item.get('speaker', 'Không rõ')}: {item.get('line', '')}"
+            for item in (reference_analysis.get("dialogue") or []) if isinstance(item, dict)
         )
         parts.append(
-            "Reference brief produced by the analysis stage. Use its ABSTRACT pacing and escalation only; never copy events, names or dialogue:\n"
-            f"Narrative formula: {reference_analysis.get('narrative_formula', [])}\n"
-            f"Reference rhythm map:\n{reference_beats or 'No scene map available.'}\n"
-            f"Visual style: {reference_analysis.get('visual_style', {})}\n"
-            f"Remake guardrails: {reference_analysis.get('remake_guardrails', [])}"
+            "NỘI DUNG NGUỒN, do bước phân tích ghi lại. Đây là sự thật phải giữ, không phải gợi ý:\n"
+            f"Câu chuyện: {str(reference_analysis.get('content_summary') or '')[:6000]}\n"
+            f"Nhân vật: {people or 'không rõ'}\n"
+            f"Diễn biến:\n{reference_beats or 'không có'}\n"
+            f"LỜI THOẠI GỐC:\n{spoken[:8000] or 'không có'}\n"
+            f"Hình ảnh: {reference_analysis.get('visual_style', '')}\n"
+            "Những chỗ phân tích KHÔNG xác định được — tuyệt đối không tự nghĩ ra để lấp vào: "
+            f"{reference_analysis.get('limitations', [])}"
         )
     direction = (creative_direction or "").strip()
     if not direction:
-        direction = "Giữ chủ đề, loại nội dung và cách trình bày của video gốc; đổi góc nhìn, ví dụ và tình huống để tạo video mới."
+        direction = "Kể lại nội dung của nguồn bằng một cách dẫn chuyện mới: câu chữ, nhịp kể và hình minh hoạ của riêng mình."
     parts.append(f"Creative remake mode: {remake_mode}. User's new-video direction: {direction}")
     parts.append(
         "FORMAT LOCK (bắt buộc): Hãy suy ra format với bằng chứng từ transcript, tiêu đề và phân tích tham chiếu. "
@@ -382,23 +404,6 @@ def _build_prompt(
         "Video truyện kể mới được dùng nhân vật và kịch tính. Không tự thêm châu báu, phép màu, làng cổ, nhân vật hư cấu "
         "hoặc bài học sáo rỗng nếu nguồn không phải truyện."
     )
-    animal = source_animal(title)
-    if animal:
-        suggested = list((research_context or {}).get("suggested_target_animals") or [])
-        target_hint = ", ".join(suggested) or "mèo, chó, gà hoặc vịt"
-        parts.append(
-            f"NON-NEGOTIABLE TOPIC RULE: The source is an animal-origin folktale about '{animal}'. "
-            f"Create an original animal-origin folktale about ONE DIFFERENT animal (choose {target_hint} unless the user names one). "
-            f"The new title and central transformation must clearly be about that chosen animal; never replace the animal theme with an unrelated object, merchant or generic deception story. "
-            f"Do not reuse '{animal}' as the transformed animal or central protagonist."
-        )
-    if research_context:
-        results = research_context.get("results") or []
-        research_lines = [f"- {item.get('title', '')}: {item.get('snippet', '')}" for item in results if isinstance(item, dict)]
-        parts.append(
-            "Web discovery hints, used only to find broad folklore motifs. Do not retell, quote, copy names, scenes or wording from them; invent a new plot:\n"
-            + ("\n".join(research_lines) if research_lines else "- No result available: use the suggested target animal and invent an original folklore arc.")
-        )
     duration = max(30, min(1800, int(target_duration_seconds or 90)))
     speech = languages.resolve(output_language)
     target_words = math.ceil(duration * float(speech["tokens_per_second"]))
@@ -416,7 +421,7 @@ def _build_prompt(
             "và nêu rõ trong script_outline rằng đây là gợi ý cấu trúc chung."
         )
     parts.append(
-        "Write as a senior YouTube editor who follows FORMAT LOCK, never as a generic storyteller. Preserve the source's density of useful information and presentation rhythm, but use original examples, explanations and visual illustrations. For educational explainers, use precise plain language, cause-and-effect, definitions, mechanisms, comparisons and practical takeaways. Do not pad with fantasy, dramatic fiction, vague morals or decorative wording. For fictional stories, use characters and plot only when the source is genuinely fictional. New titles must retain the source title's topic and structural template, but use clearly different wording rather than replacing just one word. Do not make summary a recap: summary must explain the NEW production concept only. Return: new titles, description, hashtags, "
+        "Write as a senior YouTube editor who follows FORMAT LOCK. Keep the source's facts, people, numbers and order exactly; what you write fresh is the wording, the framing and the visuals. Use precise plain language and let cause and effect carry the explanation. Do not pad with fantasy, invented drama, vague morals or decorative wording, and do not add an example, a character or a detail the source did not have. New titles must keep the source's topic and say the same thing in clearly different words. Return: new titles, description, hashtags, "
         f"creative_direction, new_story_concept, style_application, a complete new_script, and scene_blueprints ({max(6, min(48, -(-duration // 20)))} scenes, approximately 15-25 seconds each). "
         "Each scene_blueprints.narration is the actual voiceover: write 2-5 complete, concrete spoken sentences with a clear subject, action, "
         "cause/effect and transition to the next scene. Do not use vague summaries, bullet points, labels or placeholders. "

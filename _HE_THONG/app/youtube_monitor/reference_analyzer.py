@@ -1,122 +1,230 @@
+"""Report what a source video contains — the story and every line spoken in it.
+
+This used to return a production brief: abstract story beats, a style recipe,
+pacing notes. All of it was about *how the source was made*, and none of it was
+the thing the next step actually needs, which is what the source says. A writer
+handed "rhythm map: escalation, reversal, payoff" cannot retell a folk tale; a
+writer handed the events in order and the characters' own words can.
+
+So it is simpler now, and it is complete. Nothing may be summarised away: the
+whole story, every line of dialogue, and an honest list of what could not be
+made out. A long transcript is read in pieces rather than truncated, because a
+brief that quietly stops halfway is worse than one that admits it is partial.
+
+It also rules on nothing. Whether the new video may keep or change any of this
+is decided in the script step, which is where the rules live.
+"""
+
 from __future__ import annotations
 
-"""Turn a source video into a *reference brief*, never a script to copy."""
-
+import re
 from typing import Any
 
 from . import languages
-from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
+from .llm_client import (
+    LlmError,
+    call_antigravity_json,
+    call_claude_code_cli_json,
+    call_claude_json,
+    call_codex_json,
+    call_openai_json,
+)
 
 
 ReferenceAnalysisError = LlmError
+
+# Roughly what fits comfortably in one call while leaving room for the answer.
+_CHUNK_CHARS = 9000
 
 REFERENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "content_summary": {"type": "string"},
-        "narrative_formula": {"type": "array", "items": {"type": "string"}},
+        "characters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "role": {"type": "string"},
+                },
+                "required": ["name", "role"],
+                "additionalProperties": False,
+            },
+        },
+        "dialogue": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "order": {"type": "integer"},
+                    "speaker": {"type": "string"},
+                    "line": {"type": "string"},
+                },
+                "required": ["order", "speaker", "line"],
+                "additionalProperties": False,
+            },
+        },
         "scene_map": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "order": {"type": "integer"},
-                    "story_beat": {"type": "string"},
                     "what_happens": {"type": "string"},
-                    "visual_direction": {"type": "string"},
-                    "editing_pacing": {"type": "string"},
                 },
-                "required": ["order", "story_beat", "what_happens", "visual_direction", "editing_pacing"],
+                "required": ["order", "what_happens"],
                 "additionalProperties": False,
             },
         },
-        "visual_style": {
-            "type": "object",
-            "properties": {
-                "art_direction": {"type": "string"},
-                "subjects_and_setting": {"type": "string"},
-                "lighting_palette": {"type": "string"},
-                "camera_composition": {"type": "string"},
-                "motion_editing": {"type": "string"},
-                "text_graphics": {"type": "string"},
-                "style_recipe": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["art_direction", "subjects_and_setting", "lighting_palette", "camera_composition", "motion_editing", "text_graphics", "style_recipe"],
-            "additionalProperties": False,
-        },
-        "pacing": {"type": "string"},
-        "remake_guardrails": {"type": "array", "items": {"type": "string"}},
+        "visual_style": {"type": "string"},
         "limitations": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["content_summary", "narrative_formula", "scene_map", "visual_style", "pacing", "remake_guardrails", "limitations"],
+    "required": ["content_summary", "characters", "dialogue", "scene_map", "limitations"],
     "additionalProperties": False,
 }
 
-# Kept so older callers and saved sessions do not break; there is now one
-# brief, because both workflows keep the content and change only the telling.
-FAITHFUL_MODE = "faithful"
+_SYSTEM_PROMPT = """You are writing down what a source video contains, for someone who cannot
+watch it and who will retell it.
 
-_SYSTEM_PROMPT = """You are analysing a source video that will be RETOLD, not remade.
-The new video keeps this content: the same events, people, numbers, order and ending, said a
-different way. So report what the source actually contains, accurately and in order, and state
-plainly what you could not determine. Do not propose changing anything, do not suggest a new
-setting or new characters, and do not invent detail the source did not give. Return only the
-requested JSON."""
+Two things matter above all:
+1. THE STORY, complete. Every event, in the order it happens, through to the ending. Not a
+   summary - if you leave something out, it is gone.
+2. THE DIALOGUE. Every line a character speaks, attributed to whoever says it, in order and in
+   their own words. Narration counts too: attribute it to "Người dẫn". Do not paraphrase a line
+   into a description of it.
 
-# The source is the base of the new video, not a prompt to invent from. This
-# used to read "produce an ORIGINAL new video", which is how the brief came to
-# demand a changed setting, a swapped comic motive and a different field of
-# knowledge - on folklore and history, where changing any of that makes the
-# video wrong rather than original.
-_SYSTEM_PROMPT = """You are analysing a source video that a new video will be built on.
-The CONTENT is not yours to change: events, people, names, numbers, dates, places, the order
-things happen and how it ends all belong to the source and must survive into the new video.
-What the new video does differently is the TELLING - its own wording, its own narration voice
-and rhythm, its own visuals, graphics and music.
+Keep everything else short. A sentence or two on how it looks is enough; nobody needs a style
+recipe. You are not deciding what a new video may keep or change - that is settled later, when
+the script is written.
 
-This matters most where you might be tempted otherwise: folklore, history and news are not
-material to reinvent. A retold folk tale with a different character or a different ending is
-not an original work, it is a wrong one.
+Never invent. Automatic transcripts mishear words, drop endings and run speakers together. Where
+you cannot tell who is speaking, say "Không rõ". Where a line is garbled, keep what you can and
+mark the rest. Put every such gap in limitations, so nobody later mistakes a guess for a fact.
+Return only the requested JSON."""
 
-So report what the source actually contains, in order and accurately, and say plainly what you
-could not determine. Never propose changing a fact, a character, a setting, a motive or an
-outcome. State uncertainty frankly when no transcript or visual frames were supplied. Return
-only the requested JSON."""
+
+def _chunks(text: str, size: int = _CHUNK_CHARS) -> list[str]:
+    """Split on blank lines, then sentences, so no line is cut in half."""
+    body = (text or "").strip()
+    if len(body) <= size:
+        return [body] if body else []
+    paragraphs = [part for part in re.split(r"\n\s*\n", body) if part.strip()]
+    if len(paragraphs) == 1:
+        paragraphs = [part for part in re.split(r"(?<=[.!?…])\s+", body) if part.strip()]
+    pieces: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if current and len(current) + len(paragraph) + 2 > size:
+            pieces.append(current)
+            current = paragraph
+        else:
+            current = f"{current}\n\n{paragraph}" if current else paragraph
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _call(provider: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    name = str(provider or "codex_cli").strip().lower()
+    callers = {
+        "codex_cli": call_codex_json,
+        "openai_gpt": call_openai_json,
+        "anthropic_claude": call_claude_json,
+        "claude_code_cli": call_claude_code_cli_json,
+        "antigravity": call_antigravity_json,
+    }
+    caller = callers.get(name)
+    if caller is None:
+        raise ReferenceAnalysisError(f"Provider không được hỗ trợ cho phân tích tham chiếu: {provider}")
+    return caller(system_prompt, user_prompt, REFERENCE_SCHEMA, max_tokens=8000)
 
 
 def _prompt(
     video: dict[str, Any],
     transcript_text: str | None,
     output_language: str = languages.DEFAULT_LANGUAGE,
-    mode: str = "remake",
+    part: int = 1,
+    total_parts: int = 1,
 ) -> str:
     parts = [
-        f"Source title: {str(video.get('title') or '').strip()}",
-        f"Source description: {str(video.get('description') or '').strip()[:2400]}",
-        f"Tags: {', '.join(str(x) for x in (video.get('tags') or []))}",
+        f"Tiêu đề nguồn: {str(video.get('title') or '').strip()}",
+        f"Mô tả nguồn: {str(video.get('description') or '').strip()[:1200]}",
     ]
+    if total_parts > 1:
+        parts.append(
+            f"Đây là PHẦN {part}/{total_parts} của bản ghi. Chỉ ghi lại những gì có trong phần này; "
+            "đừng tóm tắt lại các phần khác và đừng đoán phần chưa đọc tới."
+        )
     if transcript_text:
-        parts.append(f"Transcript for story/scene inference (possibly shortened):\n{transcript_text[:12000]}")
-        parts.append("Visual note: transcript confirms spoken content and sequence, not exact image details. Infer visual direction conservatively.")
+        parts.append(f"BẢN GHI LỜI NÓI:\n{transcript_text}")
     else:
-        parts.append("No transcript or sampled frames are available. Do not pretend to have watched the video; mark visual claims as hypotheses in limitations.")
+        parts.append(
+            "Không có bản ghi lời nói và không có khung hình nào. Đừng giả vờ đã xem video: "
+            "ghi rõ trong limitations rằng mọi nhận định chỉ dựa trên tiêu đề và mô tả."
+        )
     parts.append(
-        "Return a FAITHFUL content brief for retelling this source:\n"
-        "- content_summary: what the source actually says or shows, accurately.\n"
-        "- narrative_formula: the real sequence of events in order, not an abstract pattern.\n"
-        "- scene_map: the actual scenes in order - what happens, who is in it, what is on screen.\n"
-        "- visual_style: how the source looks, so the retelling can match it.\n"
-        "- pacing: how fast the source moves.\n"
-        "- remake_guardrails: two kinds of line, each clearly marked. 'GIU:' for every detail "
-        "that must survive unchanged - names, numbers, dates, places, who does what, the ending. "
-        "'DOI:' only for things that are presentation and never content - wording, narration "
-        "voice and rhythm, on-screen graphics, music, editing, and not reusing the source's own "
-        "footage, logo or voice track. Never write a 'DOI:' line about a fact, a character, a "
-        "setting, a motive or an outcome.\n"
-        "- limitations: what you could not determine and must not be guessed at."
+        "Hãy ghi lại:\n"
+        "- content_summary: TOÀN BỘ câu chuyện/nội dung, kể tuần tự từ đầu đến hết. Đủ chi tiết để "
+        "người đọc kể lại được mà không cần xem video.\n"
+        "- characters: những ai xuất hiện, mỗi người một dòng ngắn.\n"
+        "- dialogue: TỪNG CÂU THOẠI, theo đúng thứ tự, kèm người nói. Lời dẫn chuyện ghi người nói "
+        "là 'Người dẫn'. Không được rút gọn, không được gộp nhiều câu thành một, không được mô tả "
+        "thay vì trích lời.\n"
+        "- scene_map: các đoạn nội dung theo thứ tự, mỗi đoạn một câu chuyện gì đang xảy ra.\n"
+        "- visual_style: một hai câu về hình ảnh, ngắn thôi.\n"
+        "- limitations: chỗ nào nghe không rõ, không biết ai nói, hoặc không xác định được."
     )
     parts.append(languages.instruction(output_language))
     return "\n\n".join(parts)
+
+
+def _merge(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join per-chunk readings into one, keeping order and dropping repeats.
+
+    Chunks are read independently, so the same character is introduced more
+    than once while dialogue simply continues. Characters are de-duplicated by
+    name; dialogue and events are concatenated and renumbered, because their
+    order across the whole video is the thing being preserved.
+    """
+    merged: dict[str, Any] = {
+        "content_summary": "",
+        "characters": [],
+        "dialogue": [],
+        "scene_map": [],
+        "visual_style": "",
+        "limitations": [],
+    }
+    seen_characters: set[str] = set()
+    summaries: list[str] = []
+    for result in results:
+        summary = str(result.get("content_summary") or "").strip()
+        if summary:
+            summaries.append(summary)
+        for person in result.get("characters") or []:
+            name = str(person.get("name") or "").strip()
+            if name and name.lower() not in seen_characters:
+                seen_characters.add(name.lower())
+                merged["characters"].append(person)
+        for line in result.get("dialogue") or []:
+            merged["dialogue"].append({
+                "order": len(merged["dialogue"]) + 1,
+                "speaker": str(line.get("speaker") or "Không rõ"),
+                "line": str(line.get("line") or ""),
+            })
+        for beat in result.get("scene_map") or []:
+            merged["scene_map"].append({
+                "order": len(merged["scene_map"]) + 1,
+                "what_happens": str(beat.get("what_happens") or ""),
+            })
+        if not merged["visual_style"]:
+            merged["visual_style"] = str(result.get("visual_style") or "")
+        for item in result.get("limitations") or []:
+            text = str(item)
+            if text not in merged["limitations"]:
+                merged["limitations"].append(text)
+    merged["content_summary"] = "\n\n".join(summaries)
+    return merged
 
 
 def analyze_reference(
@@ -126,24 +234,27 @@ def analyze_reference(
     output_language: str = languages.DEFAULT_LANGUAGE,
     mode: str = "remake",
 ) -> dict[str, Any]:
-    name = str(provider or "codex_cli").strip().lower()
-    user_prompt = _prompt(video, transcript_text, output_language, mode)
-    if name == "codex_cli":
-        result = call_codex_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
-    elif name == "openai_gpt":
-        result = call_openai_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
-    elif name == "anthropic_claude":
-        result = call_claude_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
-    elif name == "claude_code_cli":
-        result = call_claude_code_cli_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
-    elif name == "antigravity":
-        result = call_antigravity_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
+    """Read the source through, in as many passes as its transcript needs."""
+    del mode  # One brief now: describe the source, rule on nothing.
+    pieces = _chunks(transcript_text or "")
+    if not pieces:
+        result = _call(provider, _SYSTEM_PROMPT, _prompt(video, None, output_language))
+        parts_read = 0
     else:
-        raise ReferenceAnalysisError(f"Provider không được hỗ trợ cho phân tích tham chiếu: {provider}")
+        readings = [
+            _call(
+                provider,
+                _SYSTEM_PROMPT,
+                _prompt(video, piece, output_language, index + 1, len(pieces)),
+            )
+            for index, piece in enumerate(pieces)
+        ]
+        result = _merge(readings) if len(readings) > 1 else readings[0]
+        parts_read = len(pieces)
     return {
-        "provider": name,
-        "mode": mode,
+        "provider": str(provider or "codex_cli").strip().lower(),
         "source_type": "transcript" if transcript_text else "metadata",
         "visual_evidence": "transcript-guided" if transcript_text else "metadata-only",
+        "transcript_parts_read": parts_read,
         **result,
     }

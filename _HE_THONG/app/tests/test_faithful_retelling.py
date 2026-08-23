@@ -71,15 +71,13 @@ def test_retelling_mode_drops_every_instruction_to_invent() -> None:
 
 
 def test_an_animal_folktale_is_not_forced_onto_a_different_animal() -> None:
-    """The sharpest case: the normal path demands the animal be swapped out."""
-    # Dấu tiếng Việt là bắt buộc: source_animal() dò trên tiêu đề có dấu.
+    """A rule once demanded that "Su tich con meo" be rewritten about some other
+    animal. It is gone from both paths now - changing the animal in an origin
+    tale does not make a new story, it makes a wrong one."""
     video = {"title": "SỰ TÍCH CON MÈO - Tại Sao Loài Mèo Hay Bắt Chuột", "description": ""}
 
-    ordinary = _build_prompt(video, FOLK_TALE, remake_mode="new_angle_same_topic")
-    retelling = _build_prompt(video, FOLK_TALE, remake_mode=FAITHFUL_RETELL_MODE)
-
-    assert "ONE DIFFERENT animal" in ordinary
-    assert "ONE DIFFERENT animal" not in retelling
+    for mode in ("new_angle_same_topic", FAITHFUL_RETELL_MODE):
+        assert "ONE DIFFERENT animal" not in _build_prompt(video, FOLK_TALE, remake_mode=mode)
 
 
 def test_the_retelling_brief_pins_the_content_and_frees_the_telling() -> None:

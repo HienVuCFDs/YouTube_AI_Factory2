@@ -36,15 +36,27 @@ class WriterTests(unittest.TestCase):
     def test_codex_cli_is_a_supported_writer_provider(self):
         self.assertIn("codex_cli", AVAILABLE_WRITER_PROVIDERS)
 
-    def test_build_prompt_includes_creative_direction_and_reference_brief(self):
+    def test_build_prompt_carries_the_source_content_and_its_dialogue(self):
+        """The brief used to pass abstract beats; the writer needs the source's
+        own events and the characters' own words."""
         prompt = _build_prompt(
             {"title": "Chó", "description": "", "tags": []},
             "Lời kể nguồn",
-            creative_direction="Đổi nhân vật chính thành mèo ở chung cư.",
-            reference_analysis={"narrative_formula": ["mở đầu", "thử thách"], "visual_style": {"art_direction": "ấm áp"}, "remake_guardrails": ["đổi sự kiện"]},
+            creative_direction="Giữ nội dung, đổi cách dẫn chuyện.",
+            reference_analysis={
+                "content_summary": "Hai anh em họ Cao",
+                "characters": [{"name": "Tân", "role": "người anh"}],
+                "dialogue": [{"order": 1, "speaker": "Cha", "line": "Các con phải thương nhau"}],
+                "scene_map": [{"order": 1, "what_happens": "Người cha dặn dò"}],
+                "visual_style": "ấm áp",
+                "limitations": ["không có khung hình"],
+            },
         )
-        self.assertIn("Đổi nhân vật chính thành mèo", prompt)
-        self.assertIn("Narrative formula", prompt)
+        self.assertIn("Giữ nội dung, đổi cách dẫn chuyện", prompt)
+        self.assertIn("Hai anh em họ Cao", prompt)
+        self.assertIn("Các con phải thương nhau", prompt)
+        self.assertIn("Tân (người anh)", prompt)
+        self.assertIn("không có khung hình", prompt)
 
 
 if __name__ == "__main__":

@@ -231,6 +231,22 @@
     .studio-upload label.btn { cursor: pointer; }
     .studio-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .studio-thumbs img { width: 74px; height: 74px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+    .studio-rules { margin-top: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; }
+    .studio-rules-head { font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .04em; color: var(--muted); margin-bottom: 9px; }
+    .studio-rules-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+    .studio-rules-title { font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+    .studio-rules-title.keep { color: #16a34a; }
+    .studio-rules-title.change { color: var(--accent); }
+    .studio-rules ul { margin: 0; padding-left: 17px; font-size: 12px; color: var(--muted); }
+    .studio-rules li { margin: 2px 0; }
+    .studio-rules-note { margin-top: 10px; font-size: 12px; color: #c0392b; }
+    .dialogue-list { max-height: 420px; overflow-y: auto; border: 1px solid var(--line);
+      border-radius: 7px; padding: 8px 10px; }
+    .dialogue-line { display: grid; grid-template-columns: minmax(80px, 150px) 1fr; gap: 10px;
+      padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 13px; }
+    .dialogue-line:last-child { border-bottom: 0; }
+    .dialogue-who { color: var(--accent); font-weight: 600; }
     .plan-table-wrap { overflow-x: auto; }
     .plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .plan-table th, .plan-table td { padding: 6px 8px; border-bottom: 1px solid #e6e6e6; text-align: left; vertical-align: top; }
@@ -428,7 +444,7 @@
             <div id="studioWorkflowSummary" class="studio-managed-summary">Chọn kênh của tôi để áp dụng workflow đã gắn.</div>
           </div>
           <div class="studio-grid" style="margin-top:10px">
-            <div class="studio-model-note" data-wf="reup" hidden style="margin-top:9px">WF Reup <b>kể lại đúng nội dung gốc</b>: nhân vật, tên riêng, số liệu, thứ tự sự việc và cái kết đều giữ nguyên. AI chỉ đổi <b>cách dẫn chuyện</b>. Ô hướng dẫn ở trên vì vậy chỉ dùng để mô tả giọng kể, không dùng để đổi nội dung.</div><div class="studio-field" data-wf="content"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
+            <div class="studio-model-note" data-wf="reup" hidden style="margin-top:9px">WF Reup <b>kể lại đúng nội dung gốc</b>: nhân vật, tên riêng, số liệu, thứ tự sự việc và cái kết đều giữ nguyên. AI chỉ đổi <b>cách dẫn chuyện</b>. Ô hướng dẫn ở trên vì vậy chỉ dùng để mô tả giọng kể, không dùng để đổi nội dung.</div><div class="studio-rules"><div class="studio-rules-head">Quy tắc áp dụng khi viết kịch bản</div><div class="studio-rules-cols"><div><div class="studio-rules-title keep">GIỮ NGUYÊN</div><ul><li>Sự việc và thứ tự diễn biến</li><li>Nhân vật và tên riêng</li><li>Con số, ngày tháng, địa danh</li><li>Kết cục</li><li>Loại nội dung và đối tượng người xem</li></ul></div><div><div class="studio-rules-title change">ĐƯỢC ĐỔI</div><ul><li>Câu chữ và cách diễn đạt (viết mới hoàn toàn)</li><li>Cách mở đầu, dẫn dắt, nhịp kể</li><li>Hình minh hoạ, đồ hoạ, nhạc, cách dựng</li><li>Không dùng lại footage/logo/tiếng của nguồn</li></ul></div></div><div class="studio-rules-note">Truyện dân gian, lịch sử và tin tức: ranh giới này là tuyệt đối. Đổi một cái tên hay một cái kết không tạo ra tác phẩm mới, nó tạo ra một video sai.</div></div><div class="studio-field" data-wf="content"><label for="studioRemakeModeSelect">Cách tạo video mới</label><select id="studioRemakeModeSelect"><option value="new_angle_same_topic" selected>Giữ chủ đề, format & cách nói; đổi ví dụ</option><option value="new_story_same_feeling">Đổi chủ đề nhưng giữ nhịp/cấu trúc</option><option value="style_only">Chỉ lấy phong cách hình ảnh & nhịp dựng</option></select></div>
             <div class="studio-field"><label for="studioCreativeDirectionInput">Yêu cầu video mới</label><textarea id="studioCreativeDirectionInput" placeholder="Ví dụ: Vẫn giải thích lãi suất cho người mới; dùng tình huống vay mua điện thoại thay vì ví dụ gốc; giọng rõ ràng, thực tế, gần bằng thời lượng video mẫu."></textarea></div>
           </div>
           <div class="studio-actions"><button id="studioAnalyzeButton" class="btn primary" disabled>1. Phân tích tham chiếu</button><button class="btn ghost" onclick="setWorkspace('source')">Chọn video mẫu khác</button></div>
@@ -2025,24 +2041,33 @@
   }
 
   function renderStudioReferenceAnalysis(result) {
-    const style = result.visual_style || {};
-    const formula = (result.narrative_formula || []).map((item, index) => `<li><b>${index + 1}.</b> ${esc(item)}</li>`).join('') || '<li>Chưa xác định được cấu trúc.</li>';
-    const scenes = (result.scene_map || []).map((item, index) => `<div class="studio-result-card"><h3>Cảnh ${esc(item.order || index + 1)} · ${esc(item.story_beat || 'Nhịp kể')}</h3><p><b>Diễn biến:</b> ${esc(item.what_happens || '—')}\n<b>Hình ảnh:</b> ${esc(item.visual_direction || '—')}\n<b>Nhịp dựng:</b> ${esc(item.editing_pacing || '—')}</p></div>`).join('');
-    const recipe = (style.style_recipe || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || '<span class="secondary-text">Chưa có công thức phong cách.</span>';
-    // Bộ phân tích trả về hai loại dòng: 'GIU:' là nội dung bắt buộc giữ nguyên,
-    // 'DOI:' là những thứ thuộc về cách trình bày. Trộn chung một danh sách là
-    // cách cũ đã khiến người đọc tưởng mình được phép đổi cả nội dung.
-    const rules = (result.remake_guardrails || []).map((item) => String(item));
-    const strip = (item) => item.replace(/^(GIU|GIỮ|DOI|ĐỔI)\s*:\s*/i, '');
-    const mustKeep = rules.filter((item) => /^(GIU|GIỮ)\s*:/i.test(item));
-    const mayChange = rules.filter((item) => /^(DOI|ĐỔI)\s*:/i.test(item));
-    const unmarked = rules.filter((item) => !mustKeep.includes(item) && !mayChange.includes(item));
-    const bullets = (items) => items.map((item) => `<li>${esc(strip(item))}</li>`).join('');
-    const limitations = (result.limitations || []).map((item) => `<li>${esc(item)}</li>`).join('') || '<li>Dữ liệu tham chiếu chưa đầy đủ.</li>';
+    const beats = (result.scene_map || []).map((item, index) =>
+      `<li><b>${index + 1}.</b> ${esc(item.what_happens || '')}</li>`).join('') || '<li>Chưa ghi được diễn biến.</li>';
+    const people = (result.characters || []).map((item) =>
+      `<li><b>${esc(item.name || '')}</b> — ${esc(item.role || '')}</li>`).join('') || '<li>Chưa xác định nhân vật.</li>';
+    // Lời thoại là thứ bản kể lại đánh mất đầu tiên, nên hiện nguyên văn từng câu.
+    const dialogue = result.dialogue || [];
+    const lines = dialogue.map((item) =>
+      `<div class="dialogue-line"><span class="dialogue-who">${esc(item.speaker || 'Không rõ')}</span><span>${esc(item.line || '')}</span></div>`).join('');
+    const limitations = (result.limitations || []).map((item) => `<li>${esc(item)}</li>`).join('')
+      || '<li>Không ghi nhận điểm nào thiếu chắc chắn.</li>';
+    const parts = Number(result.transcript_parts_read || 0);
     $('studioAnalysisResult').innerHTML = `
-      <div class="studio-result-card"><h3>Nội dung nguồn và trình tự sự việc</h3><p>${esc(result.content_summary || '—')}</p><ol class="studio-result-list">${formula}</ol><p style="margin-top:10px"><b>Nhịp tổng thể:</b> ${esc(result.pacing || '—')}</p></div>
-      <div class="studio-result-columns"><div class="studio-result-card"><h3>Ngôn ngữ hình ảnh</h3><p><b>Art direction:</b> ${esc(style.art_direction || '—')}\n<b>Nhân vật/bối cảnh:</b> ${esc(style.subjects_and_setting || '—')}\n<b>Màu & ánh sáng:</b> ${esc(style.lighting_palette || '—')}\n<b>Camera/bố cục:</b> ${esc(style.camera_composition || '—')}\n<b>Chuyển động/dựng:</b> ${esc(style.motion_editing || '—')}\n<b>Chữ/đồ hoạ:</b> ${esc(style.text_graphics || '—')}</p><div class="keyword-list">${recipe}</div></div><div class="studio-result-card"><h3>Giữ nguyên nội dung gốc</h3><ul class="studio-result-list">${bullets(mustKeep.concat(unmarked)) || '<li>Chưa rút được chi tiết bắt buộc giữ.</li>'}</ul>${mayChange.length ? `<div class="eyebrow" style="margin-top:12px">Chỉ được đổi cách trình bày</div><ul class="studio-result-list">${bullets(mayChange)}</ul>` : ''}<div class="eyebrow" style="margin-top:12px">Độ tin cậy / giới hạn</div><ul class="studio-result-list">${limitations}</ul></div></div>
-      <div class="studio-result-card"><h3>Các cảnh của video nguồn</h3><div class="studio-result-columns">${scenes}</div></div>
+      <div class="studio-result-card"><h3>Nội dung câu chuyện</h3>
+        ${parts > 1 ? `<p class="hint">Đã đọc hết bản ghi qua ${parts} phần.</p>` : ''}
+        <p>${esc(result.content_summary || '—')}</p></div>
+      <div class="studio-result-columns">
+        <div class="studio-result-card"><h3>Nhân vật</h3><ul class="studio-result-list">${people}</ul></div>
+        <div class="studio-result-card"><h3>Diễn biến theo thứ tự</h3><ol class="studio-result-list">${beats}</ol></div>
+      </div>
+      <div class="studio-result-card"><h3>Lời thoại · ${dialogue.length} câu</h3>
+        ${lines ? `<div class="dialogue-list">${lines}</div>` : '<div class="studio-empty">Bản ghi không có lời thoại tách được.</div>'}</div>
+      <div class="studio-result-columns">
+        <div class="studio-result-card"><h3>Hình ảnh</h3><p>${esc(result.visual_style || '—')}</p></div>
+        <div class="studio-result-card"><h3>Chỗ không xác định được</h3>
+          <p class="hint">Bước viết kịch bản không được tự lấp vào những chỗ này.</p>
+          <ul class="studio-result-list">${limitations}</ul></div>
+      </div>
       <details class="studio-result-card"><summary>Xem dữ liệu phân tích đầy đủ (JSON)</summary><pre class="studio-json">${esc(JSON.stringify(result, null, 2))}</pre></details>`;
   }
 
