@@ -1595,6 +1595,235 @@ def list_project_assets(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_assets(project_id)
 
 
+LOCAL_UPLOAD_CHANNEL_ID = "LOCAL-UPLOADS-0000000000"
+_SOURCE_UPLOAD_EXTENSIONS = _ASSET_EXTENSIONS["video"] | _ASSET_EXTENSIONS["audio"]
+
+
+def _ensure_local_upload_channel() -> None:
+    """One synthetic channel so uploads sit alongside the tracked ones.
+
+    Everything downstream - projects, transcripts, analyses, timelines - is
+    keyed to a row in `videos`, which in turn needs a channel. Giving uploads
+    their own channel rather than a nullable column means none of that had to
+    learn about a second kind of source.
+    """
+    database.upsert_channel({
+        "youtube_channel_id": LOCAL_UPLOAD_CHANNEL_ID,
+        "channel_url": "local://uploads",
+        "title": "Tệp tải lên từ máy",
+        "uploads_playlist_id": "LOCAL-UPLOADS",
+        "group_name": "Tệp tải lên",
+    })
+
+
+@app.post("/api/uploads/source")
+def upload_local_source(
+    file: UploadFile = File(...),
+    title: str = Form(default=""),
+) -> dict[str, Any]:
+    """Take a video or audio file from the user's machine as a project source.
+
+    Until now a project could only start from a video the app had discovered
+    on YouTube, which left no way to work on footage the user already had.
+    The uploaded file is registered as an ordinary video row carrying
+    local_media_path, so transcription, analysis and - for the reup workflow -
+    cutting scenes out of it all work without a download step.
+    """
+    filename = Path(file.filename or "").name
+    extension = Path(filename).suffix.lower()
+    if not filename or extension not in _SOURCE_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chỉ nhận video hoặc audio. Đuôi nhận được: {extension or 'không có'}",
+        )
+
+    upload_dir = Path(PRODUCTION_ARTIFACT_DIR) / "_tai_len"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    video_id = f"local-{uuid.uuid4().hex[:16]}"
+    target = upload_dir / f"{video_id}{extension}"
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > LOCAL_ASSET_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="File vượt quá giới hạn upload local")
+                digest.update(chunk)
+                output.write(chunk)
+    except HTTPException:
+        target.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Không lưu được file: {exc}") from exc
+    if not total:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="File rỗng")
+
+    _ensure_local_upload_channel()
+    duration = media_duration_seconds(target, FFMPEG_BINARY) or 0
+    database.upsert_video({
+        "youtube_video_id": video_id,
+        "youtube_channel_id": LOCAL_UPLOAD_CHANNEL_ID,
+        "video_url": target.as_uri(),
+        "title": (title.strip() or Path(filename).stem)[:200],
+        "description": f"Tệp tải lên từ máy: {filename}",
+        "duration_seconds": int(duration),
+        "metadata_hash": digest.hexdigest(),
+        "raw_payload": {"uploaded_filename": filename, "file_size": total},
+    })
+    # upsert_video does not write local_media_path - the column was added later
+    # for downloads - so the file is registered the same way a download is.
+    database.mark_video_downloaded(video_id, str(target))
+    return {
+        "status": "uploaded",
+        "video": database.get_video(video_id),
+        "file_size": total,
+        "duration_seconds": int(duration),
+    }
+
+
+def _contact_sheet_for_review(images: list[Path], project_id: int) -> Path:
+    """Tile several reference images into one, so a model sees them together.
+
+    Showing them one at a time costs a CLI round trip each and, worse, invites
+    a description of each picture rather than of what they have in common -
+    which is the whole point of handing over a folder.
+    """
+    if len(images) == 1:
+        return images[0]
+    workspace = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"] / "reference"
+    workspace.mkdir(parents=True, exist_ok=True)
+    sheet_path = workspace / "reference-contact-sheet.png"
+    columns = 2 if len(images) <= 4 else 3
+    command = [FFMPEG_BINARY, "-y", "-hide_banner", "-loglevel", "error"]
+    for image in images:
+        command.extend(["-i", str(image)])
+    scaled = "".join(
+        f"[{index}:v]scale=640:640:force_original_aspect_ratio=decrease,"
+        f"pad=640:640:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[t{index}];"
+        for index in range(len(images))
+    )
+    inputs = "".join(f"[t{index}]" for index in range(len(images)))
+    command.extend([
+        "-filter_complex",
+        f"{scaled}{inputs}xstack=inputs={len(images)}:"
+        f"layout={_xstack_layout(len(images), columns)}:fill=black[out]",
+        "-map", "[out]", "-frames:v", "1", str(sheet_path),
+    ])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    if result.returncode != 0 or not sheet_path.is_file():
+        # One picture the model can actually see beats a sheet it cannot.
+        return images[0]
+    return sheet_path
+
+
+def _xstack_layout(count: int, columns: int) -> str:
+    """Grid positions for xstack, in the cell units FFmpeg expects."""
+    cells = []
+    for index in range(count):
+        column, row = index % columns, index // columns
+        cells.append(
+            f"{'0' if column == 0 else '+'.join(['w0'] * column)}_"
+            f"{'0' if row == 0 else '+'.join(['h0'] * row)}"
+        )
+    return "|".join(cells)
+
+
+_REFERENCE_IMAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "visual_style": {"type": "string"},
+        "palette": {"type": "array", "items": {"type": "string"}},
+        "subjects": {"type": "array", "items": {"type": "string"}},
+        "composition": {"type": "string"},
+        "reusable_prompt": {"type": "string"},
+    },
+    "required": ["summary", "visual_style"],
+}
+
+
+@app.post("/api/projects/{project_id}/assets/analyze-images")
+def analyze_reference_images(
+    project_id: int,
+    limit: int = Query(default=6, ge=1, le=12),
+) -> dict[str, Any]:
+    """Have a vision AI look at the images the user uploaded as reference.
+
+    Whisper covers uploaded audio and video; images had no analysis at all,
+    so a folder of reference art could be attached and then never read. The
+    files are shown to the model directly rather than described from their
+    names, and the result includes a prompt fragment the scene writer can
+    reuse so the style actually reaches the images it generates.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    images = [
+        asset for asset in database.list_project_assets(project_id)
+        if str(asset.get("asset_type")) == "image"
+        and Path(str(asset.get("file_path") or "")).is_file()
+    ]
+    if not images:
+        raise HTTPException(status_code=400, detail="Dự án chưa có ảnh tham khảo nào được tải lên")
+
+    chosen = images[:limit]
+    sheet = _contact_sheet_for_review(
+        [Path(str(asset["file_path"])) for asset in chosen], project_id
+    )
+    system_prompt = (
+        "Ban XEM anh tham khao cua nguoi dung roi mo ta phong cach hinh anh cua chung.\n"
+        "- 'summary': anh noi ve cai gi, dung mot doan ngan.\n"
+        "- 'visual_style': phong cach ve/chup, chat lieu, do tuong phan, anh sang.\n"
+        "- 'palette': cac mau chu dao.\n"
+        "- 'subjects': nhung thu xuat hien nhieu lan.\n"
+        "- 'composition': cach bo cuc va goc may.\n"
+        "- 'reusable_prompt': mot doan tieng Anh ngan de gan vao prompt tao anh sau nay, "
+        "dien ta dung phong cach nay.\n"
+        "Chi mo ta nhung gi BAN THUC SU NHIN THAY. Neu khong xem duoc file, hay noi ro, TUYET DOI khong bia. "
+        "Viet bang tieng Viet tru 'reusable_prompt'."
+    )
+    user_prompt = (
+        f"Day la {len(chosen)} anh tham khao nguoi dung tai len cho du an nay"
+        + (f" (ghep thanh mot bang de xem cung luc)." if len(chosen) > 1 else ".")
+    )
+    assignment = settings.agent_assignment("storyboard")
+    executor = str(assignment.get("executor") or settings.orchestrator_provider())
+    errors: list[str] = []
+    for agent in dict.fromkeys([executor, "claude_code_cli", "codex_cli"]):
+        if agent not in {"codex_cli", "claude_code_cli"}:
+            continue
+        try:
+            if agent == "codex_cli":
+                result = call_codex_vision_json(
+                    system_prompt, user_prompt, _REFERENCE_IMAGE_SCHEMA, image_path=sheet
+                )
+            else:
+                result = call_claude_code_cli_json(
+                    system_prompt, user_prompt, _REFERENCE_IMAGE_SCHEMA, image_path=str(sheet)
+                )
+            break
+        except (LlmError, CodexBridgeError) as exc:
+            errors.append(f"{agent}: {exc}")
+    else:
+        raise HTTPException(
+            status_code=502,
+            detail="Không AI vision nào đọc được ảnh tham khảo. " + " | ".join(errors),
+        )
+
+    for asset in chosen:
+        database.update_project_asset_analysis(int(asset["id"]), "completed")
+    return {
+        "status": "analyzed",
+        "images_seen": len(chosen),
+        "images_total": len(images),
+        "result": result,
+    }
+
 @app.post("/api/projects/{project_id}/assets/upload")
 def upload_project_asset(
     project_id: int,
@@ -4845,8 +5074,15 @@ def auto_transcribe_video(
         )
 
     job_id = database.start_analysis_job(video_id, "transcript", "faster_whisper")
+    # An uploaded file has no URL to pull audio from, and a YouTube video that
+    # was already downloaded should not be fetched a second time. Either way
+    # the copy on disk is the better source.
+    local_media = Path(str(video.get("local_media_path") or ""))
     try:
-        result = transcribe_video(video["video_url"], video_id, language=payload.language or None)
+        if local_media.is_file():
+            result = transcribe_local_file(str(local_media), video_id, language=payload.language or None)
+        else:
+            result = transcribe_video(video["video_url"], video_id, language=payload.language or None)
         if not result["text"]:
             raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
 

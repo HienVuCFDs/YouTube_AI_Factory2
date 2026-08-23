@@ -225,6 +225,12 @@
     .usage-limit-banner ul { margin: 0; padding-left: 18px; }
     .usage-limit-banner li { margin: 2px 0; }
     .usage-limit-banner .usage-limit-when { color: var(--muted); }
+    .studio-upload { margin-top: 12px; padding: 11px 13px; border: 1px dashed var(--line); border-radius: 9px; }
+    .studio-upload-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .04em; }
+    .studio-upload label.btn { cursor: pointer; }
+    .studio-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .studio-thumbs img { width: 74px; height: 74px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
     .plan-table-wrap { overflow-x: auto; }
     .plan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .plan-table th, .plan-table td { padding: 6px 8px; border-bottom: 1px solid #e6e6e6; text-align: left; vertical-align: top; }
@@ -398,6 +404,20 @@
           <div class="studio-grid">
             <div class="studio-field"><label for="studioSourceChannelSelect">Kênh video tham chiếu</label><select id="studioSourceChannelSelect"><option value="">Chưa có kênh nguồn</option></select></div>
             <div class="studio-field"><label for="studioVideoSelect">Video của kênh đã chọn</label><select id="studioVideoSelect"><option value="">Chưa có video trong thư viện</option></select></div>
+          </div>
+          <div class="studio-upload">
+            <div class="studio-upload-title">Hoặc tải tệp từ máy lên cho AI phân tích</div>
+            <div class="studio-actions">
+              <label class="btn ghost" for="studioSourceUpload">Tải video/audio làm nguồn</label>
+              <input id="studioSourceUpload" type="file" accept="video/*,audio/*" hidden>
+              <label class="btn ghost" for="studioImageUpload">Tải ảnh tham khảo</label>
+              <input id="studioImageUpload" type="file" accept="image/*" multiple hidden>
+              <label class="btn ghost" for="studioFolderUpload">Tải cả thư mục ảnh</label>
+              <input id="studioFolderUpload" type="file" webkitdirectory directory multiple hidden>
+              <button id="studioAnalyzeImagesButton" class="btn" hidden>Cho AI xem ảnh tham khảo</button>
+            </div>
+            <div id="studioUploadStatus" class="studio-model-note">Video tải lên trở thành nguồn của dự án (không cần tải lại từ YouTube). Ảnh dùng làm tham khảo phong cách.</div>
+            <div id="studioUploadResult" class="studio-result"></div>
           </div>
           <div class="studio-grid" style="margin-top:10px">
             <div class="studio-field"><label for="studioAnalysisProviderSelect">Model phân tích</label><select id="studioAnalysisProviderSelect"><option value="codex_cli">Codex CLI</option></select></div>
@@ -1844,6 +1864,124 @@
     if (!saved || saved.workspace !== 'production' || !saved.detailProjectId) return;
     if (!state.projects.some((item) => Number(item.id) === Number(saved.detailProjectId))) return;
     await openProjectDetail(saved.detailProjectId, saved.projectView || 'overview');
+  }
+
+  // Bước 1 vốn chỉ nhận video mà app đã tìm thấy trên YouTube, nên không có
+  // đường nào để làm việc với tư liệu người dùng đã có sẵn trên máy.
+
+  function setUploadStatus(text, type = '') {
+    const target = $('studioUploadStatus');
+    if (target) {
+      target.textContent = text;
+      target.style.color = type === 'error' ? '#c0392b' : '';
+    }
+    setMessage(text, type);
+  }
+
+  async function uploadStudioSourceFile(file) {
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    setUploadStatus(`Đang tải "${file.name}" lên (${(file.size / 1048576).toFixed(1)} MB)...`);
+    try {
+      // FormData đặt Content-Type kèm boundary; helper api() ép JSON nên không dùng được.
+      const response = await fetch('/api/uploads/source', {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      const video = data.video || {};
+      await loadVideos();
+      state.studioSourceChannelId = video.youtube_channel_id || '';
+      populateStudioSourceChannelSelect();
+      if ($('studioSourceChannelSelect')) $('studioSourceChannelSelect').value = state.studioSourceChannelId;
+      populateStudioVideoSelect();
+      if ($('studioVideoSelect')) $('studioVideoSelect').value = video.youtube_video_id;
+      state.studioVideoId = video.youtube_video_id;
+      await selectStudioVideo();
+      const minutes = Math.round((data.duration_seconds || 0) / 60);
+      setUploadStatus(`Đã nhận "${file.name}"${minutes ? ` · khoảng ${minutes} phút` : ''}. Bấm “1. Phân tích tham chiếu” để AI đọc nội dung.`, 'success');
+    } catch (error) {
+      setUploadStatus(`Tải lên thất bại: ${error.message}`, 'error');
+    }
+  }
+
+  async function uploadStudioReferenceImages(fileList) {
+    const files = Array.from(fileList || []).filter((file) =>
+      IMAGE_EXTENSIONS.has(file.name.split('.').pop()?.toLowerCase() || ''));
+    if (!files.length) return setUploadStatus('Không tìm thấy ảnh nào trong lựa chọn.', 'error');
+    if (!state.studioProjectId) {
+      if (!state.studioVideoId) {
+        return setUploadStatus('Hãy chọn hoặc tải video nguồn trước, rồi mới tải ảnh tham khảo.', 'error');
+      }
+      try {
+        const created = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {
+          method: 'POST', body: JSON.stringify({managed_channel_id: null}),
+        });
+        state.studioProjectId = created.project?.id || created.id || null;
+      } catch (error) { return setUploadStatus(`Không tạo được dự án để chứa ảnh: ${error.message}`, 'error'); }
+    }
+    let done = 0;
+    const failed = [];
+    for (const file of files) {
+      const form = new FormData();
+      form.append('asset_type', 'image');
+      form.append('file', file);
+      setUploadStatus(`Đang tải ảnh ${done + 1}/${files.length}: ${file.name}`);
+      try {
+        const response = await fetch(`/api/projects/${state.studioProjectId}/assets/upload`, {method: 'POST', body: form});
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        done += 1;
+      } catch (error) { failed.push(`${file.name}: ${error.message}`); }
+    }
+    const button = $('studioAnalyzeImagesButton');
+    if (button) button.hidden = done === 0;
+    setUploadStatus(
+      failed.length
+        ? `Đã tải ${done}/${files.length} ảnh; ${failed.length} ảnh lỗi. ${failed[0]}`
+        : `Đã tải ${done} ảnh tham khảo. Bấm “Cho AI xem ảnh tham khảo” để phân tích.`,
+      failed.length ? 'error' : 'success',
+    );
+    await renderStudioReferenceThumbs();
+  }
+
+  async function renderStudioReferenceThumbs() {
+    const target = $('studioUploadResult');
+    if (!target || !state.studioProjectId) return;
+    try {
+      const assets = await api(`/api/projects/${state.studioProjectId}/assets`);
+      const images = (assets || []).filter((item) => item.asset_type === 'image');
+      if (!images.length) { target.innerHTML = ''; return; }
+      target.innerHTML = `<div class="studio-thumbs">${images.slice(0, 24).map((item) =>
+        `<img src="/api/assets/${item.id}/download" alt="${esc(item.original_name || '')}" title="${esc(item.original_name || '')}">`).join('')}</div>`;
+      const button = $('studioAnalyzeImagesButton');
+      if (button) button.hidden = false;
+    } catch (_) { /* thumbnail chỉ là tiện ích, không chặn luồng */ }
+  }
+
+  async function analyzeStudioReferenceImages() {
+    if (!state.studioProjectId) return setUploadStatus('Chưa có dự án chứa ảnh.', 'error');
+    const button = $('studioAnalyzeImagesButton');
+    if (button) button.disabled = true;
+    setUploadStatus('AI đang xem ảnh tham khảo...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/assets/analyze-images`, {method: 'POST'});
+      const analysis = result.result || {};
+      const list = (items) => (items || []).map((item) => `<li>${esc(item)}</li>`).join('');
+      const card = document.createElement('div');
+      card.className = 'studio-result-card';
+      card.innerHTML = `<h3>AI đọc ảnh tham khảo · xem ${esc(result.images_seen)}/${esc(result.images_total)} ảnh</h3>
+        <p class="hint">${esc(analysis.summary || '')}</p>
+        <p class="hint"><b>Phong cách:</b> ${esc(analysis.visual_style || '')}</p>
+        ${analysis.composition ? `<p class="hint"><b>Bố cục:</b> ${esc(analysis.composition)}</p>` : ''}
+        ${(analysis.palette || []).length ? `<p class="hint"><b>Màu chủ đạo</b></p><ul>${list(analysis.palette)}</ul>` : ''}
+        ${(analysis.subjects || []).length ? `<p class="hint"><b>Chủ thể lặp lại</b></p><ul>${list(analysis.subjects)}</ul>` : ''}
+        ${analysis.reusable_prompt ? `<p class="hint"><b>Đoạn prompt dùng lại được:</b><br><code>${esc(analysis.reusable_prompt)}</code></p>` : ''}`;
+      $('studioUploadResult')?.prepend(card);
+      setUploadStatus(`AI đã đọc ${result.images_seen} ảnh tham khảo.`, 'success');
+    } catch (error) { setUploadStatus(`Không đọc được ảnh: ${error.message}`, 'error'); }
+    finally { if (button) button.disabled = false; }
   }
 
   async function analyzeStudioVideo() {
@@ -5018,6 +5156,10 @@ Chạy các bước này?`)) return;
   $('studioSourceChannelSelect').addEventListener('change', selectStudioSourceChannel);
   $('studioVideoSelect').addEventListener('change', selectStudioVideo);
   $('studioAnalyzeButton').addEventListener('click', analyzeStudioVideo);
+  $('studioSourceUpload')?.addEventListener('change', (event) => { void uploadStudioSourceFile(event.target.files?.[0]); event.target.value = ''; });
+  $('studioImageUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
+  $('studioFolderUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
+  $('studioAnalyzeImagesButton')?.addEventListener('click', () => void analyzeStudioReferenceImages());
   $('studioWriteButton').addEventListener('click', writeStudioScript);
   $('studioChatButton').addEventListener('click', chatStudioScript);
   $('studioGenerateStoryboardButton').addEventListener('click', generateStudioStoryboard);
