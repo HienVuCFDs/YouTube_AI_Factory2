@@ -5255,6 +5255,7 @@ def create_reference_analysis(
     video_id: str,
     provider: str = Query(default="codex_cli"),
     output_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
+    mode: Literal["remake", "faithful"] = Query(default="remake"),
 ) -> dict[str, Any]:
     """Analyse structure and style as a remake reference, not a viewer-facing recap."""
     video = database.get_video(video_id)
@@ -5276,7 +5277,9 @@ def create_reference_analysis(
             transcript = save_transcript_result(database, video_id, whisper_result)
             transcript_text = str(transcript.get("content_text") or "").strip()
             transcript_generated = True
-        result = analyze_reference(video, transcript_text, provider, output_language=output_language)
+        result = analyze_reference(
+            video, transcript_text, provider, output_language=output_language, mode=mode
+        )
         database.save_video_analysis(
             video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
         )
