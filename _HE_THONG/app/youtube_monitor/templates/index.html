@@ -420,7 +420,7 @@
             <div id="studioUploadResult" class="studio-result"></div>
           </div>
           <div class="studio-grid" style="margin-top:10px">
-            <div class="studio-field"><label for="studioAnalysisProviderSelect">Model phân tích</label><select id="studioAnalysisProviderSelect"><option value="codex_cli">Codex CLI</option></select></div>
+            <div class="studio-field"><label for="studioAnalysisProviderSelect">Model phân tích</label><select id="studioAnalysisProviderSelect"><option value="codex_cli">Codex CLI</option></select></div><div class="studio-field"><label for="studioAnalysisLanguage">Ngôn ngữ kết quả phân tích</label><select id="studioAnalysisLanguage"><option value="vi" selected>Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option><option value="es">Tiếng Tây Ban Nha</option><option value="fr">Tiếng Pháp</option></select></div>
           </div>
           <div id="studioVideoPreview" class="studio-video-preview" hidden></div>
           <div class="studio-grid" style="margin-top:10px">
@@ -439,7 +439,7 @@
         </div>
         <div id="studioStep3" class="studio-step" data-studio-step="3" hidden>
           <div class="studio-grid">
-            <div class="studio-field"><label for="studioWriterProviderSelect">Model viết kịch bản</label><select id="studioWriterProviderSelect"><option value="codex_cli">Codex CLI</option></select></div>
+            <div class="studio-field"><label for="studioWriterProviderSelect">Model viết kịch bản</label><select id="studioWriterProviderSelect"><option value="codex_cli">Codex CLI</option></select></div><div class="studio-field"><label for="studioScriptLanguage">Ngôn ngữ kịch bản</label><select id="studioScriptLanguage"><option value="vi" selected>Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option><option value="es">Tiếng Tây Ban Nha</option><option value="fr">Tiếng Pháp</option></select></div>
             <div class="studio-field"><label for="studioTargetDurationSeconds">Thời lượng video mục tiêu</label><input id="studioTargetDurationSeconds" type="text" inputmode="text" maxlength="40" placeholder="Ví dụ: 00:12:00, 12:00, 12 phút" /><div id="studioDurationHint" class="studio-model-note">Nhập giờ : phút : giây, phút : giây, hoặc chữ. Ví dụ: 01:12:30 · 12:00 · 12 phút 30 giây.</div></div>
           </div>
           <div class="studio-field" style="margin-top:10px"><label for="studioScriptInstructionInput">Yêu cầu cho kịch bản &amp; lời dẫn</label><textarea id="studioScriptInstructionInput" placeholder="Ví dụ: Video 90 giây. Kể rõ từng tình huống theo thứ tự, lời dẫn dễ nghe và có nguyên nhân–kết quả. Nhân vật chính là mèo; giọng ấm áp, kết thúc có bài học về lòng tốt."></textarea><div class="studio-model-note">Yêu cầu này điều khiển câu chuyện, độ chi tiết lời dẫn, phong cách kể và thời lượng. Bạn vẫn có thể chat để chỉnh tiếp sau khi AI viết.</div></div>
@@ -711,6 +711,8 @@
       scriptInstruction: $('studioScriptInstructionInput')?.value || '',
       targetDuration: $('studioTargetDurationSeconds')?.value || '',
       remakeMode: $('studioRemakeModeSelect')?.value || '',
+      analysisLanguage: $('studioAnalysisLanguage')?.value || '',
+      scriptLanguage: $('studioScriptLanguage')?.value || '',
       managedChannelId: $('studioManagedChannelSelect')?.value || '',
       writerProvider: $('studioWriterProviderSelect')?.value || '',
       voiceProvider: $('studioVoiceProviderSelect')?.value || '',
@@ -1845,6 +1847,8 @@
       ['studioScriptInstructionInput', saved.scriptInstruction],
       ['studioTargetDurationSeconds', saved.targetDuration],
       ['studioRemakeModeSelect', saved.remakeMode],
+      ['studioAnalysisLanguage', saved.analysisLanguage],
+      ['studioScriptLanguage', saved.scriptLanguage],
       ['studioManagedChannelSelect', saved.managedChannelId],
       ['studioWriterProviderSelect', saved.writerProvider],
       ['studioVoiceProviderSelect', saved.voiceProvider],
@@ -1994,7 +1998,8 @@
     try {
       const transcript = await ensureTranscriptForAnalysis(state.studioVideoId, (text) => setStudioProgress(35, text));
       setStudioProgress(45, `Đã có transcript (${number(transcript.word_count || 0)} từ). Đang phân tích cấu trúc, cảnh và phong cách...`);
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/reference-analysis?provider=${encodeURIComponent(provider)}`, {method: 'POST'});
+      const analysisLanguage = $('studioAnalysisLanguage')?.value || 'vi';
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/reference-analysis?provider=${encodeURIComponent(provider)}&output_language=${encodeURIComponent(analysisLanguage)}`, {method: 'POST'});
       state.studioAnalysis = response;
       state.studioReference = response;
       renderStudioAnalysis(response);
@@ -2743,7 +2748,7 @@
       const localDuration = parseStudioDuration(durationInput);
       if (durationInput && !localDuration) return setMessage('Không hiểu thời lượng. Nhập ví dụ: 00:12:00, 12:00, 12 phút hoặc 720 giây.', 'error');
       if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? 'faithful_retell' : ($('studioRemakeModeSelect')?.value || 'new_angle_same_topic'), target_duration_seconds: null, target_duration_text: durationInput, use_web_research: retelling ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? 'faithful_retell' : ($('studioRemakeModeSelect')?.value || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: retelling ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
       state.studioWriter = response;
       setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
       const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});
@@ -5156,6 +5161,13 @@ Chạy các bước này?`)) return;
   $('studioSourceChannelSelect').addEventListener('change', selectStudioSourceChannel);
   $('studioVideoSelect').addEventListener('change', selectStudioVideo);
   $('studioAnalyzeButton').addEventListener('click', analyzeStudioVideo);
+  // Phần lớn trường hợp hai ngôn ngữ này giống nhau, nên chọn một lần là đủ;
+  // vẫn đổi riêng được khi cần phân tích tiếng Anh mà viết kịch bản tiếng Việt.
+  $('studioAnalysisLanguage')?.addEventListener('change', (event) => {
+    const target = $('studioScriptLanguage');
+    if (target && !target.dataset.touched) target.value = event.target.value;
+  });
+  $('studioScriptLanguage')?.addEventListener('change', (event) => { event.target.dataset.touched = '1'; });
   $('studioSourceUpload')?.addEventListener('change', (event) => { void uploadStudioSourceFile(event.target.files?.[0]); event.target.value = ''; });
   $('studioImageUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
   $('studioFolderUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });

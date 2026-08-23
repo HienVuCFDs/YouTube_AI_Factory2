@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import languages
 from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
 
 
@@ -59,7 +60,11 @@ characters, logos or footage. State uncertainty frankly when no transcript or vi
 were supplied. Return only the requested JSON."""
 
 
-def _prompt(video: dict[str, Any], transcript_text: str | None) -> str:
+def _prompt(
+    video: dict[str, Any],
+    transcript_text: str | None,
+    output_language: str = languages.DEFAULT_LANGUAGE,
+) -> str:
     parts = [
         f"Source title: {str(video.get('title') or '').strip()}",
         f"Source description: {str(video.get('description') or '').strip()[:2400]}",
@@ -74,14 +79,20 @@ def _prompt(video: dict[str, Any], transcript_text: str | None) -> str:
         "Return a production reference brief: content_summary; narrative_formula (5-8 abstract beats); "
         "scene_map (6-12 scene units with story beat, action, visual direction and edit pacing); "
         "visual_style (a reusable, non-identical style recipe); pacing; remake_guardrails that enforce "
-        "an original story; limitations. Write all output in Vietnamese."
+        "an original story; limitations."
     )
+    parts.append(languages.instruction(output_language))
     return "\n\n".join(parts)
 
 
-def analyze_reference(video: dict[str, Any], transcript_text: str | None, provider: str) -> dict[str, Any]:
+def analyze_reference(
+    video: dict[str, Any],
+    transcript_text: str | None,
+    provider: str,
+    output_language: str = languages.DEFAULT_LANGUAGE,
+) -> dict[str, Any]:
     name = str(provider or "codex_cli").strip().lower()
-    user_prompt = _prompt(video, transcript_text)
+    user_prompt = _prompt(video, transcript_text, output_language)
     if name == "codex_cli":
         result = call_codex_json(_SYSTEM_PROMPT, user_prompt, REFERENCE_SCHEMA, max_tokens=5000)
     elif name == "openai_gpt":

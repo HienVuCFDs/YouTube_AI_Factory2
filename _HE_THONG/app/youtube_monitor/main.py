@@ -32,6 +32,7 @@ from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
 from . import usage_limits
+from . import languages
 from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
 from .gflow_bridge import gflow_cli_status
@@ -385,6 +386,7 @@ class WriterRequest(BaseModel):
     managed_channel_id: int | None = Field(default=None, ge=1)
     creative_direction: str = Field(default="", max_length=4000)
     remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only", "faithful_retell"] = "new_angle_same_topic"
+    output_language: str = Field(default=languages.DEFAULT_LANGUAGE, max_length=12)
     target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
     target_duration_text: str = Field(default="", max_length=40)
     use_web_research: bool = True
@@ -519,6 +521,7 @@ class DirectorDraftRequest(BaseModel):
     provider: DirectorProvider = "codex_cli"
     creative_direction: str = Field(default="", max_length=4000)
     remake_mode: Literal["new_story_same_feeling", "new_angle_same_topic", "style_only", "faithful_retell"] = "new_angle_same_topic"
+    output_language: str = Field(default=languages.DEFAULT_LANGUAGE, max_length=12)
     target_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
     target_duration_text: str = Field(default="", max_length=40)
     use_web_research: bool = True
@@ -890,11 +893,13 @@ def create_director_draft(
             source_duration_seconds=(video or {}).get("duration_seconds"),
             research_context=research_context,
             reference_analysis=reference_analysis,
+            output_language=payload.output_language,
         )
         if research_context:
             creative["research_context"] = research_context
         creative["target_duration_seconds"] = target_duration
-        creative["quality_warnings"] = validate_voiceover_plan(creative, target_duration)
+        creative["output_language"] = payload.output_language
+        creative["quality_warnings"] = validate_voiceover_plan(creative, target_duration, payload.output_language)
         database.save_video_analysis(
             str(bundle["project"]["youtube_video_id"]), creative, analysis_type="writer",
             provider=active_writer.provider, source_type=creative["source_type"],
@@ -4013,6 +4018,18 @@ _PROVIDER_LABELS = {
 }
 
 
+@app.get("/api/languages")
+def list_output_languages() -> dict[str, Any]:
+    """Languages the analysis and the script can be written in."""
+    return {
+        "default": languages.DEFAULT_LANGUAGE,
+        "languages": [
+            {"code": code, "label": record["label"], "tokens_per_second": record["tokens_per_second"]}
+            for code, record in languages.LANGUAGES.items()
+        ],
+    }
+
+
 @app.get("/api/usage-limits")
 def list_usage_limits() -> dict[str, Any]:
     """Which models are out of quota right now, and when they come back."""
@@ -5234,7 +5251,11 @@ def get_reference_analysis(video_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/videos/{video_id}/reference-analysis")
-def create_reference_analysis(video_id: str, provider: str = Query(default="codex_cli")) -> dict[str, Any]:
+def create_reference_analysis(
+    video_id: str,
+    provider: str = Query(default="codex_cli"),
+    output_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
+) -> dict[str, Any]:
     """Analyse structure and style as a remake reference, not a viewer-facing recap."""
     video = database.get_video(video_id)
     if not video:
@@ -5255,7 +5276,7 @@ def create_reference_analysis(video_id: str, provider: str = Query(default="code
             transcript = save_transcript_result(database, video_id, whisper_result)
             transcript_text = str(transcript.get("content_text") or "").strip()
             transcript_generated = True
-        result = analyze_reference(video, transcript_text, provider)
+        result = analyze_reference(video, transcript_text, provider, output_language=output_language)
         database.save_video_analysis(
             video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
         )
@@ -5383,11 +5404,13 @@ def generate_video_writer_content(
             source_duration_seconds=video.get("duration_seconds"),
             research_context=research_context,
             reference_analysis=reference_analysis,
+            output_language=payload.output_language,
         )
         if research_context:
             result["research_context"] = research_context
         result["target_duration_seconds"] = target_duration
-        result["quality_warnings"] = validate_voiceover_plan(result, target_duration)
+        result["output_language"] = payload.output_language
+        result["quality_warnings"] = validate_voiceover_plan(result, target_duration, payload.output_language)
         database.save_video_analysis(
             video_id,
             result,

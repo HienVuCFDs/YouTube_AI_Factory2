@@ -10,6 +10,7 @@ from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status
 from .fidelity_guard import allowed_names, numbers
 from .folklore_research import source_animal
+from . import languages
 from . import settings
 
 
@@ -127,7 +128,11 @@ def resolve_target_duration_seconds(
     return 90
 
 
-def validate_voiceover_plan(content: dict[str, Any], target_duration_seconds: int) -> list[str]:
+def validate_voiceover_plan(
+    content: dict[str, Any],
+    target_duration_seconds: int,
+    output_language: str = languages.DEFAULT_LANGUAGE,
+) -> list[str]:
     """Return production-quality warnings without discarding a generated script."""
     scenes = content.get("scene_blueprints") if isinstance(content, dict) else None
     if not isinstance(scenes, list) or not scenes:
@@ -136,7 +141,10 @@ def validate_voiceover_plan(content: dict[str, Any], target_duration_seconds: in
     total_seconds = sum(max(0, int(item.get("duration_seconds") or 0)) for item in scenes if isinstance(item, dict))
     voice_text = " ".join(str(item.get("narration") or "") for item in scenes if isinstance(item, dict))
     spoken_words = len(re.findall(r"\w+", voice_text, flags=re.UNICODE))
-    required_words = math.ceil(target * MIN_VIETNAMESE_VOICE_TOKENS_PER_SECOND)
+    # An English script sized at the Vietnamese rate comes out about a quarter
+    # too long, so the rate has to follow the language being written.
+    speech = languages.resolve(output_language)
+    required_words = math.ceil(target * float(speech["min_tokens_per_second"]))
     warnings: list[str] = []
     if not (target * 0.9 <= total_seconds <= target * 1.1):
         warnings.append(
@@ -157,7 +165,7 @@ def validate_voiceover_plan(content: dict[str, Any], target_duration_seconds: in
         if isinstance(item, dict)
         and int(item.get("duration_seconds") or 0) >= 10
         and len(re.findall(r"\w+", str(item.get("narration") or ""), flags=re.UNICODE))
-            < math.ceil(int(item.get("duration_seconds") or 0) * 2.7)
+            < math.ceil(int(item.get("duration_seconds") or 0) * float(speech["min_tokens_per_second"]) * 0.9)
     ]
     if sparse_scenes:
         preview = ", ".join(sparse_scenes[:8])
@@ -217,11 +225,13 @@ def _build_faithful_prompt(
     creative_direction: str | None = None,
     target_duration_seconds: int = 90,
     source_duration_seconds: int | None = None,
+    output_language: str = languages.DEFAULT_LANGUAGE,
 ) -> str:
     """Ask for the same content told a different way, and nothing more."""
     title = str(video.get("title") or "").strip()
     channel_name = str((workflow_context or {}).get("managed_channel_name") or "").strip()
     duration = max(30, int(target_duration_seconds or 90))
+    speech = languages.resolve(output_language)
     scene_count = max(6, min(48, -(-duration // 20)))
     parts = [
         f"Tiêu đề video nguồn: {title}",
@@ -269,6 +279,7 @@ def _build_faithful_prompt(
             + ", ".join(source_numbers)
             + ". Không được nêu con số nào khác, không làm tròn, không ước lượng thêm."
         )
+    parts.append(languages.instruction(output_language))
     parts.append(
         "TỰ KIỂM TRA trước khi trả lời: đọc lại bài viết của bạn và soi từng tên riêng, con số, "
         "địa danh, mốc thời gian. Cái nào không có trong nội dung nguồn ở trên thì XOÁ ĐI hoặc thay "
@@ -284,8 +295,8 @@ def _build_faithful_prompt(
     )
     parts.append(
         "Mỗi scene_blueprints.narration là lời đọc thật: 2-5 câu hoàn chỉnh, kể tiếp đúng mạch của nguồn. "
-        f"Viết đủ dài để lấp thời lượng cảnh ở tốc độ khoảng {VIETNAMESE_VOICE_TOKENS_PER_SECOND:.1f} "
-        "âm tiết tiếng Việt mỗi giây.\n"
+        f"Viết đủ dài để lấp thời lượng cảnh ở tốc độ khoảng {float(speech['tokens_per_second']):.1f} "
+        f"{speech['unit']} {speech['name']} mỗi giây.\n"
         "Hình của video này được CẮT TỪ CHÍNH VIDEO NGUỒN, không phải ảnh AI. Vì vậy mỗi visual_prompt "
         "hãy mô tả ĐOẠN NÀO CỦA VIDEO NGUỒN nên xuất hiện ở cảnh đó (nhìn thấy gì trên màn hình lúc ấy), "
         "chứ không phải mô tả một bức tranh cần vẽ. asset_type để là 'source_clip'.\n"
@@ -310,6 +321,7 @@ def _build_prompt(
     source_duration_seconds: int | None = None,
     research_context: dict[str, Any] | None = None,
     reference_analysis: dict[str, Any] | None = None,
+    output_language: str = languages.DEFAULT_LANGUAGE,
 ) -> str:
     if remake_mode == FAITHFUL_RETELL_MODE:
         # Everything below asks for a new story: different examples, a
@@ -323,6 +335,7 @@ def _build_prompt(
             creative_direction=creative_direction,
             target_duration_seconds=target_duration_seconds,
             source_duration_seconds=source_duration_seconds,
+            output_language=output_language,
         )
     title = str(video.get("title") or "").strip()
     description = str(video.get("description") or "").strip()
@@ -387,9 +400,12 @@ def _build_prompt(
             + ("\n".join(research_lines) if research_lines else "- No result available: use the suggested target animal and invent an original folklore arc.")
         )
     duration = max(30, min(1800, int(target_duration_seconds or 90)))
-    target_words = math.ceil(duration * VIETNAMESE_VOICE_TOKENS_PER_SECOND)
+    speech = languages.resolve(output_language)
+    target_words = math.ceil(duration * float(speech["tokens_per_second"]))
+    parts.append(languages.instruction(output_language))
     parts.append(
-        f"Target final-video duration: {duration} seconds (about {target_words} Vietnamese spoken words at a clear natural pace). "
+        f"Target final-video duration: {duration} seconds (about {target_words} spoken "
+        f"{speech['english_name']} tokens at a clear natural pace). "
         "The total of scene_blueprints.duration_seconds must be within 10% of this target."
     )
     if transcript_text:
@@ -404,7 +420,7 @@ def _build_prompt(
         f"creative_direction, new_story_concept, style_application, a complete new_script, and scene_blueprints ({max(6, min(48, -(-duration // 20)))} scenes, approximately 15-25 seconds each). "
         "Each scene_blueprints.narration is the actual voiceover: write 2-5 complete, concrete spoken sentences with a clear subject, action, "
         "cause/effect and transition to the next scene. Do not use vague summaries, bullet points, labels or placeholders. "
-        f"Use enough narration to naturally fill that scene duration at about {VIETNAMESE_VOICE_TOKENS_PER_SECOND:.1f} Vietnamese written tokens per second. "
+        f"Use enough narration to naturally fill that scene duration at about {float(speech['tokens_per_second']):.1f} written {speech['english_name']} tokens per second. "
         "Each visual_prompt must describe only original AI-generated imagery: subject, action, setting, camera, light, art style and motion; "
         "never request source footage. asset_type should normally be ai_scene."
     )
@@ -436,9 +452,9 @@ class ClaudeWriter:
 
     provider = "anthropic_claude"
 
-    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None, output_language: str = languages.DEFAULT_LANGUAGE) -> dict[str, Any]:
         parsed = call_claude_json(
-            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis, output_language), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -448,9 +464,9 @@ class OpenAiWriter:
 
     provider = "openai_gpt"
 
-    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None, output_language: str = languages.DEFAULT_LANGUAGE) -> dict[str, Any]:
         parsed = call_openai_json(
-            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis, output_language), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -460,9 +476,9 @@ class CodexWriter:
 
     provider = "codex_cli"
 
-    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None, output_language: str = languages.DEFAULT_LANGUAGE) -> dict[str, Any]:
         parsed = call_codex_json(
-            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis, output_language), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -472,9 +488,9 @@ class ClaudeCodeCliWriter:
 
     provider = "claude_code_cli"
 
-    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None, output_language: str = languages.DEFAULT_LANGUAGE) -> dict[str, Any]:
         parsed = call_claude_code_cli_json(
-            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis, output_language), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
@@ -484,9 +500,9 @@ class AntigravityWriter:
 
     provider = "antigravity"
 
-    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    def generate(self, video: dict[str, Any], transcript_text: str | None = None, workflow_context: dict[str, Any] | None = None, creative_direction: str | None = None, remake_mode: str = "new_angle_same_topic", target_duration_seconds: int = 90, source_duration_seconds: int | None = None, research_context: dict[str, Any] | None = None, reference_analysis: dict[str, Any] | None = None, output_language: str = languages.DEFAULT_LANGUAGE) -> dict[str, Any]:
         parsed = call_antigravity_json(
-            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
+            system_prompt_for(remake_mode), _build_prompt(video, transcript_text, workflow_context, creative_direction, remake_mode, target_duration_seconds, source_duration_seconds, research_context, reference_analysis, output_language), RESULT_SCHEMA, max_tokens=min(16000, max(5000, target_duration_seconds * 10))
         )
         return _finalize(video, self.provider, parsed, bool(transcript_text))
 
