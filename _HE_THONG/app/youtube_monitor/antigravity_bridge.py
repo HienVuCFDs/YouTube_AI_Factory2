@@ -73,33 +73,114 @@ def _antigravity_cli_status_uncached() -> dict[str, Any]:
     return {"installed": True, "logged_in": logged_in, "path": executable, "detail": detail}
 
 
-def _parse_json_output(text: str) -> dict[str, Any]:
-    """Same defensive multi-shape parsing as claude_code_bridge._parse_json_output
-    (see that module for why) — Antigravity's exact --output-format json envelope
-    for --json-schema results wasn't verified against a live run either."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
-        if cleaned.rstrip().endswith("```"):
-            cleaned = cleaned.rstrip()[:-3].rstrip()
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise AntigravityBridgeError("Antigravity khong tra ve JSON hop le") from exc
-    if not isinstance(parsed, dict):
-        raise AntigravityBridgeError("Antigravity phai tra ve mot JSON object")
-    if "result" in parsed:
-        result = parsed["result"]
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, str):
+def _unwrap_double_encoded(payload: dict[str, Any]) -> dict[str, Any]:
+    """Undo the CLI wrapping a whole JSON answer inside one of its own fields.
+
+    Observed live: asked for {"answer": "ok"} it returns
+    structured_output = {"answer": "{\"answer\": \"ok\"}"} - the object encoded
+    again as the value of its own key. Left alone, every field reads as a
+    string of JSON rather than the value it names.
+    """
+    if len(payload) == 1:
+        only = next(iter(payload.values()))
+        if isinstance(only, str):
             try:
-                inner = json.loads(result)
-            except json.JSONDecodeError:
+                inner = json.loads(only)
+            except (TypeError, ValueError):
                 inner = None
             if isinstance(inner, dict):
                 return inner
-    return parsed
+    return payload
+
+
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    """Pull the first complete JSON object out of a model's free text."""
+    body = text or ""
+    start = body.find("{")
+    while start != -1:
+        depth, in_string, escaped = 0, False, False
+        for index in range(start, len(body)):
+            char = body[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        parsed = json.loads(body[start:index + 1])
+                    except ValueError:
+                        break
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
+        start = body.find("{", start + 1)
+    return None
+
+
+def _parse_json_output(text: str) -> dict[str, Any]:
+    """Read the answer out of Antigravity's envelope.
+
+    The envelope was previously guessed at rather than checked against a live
+    run, and the guess was wrong: it looks for "result", which Antigravity does
+    not use. Finding nothing, the old code returned the envelope itself, so
+    every schema field was missing and an empty analysis was stored as a
+    success. A live call returns conversation_id, status, response,
+    structured_output and usage.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise AntigravityBridgeError("Antigravity khong tra ve gi")
+    try:
+        envelope = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        # Some invocations print the answer directly rather than an envelope.
+        direct = _first_json_object(cleaned)
+        if direct is not None:
+            return direct
+        raise AntigravityBridgeError("Antigravity khong tra ve JSON hop le") from exc
+    if not isinstance(envelope, dict):
+        raise AntigravityBridgeError("Antigravity phai tra ve mot JSON object")
+
+    # Not every invocation wraps the answer. If none of the envelope's own keys
+    # are present, this object is the answer.
+    envelope_keys = ("status", "response", "structured_output", "conversation_id", "result")
+    if not any(key in envelope for key in envelope_keys):
+        return envelope
+
+    status = str(envelope.get("status") or "").upper()
+    if status and status != "SUCCESS":
+        detail = str(envelope.get("response") or envelope.get("error") or status)
+        raise AntigravityBridgeError(f"Antigravity bao that bai ({status}): {detail[:400]}")
+
+    # The model's own words come first: structured_output is the CLI's
+    # extraction of them, and it is the half that double-encodes.
+    spoken = _first_json_object(str(envelope.get("response") or ""))
+    if spoken:
+        return _unwrap_double_encoded(spoken)
+    structured = envelope.get("structured_output")
+    if isinstance(structured, dict) and structured:
+        return _unwrap_double_encoded(structured)
+    for key in ("result", "output", "data"):
+        value = envelope.get(key)
+        if isinstance(value, dict) and value:
+            return value
+        if isinstance(value, str):
+            inner = _first_json_object(value)
+            if inner:
+                return inner
+    raise AntigravityBridgeError(
+        "Antigravity chay xong nhung khong tim thay ket qua JSON trong phan hoi"
+    )
 
 
 def call_antigravity_json(

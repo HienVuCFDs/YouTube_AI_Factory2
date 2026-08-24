@@ -208,6 +208,22 @@ def _prompt(
     return "\n\n".join(parts)
 
 
+def _is_empty(reading: dict[str, Any]) -> bool:
+    """Whether a reading says nothing at all.
+
+    A provider that returns a well-formed but empty object is not a success.
+    That is exactly what happened when the Antigravity envelope was misread:
+    five parts ran, every field came back missing, and an analysis with no
+    story, no cast and no dialogue was stored and shown as finished.
+    """
+    return not any((
+        str(reading.get("content_summary") or "").strip(),
+        reading.get("characters") or [],
+        reading.get("dialogue") or [],
+        reading.get("scene_map") or [],
+    ))
+
+
 def _merge(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Join per-chunk readings into one, keeping order and dropping repeats.
 
@@ -282,6 +298,11 @@ def analyze_reference(
             cast = _merge(readings)["characters"]
         result = _merge(readings) if len(readings) > 1 else readings[0]
         parts_read = len(pieces)
+    if _is_empty(result):
+        raise ReferenceAnalysisError(
+            f"{provider} chay xong nhung khong tra ve noi dung nao: khong co tom tat, "
+            "khong nhan vat, khong loi thoai. Hay thu lai hoac doi sang AI khac."
+        )
     return {
         "provider": str(provider or "codex_cli").strip().lower(),
         "source_type": "transcript" if transcript_text else "metadata",
