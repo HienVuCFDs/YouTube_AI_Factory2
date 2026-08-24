@@ -140,7 +140,10 @@ def call_claude_code_json(
     system_prompt: str,
     user_prompt: str,
     schema: dict[str, Any],
-    timeout_seconds: int = 600,
+    # A full script for a fifteen minute video is a large generation:
+    # forty-odd scenes, each with narration and an image prompt. Ten
+    # minutes was not enough and the run was thrown away at the end.
+    timeout_seconds: int = 1800,
     image_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the user's local Claude Code CLI as a structured-output agent.
@@ -184,7 +187,14 @@ def call_claude_code_json(
             cwd=str(settings.PROJECT_ROOT),
             env=_local_claude_environment(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired stringifies the whole command, which here is a 7500
+        # character prompt and JSON schema - the reason was buried at the end.
+        raise ClaudeCodeBridgeError(
+            f"Claude Code CLI qua thoi gian ({timeout_seconds}s). "
+            "Noi dung qua dai hoac may chu dang cham."
+        ) from exc
+    except OSError as exc:
         raise ClaudeCodeBridgeError(f"Khong chay duoc Claude Code CLI: {exc}") from exc
     if process.returncode != 0:
         detail = (process.stderr or process.stdout or "").strip()[-2000:]

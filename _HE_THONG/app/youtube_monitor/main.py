@@ -5362,7 +5362,13 @@ def get_reference_analysis(video_id: str) -> dict[str, Any]:
     if not database.get_video(video_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy video")
     analysis = database.get_video_analysis(video_id, analysis_type="reference")
-    return analysis or {"youtube_video_id": video_id, "status": "pending"}
+    if not analysis:
+        return {"youtube_video_id": video_id, "status": "pending"}
+    # The stored row carries no status of its own, and the studio only redraws
+    # an analysis it can see is finished. Without this a completed analysis
+    # came back statusless, was ignored on reload, and the wizard dropped back
+    # to step one as though the video had never been read.
+    return {"status": "completed", **analysis}
 
 
 def _analysis_transcript(video_id: str) -> str:

@@ -187,7 +187,10 @@ def call_antigravity_json(
     system_prompt: str,
     user_prompt: str,
     schema: dict[str, Any],
-    timeout_seconds: int = 600,
+    # A full script for a fifteen minute video is a large generation:
+    # forty-odd scenes, each with narration and an image prompt. Ten
+    # minutes was not enough and the run was thrown away at the end.
+    timeout_seconds: int = 1800,
 ) -> dict[str, Any]:
     """Run the user's local Antigravity CLI as a sandboxed structured-output agent.
 
