@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+import time
+from typing import Any, Callable
 
 from . import settings
 from .antigravity_bridge import AntigravityBridgeError, call_antigravity_json as _call_antigravity_json
@@ -13,6 +15,72 @@ from . import usage_limits
 class LlmError(RuntimeError):
     pass
 
+# A provider being briefly overloaded is not the same as it being broken or
+# out of quota, and it used to be treated as both. The reference analysis reads
+# a long transcript in several sequential passes; one 529 anywhere in that run
+# threw away every pass before it. These are the phrases that mean "ask again
+# shortly" rather than "stop asking".
+_TRANSIENT_MARKERS = (
+    "529",
+    "overloaded",
+    "503",
+    "502",
+    "504",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again in a moment",
+    "connection reset",
+    "connection aborted",
+    "read timed out",
+)
+_RETRY_DELAYS = (5.0, 20.0, 45.0)
+
+
+def _is_transient(message: str) -> bool:
+    """Whether asking again shortly is likely to work.
+
+    A usage limit is never transient however it is worded: retrying that just
+    burns minutes to be refused three more times.
+    """
+    if usage_limits.is_usage_limit(message):
+        return False
+    return any(marker in (message or "").lower() for marker in _TRANSIENT_MARKERS)
+
+
+def _readable(message: str) -> str:
+    """Pull the one useful sentence out of a CLI's JSON error blob.
+
+    Claude Code reports failures as a page of session accounting with the
+    actual cause in a "result" field, which is how "API Error: 529 Overloaded"
+    ended up invisible behind a wall of token counts.
+    """
+    text = str(message or "")
+    match = re.search(r'"result"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if match:
+        try:
+            return json.loads(f'"{match.group(1)}"')
+        except ValueError:
+            return match.group(1)
+    return text
+
+
+def _with_retry(agent: str, call: Callable[[], dict[str, Any]], errors: tuple[type[Exception], ...]):
+    """Run a CLI call, giving a briefly overloaded provider another chance."""
+    last = ""
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            result = call()
+        except errors as exc:
+            last = str(exc)
+            usage_limits.note_failure(agent, last)
+            if attempt >= len(_RETRY_DELAYS) or not _is_transient(last):
+                raise LlmError(_readable(last)) from exc
+            time.sleep(_RETRY_DELAYS[attempt])
+            continue
+        usage_limits.note_success(agent)
+        return result
+    raise LlmError(_readable(last))
+
 
 def call_codex_json(
     system_prompt: str,
@@ -22,13 +90,11 @@ def call_codex_json(
 ) -> dict[str, Any]:
     """Use the locally logged-in Codex CLI without an OpenAI API key."""
     del max_tokens  # Codex CLI owns its model token budget.
-    try:
-        result = _call_codex_json(system_prompt, user_prompt, schema)
-    except CodexBridgeError as exc:
-        usage_limits.note_failure("codex_cli", str(exc))
-        raise LlmError(str(exc)) from exc
-    usage_limits.note_success("codex_cli")
-    return result
+    return _with_retry(
+        "codex_cli",
+        lambda: _call_codex_json(system_prompt, user_prompt, schema),
+        (CodexBridgeError,),
+    )
 
 
 def call_claude_code_cli_json(
@@ -46,13 +112,11 @@ def call_claude_code_cli_json(
     it will (correctly) refuse to describe a file it cannot see.
     """
     del max_tokens  # Claude Code CLI owns its model token budget.
-    try:
-        result = _call_claude_code_json(system_prompt, user_prompt, schema, image_path=image_path)
-    except ClaudeCodeBridgeError as exc:
-        usage_limits.note_failure("claude_code_cli", str(exc))
-        raise LlmError(str(exc)) from exc
-    usage_limits.note_success("claude_code_cli")
-    return result
+    return _with_retry(
+        "claude_code_cli",
+        lambda: _call_claude_code_json(system_prompt, user_prompt, schema, image_path=image_path),
+        (ClaudeCodeBridgeError,),
+    )
 
 
 def call_antigravity_json(
@@ -63,13 +127,11 @@ def call_antigravity_json(
 ) -> dict[str, Any]:
     """Use the locally logged-in Antigravity CLI (Google account) without an API key."""
     del max_tokens  # Antigravity CLI owns its model token budget.
-    try:
-        result = _call_antigravity_json(system_prompt, user_prompt, schema)
-    except AntigravityBridgeError as exc:
-        usage_limits.note_failure("antigravity", str(exc))
-        raise LlmError(str(exc)) from exc
-    usage_limits.note_success("antigravity")
-    return result
+    return _with_retry(
+        "antigravity",
+        lambda: _call_antigravity_json(system_prompt, user_prompt, schema),
+        (AntigravityBridgeError,),
+    )
 
 
 def call_claude_json(
