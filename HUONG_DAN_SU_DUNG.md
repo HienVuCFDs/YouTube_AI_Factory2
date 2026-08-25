@@ -62,8 +62,8 @@ Lưu ý: phân tích phong cách từ transcript chỉ là suy luận có ghi r�
 ## Cấu trúc thư mục
 
 - `01_DU_AN`: từng project video. `04_XUAT_BAN/final.mp4` là video cuối; `05_PREMIERE` chứa gói Premiere.
-- `02_NGUYEN_LIEU`: media nguồn đã nhập hoặc tải về để dựng.
-- `03_TAI_LIEU`: kế hoạch và tài liệu dự án.
+- `01_DU_AN/_nguyen_lieu`: media nguồn đã nhập hoặc tải về để dựng.
+- `_HE_THONG/tai_lieu`: kế hoạch và tài liệu dự án.
 - `_HE_THONG`: mã nguồn, cấu hình, database, backup và plugin Premiere. Không nên sửa trực tiếp khi đang chạy app.
 
 Trong mỗi project:

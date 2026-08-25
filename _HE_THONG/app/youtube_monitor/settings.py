@@ -324,8 +324,12 @@ OAUTH_TOKEN_PATH = DATA_DIR / "oauth_token.json"
 
 # Deliberate, single-video, manual download for re-editing (reaction/commentary videos
 # with the user's own added footage and voiceover) — never used by any automatic/batch
-# pipeline. See 03_TAI_LIEU/KE_HOACH_DU_AN.md (muc 19) for the policy this changes.
-VIDEO_DOWNLOAD_DIR = Path(os.getenv("VIDEO_DOWNLOAD_DIR", str(PROJECT_ROOT / "02_NGUYEN_LIEU" / "tai_ve")))
+# pipeline. See _HE_THONG/tai_lieu/KE_HOACH_DU_AN.md (muc 19) for the policy this changes.
+# Source footage belongs with the projects it feeds, not in a third
+# top-level folder of its own.
+VIDEO_DOWNLOAD_DIR = Path(os.getenv(
+    "VIDEO_DOWNLOAD_DIR", str(PROJECT_ROOT / "01_DU_AN" / "_nguyen_lieu" / "tai_ve")
+))
 
 # Production adapters. Empty commands keep the workflow in safe dry-run mode;
 # configure command templates only after the local tools are installed.

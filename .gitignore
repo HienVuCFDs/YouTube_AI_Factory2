@@ -4,6 +4,7 @@ _HE_THONG/data/*.db
 _HE_THONG/data/*.db-*
 _HE_THONG/data/*.sqlite*
 _HE_THONG/data/*.log
+_HE_THONG/data/logs/
 _HE_THONG/data/oauth_token.json
 _HE_THONG/data/backups/
 
@@ -26,8 +27,8 @@ node_modules/
 # User-generated production output & downloaded source media (large binaries,
 # not source code — see HUONG_DAN_SU_DUNG.md for folder structure)
 01_DU_AN/
-02_NGUYEN_LIEU/
-03_TAI_LIEU/*.mp3
+01_DU_AN/_nguyen_lieu/
+_HE_THONG/tai_lieu/*.mp3
 
 # Experiments: vendored clones, GPU model caches, smoke-test binary artifacts
 _THU_NGHIEM/

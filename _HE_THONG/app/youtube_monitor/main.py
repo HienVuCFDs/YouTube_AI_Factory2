@@ -1411,7 +1411,9 @@ _ASSET_EXTENSIONS = {
 # folder.  Expose them as a small local library so they remain available when
 # the user switches projects.  Selecting one copies it into the project as a
 # normal editable audio asset; it never moves or changes the original file.
-_VOICE_LIBRARY_DIR = PRODUCTION_ARTIFACT_DIR.parent / "03_TAI_LIEU"
+# Reference recordings are system material, so they live under the system
+# folder rather than beside the user's projects.
+_VOICE_LIBRARY_DIR = settings.SYSTEM_ROOT / "tai_lieu"
 _VOICE_LIBRARY = (
     {
         "key": "voice-sample-1",

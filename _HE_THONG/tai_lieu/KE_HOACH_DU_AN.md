@@ -1048,9 +1048,9 @@ Bối cảnh: cách làm ở mục 41-42 (sidecar Playwright + selector viết s
 
 - **Tạo video Flow (Veo) chưa chạy trọn vẹn**: đã qua được các nút thắt (vào đúng màn, đưa ảnh vào khe "Bắt đầu", chọn đúng chế độ, gõ và bấm thật) nhưng **hết tín dụng Flow** trước khi có một lần chạy đến cuối. Cần một lần chạy có tín dụng để xác nhận.
 - **Meta AI không tạo được video** — người dùng làm tay cũng không được. Không phải lỗi automation. `meta_ai_video` giữ lại nhưng coi như không dùng được.
-- **Chia việc song song chưa test thật** — mới đúng về code, chưa chạy một mẻ thật để xác nhận.
-- **Gemini web** chưa test lại sau các thay đổi ở phần dùng chung.
-- **Loại GIF chưa có đường sản xuất riêng** — kế hoạch đã biết chọn `gif` + fps, nhưng chưa có provider nào nhận việc tạo GIF; hiện sẽ rơi vào nhóm video.
+- **Chia việc nhiều provider đã test thật ngày 2026-08-21** — Flow và ChatGPT hoàn tất, Gemini nhận job nhưng mất heartbeat. Kết quả và phương án chuyển provider được ghi tại mục 46.
+- **Gemini web đã test lại nhưng chưa ổn định** — tab mở được nhưng job không phát heartbeat trong hơn 4 phút; Codex đã loại Gemini khỏi lượt thử lại và chuyển sang ChatGPT thành công (mục 46).
+- **Loại GIF đã có đường sản xuất riêng từ ngày 2026-08-21** — provider ảnh tạo keyframe, FFmpeg tạo GIF cục bộ và gắn thẳng vào timeline; không rơi vào nhóm video nữa (mục 46).
 - **Selector còn sót ở Gemini/ChatGPT**: hai file này vẫn dùng luồng viết cứng cũ (đang chạy được nên chưa đụng vào), chưa chuyển sang cơ chế agent.
 
 ### 43.3 Điều kiện để chạy tự động không có người
@@ -1066,3 +1066,206 @@ Hiện **chưa nên** bật chạy qua đêm không giám sát. Không phải v�
 7. **Vẫn dừng hỏi người** khi: hết tín dụng/hạn mức, một cảnh chấm trượt 2 lần, mọi provider của một loại việc đều bị ngắt mạch, và **trước bước xuất bản** (hành động ra ngoài, không thu hồi được).
 
 Thứ tự nên làm: (1) và (2) trước vì chúng chặn thiệt hại, rồi (4)(5), rồi (3)(6), cuối cùng mới mở khoá chạy không giám sát.
+
+## 44. Ổn định pipeline ảnh → video và lớp bảo vệ scene job (2026-08-20)
+
+Đã sửa nền tảng tạo video từ ảnh theo hướng bắt buộc, có trạng thái và có thể phục hồi:
+
+- Sửa lỗi API chỉ nhận thời lượng `5/10` giây trong khi giao diện Flow gửi `8` giây; request scene hiện nhận `1-30` giây nên clip Veo 8 giây không còn bị FastAPI từ chối `422` trước khi tạo job.
+- Batch video nay là pipeline hai giai đoạn thật: cảnh chưa có ảnh được tạo một job ảnh trước; job video ở trạng thái `waiting`, có `depends_on_job_id`, và chỉ chuyển sang `queued` sau khi đúng ảnh nguồn đã hoàn tất/được chấm. Cảnh đã có ảnh dùng trực tiếp asset đó làm `reference_asset_id`.
+- `requires_reference_image` được lưu trong database và truyền tới browser extension/sidecar. Nếu ảnh thiếu, không tồn tại hoặc tải thất bại, job dừng với lỗi rõ ràng; không còn fallback ngầm sang text-to-video.
+- Output ảnh/video từ worker local được đăng ký thành `project_assets`, giúp job sau luôn nhận một asset ID ổn định thay vì chỉ dựa vào đường dẫn file.
+- Thêm trạng thái `pipeline_stage`, `heartbeat_at`, `attempt_count`, `max_attempts`, `failure_kind`, `claim_token` và liên kết dependency cho `scene_generation_jobs`.
+- Thêm watchdog riêng: mặc định job mất heartbeat quá 15 phút được chạy lại tối đa một lần; lần tiếp theo chuyển `error`. Có thể chỉnh qua `SCENE_JOB_STALE_SECONDS` và `SCENE_WATCHDOG_INTERVAL_SECONDS`.
+- Mỗi lượt claim có token riêng. Callback/heartbeat cũ đến muộn sau khi watchdog đã cấp lượt mới bị từ chối, tránh một lượt chạy cũ ghi đè kết quả mới.
+- Thêm circuit breaker persistent theo provider: 3 lỗi liên tiếp sẽ khóa provider 1 giờ; một lần thành công đóng circuit và xóa chuỗi lỗi. Trạng thái này xuất hiện trong API queue/sidecar.
+- `meta_ai_video` bị khóa ở API và bỏ khỏi lựa chọn UI vì đã xác nhận không tạo được video; hệ thống không tiếp tục đưa job mới vào provider không có năng lực.
+- Giao diện chỉ cho tạo video từng cảnh khi đã có ảnh. Với batch, giao diện nói rõ cảnh thiếu ảnh sẽ được tạo ảnh trước rồi mới tạo video.
+
+Đã kiểm thử: Python compile pass, JavaScript giao diện và browser extension parse pass, `pytest` **128/128 pass**. Regression test mới bao phủ dependency ảnh → video, clip 8 giây, chặn thiếu ảnh, watchdog retry giới hạn, claim token và circuit breaker.
+
+Chưa thể nghiệm thu provider thật trong phiên này: vẫn cần một lượt Flow/Veo có tín dụng chạy đến cuối (ảnh → tạo clip → tải file → import asset → gắn timeline), sau đó chạy một project 60-90 giây hoàn chỉnh. Chưa mở chạy tự động không giám sát; hạn mức chi phí theo ngày/project, sổ năng lực provider đầy đủ, vòng điều phối nền và nhật ký chi phí vẫn là các bước tiếp theo.
+
+## 45. Tự mở Flow và tách workspace theo dự án (2026-08-21)
+
+Đã bổ sung lớp quản lý project Google Flow cho browser extension:
+
+- Job trình duyệt nay mang theo `project_title`, để extension biết cảnh đang thuộc video/dự án nào.
+- Mỗi `project_id` có một workspace Flow riêng, lưu bền trong `chrome.storage.local` gồm URL, tab, tên dự án và tiêu đề dự án nguồn.
+- Cảnh Flow đầu tiên tự mở `https://labs.google/fx/vi/tools/flow` trong tab hiển thị, AI điều phối tự bấm tạo dự án mới và vào màn hình soạn trước khi gửi prompt.
+- Tên mong muốn có dạng `YT Factory P{id} - {tên dự án}`. Nếu Flow không đưa ra ô đặt tên ở bước tạo, pipeline vẫn tiếp tục và ghi nhớ URL project thay vì làm hỏng job.
+- Các cảnh sau của cùng dự án tái sử dụng đúng tab/URL đã lưu. Nếu tab đã đóng, extension tự mở lại URL project; không còn lấy bừa một tab Flow đang mở của dự án khác.
+- Tab Flow được giữ lại giữa các cảnh và không tự đóng sau mỗi job. Bước chuẩn bị project bị cấm gửi prompt hoặc bấm tạo nội dung, nên không tiêu credit.
+- Luồng tạo ảnh vẫn kiểm tra dòng xác nhận `0 tín dụng`; nếu Flow báo tốn tín dụng thì agent phải quay về chế độ **Hình ảnh** hoặc dừng, không chạy video.
+
+Đã kiểm thử tĩnh, regression và **nghiệm thu thật trên Google Flow** sau khi reload extension v1.1.0:
+
+- Job `152`, project `18`, segment `110`: extension tự mở Flow, tạo project URL riêng và đặt tên `YT Factory P18 - ...` thành công.
+- Flow nhận đúng prompt ảnh, đúng chế độ ảnh 16:9. Lượt đầu báo `Không thành công` do lỗi tạm thời; agent thử lại một lần, theo dõi tiến trình `image 94%` rồi lấy đúng ảnh mới sinh, không nhầm ảnh cũ trong thư viện.
+- Ảnh JPEG `1376x768`, 301.338 byte được import thành asset `64`, lưu vào thư mục project và gắn vào timeline; segment chuyển sang `asset_ready`.
+- AI chấm chất lượng nền đọc được nội dung thật, cho `8/10`, trạng thái `pass`, không tự tạo lại. Ảnh đúng mèo vàng đang chạy, dấu chân đất và làng ven sông; còn một số sai lệch nhỏ về hướng nhìn/góc máy và watermark nhỏ được ghi trong review note.
+- Không chạy video và không dùng credit Veo trong lượt nghiệm thu này.
+
+## 46. Codex điều phối App và pipeline AI tạo GIF thay video (2026-08-21)
+
+Đã chọn bền `AI_ORCHESTRATOR_PROVIDER=codex_cli`. Mọi quyết định trong lượt nghiệm thu dưới đây đi qua cửa giao việc của App (`/api/projects/{id}/orchestrate`); không tạo batch trực tiếp bằng tay:
+
+- Schema điều phối có hành động `generate_gifs`, kèm `limit` và danh sách `providers`. Khi ý định yêu cầu GIF thay video, Codex bị ràng buộc không chọn provider video.
+- Codex đọc cả trạng thái lỗi gần đây của từng provider. Lượt thử lại vì Gemini mất heartbeat đã tự chọn duy nhất `chatgpt_web_image`, thay vì lặp lại provider vừa hỏng.
+- Batch có chế độ `motion_as_gif`: các cảnh mà kế hoạch xếp là `gif` hoặc `video` đều được giao cho AI tạo ảnh keyframe; các provider video bị từ chối rõ ràng trong chế độ này.
+- Sau khi AI web trả ảnh, App dùng FFmpeg tạo GIF lặp cục bộ với chuyển động zoom nhẹ, thời lượng/fps theo kế hoạch, rồi đăng ký GIF thành `project_asset` và gắn trực tiếp vào timeline.
+- Renderer nhận `.gif` là nguồn chuyển động (`-stream_loop -1`), không còn xử lý như ảnh tĩnh và đóng băng ở frame đầu. Quality check cũng tính GIF là cảnh động.
+- Chấm chất lượng tuân theo AI điều phối đã cấu hình: với Codex, App trích frame đại diện của GIF, gửi ảnh thật cho Codex Vision và nhận JSON nghiêm ngặt. Nếu điểm thấp nghiêm trọng, cơ chế tạo lại tối đa một lần vẫn được giữ nguyên.
+
+**Nghiệm thu thật trên dự án 18:**
+
+- Codex đọc storyboard 30 cảnh và lập kế hoạch `21 GIF / 9 ảnh / 0 video` đúng yêu cầu không dùng video. Lượt smoke test giới hạn 3 cảnh và phân việc qua Flow, ChatGPT, Gemini.
+- Job `153` (`flow_image`) hoàn tất, tạo asset `66`; job `154` (`chatgpt_web_image`) hoàn tất, tạo asset `65`, chấm `8/10`.
+- Job `155` (`gemini_web_image`, loại `gif`) mở tab nhưng không phát heartbeat hơn 4 phút nên dừng có lỗi rõ ràng. Đây là lỗi provider hiện còn tồn tại, không làm cả batch treo vĩnh viễn.
+- Codex nhận trạng thái mới và ở lượt kế tiếp tự chọn `chatgpt_web_image` cho đúng một cảnh GIF còn thiếu. Job `156` hoàn tất thành asset `68`: `segment-004-job-156-motion.gif`, kích thước `960x540`, `50` frame, `10 fps`, dài `5` giây, `388.656` byte.
+- Codex Vision xem frame thật của GIF, chấm `9/10`, `matches=true`, `should_regenerate=false`. Nội dung đúng bé An và mèo Mướp trong vườn dâu; sai lệch nhỏ là số sọc vàng có vẻ nhiều hơn mô tả, chưa đủ nghiêm trọng để tạo lại.
+- Segment `113` chuyển sang `asset_ready`, đường dẫn timeline là file GIF. Toàn bộ lượt nghiệm thu tạo **0 job video**, không dùng credit Veo.
+
+Đã kiểm thử hồi quy toàn bộ sau khi triển khai: `pytest` **133/133 pass**. App thật đã được khởi động lại trên `http://127.0.0.1:8787` với Codex là AI điều phối.
+
+**Phần vẫn chưa hoàn tất sau mốc này:** Gemini web cần sửa độ ổn định/heartbeat; Flow/Veo vẫn cần tín dụng để nghiệm thu video thật nếu sau này quay lại dùng video; vòng điều phối nền tự chạy theo chu kỳ, hạn mức chi phí đầy đủ và nhật ký quyết định/chi phí vẫn chưa được triển khai. Việc xuất bản tiếp tục là bước bắt buộc người dùng duyệt cuối cùng.
+
+## 47. Chốt kiến trúc đa AI và Google Flow là động cơ video chính (2026-08-21)
+
+### 47.1 Quyết định phạm vi
+
+- Tài khoản tạo video đang được người dùng đăng ký là **Google Flow**. Vì vậy chỉ Flow/Veo được bật làm đường tạo video bằng gói thuê bao trong giai đoạn này; chưa tích hợp Runway, Kling, Luma, Higgsfield hoặc dịch vụ trả phí khác khi chưa có tài khoản tương ứng.
+- `Codex CLI`, `Claude Code CLI` và `Google Antigravity CLI/IDE` là các **AI agent cloud có client chạy trên PC**, không phải model local chạy bằng GPU. Chúng dùng tài khoản đã đăng nhập để điều phối, thực hiện và nghiệm thu công việc.
+- AI agent không đồng nghĩa với công cụ sinh media. Ví dụ: Codex/Claude/Antigravity có thể là executor, `gflow-cli` là tool, còn Google Flow/Veo là provider thực sự render video.
+- Giữ nguyên ảnh đã hoạt động qua Flow, ChatGPT web và Antigravity. Không thay lại pipeline ảnh trong lúc đang ổn định video.
+- Extension Flow hiện tại chuyển thành đường `legacy`, giữ lại để phục hồi/đối chiếu nhưng không còn là lựa chọn mặc định sau khi `gflow-cli` vượt qua nghiệm thu thật.
+
+### 47.2 Agent Registry và quy tắc phân công
+
+Ba agent ban đầu:
+
+```text
+codex_cli
+claude_code_cli
+antigravity
+```
+
+AI điều phối chính là cấu hình của người dùng, không cố định Codex. Mỗi công đoạn có ba chế độ:
+
+- `fixed`: người dùng khóa executor/reviewer; orchestrator không được tự đổi.
+- `auto`: orchestrator chọn trong `allowed_agents` dựa trên trạng thái đăng nhập, năng lực, công cụ được cấp và lịch sử thành công/thất bại.
+- `fallback`: ưu tiên agent người dùng chọn; chỉ chuyển sang agent dự phòng khi lỗi/timeout theo chính sách.
+
+Mỗi công đoạn lưu tối thiểu: `assignment_mode`, `executor`, `allowed_agents`, `reviewer`, `fallback_agents`, `allowed_tools`, `max_attempts`. Khi có thể, reviewer phải khác executor để nghiệm thu chéo. Người dùng vẫn là người duyệt bắt buộc trước bước xuất bản.
+
+### 47.3 Giao tiếp giữa các AI
+
+App là nguồn sự thật và đứng giữa các agent:
+
+```text
+Quy tắc người dùng
+    → orchestrator tạo AgentTask
+    → App giao task cho Codex/Claude/Antigravity bridge
+    → executor gọi tool được phép
+    → kết quả/asset được lưu vào App
+    → reviewer khác nhận ReviewTask
+    → orchestrator nhận/sửa/fallback
+    → người dùng duyệt xuất bản
+```
+
+Không để các CLI chat tự do hoặc truy cập SQLite trực tiếp. Agent trao đổi qua task/result/review/action log có JSON schema; MCP được dùng làm giao diện **agent → tool**, còn task queue của App là giao diện **agent → agent**.
+
+### 47.4 Đường tạo video Flow mới
+
+Provider mới `gflow_cli` chạy trong production scene worker:
+
+1. Nhận `scene_generation_job` và ảnh nguồn đã được nghiệm thu.
+2. Chạy `gflow video i2v --initial-frame ... --output ... --json` bằng Chrome profile Flow đã đăng nhập.
+3. Phát heartbeat trong lúc chờ; không để watchdog hiểu nhầm job đang render là job chết.
+4. Parse JSON chuẩn (`local_path`, `succeeded`, `failure_reasons`, `retryable`) và phân loại `auth`, `quota`, `timeout`, `selector_drift`, `provider`.
+5. Kiểm tra MP4 local, đăng ký `project_asset`, gắn timeline và chuyển sang quality review.
+6. Một Chrome profile chỉ chạy một generation tại một thời điểm. Không tự retry lỗi quota/auth; retry lỗi transient tối đa theo `max_attempts`.
+
+`flow_veo` cũ được đổi nhãn thành `Flow Extension (legacy)`. `gflow_cli` là mặc định cho nút tạo video, batch và hành động `generate_videos` của orchestrator. Việc dùng `gflow MCP` để agent gọi trực tiếp là lớp bổ sung về sau; worker trước mắt gọi CLI `--json` để ổn định và không tốn thêm lượt suy luận chỉ cho thao tác trình duyệt.
+
+### 47.5 Thứ tự nghiệm thu bắt buộc
+
+1. Cài `gflow-cli`, kiểm tra `auth status`/`doctor` không tiêu credit.
+2. Chạy đúng một I2V trên ảnh thật của project hiện có; nhận MP4 và JSON thành công.
+3. Chạy cùng job qua App: ảnh → gflow → import asset → timeline → review.
+4. Chạy 3 cảnh tuần tự trong cùng một project; xác nhận không tạo trùng và không dùng song song cùng profile.
+5. Chạy bản nháp 60–90 giây, FFmpeg render và QC toàn video.
+6. Chỉ sau các mốc trên mới bật vòng điều phối nền; xuất bản vẫn luôn yêu cầu người dùng duyệt.
+
+### 47.6 Trạng thái triển khai thực tế
+
+Đã triển khai trong app:
+
+- `gflow-cli 0.59.0` được cài tách biệt tại `_THU_NGHIEM/gflow-cli/.venv`; có script cài lại cố định phiên bản tại `_HE_THONG/scripts/install_gflow_cli.ps1`.
+- Provider nội bộ `gflow_cli` chạy trực tiếp trong scene worker, không phụ thuộc Browser Extension.
+- Mỗi production project lưu `gflow_project_id` và `gflow_profile`; lần tạo video đầu tự tạo đúng một project trên Flow, các cảnh sau dùng lại project đó.
+- Google Flow/Veo là lựa chọn video mặc định ở Studio, từng shot, từng segment và batch image-to-video; `flow_veo` cũ chỉ còn là `legacy`.
+- App có nút mở đăng nhập Flow bằng Chrome và nút kiểm tra lại session, không yêu cầu API key.
+- Bảng phân công sáu công đoạn hỗ trợ `fixed`, `auto`, `fallback` cho Codex CLI, Claude Code CLI và Antigravity; cấu hình được lưu trong `AI_STAGE_ASSIGNMENTS_JSON`.
+- Agent thực thi và agent nghiệm thu được tách vai; review ảnh/GIF ưu tiên Codex/Claude vision khác executor và chỉ cho tái tạo tự động tối đa một lần.
+- Bridge xử lý heartbeat, timeout, lỗi auth/quota/selector/input, khóa một lượt sinh trên một profile, tải MP4 về đúng thư mục project rồi gắn timeline.
+
+Trạng thái nghiệm thu tại thời điểm cập nhật: compile Python và JavaScript đạt; toàn bộ 142 test tự động đạt. Phần phát sinh credit chỉ được chạy sau khi profile Google Flow `default` đăng nhập thành công; đây là quyền tài khoản do người dùng hoàn tất trực tiếp trong cửa sổ Google, app không đọc mật khẩu/cookie.
+
+## 48. Vá ba lỗ hổng của WF B1-B5: duyệt chéo, loại hình từng cảnh, kế hoạch dựng (2026-08-22)
+
+Bối cảnh: người dùng chỉ rõ workflow mong muốn và những chỗ còn thiếu. Kiểm chứng lại trong code cho thấy cả năm điểm đều đúng, và ba trong số đó có cùng một nguyên nhân: **tính năng đã viết xong nhưng không nơi nào gọi**.
+
+| Bước | Trước ngày 2026-08-22 | Sau |
+|---|---|---|
+| B1 phân tích nguồn | ổn | không đổi |
+| B2 kịch bản | không có duyệt chéo; công đoạn `script` khai báo trong cấu hình mà không nơi nào gọi; `ScriptStatus` có `review` mà không ai đặt | `POST /api/projects/{id}/script/review` + nút "AI duyệt kịch bản" |
+| B3 giọng đọc | chỉ nghe thử, không đối chiếu lời | `POST /api/projects/{id}/voice/review` + nút "AI nghe lại giọng đọc" |
+| B4 storyboard | `plan-visuals` chạy được nhưng **0 lần xuất hiện trong `index.html`**; GIF chuyển động sai chỗ | bảng "Loại hình từng cảnh" sửa tay được; thêm provider `gflow_image` |
+| B5 kế hoạch dựng | `edit-plan` cũng **0 lần trong `index.html`** | bảng "Kế hoạch dựng" sửa tay được |
+
+### 48.1 Duyệt chéo kịch bản và giọng đọc
+
+Kịch bản: AI khác chấm điểm, phán hook, liệt kê vấn đề và đề xuất, rồi chuyển `draft → review`.
+
+Nghiệm thu trên dự án 27 (không dựng dữ liệu giả): chấm 6/10 và tìm ra năm lỗi cấu trúc, trong đó có lỗi không ai phát hiện trong suốt quá trình làm:
+- **Hook không được trả bài**: mở đầu dựng thế đối đầu *người gửi tiết kiệm vs người đi vay* trên cùng 80 triệu/4 năm, nhưng cảnh 10-12 chỉ chạy kịch bản người gửi.
+- **Nhân vật Tích bị bỏ rơi**: giới thiệu ở mở đầu rồi không xuất hiện thêm lần nào trong 12 cảnh còn lại.
+- **Lệch thời lượng cam kết**: hứa "bốn phút" nhưng kịch bản dài khoảng 6,5 phút ở tốc độ đọc bình thường.
+
+Giọng đọc: Faster-Whisper (đã có sẵn cho transcript nguồn) nghe lại từng đoạn, AI đối chiếu với `voice_text`. Điểm mấu chốt là **phân biệt máy nghe nhầm với người đọc sai** — prompt nói rõ chỉ báo lỗi khi *ý nghĩa* khác nhau. Kết quả thật: `"tiết kiệm" → "tích kiểm"` được xếp là lỗi nhận dạng âm và bỏ qua (9/10), còn khi cố tình cắt một câu thì chấm 4/10, gọi đúng tên câu bị thiếu **và** hệ quả kéo theo (câu kết "vì sao hai kết quả lại lệch nhau" mất căn cứ vì chỉ còn một vế).
+
+Lưu ý về duyệt chéo ảnh: `_review_scene_asset` đã ưu tiên vision agent khác executor từ trước. Nhưng cả `image_generation` lẫn `quality_review` đều khai executor là `codex_cli`, mà Codex CLI đang hỏng, nên **trên cấu hình là chéo, lúc chạy thật thì cả hai cùng rơi về Claude**. Đây là hệ quả của Codex hỏng, không phải lỗi thiết kế; sửa bằng cách sửa Codex hoặc đổi executor một trong hai công đoạn.
+
+### 48.2 GIF: vẽ nối tiếp thay vì cắt bảng 2x2
+
+Nguyên nhân gốc của việc GIF chấm 4-5/10: cách cũ bắt **một** bức vẽ chứa bốn khoảnh khắc ở kích thước 1/4. Kết quả là nền động còn thứ mà cảnh nói về — con số đang tăng, ô đang được tô — thì đứng yên. Prompt có thể *yêu cầu* khác biệt giữa các ô nhưng không có gì *bắt* nó xảy ra.
+
+Cách mới: `gflow image i2i --ref` vẽ từng khung **full size**, khung sau lấy khung trước làm ảnh tham chiếu. AI điều phối viết *các bước của chuyển động* thay vì một yêu cầu bảng: khung 1 mô tả toàn cảnh, các khung sau chỉ nói điều gì đã thay đổi. `create_gif_from_frames` ghép theo thứ tự 1-2-3-4-3-2 và cắt đúng thời lượng để mục cuối lặp lại của concat demuxer không giữ gấp đôi (nếu không sẽ khựng mỗi lần vòng lặp quay đầu).
+
+Nghiệm thu bằng FFmpeg thật, đo nội dung chứ không đo file: bốn khung có thanh rộng 40/160/280/400 px cho ra vòng lặp đo được `60-240-420-600-420-240`, hai đầu giữ đều nhau.
+
+Đánh đổi: mỗi GIF tốn bốn lượt gọi Flow thay vì một. Chấp nhận được vì ảnh Flow không tốn tín dụng.
+
+### 48.3 Provider `gflow_image`
+
+Flow vẫn tạo được **ảnh** trong lúc phía **video** đã hết tín dụng, và CLI không cần giữ tab trình duyệt mở. Vì vậy `gflow_image` là nguồn ảnh thứ tư chạy song song được cùng `chatgpt_web_image` và `gemini_web_image`, thay vì tranh nhau một extension. Cấu hình model qua `GFLOW_IMAGE_MODEL` (để trống thì dùng mặc định `nano2`).
+
+Chưa nghiệm thu chạy thật: tại thời điểm cập nhật, profile Flow `default` đang ở trạng thái **đăng xuất** (`gflow auth login` chưa chạy lại). Cú pháp đã xác nhận qua `gflow image t2i --help` / `i2i --help` trên bản 0.59.0.
+
+### 48.4 Hai bảng kế hoạch lên giao diện
+
+Cả `plan-visuals` và `edit-plan` đều chạy được từ trước mà không có một dòng nào trong `index.html`, nên luồng bảy bước đi ngang qua chúng và mọi cảnh bị đối xử như nhau.
+
+Nay Storyboard có nút phân tích loại hình, hiện bảng *ảnh tĩnh / GIF / video* kèm **lý do từng cảnh**; bước Xưởng dựng có bảng *chuyển cảnh / hiệu ứng / ghi chú*. Hai bảng sửa tay được: `PATCH /api/timeline/{segment_id}/plan` đổi một dòng mà không phải chạy lại cả kế hoạch — đây chính là thứ khiến các lần chạy trước rất đắt để sửa.
+
+Nghiệm thu trên dự án 27: 15 cảnh chia thành 9 video / 4 ảnh tĩnh / 2 GIF, mỗi cảnh có lý do riêng đọc từ nội dung. Kế hoạch dựng **đọc ngược lại được** loại hình đó: cảnh GIF/video thì để `static`, dành `zoom` cho ảnh tĩnh; và khi sửa tay cảnh 1 từ `video` sang `gif`, ghi chú của kế hoạch dựng phản ánh đúng thay đổi đó.
+
+### 48.5 Còn lại
+
+- **Chạy thật `gflow_image`**: cần đăng nhập lại profile Flow.
+- **Codex CLI hỏng** (in banner rồi lặp lại prompt, không trả JSON): làm mọi lời gọi phải thử Codex trước rồi mới sang Claude, và làm hỏng duyệt chéo ở 48.1. Ngoài phạm vi app.
+- **Bỏ hẳn Extension**: chỉ nên làm sau khi `gflow_image` nghiệm thu thật, và chỉ khi chấp nhận mất ChatGPT/Gemini web khỏi dàn chạy song song.
+- **Chuyển sang MCP**: `gflow mcp` có sẵn. Danh mục công cụ của orchestrator (mục 43) mới là phần cốt lõi; có nó rồi thì đổi sang MCP chỉ là đổi lớp vận chuyển.
+
+Trạng thái nghiệm thu tại thời điểm cập nhật: compile Python và JavaScript đạt; 162 test tự động đạt.
