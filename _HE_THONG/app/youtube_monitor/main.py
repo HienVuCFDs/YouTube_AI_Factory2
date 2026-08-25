@@ -32,7 +32,7 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
-from . import operations, usage_limits
+from . import operations, usage_limits, workflows
 from . import languages
 from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
@@ -1262,7 +1262,7 @@ def update_timeline_segment(
 class UpdateProjectWorkflowRequest(BaseModel):
     """Which production workflow this project follows."""
 
-    workflow: Literal["content", "reup"] = "content"
+    workflow: str = Field(default=workflows.DEFAULT_KEY, max_length=32)
 
 
 @app.patch("/api/projects/{project_id}/workflow")
@@ -4120,6 +4120,20 @@ def list_output_languages() -> dict[str, Any]:
             {"code": code, "label": record["label"], "tokens_per_second": record["tokens_per_second"]}
             for code, record in languages.LANGUAGES.items()
         ],
+    }
+
+
+@app.get("/api/workflows")
+def list_workflows() -> dict[str, Any]:
+    """The workflows, each read from its own file.
+
+    The browser builds its wizard from this rather than keeping a second copy
+    of the same descriptions, which is how a workflow came to mean one thing
+    on screen and another in the writer.
+    """
+    return {
+        "default": workflows.DEFAULT_KEY,
+        "workflows": [item.as_dict() for item in workflows.all_workflows()],
     }
 
 

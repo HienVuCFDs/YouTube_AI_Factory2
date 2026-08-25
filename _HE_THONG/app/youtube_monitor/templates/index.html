@@ -759,34 +759,25 @@
     } catch (_) { return null; }
   }
 
-  // Hai quy trinh dung CHUNG bay panel cua wizard. Chung chi khac nhau o
-  // nhan tung buoc va o hang nut nao duoc bat trong hai panel - nen doi quy
-  // trinh khong phai dung mot giao dien thu hai.
-  const WORKFLOWS = {
-    content: {
-      label: 'WF Content',
-      state: 'Đang dang dở ở bước tạo hình',
-      summary: 'Viết kịch bản mới, rồi để AI vẽ hình cho từng cảnh.',
-      tabs: ['Nguồn', 'Phân tích', 'Kịch bản', 'Giọng đọc', 'Storyboard', 'Xưởng dựng', 'Xuất bản'],
-      notes: [
-        'Hình do AI tạo: ChatGPT/Gemini qua Extension, Google Flow qua CLI.',
-        'Cảnh cần video sẽ tạo ảnh tĩnh trước rồi mới dựng video từ chính ảnh đó.',
-        'CHƯA XONG: khâu tạo hình còn hỏng nhiều — Antigravity 9/81, ChatGPT web 11/32, Gemini API 0/30; tạo video qua Flow chưa từng chạy trọn một lần.',
-      ],
-    },
-    reup: {
-      label: 'WF Reup',
-      state: 'Đang làm',
-      summary: 'Tải video gốc về, kể lại lời bình theo cách khác, dịch, rồi cắt hình từ chính video đó.',
-      tabs: ['Nguồn', 'Phân tích', 'Lời bình', 'Giọng đọc', 'Cảnh gốc', 'Xưởng dựng', 'Xuất bản'],
-      notes: [
-        'Nội dung gốc giữ nguyên: nhân vật, tên riêng, số liệu, thứ tự sự việc, cái kết. Chỉ đổi cách dẫn chuyện.',
-        'Không tạo ảnh AI: hình cắt từ video gốc đã tải, nên không phụ thuộc Extension và không tốn tín dụng.',
-        'AI đọc transcript có mốc thời gian để chọn đoạn hình cho từng câu bình luận.',
-        'CHƯA CHẠY THẬT: bước cắt cảnh và dựng MP4 chưa nghiệm thu trọn một lần trong luồng này.',
-      ],
-    },
-  };
+  // Mỗi WF là một file ở phía app (youtube_monitor/workflows/). Trình duyệt
+  // nạp đúng file đó thay vì giữ một bản mô tả thứ hai — bản sao thứ hai chính
+  // là cách WF Reup từng bị phân tích bằng quy tắc remake của WF Content.
+  const WORKFLOWS = {};
+
+  async function loadWorkflows() {
+    try {
+      const result = await api('/api/workflows');
+      Object.keys(WORKFLOWS).forEach((key) => delete WORKFLOWS[key]);
+      (result.workflows || []).forEach((flow) => { WORKFLOWS[flow.key] = flow; });
+      if (!WORKFLOWS[state.studioWorkflow]) state.studioWorkflow = result.default || 'content';
+      renderWorkflowsPanel();
+      setStudioStep(state.studioStep || 1);
+    } catch (_) { /* giữ định nghĩa đang có nếu không nạp được */ }
+  }
+
+  function currentWorkflow() {
+    return WORKFLOWS[state.studioWorkflow] || Object.values(WORKFLOWS)[0] || {steps: [], label: ''};
+  }
 
   function setStudioWorkflow(key, jump = true) {
     state.studioWorkflow = WORKFLOWS[key] ? key : 'content';
@@ -809,8 +800,8 @@
     if (!target) return;
     target.innerHTML = Object.entries(WORKFLOWS).map(([key, flow]) => {
       const active = key === state.studioWorkflow;
-      const steps = flow.tabs.map((label, index) => `<span class="wf-step">${index + 1}. ${esc(label)}</span>`).join('');
-      const notes = flow.notes.map((note) => `<li>${esc(note)}</li>`).join('');
+      const steps = (flow.steps || []).map((label, index) => `<span class="wf-step">${index + 1}. ${esc(label)}</span>`).join('');
+      const notes = (flow.notes || []).map((note) => `<li>${esc(note)}</li>`).join('');
       return `<div class="studio-result-card${active ? ' wf-active' : ''}">
         <h3>${esc(flow.label)}${active ? ' · đang dùng' : ''}</h3>
         <p class="hint"><b>${esc(flow.state || '')}</b> — ${esc(flow.summary)}</p>
@@ -1495,8 +1486,8 @@
 
   function setStudioStep(step) {
     const next = Math.max(1, Math.min(7, Number(step) || 1));
-    const flow = WORKFLOWS[state.studioWorkflow] || WORKFLOWS.content;
-    const labels = Object.fromEntries(flow.tabs.map((label, index) => [index + 1, label.toUpperCase()]));
+    const flow = currentWorkflow();
+    const labels = Object.fromEntries((flow.steps || []).map((label, index) => [index + 1, label.toUpperCase()]));
     state.studioStep = next;
     if (next === 3 && $('studioScriptInstructionInput') && !$('studioScriptInstructionInput').value.trim()) $('studioScriptInstructionInput').value = $('studioCreativeDirectionInput')?.value || '';
     if (next === 3 && $('studioTargetDurationSeconds') && !$('studioTargetDurationSeconds').value.trim()) {
@@ -1512,7 +1503,7 @@
       tab.classList.toggle('active', value === next);
       tab.classList.toggle('done', value < next);
       const label = tab.querySelector('strong');
-      if (label && flow.tabs[value - 1]) label.textContent = flow.tabs[value - 1];
+      if (label && flow.steps?.[value - 1]) label.textContent = flow.steps[value - 1];
     });
     // Hang nao khong gan data-wf thi thuoc ca hai quy trinh.
     document.querySelectorAll('[data-wf]').forEach((row) => {
@@ -2795,7 +2786,9 @@
     button.disabled = true;
     // WF Lồng tiếng kể lại đúng nội dung nguồn, nên nó không đi qua chế độ
     // sáng tác lại - chế độ đó được viết để ĐỔI nhân vật và tình tiết.
-    const retelling = state.studioWorkflow === 'reup';
+    // Chế độ viết thuộc về định nghĩa WF, không suy ra bằng so chuỗi ở đây.
+    const flow = currentWorkflow();
+    const retelling = flow.script_mode === 'faithful_retell';
     setStudioProgress(10, retelling
       ? 'AI đang viết lại cách dẫn chuyện, giữ nguyên nội dung gốc...'
       : 'AI đang viết câu chuyện mới từ ý tưởng của bạn...');
@@ -2808,7 +2801,7 @@
       const localDuration = parseStudioDuration(durationInput);
       if (durationInput && !localDuration) return setMessage('Không hiểu thời lượng. Nhập ví dụ: 00:12:00, 12:00, 12 phút hoặc 720 giây.', 'error');
       if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? 'faithful_retell' : ($('studioRemakeModeSelect')?.value || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: retelling ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? flow.script_mode : ($('studioRemakeModeSelect')?.value || flow.script_mode || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: flow.uses_web_research === false ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
       state.studioWriter = response;
       setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
       const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});
@@ -4949,7 +4942,7 @@ Chạy các bước này?`)) return;
 
   async function refresh() {
     try {
-      await Promise.all([loadHealth(), loadUsageLimits(), loadRunningOperations(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
+      await Promise.all([loadHealth(), loadWorkflows(), loadUsageLimits(), loadRunningOperations(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();
@@ -5331,9 +5324,8 @@ Chạy các bước này?`)) return;
   $('closeWriter').addEventListener('click', () => $('writerDetail').classList.remove('open'));
   restorePanel('channels');
   restorePanel('videos');
-  try { state.studioWorkflow = WORKFLOWS[localStorage.getItem('ytFactory.workflow')] ? localStorage.getItem('ytFactory.workflow') : 'content'; } catch (_) {}
-  renderWorkflowsPanel();
-  setStudioStep(state.studioStep || 1);
+  try { state.studioWorkflow = localStorage.getItem('ytFactory.workflow') || 'content'; } catch (_) {}
+  void loadWorkflows();
   try { setWorkspace(localStorage.getItem('ytFactory.workspace') || 'dashboard', false); } catch (_) { setWorkspace('dashboard', false); }
   startBrowserLease();
   async function initializeApp() {

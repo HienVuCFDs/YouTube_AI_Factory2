@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import workflows
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -3734,8 +3736,12 @@ class Database:
         return [dict(row) for row in rows]
 
     def set_project_workflow(self, project_id: int, workflow: str) -> dict[str, Any] | None:
-        """Record which production workflow this project follows."""
-        chosen = str(workflow or "").strip().lower() or "content"
+        """Record which production workflow this project follows.
+
+        Resolved through the registry so an unknown key becomes the default
+        rather than a value nothing later knows how to run.
+        """
+        chosen = workflows.get(workflow).key
         with self._connect() as connection:
             connection.execute(
                 "UPDATE production_projects SET workflow = ?, updated_at = ? WHERE id = ?",
