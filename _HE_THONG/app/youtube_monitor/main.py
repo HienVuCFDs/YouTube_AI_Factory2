@@ -3896,6 +3896,93 @@ def _condense_transcript(segments: list[dict[str, Any]], block_seconds: float = 
     return "\n".join(lines)
 
 
+@app.post("/api/projects/{project_id}/timeline/from-dialogue")
+def build_timeline_from_dialogue(
+    project_id: int,
+    min_seconds: float = Query(default=1.2, ge=0.3, le=10.0),
+) -> dict[str, Any]:
+    """Cut the timeline on the source's own dialogue turns.
+
+    The reup workflow does not draw its pictures, it takes them from the video
+    it is retelling. Its scenes should therefore fall exactly where the speech
+    falls - one scene per spoken turn, running from that line's first second to
+    its last - rather than on the even 15-25 second blocks a writer invents for
+    a storyboard that will be illustrated.
+
+    Each segment carries the speaker, so the line stays attached to whoever
+    says it, and source_start_seconds, so the cut is made at that exact moment
+    instead of being guessed at later.
+    """
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+
+    analysis = database.get_video_analysis(
+        str(project.get("youtube_video_id") or ""), analysis_type="reference"
+    )
+    turns = list((analysis or {}).get("result", {}).get("dialogue") or [])
+    if not turns:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa có bản phân tích lời thoại. Hãy chạy bước Phân tích trước.",
+        )
+    video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    source_duration = float(video.get("duration_seconds") or 0)
+
+    planned: list[dict[str, Any]] = []
+    missing_times = 0
+    for index, turn in enumerate(turns):
+        line = str(turn.get("line") or "").strip()
+        if not line:
+            continue
+        start = float(turn.get("start_seconds") or 0)
+        end = float(turn.get("end_seconds") or 0)
+        if end <= start:
+            # An analysis from before turns carried times, or a turn the model
+            # could not place: fall back to the next turn's start so the cut is
+            # still made somewhere sensible rather than at second zero.
+            following = turns[index + 1] if index + 1 < len(turns) else {}
+            end = float(following.get("start_seconds") or 0) or start + min_seconds
+            missing_times += 1
+        duration = max(min_seconds, end - start)
+        if source_duration:
+            start = min(start, max(0.0, source_duration - min_seconds))
+        planned.append({
+            "segment_index": len(planned) + 1,
+            "start_seconds": int(round(sum(item["duration_seconds"] for item in planned))),
+            "duration_seconds": max(1, int(round(duration))),
+            "voice_text": line,
+            "subtitle_text": line,
+            "speaker": str(turn.get("speaker") or "").strip(),
+            "visual_prompt": f"Cắt từ video gốc tại {int(start)}s",
+            "asset_type": "source_clip",
+        })
+        planned[-1]["_source_start"] = start
+
+    if not planned:
+        raise HTTPException(status_code=400, detail="Bản phân tích không có lượt thoại nào dùng được")
+
+    cuts = [item.pop("_source_start") for item in planned]
+    timeline = database.create_project_timeline(project_id, int(script["id"]), planned, force=True)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="Không lưu được timeline")
+    for segment, start in zip(timeline, cuts):
+        database.save_segment_source_cue(
+            int(segment["id"]), start, "Cắt đúng lúc câu thoại này được nói"
+        )
+
+    speakers = sorted({str(item.get("speaker") or "").strip() for item in planned if item.get("speaker")})
+    return {
+        "status": "built",
+        "segments": len(planned),
+        "speakers": speakers,
+        "turns_without_timing": missing_times,
+        "total_duration_seconds": sum(int(item["duration_seconds"]) for item in planned),
+        "timeline": database.list_project_timeline(project_id, script_id=int(script["id"])),
+    }
+
+
 @app.post("/api/projects/{project_id}/timeline/plan-source-cues")
 def plan_timeline_source_cues(project_id: int) -> dict[str, Any]:
     """Decide which moment of the source video each scene should show.

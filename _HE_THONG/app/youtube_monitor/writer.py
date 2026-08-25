@@ -45,6 +45,10 @@ RESULT_SCHEMA = {
                     "order": {"type": "integer"}, "section": {"type": "string"},
                     "narration": {"type": "string"}, "visual_prompt": {"type": "string"},
                     "asset_type": {"type": "string"}, "duration_seconds": {"type": "integer"},
+                    # Who says this line. "Người dẫn" for narration, a
+                    # character's own name when the source has them speaking -
+                    # without it every retelling collapses into reported speech.
+                    "speaker": {"type": "string"},
                 },
                 "required": ["order", "section", "narration", "visual_prompt", "asset_type", "duration_seconds"],
                 "additionalProperties": False,
@@ -192,8 +196,13 @@ FAITHFUL_RETELL_MODE = "faithful_retell"
 _MAX_FAITHFUL_TRANSCRIPT_CHARS = 40000
 
 _FAITHFUL_SYSTEM_PROMPT = (
-    "Bạn là người DẪN CHUYỆN kể lại đúng nội dung của một video có sẵn. "
-    "Bạn KHÔNG phải biên kịch sáng tạo, và đây KHÔNG phải bản chuyển thể.\n"
+    "Bạn dựng lại LỜI của một video có sẵn. Bạn KHÔNG phải biên kịch sáng tạo, và đây KHÔNG "
+    "phải bản chuyển thể.\n"
+    "QUAN TRỌNG NHẤT: đây KHÔNG phải bản tóm tắt do người dẫn kể lại. Nhân vật nào nói trong "
+    "nguồn thì trong bản mới VẪN NÓI — giữ nguyên là lời thoại trực tiếp của chính nhân vật đó. "
+    "TUYỆT ĐỐI KHÔNG biến lời thoại thành lời kể gián tiếp: không viết 'anh ta nói rằng...', "
+    "không gộp một đoạn đối đáp thành một câu tường thuật. Chỉ phần LỜI DẪN mới được viết lại "
+    "theo cách khác.\n"
     "Nội dung là BẤT BIẾN: mọi sự việc, nhân vật, tên riêng, địa danh, con số, mốc thời gian, "
     "thứ tự diễn biến và cái kết đều phải giữ đúng như nguồn.\n"
     "Bạn CHỈ được đổi CÁCH KỂ: cách đặt câu, nhịp kể, cách chọn từ, cách mở đầu và cách nối các đoạn.\n"
@@ -301,7 +310,14 @@ def _build_faithful_prompt(
         f"Tổng scene_blueprints.duration_seconds phải nằm trong khoảng 10% của {duration}."
     )
     parts.append(
-        "Mỗi scene_blueprints.narration là lời đọc thật: 2-5 câu hoàn chỉnh, kể tiếp đúng mạch của nguồn. "
+        "MỖI CẢNH LÀ MỘT LƯỢT NÓI:\n"
+        "- 'speaker': ai nói. Nhân vật nói thì ghi ĐÚNG TÊN nhân vật đó; chỉ phần dẫn chuyện mới "
+        "ghi 'Người dẫn'.\n"
+        "- 'narration': chính là câu người đó nói. Với nhân vật, đây là LỜI THOẠI TRỰC TIẾP — "
+        "viết như họ đang nói, không phải kể lại rằng họ đã nói. Được đổi cách diễn đạt, giọng "
+        "điệu, độ dài câu; KHÔNG được đổi ý, không đổi người nói, không đổi thứ tự đối đáp.\n"
+        "- Nguồn có bao nhiêu lượt đối đáp thì giữ đủ bấy nhiêu; đừng gộp hai người thành một cảnh.\n"
+        "Lời dẫn: 2-5 câu hoàn chỉnh, kể tiếp đúng mạch của nguồn. "
         f"Viết đủ dài để lấp thời lượng cảnh ở tốc độ khoảng {float(speech['tokens_per_second']):.1f} "
         f"{speech['unit']} {speech['name']} mỗi giây.\n"
         "Hình của video này được CẮT TỪ CHÍNH VIDEO NGUỒN, không phải ảnh AI. Vì vậy mỗi visual_prompt "

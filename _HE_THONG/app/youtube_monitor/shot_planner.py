@@ -46,8 +46,13 @@ def build_shot_plan(project: dict[str, Any], script: dict[str, Any], writer_cont
             narration = str(item.get("narration") or "").strip()
             ai_shots.append({
                 "shot_index": int(item.get("order") or index), "section": section, "narration": narration,
+                "speaker": str(item.get("speaker") or "").strip(),
                 "visual_prompt": str(item.get("visual_prompt") or _visual_prompt(section, narration, project_title)).strip(),
-                "asset_type": "ai_scene", "duration_seconds": max(3, min(30, int(item.get("duration_seconds") or _duration(narration)))),
+                # Honour the asset type the writer chose. Forcing ai_scene here
+                # sent the reup workflow - whose pictures are cut from its own
+                # source - into the image generators anyway.
+                "asset_type": str(item.get("asset_type") or "ai_scene").strip() or "ai_scene",
+                "duration_seconds": max(3, min(30, int(item.get("duration_seconds") or _duration(narration)))),
                 "status": "planned",
             })
         if ai_shots:

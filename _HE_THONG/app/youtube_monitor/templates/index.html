@@ -482,7 +482,7 @@
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
-          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn">1. Tải video nguồn về máy</button><button id="studioPlanSourceCuesButton" class="btn">2. Chọn đoạn hình cho từng cảnh</button><button id="studioCutSourceScenesButton" class="btn primary">3. Cắt cảnh từ video gốc</button></div><div class="studio-model-note" data-wf="reup" style="margin-top:6px" hidden>Hình lấy từ chính video gốc, không gọi AI tạo ảnh. Mỗi cảnh được cắt đúng bằng độ dài giọng đọc thật và đã tắt tiếng gốc.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
+          <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioCutByDialogueButton" class="btn primary">1. Cắt cảnh theo lời thoại</button><button id="studioDownloadSourceButton" class="btn">2. Tải video nguồn về máy</button><button id="studioPlanSourceCuesButton" class="btn">Chọn lại đoạn hình (nếu cần)</button><button id="studioCutSourceScenesButton" class="btn primary">3. Xuất clip từ video gốc</button></div><div class="studio-model-note" data-wf="reup" style="margin-top:6px" hidden>Mỗi cảnh là MỘT lượt thoại của nguồn, cắt đúng từ giây câu đó được nói. Không gọi AI tạo ảnh hay tạo video.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
@@ -2391,6 +2391,26 @@
       setStudioProgress(0, `Tải video gốc thất bại: ${error.message}`, 'error');
       setMessage(error.message, 'error');
     } finally { if (button) button.disabled = false; }
+  }
+
+  async function cutStudioScenesByDialogue() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    if (!confirm('Dựng lại timeline theo từng lượt thoại của video gốc? Timeline hiện tại sẽ bị thay.')) return;
+    const button = $('studioCutByDialogueButton');
+    if (button) button.disabled = true;
+    setMessage('Đang cắt cảnh theo lời thoại...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue`, {method: 'POST'});
+      const minutes = Math.round((result.total_duration_seconds || 0) / 60);
+      const missing = result.turns_without_timing || 0;
+      setMessage(
+        `Đã cắt ${result.segments} cảnh theo lời thoại (${result.speakers.length} người nói, ~${minutes} phút)`
+        + (missing ? ` · ${missing} lượt không có mốc giây, đã ước lượng.` : '.'),
+        missing ? 'error' : 'success');
+      const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+    } catch (error) { setMessage(`Không cắt được: ${error.message}`, 'error'); }
+    finally { if (button) button.disabled = false; }
   }
 
   async function planStudioSourceCues() {
@@ -5265,6 +5285,7 @@ Chạy các bước này?`)) return;
   $('studioPlanVisualsButton')?.addEventListener('click', () => void planStudioVisuals());
   $('studioPlanEditButton')?.addEventListener('click', () => void planStudioEdit());
   $('studioDownloadSourceButton')?.addEventListener('click', () => void downloadStudioSource());
+  $('studioCutByDialogueButton')?.addEventListener('click', () => void cutStudioScenesByDialogue());
   $('studioPlanSourceCuesButton')?.addEventListener('click', () => void planStudioSourceCues());
   $('studioCutSourceScenesButton')?.addEventListener('click', () => void cutStudioSourceScenes());
   $('studioRenderReupButton')?.addEventListener('click', () => void renderStudioReup());

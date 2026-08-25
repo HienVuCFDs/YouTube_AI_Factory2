@@ -570,6 +570,11 @@ class Database:
             # The narration before translation, kept so a translated line can
             # be checked against what was actually said.
             self._ensure_column(connection, "project_timeline_segments", "source_voice_text", "TEXT NOT NULL DEFAULT ''")
+            # Who speaks this line. Without it a retelling has nowhere to record
+            # that a line belongs to a character, and every line reads as
+            # narration - which is exactly how the dialogue kept disappearing.
+            self._ensure_column(connection, "project_shots", "speaker", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "speaker", "TEXT NOT NULL DEFAULT ''")
             # Whether the orchestrator has written this job's prompt yet.
             # Cannot be inferred from pipeline_stage: claiming a job
             # overwrites that with 'running', erasing the marker.
@@ -1651,9 +1656,9 @@ class Database:
                     """
                     INSERT INTO project_shots (
                         project_id, script_id, shot_index, section, narration,
-                        visual_prompt, asset_type, duration_seconds, status,
+                        speaker, visual_prompt, asset_type, duration_seconds, status,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id,
@@ -1661,6 +1666,7 @@ class Database:
                         int(shot.get("shot_index") or 1),
                         str(shot.get("section") or "main").strip(),
                         str(shot.get("narration") or "").strip(),
+                        str(shot.get("speaker") or "").strip(),
                         str(shot.get("visual_prompt") or "").strip(),
                         str(shot.get("asset_type") or "broll").strip(),
                         int(shot.get("duration_seconds") or 8),
@@ -1744,6 +1750,7 @@ class Database:
         *,
         section: str = "main",
         narration: str = "",
+        speaker: str = "",
         visual_prompt: str = "",
         asset_type: str = "broll",
         duration_seconds: int = 8,
@@ -1804,9 +1811,9 @@ class Database:
                 """
                 INSERT INTO project_shots (
                     project_id, script_id, shot_index, section, narration,
-                    visual_prompt, asset_type, duration_seconds, status,
+                    speaker, visual_prompt, asset_type, duration_seconds, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -1814,6 +1821,7 @@ class Database:
                     shot_index,
                     section.strip() or "main",
                     narration.strip(),
+                    speaker.strip(),
                     visual_prompt.strip(),
                     asset_type.strip() or "broll",
                     max(1, int(duration_seconds)),
@@ -1938,10 +1946,10 @@ class Database:
                     """
                     INSERT INTO project_timeline_segments (
                         project_id, script_id, shot_id, segment_index, section,
-                        voice_text, subtitle_text, visual_prompt, asset_type,
+                        voice_text, subtitle_text, speaker, visual_prompt, asset_type,
                         duration_seconds, start_seconds, end_seconds, audio_path,
                         visual_path, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id,
@@ -1951,6 +1959,7 @@ class Database:
                         str(segment.get("section") or "main").strip(),
                         str(segment.get("voice_text") or "").strip(),
                         str(segment.get("subtitle_text") or segment.get("voice_text") or "").strip(),
+                        str(segment.get("speaker") or "").strip(),
                         str(segment.get("visual_prompt") or "").strip(),
                         str(segment.get("asset_type") or "broll").strip(),
                         max(1, int(segment.get("duration_seconds") or 8)),

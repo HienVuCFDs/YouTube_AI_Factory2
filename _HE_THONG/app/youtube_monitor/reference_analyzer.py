@@ -64,6 +64,11 @@ REFERENCE_SCHEMA: dict[str, Any] = {
                     "order": {"type": "integer"},
                     "speaker": {"type": "string"},
                     "line": {"type": "string"},
+                    # Where this turn sits in the source. It is what lets the
+                    # reup workflow cut each scene exactly where the line is
+                    # spoken instead of guessing at scene boundaries.
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
                 },
                 "required": ["order", "speaker", "line"],
                 "additionalProperties": False,
@@ -199,7 +204,8 @@ def _prompt(
         "- dialogue: TỪNG LƯỢT NÓI, theo đúng thứ tự, kèm người nói. Gộp các dòng liền nhau của "
         "cùng một người thành một lượt; đổi người nói thì sang lượt mới. Lời dẫn chuyện ghi người "
         "nói là 'Người dẫn'. Không được rút gọn, không được bỏ lượt nào, không được mô tả thay vì "
-        "trích lời.\n"
+        "trích lời. Mỗi lượt phải kèm 'start_seconds' và 'end_seconds' lấy đúng từ mốc giây "
+        "[Ns] của các dòng tạo nên lượt đó — đây là căn cứ để cắt hình sau này.\n"
         "- scene_map: các đoạn nội dung theo thứ tự, mỗi đoạn một câu chuyện gì đang xảy ra.\n"
         "- visual_style: một hai câu về hình ảnh, ngắn thôi.\n"
         "- limitations: chỗ nào nghe không rõ, không biết ai nói, hoặc không xác định được."
@@ -256,6 +262,8 @@ def _merge(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "order": len(merged["dialogue"]) + 1,
                 "speaker": str(line.get("speaker") or "Không rõ"),
                 "line": str(line.get("line") or ""),
+                "start_seconds": float(line.get("start_seconds") or 0),
+                "end_seconds": float(line.get("end_seconds") or 0),
             })
         for beat in result.get("scene_map") or []:
             merged["scene_map"].append({

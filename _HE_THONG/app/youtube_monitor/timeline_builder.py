@@ -23,6 +23,7 @@ def build_timeline(
                 "section": str(shot.get("section") or "main").strip(),
                 "voice_text": voice_text,
                 "subtitle_text": voice_text,
+                "speaker": str(shot.get("speaker") or "").strip(),
                 "visual_prompt": str(shot.get("visual_prompt") or "").strip(),
                 "asset_type": str(shot.get("asset_type") or "broll").strip(),
                 "duration_seconds": duration,
