@@ -4125,6 +4125,72 @@ def list_output_languages() -> dict[str, Any]:
     }
 
 
+_EDGE_VOICE_CACHE: dict[str, Any] = {"fetched_at": 0.0, "voices": []}
+_EDGE_VOICE_TTL_SECONDS = 3600.0
+
+
+@app.get("/api/tts/voices")
+def list_tts_voices(refresh: bool = Query(default=False)) -> dict[str, Any]:
+    """Ask Edge TTS what voices it actually has, rather than guessing.
+
+    The picker listed seven voices written into the page by hand. Microsoft
+    publishes 322, so most were simply unreachable - and the two Vietnamese
+    ones shown were not the app being stingy, they are the entire Vietnamese
+    catalogue, which is worth being able to see for oneself.
+
+    Cached for an hour: the list changes rarely and the call goes over the
+    network, while the voice picker is drawn on every project open.
+    """
+    now = time.monotonic()
+    cached = _EDGE_VOICE_CACHE["voices"]
+    if cached and not refresh and now - float(_EDGE_VOICE_CACHE["fetched_at"]) < _EDGE_VOICE_TTL_SECONDS:
+        voices = cached
+    else:
+        if not EDGE_TTS_RUNTIME_READY:
+            raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng trong môi trường local")
+        script = (
+            "import asyncio, json, edge_tts;"
+            "print(json.dumps([{'short_name': v['ShortName'], 'locale': v['Locale'],"
+            " 'gender': v['Gender'], 'friendly': v.get('FriendlyName', '')}"
+            " for v in asyncio.run(edge_tts.list_voices())]))"
+        )
+        try:
+            result = operations.run_cancellable(
+                [str(settings.EDGE_TTS_PYTHON), "-c", script], timeout=90
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(status_code=502, detail=f"Không hỏi được danh sách giọng: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[-300:]
+            raise HTTPException(status_code=502, detail=f"edge-tts lỗi: {detail}")
+        try:
+            voices = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise HTTPException(status_code=502, detail="edge-tts trả về dữ liệu không đọc được") from exc
+        _EDGE_VOICE_CACHE["voices"] = voices
+        _EDGE_VOICE_CACHE["fetched_at"] = now
+
+    by_locale: dict[str, list[dict[str, Any]]] = {}
+    for voice in voices:
+        by_locale.setdefault(str(voice.get("locale") or "?"), []).append(voice)
+    return {
+        "provider": "edge_tts",
+        "total": len(voices),
+        "locales": len(by_locale),
+        # Vietnamese first: it is what this app is for, and seeing that the
+        # language really does have only two voices answers the question
+        # better than any note could.
+        "voices": sorted(
+            voices,
+            key=lambda item: (
+                not str(item.get("locale") or "").startswith("vi-"),
+                str(item.get("locale") or ""),
+                str(item.get("short_name") or ""),
+            ),
+        ),
+    }
+
+
 @app.get("/api/workflows")
 def list_workflows() -> dict[str, Any]:
     """The workflows, each read from its own file.
