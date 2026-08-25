@@ -219,6 +219,12 @@
     .wf-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .wf-step { border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--muted); }
     .studio-result-card.wf-active { border-color: rgba(245,158,11,.55); }
+    .running-ops { width: 100%; margin-top: 10px; border: 1px solid rgba(245,158,11,.45);
+      border-radius: 8px; background: rgba(245,158,11,.08); padding: 9px 12px; font-size: 13px; }
+    .running-ops-head { font-weight: 600; margin-bottom: 6px; }
+    .running-op { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 4px 0; }
+    .running-op-step { color: var(--muted); font-size: 12px; }
     .usage-limit-banner { width: 100%; margin-top: 10px; border: 1px solid rgba(192,57,43,.55);
       border-radius: 8px; background: rgba(192,57,43,.10); padding: 9px 12px; font-size: 13px; }
     .usage-limit-banner .usage-limit-title { font-weight: 600; margin-bottom: 4px; }
@@ -392,6 +398,7 @@
         <span class="status-pill ok"><span class="dot"></span> KHÔNG TỰ ĐỘNG TẢI VIDEO</span>
       </div>
       <div id="usageLimitBanner" class="usage-limit-banner" hidden></div>
+      <div id="runningOpsBar" class="running-ops" hidden></div>
     </header>
 
     <main id="overview" class="content">
@@ -4875,9 +4882,54 @@ Chạy các bước này?`)) return;
     }
   }
 
+  // Trước đây không có đường nào dừng: phân tích và viết kịch bản là request
+  // HTTP chặn, chạy hàng chục phút, đóng app là cách duy nhất thoát ra.
+  function elapsedSince(iso) {
+    const started = new Date(iso);
+    if (Number.isNaN(started.getTime())) return '';
+    const seconds = Math.max(0, Math.round((Date.now() - started.getTime()) / 1000));
+    return seconds < 60 ? `${seconds} giây` : `${Math.floor(seconds / 60)} phút ${seconds % 60} giây`;
+  }
+
+  async function loadRunningOperations() {
+    const bar = $('runningOpsBar');
+    if (!bar) return;
+    try {
+      const result = await api('/api/operations');
+      const running = result.operations || [];
+      if (!running.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+      bar.hidden = false;
+      bar.innerHTML = `<div class="running-ops-head">Đang chạy · ${running.length}</div>
+        ${running.map((item) => `<div class="running-op">
+          <div><b>${esc(item.label || item.kind)}</b>
+            <div class="running-op-step">${esc(item.step || '')}${item.step ? ' · ' : ''}${esc(elapsedSince(item.started_at))}</div></div>
+          <button class="btn small danger" onclick="cancelRunningOperation('${esc(item.id)}')"
+            ${item.cancelled ? 'disabled' : ''}>${item.cancelled ? 'Đang dừng...' : 'Dừng'}</button>
+        </div>`).join('')}
+        ${running.length > 1 ? '<div class="studio-actions"><button class="btn small danger" onclick="cancelAllOperations()">Dừng tất cả</button></div>' : ''}`;
+    } catch (_) { /* thanh này không được phép làm hỏng vòng refresh */ }
+  }
+
+  async function cancelRunningOperation(operationId) {
+    try {
+      await api(`/api/operations/${encodeURIComponent(operationId)}/cancel`, {method: 'POST'});
+      setMessage('Đang dừng tiến trình...', 'success');
+    } catch (error) { setMessage(`Không dừng được: ${error.message}`, 'error'); }
+    await loadRunningOperations();
+  }
+
+  async function cancelAllOperations() {
+    if (!confirm('Dừng tất cả tiến trình đang chạy?')) return;
+    try {
+      const result = await api('/api/operations/cancel-all', {method: 'POST'});
+      setMessage(`Đã yêu cầu dừng ${result.cancelled} tiến trình.`, 'success');
+    } catch (error) { setMessage(`Không dừng được: ${error.message}`, 'error'); }
+    await loadRunningOperations();
+  }
+
   async function refresh() {
     try {
-      await Promise.all([loadHealth(), loadUsageLimits(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
+      await Promise.all([loadHealth(), loadUsageLimits(), loadRunningOperations(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();

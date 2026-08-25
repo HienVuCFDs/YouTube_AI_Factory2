@@ -32,7 +32,7 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
-from . import usage_limits
+from . import operations, usage_limits
 from . import languages
 from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
@@ -599,6 +599,10 @@ class RenameAssetRequest(BaseModel):
 
 
 def _api_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, operations.OperationCancelled):
+        # 499 is nginx's "client closed request"; the nearest honest code for
+        # work that was deliberately stopped rather than failing.
+        return HTTPException(status_code=499, detail="Đã dừng theo yêu cầu")
     if isinstance(exc, YouTubeApiError):
         status = exc.status_code if exc.status_code and 400 <= exc.status_code < 500 else 502
         return HTTPException(status_code=status, detail=str(exc))
@@ -884,18 +888,19 @@ def create_director_draft(
         }
         target_duration = resolve_target_duration_seconds(payload.target_duration_seconds, direction, payload.target_duration_text, (video or {}).get("duration_seconds"))
         research_context = research_folklore_remake(str((video or {}).get("title") or ""), direction) if payload.use_web_research else None
-        creative = active_writer.generate(
-            video or {},
-            transcript_text,
-            workflow_context=workflow_context,
-            creative_direction=direction,
-            remake_mode=payload.remake_mode,
-            target_duration_seconds=target_duration,
-            source_duration_seconds=(video or {}).get("duration_seconds"),
-            research_context=research_context,
-            reference_analysis=reference_analysis,
-            output_language=payload.output_language,
-        )
+        with operations.track("writer", f"AI Đạo diễn · dự án {project_id}", project_id):
+            creative = active_writer.generate(
+                video or {},
+                transcript_text,
+                workflow_context=workflow_context,
+                creative_direction=direction,
+                remake_mode=payload.remake_mode,
+                target_duration_seconds=target_duration,
+                source_duration_seconds=(video or {}).get("duration_seconds"),
+                research_context=research_context,
+                reference_analysis=reference_analysis,
+                output_language=payload.output_language,
+            )
         if research_context:
             creative["research_context"] = research_context
         creative["target_duration_seconds"] = target_duration
@@ -4031,6 +4036,26 @@ def list_output_languages() -> dict[str, Any]:
     }
 
 
+@app.get("/api/operations")
+def list_operations() -> dict[str, Any]:
+    """Long-running work in progress, with what each one is doing."""
+    return {"operations": operations.active()}
+
+
+@app.post("/api/operations/{operation_id}/cancel")
+def cancel_operation(operation_id: str) -> dict[str, Any]:
+    """Stop one operation and kill whatever CLI it is currently waiting on."""
+    if not operations.cancel(operation_id):
+        raise HTTPException(status_code=404, detail="Tiến trình đã kết thúc hoặc không tồn tại")
+    return {"status": "cancelling", "operation_id": operation_id}
+
+
+@app.post("/api/operations/cancel-all")
+def cancel_all_operations() -> dict[str, Any]:
+    """Stop everything that is running."""
+    return {"status": "cancelling", "cancelled": operations.cancel_all()}
+
+
 @app.get("/api/usage-limits")
 def list_usage_limits() -> dict[str, Any]:
     """Which models are out of quota right now, and when they come back."""
@@ -5431,7 +5456,8 @@ def create_reference_analysis(
             transcript = save_transcript_result(database, video_id, whisper_result)
             transcript_text = str(transcript.get("content_text") or "").strip()
             transcript_generated = True
-        result = analyze_reference(video, transcript_text, provider, output_language=output_language)
+        with operations.track("reference", f"Phân tích nguồn: {str(video.get('title') or video_id)[:50]}"):
+            result = analyze_reference(video, transcript_text, provider, output_language=output_language)
         database.save_video_analysis(
             video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
         )
@@ -5549,18 +5575,19 @@ def generate_video_writer_content(
     try:
         target_duration = resolve_target_duration_seconds(payload.target_duration_seconds, payload.creative_direction, payload.target_duration_text, video.get("duration_seconds"))
         research_context = research_folklore_remake(str(video.get("title") or ""), payload.creative_direction) if payload.use_web_research else None
-        result = active_writer.generate(
-            video,
-            transcript_text,
-            workflow_context=workflow_context,
-            creative_direction=payload.creative_direction,
-            remake_mode=payload.remake_mode,
-            target_duration_seconds=target_duration,
-            source_duration_seconds=video.get("duration_seconds"),
-            research_context=research_context,
-            reference_analysis=reference_analysis,
-            output_language=payload.output_language,
-        )
+        with operations.track("writer", f"Viết kịch bản: {str(video.get('title') or video_id)[:50]}"):
+            result = active_writer.generate(
+                video,
+                transcript_text,
+                workflow_context=workflow_context,
+                creative_direction=payload.creative_direction,
+                remake_mode=payload.remake_mode,
+                target_duration_seconds=target_duration,
+                source_duration_seconds=video.get("duration_seconds"),
+                research_context=research_context,
+                reference_analysis=reference_analysis,
+                output_language=payload.output_language,
+            )
         if research_context:
             result["research_context"] = research_context
         result["target_duration_seconds"] = target_duration

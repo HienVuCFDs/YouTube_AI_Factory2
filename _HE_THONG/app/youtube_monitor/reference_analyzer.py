@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import languages
+from . import languages, operations
 from .llm_client import (
     LlmError,
     call_antigravity_json,
@@ -289,6 +289,10 @@ def analyze_reference(
         readings: list[dict[str, Any]] = []
         cast: list[dict[str, Any]] = []
         for index, piece in enumerate(pieces):
+            # A cancel lands here even if the call already in flight cannot be
+            # stopped: the next pass simply never starts.
+            operations.check()
+            operations.set_step(f"Đọc phần {index + 1}/{len(pieces)} của bản ghi")
             reading = _call(
                 provider,
                 _SYSTEM_PROMPT,

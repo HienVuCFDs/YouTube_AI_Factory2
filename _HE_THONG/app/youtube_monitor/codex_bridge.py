@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import settings
+from . import operations, settings
 
 
 class CodexBridgeError(RuntimeError):
@@ -166,18 +166,12 @@ def call_codex_json(
             "-",
         ]
         try:
-            process = subprocess.run(
+            process = operations.run_cancellable(
                 command,
-                input=instruction,
-                capture_output=True,
-                text=True,
-                # Windows otherwise defaults to a legacy console code page
-                # (often cp1252), which cannot carry Vietnamese prompts.
-                encoding="utf-8",
-                errors="replace",
                 timeout=timeout_seconds,
-                check=False,
+                cwd=str(settings.PROJECT_ROOT),
                 env=_local_codex_environment(),
+                input_text=instruction,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise CodexBridgeError(f"Khong chay duoc Codex CLI: {exc}") from exc

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import settings
+from . import operations, settings
 
 
 class AntigravityBridgeError(RuntimeError):
@@ -220,14 +220,9 @@ def call_antigravity_json(
         "--print-timeout", f"{max(1, timeout_seconds // 60)}m",
     ]
     try:
-        process = subprocess.run(
+        process = operations.run_cancellable(
             command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout_seconds,
-            check=False,
             cwd=str(settings.PROJECT_ROOT),
             env=_antigravity_environment(),
         )
