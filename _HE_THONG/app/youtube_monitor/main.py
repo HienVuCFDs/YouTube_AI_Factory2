@@ -2836,6 +2836,36 @@ _EDIT_PLAN_SCHEMA = {
                     "segment_index": {"type": "integer"},
                     "transition": {"type": "string", "enum": ["cut", "fade"]},
                     "effect": {"type": "string", "enum": ["zoom_in", "zoom_out", "static"]},
+                    # Dead air and a redundant lead-in are the commonest reason
+                    # a retold clip feels slack, and how much to take off
+                    "trim_head_seconds": {"type": "number"},
+                    "trim_tail_seconds": {"type": "number"},
+                    # Anything on screen that belongs to the source rather than
+                    # to this video: its channel logo, its watermark, and its
+                    # burned-in subtitles, which are in a language this
+                    # audience is not being given.
+                    "cleanups": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["logo", "watermark", "subtitle", "other"]},
+                                "position": {
+                                    "type": "string",
+                                    "enum": [
+                                        "top_left", "top_right", "top_center",
+                                        "bottom_left", "bottom_right", "bottom_center",
+                                        "center", "full",
+                                    ],
+                                },
+                                "method": {"type": "string", "enum": ["blur", "delogo", "crop"]},
+                                "note": {"type": "string"},
+                            },
+                            "required": ["kind", "position", "method"],
+                        },
+                    },
+                    "needs_extra_visual": {"type": "boolean"},
+                    "extra_visual_note": {"type": "string"},
                     "note": {"type": "string"},
                 },
                 "required": ["segment_index", "transition", "effect"],
@@ -2879,7 +2909,21 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         "- 'effect': 'zoom_in' (day vao dan, tao cam giac tap trung), 'zoom_out' (keo lui, mo rong boi canh), "
         "hoac 'static' (dung yen hoan toan — dung khi nguoi xem can DOC noi dung tren man hinh)\n"
         "- 'note': ly do ngan bang tieng Viet\n\n"
-        "Luu y: canh loai 'video'/'gif' da co chuyen dong san, nen thuong de 'static' de khong chong chuyen dong. "
+        "Luu y: canh loai 'video'/'gif' da co chuyen dong san, nen thuong de 'static' de khong chong chuyen dong.\n\n"
+        "VOI CANH CAT TU VIDEO NGUON (asset_type = source_clip), quyet dinh them:\n"
+        "- 'trim_head_seconds' / 'trim_tail_seconds': cat bo phan thua o dau/cuoi canh - khoang lang, "
+        "canh dan nhap, doan lap lai y da noi. De 0 neu khong can cat.\n"
+        "- 'cleanups': nhung gi tren man hinh thuoc ve NGUON chu khong thuoc video nay:\n"
+        "    kind='logo' / 'watermark': logo kenh goc, watermark chim goc man hinh;\n"
+        "    kind='subtitle': phu de chay san trong hinh - thuong la tieng nuoc ngoai, nguoi xem cua "
+        "ta khong doc duoc va no da duoc thay bang loi doc moi;\n"
+        "    'position': vung no nam ('top_left', 'bottom_center'...);\n"
+        "    'method': 'blur' (lam mo - an toan nhat), 'delogo' (xoa va noi lai nen - hop voi logo nho "
+        "tren nen deu), 'crop' (cat bo canh hinh - chi khi no sat mep).\n"
+        "  De mang rong neu canh do khong co gi can xu ly. CHI ke nhung gi co bang chung trong mo ta "
+        "canh; dung mac dinh rang canh nao cung co logo.\n"
+        "- 'needs_extra_visual' + 'extra_visual_note': dat true khi canh nay thieu hinh minh hoa - vi du "
+        "loi thoai noi ve mot thu ma video goc khong cho thay - va noi ro can them gi.\n\n"
         "Ngoai ra tra ve 'pacing' (nhip tong the) va 'music_mood' (khong khi nhac nen) cho ca video."
     )
     try:
@@ -2895,13 +2939,24 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             continue
         transition = str(entry.get("transition") or "fade")
         effect = str(entry.get("effect") or "zoom_in")
-        database.save_segment_edit(int(segment["id"]), transition, effect, str(entry.get("note") or ""))
+        cleanups = [item for item in (entry.get("cleanups") or []) if isinstance(item, dict)]
+        database.save_segment_edit(
+            int(segment["id"]), transition, effect, str(entry.get("note") or ""),
+            trim_head_seconds=float(entry.get("trim_head_seconds") or 0),
+            trim_tail_seconds=float(entry.get("trim_tail_seconds") or 0),
+            cleanups=cleanups,
+        )
         planned.append({
             "segment_id": segment["id"],
             "segment_index": segment["segment_index"],
             "transition": transition,
             "effect": effect,
             "note": str(entry.get("note") or ""),
+            "trim_head_seconds": float(entry.get("trim_head_seconds") or 0),
+            "trim_tail_seconds": float(entry.get("trim_tail_seconds") or 0),
+            "cleanups": cleanups,
+            "needs_extra_visual": bool(entry.get("needs_extra_visual")),
+            "extra_visual_note": str(entry.get("extra_visual_note") or ""),
         })
     return {
         "status": "planned",

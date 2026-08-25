@@ -545,6 +545,12 @@ class Database:
             self._ensure_column(connection, "project_timeline_segments", "edit_transition", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_effect", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "edit_note", "TEXT NOT NULL DEFAULT ''")
+            # How much of a source clip is dead air or a redundant lead-in, and
+            # what on screen belongs to the source rather than to this video -
+            # its logo, its watermark, its burned-in foreign subtitles.
+            self._ensure_column(connection, "project_timeline_segments", "edit_trim_head", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_timeline_segments", "edit_trim_tail", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_timeline_segments", "edit_cleanups", "TEXT NOT NULL DEFAULT '[]'")
             # A second AI's verdict on the script, so the stage that was
             # declared in the agent settings but never called has somewhere to
             # record its findings. status already had draft/review/approved;
@@ -3592,16 +3598,34 @@ class Database:
         transition: str,
         effect: str,
         note: str = "",
+        trim_head_seconds: float = 0.0,
+        trim_tail_seconds: float = 0.0,
+        cleanups: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Stores how one scene should be cut and moved in the final edit."""
+        """Stores how one scene should be cut, moved and cleaned in the edit.
+
+        Cleanups are kept as JSON rather than columns: a scene may need none,
+        or a logo and a burned-in subtitle at once, and the renderer reads the
+        whole list to build one filter chain.
+        """
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE project_timeline_segments
-                SET edit_transition = ?, edit_effect = ?, edit_note = ?, updated_at = ?
+                SET edit_transition = ?, edit_effect = ?, edit_note = ?,
+                    edit_trim_head = ?, edit_trim_tail = ?, edit_cleanups = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (transition.strip()[:20], effect.strip()[:20], note.strip()[:400], utc_now(), segment_id),
+                (
+                    transition.strip()[:20],
+                    effect.strip()[:20],
+                    note.strip()[:400],
+                    max(0.0, float(trim_head_seconds or 0)),
+                    max(0.0, float(trim_tail_seconds or 0)),
+                    json.dumps(cleanups or [], ensure_ascii=False),
+                    utc_now(),
+                    segment_id,
+                ),
             )
 
     def set_segment_visual_kind(

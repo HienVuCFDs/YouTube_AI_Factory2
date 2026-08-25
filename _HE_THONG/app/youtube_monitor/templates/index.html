@@ -416,7 +416,7 @@
           <div><div class="panel-title"><span class="mark">▶</span> TẠO VIDEO MỚI</div><div class="panel-sub">Chỉ cần: chọn video mẫu → Phân tích → Viết kịch bản → Dựng. Các tùy chọn nâng cao là không bắt buộc.</div></div>
           <span id="studioStatusTag" class="tag cyan">BƯỚC 1 / 7</span>
         </div>
-        <div class="studio-stepper" role="tablist" aria-label="Quy trình tạo video" hidden>
+        <div class="studio-stepper" role="tablist" aria-label="Quy trình tạo video">
           <button class="studio-step-tab active" data-studio-tab="1" onclick="setStudioStep(1)"><span>01</span><strong>Nguồn</strong></button>
           <button class="studio-step-tab" data-studio-tab="2" onclick="setStudioStep(2)"><span>02</span><strong>Phân tích</strong></button>
           <button class="studio-step-tab" data-studio-tab="3" onclick="setStudioStep(3)"><span>03</span><strong>Kịch bản</strong></button>
@@ -1533,6 +1533,17 @@
     document.querySelectorAll('[data-wf]').forEach((row) => {
       row.hidden = row.dataset.wf !== state.studioWorkflow;
     });
+    // Một file đã tải lên nằm sẵn trên máy, nên bước "tải video nguồn" không
+    // còn việc gì để làm; để nguyên chỉ khiến người dùng tưởng mình bỏ sót.
+    const downloadButton = $('studioDownloadSourceButton');
+    if (downloadButton) {
+      const alreadyLocal = studioSelectedVideo()?.media_status === 'downloaded_for_editing';
+      downloadButton.hidden = alreadyLocal;
+      const cut = $('studioCutByDialogueButton');
+      const exported = $('studioCutSourceScenesButton');
+      if (cut) cut.textContent = `${alreadyLocal ? 1 : 2}. Cắt cảnh theo lời thoại`;
+      if (exported) exported.textContent = `${alreadyLocal ? 2 : 3}. Xuất clip từ video gốc`;
+    }
     if ($('studioStatusTag')) $('studioStatusTag').textContent = labels[next] || 'TẠO VIDEO';
     if (next === 4) {
       syncStudioVoiceModelOptions();
@@ -2324,18 +2335,34 @@
     if (!target) return;
     const scenes = result.scenes || [];
     if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa có cảnh nào trong kế hoạch dựng.</div>');
+    const CLEANUP_LABELS = {logo: 'Logo', watermark: 'Watermark', subtitle: 'Phụ đề gốc', other: 'Khác'};
+    const METHOD_LABELS = {blur: 'làm mờ', delogo: 'xoá', crop: 'cắt mép'};
+    const trimText = (scene) => {
+      const head = Number(scene.trim_head_seconds || 0);
+      const tail = Number(scene.trim_tail_seconds || 0);
+      if (!head && !tail) return '—';
+      return [head ? `đầu ${head}s` : '', tail ? `cuối ${tail}s` : ''].filter(Boolean).join(', ');
+    };
+    const cleanupText = (scene) => {
+      const items = (scene.cleanups || []).map((item) =>
+        `${CLEANUP_LABELS[item.kind] || item.kind} · ${METHOD_LABELS[item.method] || item.method}`);
+      if (scene.needs_extra_visual) items.push(`⊕ thiếu hình: ${scene.extra_visual_note || ''}`);
+      return items.length ? items.map((item) => esc(item)).join('<br>') : '—';
+    };
     const rows = scenes.map((scene) => `<tr>
       <td>${esc(scene.segment_index)}</td>
       <td>${planSelect(scene.segment_id, 'transition', scene.transition, TRANSITION_LABELS)}</td>
       <td>${planSelect(scene.segment_id, 'effect', scene.effect, EFFECT_LABELS)}</td>
+      <td>${esc(trimText(scene))}</td>
+      <td>${cleanupText(scene)}</td>
       <td class="plan-reason">${esc(scene.note || '')}</td>
     </tr>`).join('');
     const header = [result.pacing, result.music_mood].filter(Boolean).map(esc).join(' · ');
     target.innerHTML = `<div class="studio-result-card"><h3>Kế hoạch dựng</h3>
       ${header ? `<p class="hint">${header}</p>` : ''}
-      <p class="hint">Chuyển cảnh và hiệu ứng được áp dụng khi render; sửa ở đây trước khi dựng.</p>
+      <p class="hint">Áp dụng khi render: chuyển cảnh, hiệu ứng, cắt bỏ phần thừa đầu/cuối, và xoá/làm mờ logo · watermark · phụ đề gốc còn dính trong hình.</p>
       <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
-      <th>Cảnh</th><th>Chuyển cảnh</th><th>Hiệu ứng</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+      <th>Cảnh</th><th>Chuyển cảnh</th><th>Hiệu ứng</th><th>Cắt thừa</th><th>Dọn hình</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
     bindPlanSelects(target);
   }
 

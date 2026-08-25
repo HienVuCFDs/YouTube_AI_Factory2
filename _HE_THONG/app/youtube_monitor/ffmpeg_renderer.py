@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import textwrap
@@ -238,6 +239,61 @@ def _encoding_arguments(codec: str) -> list[str]:
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
 
 
+def _cleanup_filters(cleanups: list[dict[str, Any]], width: int, height: int) -> list[str]:
+    """Filters that take the source's own marks off the picture.
+
+    A retold clip still carries the original channel's logo, its watermark and
+    its burned-in subtitles - the last in a language this audience is not being
+    given, and already replaced by the new narration.
+
+    Everything lands on delogo, which rebuilds a rectangle from the pixels
+    around it. A proper blur needs split/overlay with labels, and these filters
+    have to compose into the one flat -vf chain the segment already builds. For
+    a small corner logo delogo is what it was made for; over a wide subtitle
+    band it smears rather than cleanly erases, which is still better than
+    leaving foreign text on screen, and is why the plan can choose crop instead
+    when the mark sits against an edge.
+    """
+    if not cleanups:
+        return []
+    mark_w, mark_h = max(16, width // 5), max(16, height // 8)
+    band_w, band_h = max(16, int(width * 0.9)), max(16, int(height * 0.18))
+    boxes: dict[str, tuple[int, int, int, int]] = {
+        "top_left": (0, 0, mark_w, mark_h),
+        "top_right": (width - mark_w, 0, mark_w, mark_h),
+        "top_center": ((width - band_w) // 2, 0, band_w, mark_h),
+        "bottom_left": (0, height - mark_h, mark_w, mark_h),
+        "bottom_right": (width - mark_w, height - mark_h, mark_w, mark_h),
+        "bottom_center": ((width - band_w) // 2, height - band_h, band_w, band_h),
+        "center": ((width - band_w) // 2, (height - band_h) // 2, band_w, band_h),
+        "full": (0, 0, width, height),
+    }
+    filters: list[str] = []
+    for cleanup in cleanups:
+        if not isinstance(cleanup, dict):
+            continue
+        box = boxes.get(str(cleanup.get("position") or "").strip().lower())
+        if not box:
+            continue
+        x, y, w, h = box
+        method = str(cleanup.get("method") or "blur").strip().lower()
+        if method == "crop" and (y == 0 or y + h >= height):
+            # Only safe against an edge; the scale/pad further down the chain
+            # puts the frame back to its target size.
+            filters.append(
+                f"crop={width}:{max(16, height - h)}:0:{h if y == 0 else 0}"
+            )
+            continue
+        # delogo must stay a pixel inside the frame on every side, or it has
+        # no border to rebuild from and FFmpeg refuses the filter outright.
+        x = max(1, min(x, width - 3))
+        y = max(1, min(y, height - 3))
+        w = max(1, min(w, width - x - 1))
+        h = max(1, min(h, height - y - 1))
+        filters.append(f"delogo=x={x}:y={y}:w={w}:h={h}")
+    return filters
+
+
 def _segment_arguments(
     executable: str,
     item: dict[str, Any],
@@ -255,6 +311,7 @@ def _segment_arguments(
     music_volume: float = 0.12,
     transition: str = "fade",
     effect: str = "",
+    cleanups: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     if not visual:
         raise FfmpegRenderError(
@@ -295,6 +352,9 @@ def _segment_arguments(
                 f"zoompan=z='min(zoom+0.0007,1.055)':x='iw/2-(iw/zoom/2)':"
                 f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
             )
+    # Before scale/pad: the boxes are worked out against the target frame, and
+    # padding would put bars where a corner mark is expected to be.
+    filters.extend(_cleanup_filters(cleanups or [], width, height))
     filters.extend([
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
@@ -425,10 +485,15 @@ def render_timeline_with_ffmpeg(
         # default gentle push-in.
         segment_transition = str(item.get("edit_transition") or transition or "fade")
         segment_effect = str(item.get("edit_effect") or "")
+        try:
+            segment_cleanups = json.loads(str(item.get("edit_cleanups") or "[]"))
+        except (TypeError, ValueError):
+            segment_cleanups = []
         args = _segment_arguments(
             executable, item, visual, audio, segment_output, duration,
             width, height, fps, index, preferred_codec, subtitle_path,
             background_music, music_volume, segment_transition, segment_effect,
+            segment_cleanups,
         )
         try:
             _run(args, output_dir)
@@ -441,6 +506,7 @@ def render_timeline_with_ffmpeg(
                     executable, item, visual, audio, segment_output, duration,
                     width, height, fps, index, "libx264", subtitle_path,
                     background_music, music_volume, segment_transition, segment_effect,
+                    segment_cleanups,
                 ),
                 output_dir,
             )
