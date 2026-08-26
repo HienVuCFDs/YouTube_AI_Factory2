@@ -4335,8 +4335,11 @@ Chạy các bước này?`)) return;
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
-  async function saveRenderSettings(projectId) {
-    setMessage('Đang lưu thiết lập render...');
+  // `quiet` is for saves the user did not ask for by name - persisting a
+  // dropdown the moment it changes. The save still has to happen, but
+  // announcing it twice per click buries the messages that matter.
+  async function saveRenderSettings(projectId, {quiet = false} = {}) {
+    if (!quiet) setMessage('Đang lưu thiết lập render...');
     try {
       const current = await api(`/api/projects/${projectId}/render-settings`);
       const usingStudio = localStorage.getItem('ytFactory.workspace') === 'dashboard' && Boolean($('studioVoiceProviderSelect'));
@@ -4354,14 +4357,27 @@ Chạy các bước này?`)) return;
           voice_provider: selected('renderVoiceProvider', 'studioVoiceProviderSelect', current.voice_provider || 'edge_tts'),
           voice_model: selected('renderVoiceModel', 'studioVoiceModelSelect', current.voice_model || 'vi-VN-HoaiMyNeural'),
           voice_rate: selected('renderVoiceRate', 'studioVoiceRateSelect', current.voice_rate || '+0%'),
-          voice_reference_asset_id: (() => { const value = selected('renderVoiceReferenceAsset', 'studioVoiceReferenceAsset', String(current.voice_reference_asset_id || '')); return value ? Number(value) : null; })(),
+          // The hidden field holding the chosen sample is filled in by
+          // hydrateStudioVoiceSettings, which only runs once step 4 is open.
+          // Saving before that read an empty field as "no sample" and wiped
+          // the project's voice - so VoxCPM went back to inventing a new
+          // speaker per scene. An empty field with no options in it means
+          // "not loaded yet", not "cleared"; only a blank pick from a
+          // populated list clears the sample.
+          voice_reference_asset_id: (() => {
+            const element = $(usingStudio ? 'studioVoiceReferenceAsset' : 'renderVoiceReferenceAsset');
+            const stored = current.voice_reference_asset_id || null;
+            if (!element) return stored;
+            if (element.value) return Number(element.value);
+            return element.options && element.options.length > 1 ? null : stored;
+          })(),
           voice_prompt_text: selected('renderVoicePromptText', 'studioVoicePromptText', current.voice_prompt_text || ''),
           subtitle_provider: selected('renderSubtitleProvider', 'studioSubtitleProviderSelect', current.subtitle_provider || 'timeline_text'),
           subtitle_model: selected('renderSubtitleModel', 'studioSubtitleModelSelect', current.subtitle_model || 'timeline'),
           publish_language: selected('renderPublishLanguage', 'studioPublishLanguageSelect', current.publish_language || 'vi'),
         }),
       });
-      setMessage('Đã lưu thiết lập nhạc nền và chuyển cảnh.', 'success');
+      if (!quiet) setMessage('Đã lưu thiết lập nhạc nền và chuyển cảnh.', 'success');
       if (response.settings && state.projectId && Number(state.projectId) === Number(projectId)) await openProjectDetail(state.projectId);
     } catch (error) { setMessage(`Không lưu được thiết lập render: ${error.message}`, 'error'); }
   }
@@ -5365,6 +5381,12 @@ Chạy các bước này?`)) return;
   $('studioVoiceProviderSelect')?.addEventListener('change', () => {
     syncStudioVoiceModelOptions();
     saveStudioSession();
+    // Entering step 4 rehydrates this dropdown from the project's saved
+    // settings, so a choice that lived only in the page was overwritten the
+    // next time the user walked back into the step - picking Edge TTS and
+    // finding VoxCPM again. Writing the choice down as it is made means the
+    // rehydrate reads back the same answer.
+    if (state.studioProjectId) void saveRenderSettings(state.studioProjectId, {quiet: true});
   });
   $('studioSubtitleModelSelect')?.addEventListener('change', () => {
     syncStudioSubtitleOptions();
