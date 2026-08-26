@@ -157,3 +157,41 @@ def test_it_refuses_without_an_analysis() -> None:
 
     assert caught.value.status_code == 400
     assert "Phân tích" in str(caught.value.detail)
+
+
+def test_cutting_by_dialogue_rewrites_the_storyboard_to_match() -> None:
+    """The storyboard grid is drawn from project_shots and finds a card's
+    picture through segment.shot_id. Cutting the timeline used to leave the
+    earlier, AI-invented storyboard in place beside it, so the screen showed
+    36 cards for 85 scenes and every card said it had no picture yet - even
+    though each segment already carried its clip from the source video.
+    """
+    project = _project("shots-follow", TURNS)
+    script = database.get_latest_project_script(int(project["id"]))
+    database.create_project_shots(int(project["id"]), int(script["id"]), [
+        {"shot_index": i, "narration": "canh AI cu", "visual_prompt": "anh minh hoa"}
+        for i in range(1, 8)
+    ], force=True)
+
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+
+    shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+    timeline = database.list_project_timeline(int(project["id"]), script_id=int(script["id"]))
+
+    assert len(shots) == len(timeline) == len(TURNS), "moi luot thoai mot canh"
+    assert all(segment["shot_id"] for segment in timeline), "canh nao cung phai noi duoc voi doan"
+    assert {int(s["shot_id"]) for s in timeline} == {int(s["id"]) for s in shots}
+
+
+def test_each_storyboard_card_carries_the_line_and_the_speaker() -> None:
+    """A card showing narration that nobody in the source says would send the
+    reup workflow straight back to inventing content."""
+    project = _project("shots-carry", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+
+    script = database.get_latest_project_script(int(project["id"]))
+    shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+
+    assert [shot["narration"] for shot in shots] == [turn["line"] for turn in TURNS]
+    assert [shot["speaker"] for shot in shots] == [turn["speaker"] for turn in TURNS]
+    assert all(shot["asset_type"] == "source_clip" for shot in shots), "WF reup khong tao anh AI"

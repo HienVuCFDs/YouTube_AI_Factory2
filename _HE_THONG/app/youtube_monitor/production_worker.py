@@ -80,7 +80,7 @@ def _run_command(template: str, values: dict[str, Any], cwd: Path, require_cuda:
             cwd=str(cwd),
             env=command_env,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=3600,
             check=False,
         )
@@ -204,7 +204,7 @@ def _prepare_voxcpm_reference_audio(reference: Path, cwd: Path, python_executabl
         ],
         cwd=str(cwd),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=120,
         check=False,
     )
@@ -286,7 +286,7 @@ def _run_voxcpm_batch(
             cwd=str(cwd),
             env=environment,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=3600,
             check=False,
         )

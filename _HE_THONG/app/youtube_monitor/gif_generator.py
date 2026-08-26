@@ -107,7 +107,7 @@ def create_animated_gif(
         result = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=max(60.0, duration * 20.0),
             check=False,
         )
@@ -199,7 +199,7 @@ def create_gif_from_frames(
             result = subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=max(60.0, duration * 20.0),
                 check=False,
             )

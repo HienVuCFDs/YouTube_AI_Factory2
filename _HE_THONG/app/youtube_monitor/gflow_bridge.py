@@ -128,7 +128,7 @@ def launch_gflow_login() -> dict[str, Any]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=env,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         creationflags=creation_flags,
     )
     _status_cache = None

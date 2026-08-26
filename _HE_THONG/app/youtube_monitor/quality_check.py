@@ -24,7 +24,7 @@ def _probe_media(path: Path, ffmpeg_binary: str) -> dict[str, Any]:
         try:
             result = subprocess.run(
                 [probe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
-                capture_output=True, text=True, timeout=30, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
             )
             if result.returncode == 0:
                 return json.loads(result.stdout or "{}")
@@ -54,7 +54,7 @@ def _long_silence_segments(timeline: list[dict[str, Any]], ffmpeg_binary: str, t
         try:
             result = subprocess.run(
                 [executable, "-hide_banner", "-i", str(path), "-af", f"silencedetect=noise=-45dB:d={threshold}", "-f", "null", "-"],
-                capture_output=True, text=True, timeout=120, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -96,11 +96,11 @@ def _final_audio_metrics(final_path: Path, ffmpeg_binary: str) -> dict[str, floa
     try:
         volume = subprocess.run(
             [executable, "-hide_banner", "-i", str(final_path), "-af", "volumedetect", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=180, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, check=False,
         )
         loudness = subprocess.run(
             [executable, "-hide_banner", "-i", str(final_path), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=180, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return {"max_volume_db": None, "integrated_lufs": None, "true_peak_db": None}
@@ -125,7 +125,7 @@ def _uses_nvenc(final_path: Path, ffmpeg_binary: str) -> bool:
             result = subprocess.run(
                 [probe, "-v", "error", "-show_entries", "stream_tags=encoder", "-of", "default=nw=1", str(final_path)],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=30,
                 check=False,
             )

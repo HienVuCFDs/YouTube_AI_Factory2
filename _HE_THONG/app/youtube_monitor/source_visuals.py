@@ -70,7 +70,7 @@ def _run(arguments: list[str], cwd: Path) -> None:
             arguments,
             cwd=str(cwd),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=3600,
             check=False,
         )
@@ -92,7 +92,7 @@ def _supports_nvenc(executable: str) -> bool:
         result = subprocess.run(
             [executable, "-hide_banner", "-encoders"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=20,
             check=False,
         )

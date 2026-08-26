@@ -211,7 +211,7 @@ class OpenMontageAdapter:
             *duration_args,
             str(output_path),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=600)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=600)
         if result.returncode != 0 or not output_path.is_file():
             detail = (result.stderr or result.stdout or "").strip()[-2000:]
             raise OpenMontageError(f"Không trộn được voiceover: {detail}")
@@ -341,7 +341,7 @@ class OpenMontageAdapter:
                 cwd=str(self.root),
                 env=environment,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=self.timeout_seconds,
                 check=False,
             )

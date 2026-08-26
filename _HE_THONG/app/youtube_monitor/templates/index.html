@@ -2617,8 +2617,20 @@
 
   async function generateStudioVoiceover() {
     if (!state.studioProjectId) return setMessage('Hãy tạo project và kịch bản trước khi tạo giọng đọc.', 'error');
+    // Giọng mẫu là thứ giữ cho mọi cảnh cùng một người đọc; thiếu nó thì
+    // VoxCPM sinh một giọng khác cho từng đoạn. Nhưng lựa chọn đã lưu nằm ở
+    // cấu hình dự án, còn ô ẩn này rỗng sau mỗi lần tải lại trang — đọc mỗi
+    // ô đó là chặn oan người đã chọn giọng từ trước.
     if ($('studioVoiceProviderSelect')?.value === 'voxcpm' && !$('studioVoiceReferenceAsset')?.value) {
-      return setMessage('VoxCPM cần giọng mẫu để giữ cùng một người đọc. Hãy tải file WAV/MP3 sạch 10–20 giây ở bước này và chọn nó trước.', 'error');
+      let saved = null;
+      try {
+        const bundle = await api(`/api/projects/${state.studioProjectId}`);
+        saved = bundle.render_settings?.voice_reference_asset_id || null;
+      } catch (_) { /* không đọc được thì xử như chưa chọn */ }
+      if (!saved) {
+        return setMessage('VoxCPM cần giọng mẫu để giữ cùng một người đọc cho mọi cảnh. Hãy chọn một giọng mẫu, hoặc tải file WAV/MP3 sạch 10–20 giây ở bước này.', 'error');
+      }
+      if ($('studioVoiceReferenceAsset')) $('studioVoiceReferenceAsset').value = String(saved);
     }
     const button = $('studioGenerateVoiceoverButton');
     button.disabled = true;

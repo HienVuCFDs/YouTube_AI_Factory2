@@ -108,7 +108,7 @@ def _system_chrome_is_running() -> bool:
     try:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         return "chrome.exe" in result.stdout.lower()
     except Exception:  # noqa: BLE001 - if we can't tell, assume the risky case

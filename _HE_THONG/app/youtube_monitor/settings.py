@@ -390,7 +390,7 @@ def _pyvideotrans_cuda_ready() -> bool:
             ],
             cwd=str(PYVIDEOTRANS_ROOT),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=20,
             check=False,
         )
@@ -431,7 +431,7 @@ def _voxcpm_runtime_ready() -> bool:
             ],
             cwd=str(PYVIDEOTRANS_ROOT),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=30,
             check=False,
         )

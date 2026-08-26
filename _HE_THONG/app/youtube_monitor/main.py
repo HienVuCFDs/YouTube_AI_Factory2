@@ -1526,6 +1526,7 @@ def stream_edge_voice_preview(voice: str, rate: str = Query(default="+0%")) -> F
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=90,
                 check=False,
             )
@@ -1728,7 +1729,7 @@ def _contact_sheet_for_review(images: list[Path], project_id: int) -> Path:
         f"layout={_xstack_layout(len(images), columns)}:fill=black[out]",
         "-map", "[out]", "-frames:v", "1", str(sheet_path),
     ])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
     if result.returncode != 0 or not sheet_path.is_file():
         # One picture the model can actually see beats a sheet it cannot.
         return images[0]
@@ -2612,7 +2613,7 @@ def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[s
                     str(frame_path),
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=60,
                 check=False,
             )
@@ -2902,7 +2903,7 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             f"Hinh: {str(segment.get('visual_prompt') or '')[:200]}"
         )
     system_prompt = (
-        "Ban la nguoi dung phim (editor) cho video YouTube giai thich tai chinh. "
+        "Ban la nguoi dung phim (editor) cho video YouTube. "
         "Voi TUNG canh, hay quyet dinh cach vao canh va chuyen dong camera:\n"
         "- 'transition': 'cut' (cat thang, dung khi doi y dot ngot hoac so sanh hai trang thai) "
         "hoac 'fade' (mem, dung khi mach y chay lien tuc)\n"
@@ -4021,6 +4022,34 @@ def build_timeline_from_dialogue(
         raise HTTPException(status_code=400, detail="Bản phân tích không có lượt thoại nào dùng được")
 
     cuts = [item.pop("_source_start") for item in planned]
+
+    # The storyboard grid is drawn from project_shots, and pairs a card to its
+    # segment through segment.shot_id. Cutting the timeline without rewriting
+    # the shots left the old, AI-invented storyboard on screen next to a
+    # timeline it no longer described - every card reported "no picture yet"
+    # even though each segment already had its clip from the source. One shot
+    # per spoken turn, and the link between them, keeps the two in step.
+    shots = database.create_project_shots(
+        project_id,
+        int(script["id"]),
+        [
+            {
+                "shot_index": item["segment_index"],
+                "section": "main",
+                "narration": item["voice_text"],
+                "speaker": item["speaker"],
+                "visual_prompt": item["visual_prompt"],
+                "asset_type": "source_clip",
+                "duration_seconds": item["duration_seconds"],
+                "status": "planned",
+            }
+            for item in planned
+        ],
+        force=True,
+    ) or []
+    for item, shot in zip(planned, shots):
+        item["shot_id"] = int(shot["id"])
+
     timeline = database.create_project_timeline(project_id, int(script["id"]), planned, force=True)
     if timeline is None:
         raise HTTPException(status_code=404, detail="Không lưu được timeline")

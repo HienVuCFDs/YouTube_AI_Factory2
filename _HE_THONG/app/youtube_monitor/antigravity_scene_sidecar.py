@@ -71,7 +71,7 @@ No text, captions, logos or watermarks. Save the image in the returned import_fo
         raise RuntimeError(f"Không tìm thấy Antigravity CLI: {AGY}")
     result = subprocess.run(
         [str(AGY), "-p", text, "--output-format", "json", "--dangerously-skip-permissions", "--print-timeout", "10m"],
-        cwd=str(WORKSPACE), capture_output=True, text=True, timeout=660,
+        cwd=str(WORKSPACE), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=660,
     )
     output_tail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()[-800:] or "(không có output)"
     if result.returncode != 0:

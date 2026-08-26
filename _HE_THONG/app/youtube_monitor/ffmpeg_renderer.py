@@ -56,7 +56,7 @@ def media_duration_seconds(path: Path, ffmpeg_binary: str = "ffmpeg") -> float |
                     "-of", "default=noprint_wrappers=1:nokey=1", str(target),
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=30,
                 check=False,
             )
@@ -75,7 +75,7 @@ def _run(args: list[str], cwd: Path) -> None:
             args,
             cwd=str(cwd),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=3600,
             check=False,
         )
@@ -219,7 +219,7 @@ def _supports_nvenc(executable: str) -> bool:
         result = subprocess.run(
             [executable, "-hide_banner", "-encoders"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=20,
             check=False,
         )
@@ -237,6 +237,10 @@ def _encoding_arguments(codec: str) -> list[str]:
     if codec == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-b:v", "0"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+
+
+# A trimmed clip shorter than this reads as a glitch rather than a shot.
+_MINIMUM_TRIMMED_CLIP_SECONDS = 0.4
 
 
 def _cleanup_filters(cleanups: list[dict[str, Any]], width: int, height: int) -> list[str]:
@@ -294,6 +298,31 @@ def _cleanup_filters(cleanups: list[dict[str, Any]], width: int, height: int) ->
     return filters
 
 
+def _usable_clip_window(
+    visual: Path,
+    executable: str,
+    trim_head: float,
+    trim_tail: float,
+) -> tuple[float, float] | None:
+    """What is left of a source clip once the plan's trims are taken off.
+
+    Returns None when there is nothing to do, and also when the trims would
+    leave too little to show: a plan that asks for more than the clip holds
+    must not empty the scene, so the clip is used whole instead.
+    """
+    head = max(0.0, float(trim_head or 0))
+    tail = max(0.0, float(trim_tail or 0))
+    if head <= 0 and tail <= 0:
+        return None
+    clip_seconds = media_duration_seconds(visual, executable)
+    if not clip_seconds:
+        return None
+    keep = clip_seconds - head - tail
+    if keep < _MINIMUM_TRIMMED_CLIP_SECONDS:
+        return None
+    return head, keep
+
+
 def _segment_arguments(
     executable: str,
     item: dict[str, Any],
@@ -312,6 +341,8 @@ def _segment_arguments(
     transition: str = "fade",
     effect: str = "",
     cleanups: list[dict[str, Any]] | None = None,
+    trim_head: float = 0.0,
+    trim_tail: float = 0.0,
 ) -> list[str]:
     if not visual:
         raise FfmpegRenderError(
@@ -321,9 +352,19 @@ def _segment_arguments(
     if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
         args += ["-loop", "1", "-framerate", str(fps), "-i", str(visual)]
     else:
-        # The visual is looped only to cover a sub-frame duration difference.
-        # Its original audio is never mapped into the rendered segment.
-        args += ["-stream_loop", "-1", "-i", str(visual)]
+        # The edit plan can shave dead weight off a source clip: a beat of
+        # silence before the line starts, a held frame after it ends. Both are
+        # input options, so they narrow the window FFmpeg reads and loops,
+        # rather than cutting the finished segment - the segment's length is
+        # set by the voiceover, and must not change.
+        window = _usable_clip_window(visual, executable, trim_head, trim_tail)
+        if window:
+            head, keep = window
+            args += ["-stream_loop", "-1", "-ss", f"{head:.3f}", "-t", f"{keep:.3f}", "-i", str(visual)]
+        else:
+            # The visual is looped only to cover a sub-frame duration difference.
+            # Its original audio is never mapped into the rendered segment.
+            args += ["-stream_loop", "-1", "-i", str(visual)]
     if audio:
         args += ["-i", str(audio)]
     else:
@@ -489,11 +530,13 @@ def render_timeline_with_ffmpeg(
             segment_cleanups = json.loads(str(item.get("edit_cleanups") or "[]"))
         except (TypeError, ValueError):
             segment_cleanups = []
+        trim_head = float(item.get("edit_trim_head") or 0)
+        trim_tail = float(item.get("edit_trim_tail") or 0)
         args = _segment_arguments(
             executable, item, visual, audio, segment_output, duration,
             width, height, fps, index, preferred_codec, subtitle_path,
             background_music, music_volume, segment_transition, segment_effect,
-            segment_cleanups,
+            segment_cleanups, trim_head, trim_tail,
         )
         try:
             _run(args, output_dir)
@@ -506,7 +549,7 @@ def render_timeline_with_ffmpeg(
                     executable, item, visual, audio, segment_output, duration,
                     width, height, fps, index, "libx264", subtitle_path,
                     background_music, music_volume, segment_transition, segment_effect,
-                    segment_cleanups,
+                    segment_cleanups, trim_head, trim_tail,
                 ),
                 output_dir,
             )
