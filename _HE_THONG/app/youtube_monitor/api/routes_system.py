@@ -31,7 +31,7 @@ from ..settings import (
     PYVIDEOTRANS_WORKDIR,
     VOXCPM_DEVICE,
     VOXCPM_MODEL,
-    VOXCPM_RUNTIME_READY,
+    voxcpm_runtime_status,
     SYSTEM_ROOT,
     YOUTUBE_API_KEY,
 )
@@ -126,7 +126,7 @@ def health() -> dict[str, Any]:
         "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
         "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
         "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
-        "voxcpm_runtime_ready": VOXCPM_RUNTIME_READY,
+        "voxcpm_runtime_ready": voxcpm_runtime_status()[0],
         "voxcpm_model": VOXCPM_MODEL,
         "voxcpm_device": VOXCPM_DEVICE,
         "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
@@ -542,7 +542,7 @@ def model_catalog() -> list[dict[str, Any]]:
         {"stage": "Image AI", "provider": "openai_image", "model": "gpt-image-1", "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "LLM", "provider": "anthropic_claude", "model": anthropic_model, "mode": "cloud", "ready": bool(anthropic_key), "vram": "Cloud"},
         {"stage": "STT", "provider": "faster_whisper", "model": settings.WHISPER_MODEL_SIZE, "mode": "local_gpu" if settings.WHISPER_DEVICE != "cpu" else "local_cpu", "ready": whisper_ready, "vram": "~1–6 GB"},
-        {"stage": "TTS", "provider": "voxcpm", "model": settings.VOXCPM_MODEL, "mode": "local_gpu", "ready": VOXCPM_RUNTIME_READY, "vram": "~6–10 GB"},
+        {"stage": "TTS", "provider": "voxcpm", "model": settings.VOXCPM_MODEL, "mode": "local_gpu", "ready": voxcpm_runtime_status()[0], "vram": "~6–10 GB"},
         {"stage": "TTS", "provider": "pyvideotrans", "model": PYVIDEOTRANS_VOICE_ROLE, "mode": "local_gpu", "ready": PYVIDEOTRANS_RUNTIME_READY, "vram": "Theo engine"},
         {"stage": "TTS", "provider": "edge_tts", "model": "Neural voices", "mode": "cloud", "ready": EDGE_TTS_RUNTIME_READY, "vram": "Cloud"},
         {"stage": "Video AI", "provider": "runway", "model": runway_model, "mode": "cloud", "ready": bool(runway_key), "vram": "Cloud"},
@@ -553,6 +553,7 @@ def model_catalog() -> list[dict[str, Any]]:
 
 @router.get("/api/tool-status")
 def tool_status() -> list[dict[str, Any]]:
+    voxcpm_ready, voxcpm_detail = voxcpm_runtime_status()
     oauth = oauth_status()
     anthropic_key, _ = settings.anthropic_config()
     openai_key, _ = settings.openai_config()
@@ -645,12 +646,15 @@ def tool_status() -> list[dict[str, Any]]:
         {
             "key": "voxcpm",
             "label": "VoxCPM2 voiceover · CUDA",
-            "ready": VOXCPM_RUNTIME_READY,
-            "phase": "ready" if VOXCPM_RUNTIME_READY else "configure",
+            "ready": voxcpm_ready,
+            "phase": "ready" if voxcpm_ready else "configure",
+            # The old wording told everyone to install voxcpm and enable CUDA,
+            # including the many cases where both were already fine and the
+            # startup probe had simply run out of time. Say what stopped it.
             "detail": (
                 f"VoxCPM2 sẵn sàng trên {VOXCPM_DEVICE}; model sẽ tải ở lần chạy đầu"
-                if VOXCPM_RUNTIME_READY
-                else "Cần cài voxcpm trong môi trường pyVideoTrans và bật CUDA"
+                if voxcpm_ready
+                else voxcpm_detail or "Cần cài voxcpm trong môi trường pyVideoTrans và bật CUDA"
             ),
         },
         {

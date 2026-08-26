@@ -6,6 +6,7 @@ import shutil
 import site
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -419,9 +420,25 @@ VOXCPM_REFERENCE_AUDIO = os.getenv("VOXCPM_REFERENCE_AUDIO", "").strip()
 VOXCPM_PROMPT_TEXT = os.getenv("VOXCPM_PROMPT_TEXT", "").strip()
 
 
-def _voxcpm_runtime_ready() -> bool:
-    if not VOXCPM_PYTHON.is_file() or not VOXCPM_RUNNER.is_file() or not VOXCPM_DEVICE.startswith("cuda"):
-        return False
+# Loading torch and waking CUDA takes about five seconds once the files are in
+# the page cache, and far longer on a cold disk - which is exactly the state
+# the machine is in when the app is started from its .bat right after boot.
+_VOXCPM_PROBE_TIMEOUT_SECONDS = 180
+# A failure is worth asking about again: the usual cause is a slow first
+# import, not a missing install, and freezing that answer for the life of the
+# process meant the only cure was restarting the app.
+_VOXCPM_RETRY_AFTER_SECONDS = 60
+
+_voxcpm_probe: tuple[float, bool, str] | None = None
+
+
+def _run_voxcpm_probe() -> tuple[bool, str]:
+    """Whether VoxCPM can run here, and if not, what actually stopped it."""
+    for label, path in (("Python cua pyVideoTrans", VOXCPM_PYTHON), ("voxcpm_runner.py", VOXCPM_RUNNER)):
+        if not path.is_file():
+            return False, f"Không tìm thấy {label}: {path}"
+    if not VOXCPM_DEVICE.startswith("cuda"):
+        return False, f"VOXCPM_DEVICE đang là '{VOXCPM_DEVICE}'; VoxCPM ở đây chỉ chạy trên CUDA"
     try:
         probe = subprocess.run(
             [
@@ -432,15 +449,37 @@ def _voxcpm_runtime_ready() -> bool:
             cwd=str(PYVIDEOTRANS_ROOT),
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
-            timeout=30,
+            timeout=_VOXCPM_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return probe.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"Phép thử VoxCPM quá {_VOXCPM_PROBE_TIMEOUT_SECONDS}s. "
+            "Thường là lần nạp torch/CUDA đầu tiên sau khi bật máy; thử lại sau một phút."
+        )
+    except OSError as exc:
+        return False, f"Không chạy được phép thử VoxCPM: {exc}"
+    if probe.returncode == 0:
+        return True, ""
+    detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+    return False, detail[-1] if detail else f"Phép thử VoxCPM thoát với mã {probe.returncode}"
 
 
-VOXCPM_RUNTIME_READY = _voxcpm_runtime_ready()
+def voxcpm_runtime_status(force: bool = False) -> tuple[bool, str]:
+    """Cached answer to "can VoxCPM run", with the reason when it cannot."""
+    global _voxcpm_probe
+    now = time.monotonic()
+    if not force and _voxcpm_probe is not None:
+        checked_at, ready, detail = _voxcpm_probe
+        if ready or now - checked_at < _VOXCPM_RETRY_AFTER_SECONDS:
+            return ready, detail
+    ready, detail = _run_voxcpm_probe()
+    _voxcpm_probe = (now, ready, detail)
+    return ready, detail
+
+
+def voxcpm_runtime_ready() -> bool:
+    return voxcpm_runtime_status()[0]
 # Edge TTS is a lightweight fallback for voiceover. It is shipped inside the
 # pyVideoTrans virtual environment but does not import pyVideoTrans/PyTorch.
 EDGE_TTS_PYTHON = Path(os.getenv("EDGE_TTS_PYTHON", str(_pyvideotrans_venv_python)))

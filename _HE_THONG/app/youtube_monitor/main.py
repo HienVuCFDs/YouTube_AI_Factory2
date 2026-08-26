@@ -82,7 +82,7 @@ from .settings import (
     VOXCPM_PYTHON,
     VOXCPM_REFERENCE_AUDIO,
     VOXCPM_RUNNER,
-    VOXCPM_RUNTIME_READY,
+    voxcpm_runtime_status,
     SYSTEM_ROOT,
     YOUTUBE_API_KEY,
     YOUTUBE_MAX_INITIAL_VIDEOS,
@@ -4893,8 +4893,9 @@ def _voxcpm_preview_path(project_id: int, key: str) -> Path:
 
 @app.post("/api/projects/{project_id}/voice-previews")
 def queue_voxcpm_voice_previews(project_id: int) -> dict[str, Any]:
-    if not VOXCPM_RUNTIME_READY:
-        raise HTTPException(status_code=400, detail="VoxCPM chưa sẵn sàng: kiểm tra CUDA và môi trường local")
+    voxcpm_ready, voxcpm_detail = voxcpm_runtime_status()
+    if not voxcpm_ready:
+        raise HTTPException(status_code=400, detail=f"VoxCPM chưa sẵn sàng: {voxcpm_detail}")
     script = database.get_latest_project_script(project_id)
     if not database.get_production_project(project_id) or not script:
         raise HTTPException(status_code=400, detail="Hãy tạo project và kịch bản trước khi nghe thử giọng")
@@ -5070,8 +5071,10 @@ def queue_project_job(
         raise HTTPException(status_code=400, detail="Chưa cấu hình PYVIDEOTRANS_COMMAND trong .env")
     if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_RUNTIME_READY:
         raise HTTPException(status_code=400, detail="Môi trường pyVideoTrans chưa hoàn tất dependency")
-    if provider == "voxcpm" and not VOXCPM_RUNTIME_READY:
-        raise HTTPException(status_code=400, detail="VoxCPM chưa sẵn sàng: kiểm tra voxcpm và CUDA")
+    if provider == "voxcpm":
+        ready, detail = voxcpm_runtime_status()
+        if not ready:
+            raise HTTPException(status_code=400, detail=f"VoxCPM chưa sẵn sàng: {detail}")
     if provider == "edge_tts" and not EDGE_TTS_RUNTIME_READY:
         raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng trong môi trường local")
     if provider in {"ffmpeg", "ffmpeg_command"} and not FFMPEG_RENDER_COMMAND:
@@ -5328,7 +5331,7 @@ def production_queue_status() -> dict[str, Any]:
         "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
         "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
         "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
-        "voxcpm_runtime_ready": VOXCPM_RUNTIME_READY,
+        "voxcpm_runtime_ready": voxcpm_runtime_status()[0],
         "voxcpm_model": VOXCPM_MODEL,
         "voxcpm_device": VOXCPM_DEVICE,
         "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
