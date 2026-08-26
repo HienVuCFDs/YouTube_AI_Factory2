@@ -2969,8 +2969,28 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             trim_tail_seconds=float(entry.get("trim_tail_seconds") or 0),
             cleanups=cleanups,
         )
+        # A scene short of pictures is a storyboard fact, not an edit one: the
+        # storyboard is where what-is-on-screen is decided, and its cards
+        # already carry the controls to draw or attach a visual. Reported only
+        # in the edit-plan table, the note was a dead end - nothing could act
+        # on it. Send it back to the card it belongs to.
+        needs_visual = bool(entry.get("needs_extra_visual"))
+        extra_note = str(entry.get("extra_visual_note") or "").strip()
+        if segment.get("shot_id"):
+            shot = database.get_project_shot(int(segment["shot_id"]))
+            if shot and needs_visual:
+                database.update_project_shot(
+                    int(segment["shot_id"]),
+                    visual_prompt=extra_note or str(shot["visual_prompt"] or ""),
+                    status="needs_visual",
+                )
+            elif shot and str(shot["status"] or "") == "needs_visual":
+                # The plan no longer asks for it. Only this one status is
+                # withdrawn - a card someone has since filled in keeps its own.
+                database.update_project_shot(int(segment["shot_id"]), status="planned")
         planned.append({
             "segment_id": segment["id"],
+            "shot_id": segment.get("shot_id"),
             "segment_index": segment["segment_index"],
             "transition": transition,
             "effect": effect,
@@ -2978,8 +2998,8 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             "trim_head_seconds": float(entry.get("trim_head_seconds") or 0),
             "trim_tail_seconds": float(entry.get("trim_tail_seconds") or 0),
             "cleanups": cleanups,
-            "needs_extra_visual": bool(entry.get("needs_extra_visual")),
-            "extra_visual_note": str(entry.get("extra_visual_note") or ""),
+            "needs_extra_visual": needs_visual,
+            "extra_visual_note": extra_note,
         })
     return {
         "status": "planned",

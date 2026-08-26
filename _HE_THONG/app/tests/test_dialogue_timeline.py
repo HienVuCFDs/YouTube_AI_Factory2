@@ -228,3 +228,80 @@ def test_the_edit_planner_is_told_what_the_source_looks_like(monkeypatch) -> Non
     assert "phụ đề tiếng Hán" in seen["user"], "mo ta hinh anh nguon phai di kem"
     assert "MOT video goc" in seen["user"], "phai noi ro moi canh cat tu cung mot nguon"
     assert "MOI canh" in seen["system"], "dau vet cua nguon thi dung cho moi canh"
+
+
+def _plan_with(monkeypatch, project_id: int, scenes: list[dict]) -> None:
+    from youtube_monitor import main
+
+    monkeypatch.setattr(
+        main, "_call_orchestrator_json",
+        lambda *_a, **_k: {"scenes": scenes, "pacing": "", "music_mood": ""},
+    )
+    main.plan_project_edit(project_id)
+
+
+def test_a_scene_short_of_pictures_goes_back_to_the_storyboard(monkeypatch) -> None:
+    """What is on screen is decided in the storyboard, and its cards already
+    carry the controls to draw or attach a visual. Reported only in the
+    edit-plan table, the note was a dead end: nothing could act on it.
+    """
+    project = _project("needs-visual", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+    _plan_with(monkeypatch, int(project["id"]), [{
+        "segment_index": 2, "transition": "cut", "effect": "static",
+        "needs_extra_visual": True,
+        "extra_visual_note": "Can ban do vung dat duoc nhac toi",
+    }])
+
+    script = database.get_latest_project_script(int(project["id"]))
+    shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+
+    assert shots[1]["status"] == "needs_visual"
+    assert shots[1]["visual_prompt"] == "Can ban do vung dat duoc nhac toi"
+    assert [shot["status"] for shot in shots].count("needs_visual") == 1, "chi canh duoc bao moi danh dau"
+
+
+def test_the_note_becomes_the_prompt_the_card_generates_from(monkeypatch) -> None:
+    """"Cắt từ video gốc tại 9s" is not something an image model can draw."""
+    project = _project("needs-visual-prompt", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+    script = database.get_latest_project_script(int(project["id"]))
+    before = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))[0]
+
+    _plan_with(monkeypatch, int(project["id"]), [{
+        "segment_index": 1, "transition": "cut", "effect": "static",
+        "needs_extra_visual": True, "extra_visual_note": "The chu giai nghia chuc quan",
+    }])
+
+    after = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))[0]
+    assert before["visual_prompt"] != after["visual_prompt"]
+    assert after["visual_prompt"] == "The chu giai nghia chuc quan"
+
+
+def test_withdrawing_the_flag_releases_the_card(monkeypatch) -> None:
+    project = _project("needs-visual-clear", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+    scene = {"segment_index": 1, "transition": "cut", "effect": "static"}
+
+    _plan_with(monkeypatch, int(project["id"]), [{**scene, "needs_extra_visual": True, "extra_visual_note": "x"}])
+    _plan_with(monkeypatch, int(project["id"]), [{**scene, "needs_extra_visual": False}])
+
+    script = database.get_latest_project_script(int(project["id"]))
+    shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
+    assert shots[0]["status"] == "planned"
+
+
+def test_a_card_already_filled_in_keeps_its_own_status(monkeypatch) -> None:
+    """Re-running the plan must not walk back work somebody has since done."""
+    project = _project("needs-visual-keep", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+    script = database.get_latest_project_script(int(project["id"]))
+    shot = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))[0]
+    database.update_project_shot(int(shot["id"]), status="done")
+
+    _plan_with(monkeypatch, int(project["id"]), [
+        {"segment_index": 1, "transition": "cut", "effect": "static", "needs_extra_visual": False},
+    ])
+
+    kept = database.get_project_shot(int(shot["id"]))
+    assert kept["status"] == "done"

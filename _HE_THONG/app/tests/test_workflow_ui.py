@@ -67,3 +67,10 @@ def test_moving_between_steps_stays_available_in_both_workflows(page: str) -> No
     row = page[row_start:page.index(marker)]
 
     assert 'data-wf' not in row.split("<span")[0], "ca hang khong duoc gan cho mot WF"
+
+
+def test_a_card_short_of_pictures_is_visible_as_such(page: str) -> None:
+    """The edit plan writes this status onto the shot; if the storyboard has no
+    word for it the card renders a bare "NEEDS_VISUAL" and reads as a glitch."""
+    assert "needs_visual: ['red', 'THIẾU HÌNH']" in page
+    assert "Cảnh này thiếu hình minh hoạ" in page
