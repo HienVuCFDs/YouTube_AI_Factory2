@@ -195,3 +195,36 @@ def test_each_storyboard_card_carries_the_line_and_the_speaker() -> None:
     assert [shot["narration"] for shot in shots] == [turn["line"] for turn in TURNS]
     assert [shot["speaker"] for shot in shots] == [turn["speaker"] for turn in TURNS]
     assert all(shot["asset_type"] == "source_clip" for shot in shots), "WF reup khong tao anh AI"
+
+
+def test_the_edit_planner_is_told_what_the_source_looks_like(monkeypatch) -> None:
+    """Every scene in a reup is cut from one video, so a channel logo or a
+    burned-in subtitle is on all of them or none. The planner used to be asked
+    what a scene looks like while holding only its dialogue and the words
+    "cut from the source at 9s", so it correctly reported no evidence of any
+    mark - and eighty-five scenes of Chinese subtitles were never cleaned,
+    even though the analysis had written down that they were there.
+    """
+    from youtube_monitor import main
+
+    project = _project("plan-sees-source", TURNS)
+    build_timeline_from_dialogue(int(project["id"]), min_seconds=1.2)
+    database.save_video_analysis(
+        "video-dialogue-plan-sees-source",
+        {"dialogue": TURNS, "visual_style": "Hoạt họa 2D, có phụ đề tiếng Hán chạy dưới"},
+        analysis_type="reference", provider="antigravity",
+    )
+
+    seen: dict[str, str] = {}
+
+    def capture(system_prompt, user_prompt, _schema, stage=""):
+        seen["system"] = system_prompt
+        seen["user"] = user_prompt
+        return {"scenes": [], "pacing": "", "music_mood": ""}
+
+    monkeypatch.setattr(main, "_call_orchestrator_json", capture)
+    main.plan_project_edit(int(project["id"]))
+
+    assert "phụ đề tiếng Hán" in seen["user"], "mo ta hinh anh nguon phai di kem"
+    assert "MOT video goc" in seen["user"], "phai noi ro moi canh cat tu cung mot nguon"
+    assert "MOI canh" in seen["system"], "dau vet cua nguon thi dung cho moi canh"

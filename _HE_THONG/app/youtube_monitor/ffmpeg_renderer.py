@@ -401,6 +401,31 @@ def _mark_frame_size(
     return (source_width, source_height) if source_width > 0 and source_height > 0 else (width, height)
 
 
+def _motion_filters(effect: str, width: int, height: int, fps: int) -> list[str]:
+    """The camera move the edit plan asked for.
+
+    This used to be read only for still images, so on the reup workflow - where
+    every scene is a clip cut from the source - the plan's camera moves did
+    nothing at all: zoom_in, zoom_out and static all rendered the same.
+
+    The input is looped at the frame rate, so d=1 advances the zoom a little
+    per output frame without changing how long the scene lasts.
+    """
+    motion = str(effect or "").strip().lower()
+    if motion == "zoom_in":
+        zoom = "min(zoom+0.0007,1.055)"
+    elif motion == "zoom_out":
+        zoom = "max(1.055-0.0007*on,1.0)"
+    else:
+        # 'static' means hold, and an effect nobody recognises is not worth
+        # guessing at - some scenes are meant to be read off the screen.
+        return []
+    return [
+        f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"d=1:s={width}x{height}:fps={fps}"
+    ]
+
+
 def _segment_arguments(
     executable: str,
     item: dict[str, Any],
@@ -450,40 +475,32 @@ def _segment_arguments(
     if background_music:
         args += ["-stream_loop", "-1", "-i", str(background_music)]
 
-    filters: list[str] = []
-    if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
-        # Give still images a restrained Ken-Burns motion.  The image input is
-        # looped at the project frame rate, therefore d=1 advances the zoom a
-        # tiny amount per output frame without changing the segment duration.
-        # An edit plan can override the direction per scene, or hold a scene
-        # perfectly still — which some scenes want, e.g. a card the script
-        # deliberately parks on screen for the viewer to read or screenshot.
-        motion = str(effect or "").strip().lower()
-        if motion == "static":
-            pass
-        elif motion == "zoom_out":
-            filters.append(
-                f"zoompan=z='max(1.055-0.0007*on,1.0)':x='iw/2-(iw/zoom/2)':"
-                f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
-            )
-        else:
-            filters.append(
-                f"zoompan=z='min(zoom+0.0007,1.055)':x='iw/2-(iw/zoom/2)':"
-                f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
-            )
-    # The marks belong to the source, so they are found on the source's own
-    # frame - before scale, and measured against the clip's real size rather
-    # than the output's. A 1920x1080 clip going out as a 1080x1920 Short was
-    # having its subtitle box worked out for the vertical frame, which put it
-    # off the picture entirely.
+    # Where the marks are is decided on the frame they are actually on: a
+    # still has already been through zoompan and is at the output size, a clip
+    # has not been touched and is still its own.
     mark_width, mark_height = _mark_frame_size(visual, executable, width, height)
     linear_cleanups, blur_regions = _cleanup_filters(cleanups or [], mark_width, mark_height)
-    filters.extend(linear_cleanups)
-    after = [
+
+    filters: list[str] = []
+    after: list[str] = []
+    if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
+        # A still with no motion at all reads as a broken video, so the plan's
+        # silence means a restrained push rather than nothing.
+        filters.extend(_motion_filters(effect or "zoom_in", width, height, fps))
+        filters.extend(linear_cleanups)
+    else:
+        # The clip already moves, so silence here means leave it alone. When
+        # the plan does ask for a move, it happens after the marks are covered
+        # - so a logo and the patch over it travel together - and at the
+        # clip's own shape, or the push would stretch the picture on its way
+        # to a vertical frame.
+        filters.extend(linear_cleanups)
+        after.extend(_motion_filters(effect, mark_width, mark_height, fps))
+    after.extend([
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
         "format=yuv420p",
-    ]
+    ])
     if str(transition or "fade").strip().lower() == "fade":
         fade_seconds = 0.12
         after.extend([

@@ -2893,8 +2893,27 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
     if not timeline:
         raise HTTPException(status_code=400, detail="Cần tạo timeline trước")
+    project = database.get_production_project(project_id) or {}
 
-    lines = []
+    # What is on screen is a fact about the source video, not about any one
+    # scene: every clip here is cut from the same film, so a channel logo or a
+    # burned-in subtitle is on all of them or none. Without this the planner
+    # was being asked what a scene looks like while holding only its dialogue
+    # and the words "cut from the source at 9s" - so it correctly answered that
+    # it had no evidence of any mark, and nothing was ever cleaned.
+    source_video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    source_analysis = (database.get_video_analysis(
+        str(project.get("youtube_video_id") or ""), analysis_type="reference"
+    ) or {}).get("result", {})
+    render_settings = database.get_project_render_settings(project_id) or {}
+    lines = [
+        "NGUON: tat ca cac canh duoi day deu cat tu MOT video goc.",
+        f"- Tieu de goc: {str(source_video.get('title') or 'khong ro')[:200]}",
+        f"- Hinh anh video goc: {str(source_analysis.get('visual_style') or 'chua mo ta')[:600]}",
+        f"- Ngon ngu se xuat ban: {render_settings.get('publish_language') or 'vi'}",
+        "",
+        "CAC CANH:",
+    ]
     for segment in timeline:
         lines.append(
             f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s, "
@@ -2921,8 +2940,11 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         "    'position': vung no nam ('top_left', 'bottom_center'...);\n"
         "    'method': 'blur' (lam mo - an toan nhat), 'delogo' (xoa va noi lai nen - hop voi logo nho "
         "tren nen deu), 'crop' (cat bo canh hinh - chi khi no sat mep).\n"
-        "  De mang rong neu canh do khong co gi can xu ly. CHI ke nhung gi co bang chung trong mo ta "
-        "canh; dung mac dinh rang canh nao cung co logo.\n"
+        "  De mang rong neu canh do khong co gi can xu ly. Bang chung nam o phan NGUON dau input: "
+        "no mo ta hinh anh cua video goc. Neu mo ta do noi video goc co phu de chay san - nhat la "
+        "phu de tieng nuoc ngoai khac voi ngon ngu xuat ban - hoac co logo/watermark, thi dieu do "
+        "dung cho MOI canh, vi moi canh deu cat tu video ay: hay ke no ra o tung canh. Nguoc lai, "
+        "dung bia ra thu ma phan NGUON khong nhac toi.\n"
         "- 'needs_extra_visual' + 'extra_visual_note': dat true khi canh nay thieu hinh minh hoa - vi du "
         "loi thoai noi ve mot thu ma video goc khong cho thay - va noi ro can them gi.\n\n"
         "Ngoai ra tra ve 'pacing' (nhip tong the) va 'music_mood' (khong khi nhac nen) cho ca video."
