@@ -4,75 +4,161 @@ from __future__ import annotations
 
 import pytest
 
-from youtube_monitor.ffmpeg_renderer import _cleanup_filters
+from youtube_monitor.ffmpeg_renderer import _cleanup_filters, _compose_video_graph
 
 FRAME = (1280, 720)
+AFTER = ["scale=1280:720:force_original_aspect_ratio=decrease", "format=yuv420p"]
 
 
-def test_no_cleanups_adds_no_filters() -> None:
-    """Most scenes need nothing; a filter that does nothing still costs a pass."""
-    assert _cleanup_filters([], *FRAME) == []
+def _values(filter_string: str, name: str) -> dict[str, int]:
+    return {
+        key: int(value)
+        for key, value in (part.split("=") for part in filter_string.replace(f"{name}=", "").split(":"))
+    }
 
 
-def test_a_corner_logo_becomes_a_delogo_box_inside_the_frame() -> None:
+def test_no_cleanups_adds_nothing() -> None:
+    assert _cleanup_filters([], *FRAME) == ([], [])
+
+
+def test_a_mark_is_blurred_by_default() -> None:
+    """Blur is what the plan asks for on burned-in subtitles, and what the
+    user asked for by name. It used to be quietly turned into a delogo."""
+    linear, blurs = _cleanup_filters([{"kind": "subtitle", "position": "bottom_center"}], *FRAME)
+
+    assert linear == []
+    assert len(blurs) == 1
+
+
+def test_a_blur_region_is_a_fraction_not_a_pixel_count() -> None:
+    """The frame these land on is the source clip's - 1920x1080 here - while
+    the video may go out as a 1080x1920 Short. Pixels worked out against the
+    output put the subtitle box off the picture entirely, which is why foreign
+    subtitles survived being 'removed'."""
+    _, blurs = _cleanup_filters([{"kind": "subtitle", "position": "bottom_center"}], *FRAME)
+    x, y, w, h = blurs[0]
+
+    assert all(0.0 <= value <= 1.0 for value in (x, y, w, h))
+    assert w > 0.8, "phu de chay gan het chieu ngang"
+    assert y > 0.7, "phu de nam thap trong khung"
+
+
+def test_the_blur_graph_splits_crops_and_lays_the_copy_back() -> None:
+    """A blur cannot be one filter in a flat chain: the region has to be taken
+    out of the frame, blurred, and put back where it came from."""
+    _, blurs = _cleanup_filters([{"kind": "subtitle", "position": "bottom_center"}], *FRAME)
+    graph = _compose_video_graph([], blurs, AFTER)
+
+    assert graph.startswith("split[base][b0]")
+    assert "crop=" in graph and "boxblur=" in graph and "overlay=" in graph
+    assert graph.endswith(",".join(AFTER)), "phan con lai cua chuoi phai chay tiep sau overlay"
+
+
+def test_the_graph_has_one_way_in_and_one_way_out() -> None:
+    """-vf accepts a labelled graph, but only if every branch it opens is
+    joined back up - otherwise FFmpeg refuses the whole command."""
+    _, blurs = _cleanup_filters([
+        {"kind": "subtitle", "position": "bottom_center"},
+        {"kind": "logo", "position": "top_right"},
+        {"kind": "watermark", "position": "bottom_left"},
+    ], *FRAME)
+    graph = _compose_video_graph(["zoompan=z=1"], blurs, AFTER)
+
+    assert "split=4[base][b0][b1][b2]" in graph
+    for index in range(3):
+        assert f"[f{index}]" in graph
+    assert graph.count("overlay=") == 3
+
+
+def test_a_graph_without_blurs_stays_a_flat_chain() -> None:
+    """Most scenes need no blur, and a split/overlay costs a frame copy."""
+    assert _compose_video_graph(["zoompan=z=1"], [], AFTER) == ",".join(["zoompan=z=1", *AFTER])
+
+
+def test_delogo_is_sized_in_pixels_and_stays_inside_the_frame() -> None:
     """delogo rebuilds from the pixels around its box, so a box touching the
     edge has no border to read and FFmpeg refuses the filter outright."""
     width, height = FRAME
 
-    for position in ("top_left", "top_right", "bottom_left", "bottom_right"):
-        chain = _cleanup_filters([{"kind": "logo", "position": position, "method": "delogo"}], *FRAME)
-        assert len(chain) == 1
-        values = dict(part.split("=") for part in chain[0].replace("delogo=", "").split(":"))
-        x, y, w, h = (int(values[key]) for key in ("x", "y", "w", "h"))
-        assert x >= 1 and y >= 1
-        assert x + w < width and y + h < height
+    for position in ("top_left", "top_right", "bottom_left", "bottom_right", "center", "full"):
+        linear, blurs = _cleanup_filters(
+            [{"kind": "logo", "position": position, "method": "delogo"}], *FRAME
+        )
+        assert blurs == []
+        box = _values(linear[0], "delogo")
+        assert box["x"] >= 1 and box["y"] >= 1, position
+        assert box["x"] + box["w"] < width and box["y"] + box["h"] < height, position
 
 
-def test_a_subtitle_band_covers_the_width_it_actually_occupies() -> None:
-    """Burned-in subtitles run most of the way across, low in the frame."""
-    chain = _cleanup_filters([{"kind": "subtitle", "position": "bottom_center", "method": "blur"}], *FRAME)
-
-    values = dict(part.split("=") for part in chain[0].replace("delogo=", "").split(":"))
-    assert int(values["w"]) > FRAME[0] * 0.8
-    assert int(values["y"]) > FRAME[1] * 0.7
-
-
-def test_several_marks_produce_several_filters_in_order() -> None:
-    chain = _cleanup_filters([
-        {"kind": "logo", "position": "top_left", "method": "delogo"},
-        {"kind": "subtitle", "position": "bottom_center", "method": "blur"},
-    ], *FRAME)
-
-    assert len(chain) == 2
+@pytest.mark.parametrize("size", [(640, 360), (1920, 1080), (720, 1280)])
+def test_delogo_stays_inside_every_frame_size(size: tuple[int, int]) -> None:
+    for position in ("top_left", "bottom_right", "bottom_center", "full"):
+        linear, _ = _cleanup_filters(
+            [{"kind": "logo", "position": position, "method": "delogo"}], *size
+        )
+        box = _values(linear[0], "delogo")
+        assert 1 <= box["x"] and 1 <= box["y"], position
+        assert box["x"] + box["w"] < size[0] and box["y"] + box["h"] < size[1], position
 
 
 def test_crop_is_only_used_against_an_edge() -> None:
     """Cropping a mark out of the middle would take the picture with it."""
-    edge = _cleanup_filters([{"kind": "watermark", "position": "top_center", "method": "crop"}], *FRAME)
-    middle = _cleanup_filters([{"kind": "watermark", "position": "center", "method": "crop"}], *FRAME)
+    edge, _ = _cleanup_filters([{"kind": "watermark", "position": "top_center", "method": "crop"}], *FRAME)
+    _, middle_blurs = _cleanup_filters([{"kind": "watermark", "position": "center", "method": "crop"}], *FRAME)
 
     assert edge[0].startswith("crop=")
-    assert middle[0].startswith("delogo="), "giua khung thi phai xoa, khong duoc cat"
+    assert len(middle_blurs) == 1, "giua khung thi lam mo, khong duoc cat"
 
 
 def test_an_unknown_position_is_skipped_rather_than_guessed() -> None:
     """Blurring the wrong rectangle damages the picture for nothing."""
-    assert _cleanup_filters([{"kind": "logo", "position": "somewhere", "method": "blur"}], *FRAME) == []
+    assert _cleanup_filters([{"kind": "logo", "position": "somewhere"}], *FRAME) == ([], [])
 
 
 def test_a_malformed_entry_does_not_break_the_render() -> None:
-    assert _cleanup_filters(["khong phai dict", {"kind": "logo"}], *FRAME) == []
+    assert _cleanup_filters(["khong phai dict", {"kind": "logo"}], *FRAME) == ([], [])
 
 
-@pytest.mark.parametrize("size", [(640, 360), (1920, 1080), (720, 1280)])
-def test_boxes_stay_inside_every_frame_size(size: tuple[int, int]) -> None:
-    """Vertical output is a real target here, and a box sized for landscape
-    would fall outside it."""
-    width, height = size
+def test_a_video_mark_is_measured_against_the_clip_not_the_output(monkeypatch, tmp_path) -> None:
+    """This is the bug that left foreign subtitles legible: the source clips
+    are 1920x1080 landscape, the project renders 1080x1920 Shorts, and a
+    bottom-of-frame box worked out for the vertical output lands below the
+    bottom of a landscape frame."""
+    import subprocess as sp
 
-    for position in ("top_left", "top_right", "bottom_right", "bottom_center", "center", "full"):
-        chain = _cleanup_filters([{"kind": "logo", "position": position, "method": "delogo"}], width, height)
-        values = dict(part.split("=") for part in chain[0].replace("delogo=", "").split(":"))
-        x, y, w, h = (int(values[key]) for key in ("x", "y", "w", "h"))
-        assert 1 <= x and 1 <= y, position
-        assert x + w < width and y + h < height, position
+    from youtube_monitor import ffmpeg_renderer
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"")
+    monkeypatch.setattr(
+        ffmpeg_renderer.subprocess, "run",
+        lambda *_a, **_k: sp.CompletedProcess([], 0, stdout="1920x1080\n", stderr=""),
+    )
+
+    assert ffmpeg_renderer._mark_frame_size(clip, "ffmpeg", 1080, 1920) == (1920, 1080)
+
+
+def test_a_still_image_is_already_at_the_output_size(tmp_path) -> None:
+    """zoompan has run by then, so the picture is the output's shape."""
+    from youtube_monitor import ffmpeg_renderer
+
+    image = tmp_path / "canh.png"
+    image.write_bytes(b"")
+
+    assert ffmpeg_renderer._mark_frame_size(image, "ffmpeg", 1080, 1920) == (1080, 1920)
+
+
+def test_an_unreadable_clip_falls_back_to_the_output_size(monkeypatch, tmp_path) -> None:
+    """Guessing is better than refusing to render the scene at all."""
+    import subprocess as sp
+
+    from youtube_monitor import ffmpeg_renderer
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"")
+    monkeypatch.setattr(
+        ffmpeg_renderer.subprocess, "run",
+        lambda *_a, **_k: sp.CompletedProcess([], 1, stdout="", stderr="hong"),
+    )
+
+    assert ffmpeg_renderer._mark_frame_size(clip, "ffmpeg", 1280, 720) == (1280, 720)

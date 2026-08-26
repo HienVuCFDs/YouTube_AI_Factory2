@@ -243,59 +243,107 @@ def _encoding_arguments(codec: str) -> list[str]:
 _MINIMUM_TRIMMED_CLIP_SECONDS = 0.4
 
 
-def _cleanup_filters(cleanups: list[dict[str, Any]], width: int, height: int) -> list[str]:
-    """Filters that take the source's own marks off the picture.
+# Where each mark sits, as a fraction of the frame. Fractions rather than
+# pixels because the frame these land on is the source clip's own - 1920x1080
+# for the material this app reups - while the finished video may be anything,
+# and this project renders Shorts at 1080x1920. Boxes worked out against the
+# output size were landing outside a landscape frame entirely, which is why
+# burned-in subtitles were still legible after being "removed".
+_MARK_BOXES: dict[str, tuple[float, float, float, float]] = {
+    "top_left": (0.0, 0.0, 0.20, 0.125),
+    "top_right": (0.80, 0.0, 0.20, 0.125),
+    "top_center": (0.05, 0.0, 0.90, 0.125),
+    "bottom_left": (0.0, 0.875, 0.20, 0.125),
+    "bottom_right": (0.80, 0.875, 0.20, 0.125),
+    "bottom_center": (0.05, 0.82, 0.90, 0.18),
+    "center": (0.05, 0.41, 0.90, 0.18),
+    "full": (0.0, 0.0, 1.0, 1.0),
+}
+
+# Strong enough that letterforms stop resolving, not so strong that the patch
+# reads as a grey rectangle laid over the picture.
+_BLUR = r"boxblur=luma_radius=min(w\,h)/8:luma_power=2:chroma_radius=min(cw\,ch)/8:chroma_power=2"
+
+
+def _cleanup_filters(
+    cleanups: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> tuple[list[str], list[tuple[float, float, float, float]]]:
+    """What it takes to get the source's own marks off the picture.
 
     A retold clip still carries the original channel's logo, its watermark and
     its burned-in subtitles - the last in a language this audience is not being
     given, and already replaced by the new narration.
 
-    Everything lands on delogo, which rebuilds a rectangle from the pixels
-    around it. A proper blur needs split/overlay with labels, and these filters
-    have to compose into the one flat -vf chain the segment already builds. For
-    a small corner logo delogo is what it was made for; over a wide subtitle
-    band it smears rather than cleanly erases, which is still better than
-    leaving foreign text on screen, and is why the plan can choose crop instead
-    when the mark sits against an edge.
+    Returns the filters that go straight into the chain (delogo, crop) and,
+    separately, the regions to blur: a blur cannot be written as one filter,
+    it needs the frame split, a copy cropped and blurred, and that copy laid
+    back over the original. The caller weaves those into the graph.
     """
-    if not cleanups:
-        return []
-    mark_w, mark_h = max(16, width // 5), max(16, height // 8)
-    band_w, band_h = max(16, int(width * 0.9)), max(16, int(height * 0.18))
-    boxes: dict[str, tuple[int, int, int, int]] = {
-        "top_left": (0, 0, mark_w, mark_h),
-        "top_right": (width - mark_w, 0, mark_w, mark_h),
-        "top_center": ((width - band_w) // 2, 0, band_w, mark_h),
-        "bottom_left": (0, height - mark_h, mark_w, mark_h),
-        "bottom_right": (width - mark_w, height - mark_h, mark_w, mark_h),
-        "bottom_center": ((width - band_w) // 2, height - band_h, band_w, band_h),
-        "center": ((width - band_w) // 2, (height - band_h) // 2, band_w, band_h),
-        "full": (0, 0, width, height),
-    }
-    filters: list[str] = []
+    linear: list[str] = []
+    blurs: list[tuple[float, float, float, float]] = []
     for cleanup in cleanups:
         if not isinstance(cleanup, dict):
             continue
-        box = boxes.get(str(cleanup.get("position") or "").strip().lower())
+        box = _MARK_BOXES.get(str(cleanup.get("position") or "").strip().lower())
         if not box:
             continue
-        x, y, w, h = box
+        fx, fy, fw, fh = box
         method = str(cleanup.get("method") or "blur").strip().lower()
-        if method == "crop" and (y == 0 or y + h >= height):
+        if method == "crop" and (fy <= 0.001 or fy + fh >= 0.999):
             # Only safe against an edge; the scale/pad further down the chain
             # puts the frame back to its target size.
-            filters.append(
-                f"crop={width}:{max(16, height - h)}:0:{h if y == 0 else 0}"
-            )
+            keep = max(16, int(round(height * (1 - fh))))
+            linear.append(f"crop={width}:{keep}:0:{int(round(height * fh)) if fy <= 0.001 else 0}")
             continue
-        # delogo must stay a pixel inside the frame on every side, or it has
-        # no border to rebuild from and FFmpeg refuses the filter outright.
-        x = max(1, min(x, width - 3))
-        y = max(1, min(y, height - 3))
-        w = max(1, min(w, width - x - 1))
-        h = max(1, min(h, height - y - 1))
-        filters.append(f"delogo=x={x}:y={y}:w={w}:h={h}")
-    return filters
+        if method == "delogo":
+            # delogo rebuilds a rectangle from the pixels around it, so it takes
+            # integers, not expressions - it is the one cleanup that has to be
+            # sized against a known frame. It must also stay a pixel inside on
+            # every side, or it has no border to read and FFmpeg refuses it.
+            x = max(1, min(int(round(width * fx)), width - 3))
+            y = max(1, min(int(round(height * fy)), height - 3))
+            w = max(1, min(int(round(width * fw)), width - x - 1))
+            h = max(1, min(int(round(height * fh)), height - y - 1))
+            linear.append(f"delogo=x={x}:y={y}:w={w}:h={h}")
+            continue
+        blurs.append(box)
+    return linear, blurs
+
+
+def _compose_video_graph(
+    before: list[str],
+    blurs: list[tuple[float, float, float, float]],
+    after: list[str],
+) -> str:
+    """One filtergraph for -vf, blurred regions and all.
+
+    -vf takes a labelled graph as happily as a flat chain, provided the graph
+    has exactly one input and one output. Each blurred region costs a branch:
+    the frame is split, one copy is cropped to the region and blurred, and that
+    copy is laid back over the picture at the same place.
+    """
+    if not blurs:
+        return ",".join(before + after)
+    branches = len(blurs) + 1
+    split = "split" if branches == 2 else f"split={branches}"
+    head = ",".join([*before, split])
+    chains = [head + "[base]" + "".join(f"[b{i}]" for i in range(len(blurs)))]
+    for index, (fx, fy, fw, fh) in enumerate(blurs):
+        chains.append(
+            f"[b{index}]crop=w=iw*{fw:.4f}:h=ih*{fh:.4f}:x=iw*{fx:.4f}:y=ih*{fy:.4f},"
+            f"{_BLUR}[f{index}]"
+        )
+    source = "[base]"
+    for index, (fx, fy, _w, _h) in enumerate(blurs):
+        overlay = f"{source}[f{index}]overlay=x=W*{fx:.4f}:y=H*{fy:.4f}"
+        if index == len(blurs) - 1:
+            chains.append(",".join([overlay, *after]))
+        else:
+            chains.append(f"{overlay}[o{index}]")
+            source = f"[o{index}]"
+    return ";".join(chains)
 
 
 def _usable_clip_window(
@@ -321,6 +369,36 @@ def _usable_clip_window(
     if keep < _MINIMUM_TRIMMED_CLIP_SECONDS:
         return None
     return head, keep
+
+
+def _mark_frame_size(
+    visual: Path,
+    executable: str,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    """The frame a source mark is actually sitting on.
+
+    A still image has already been through zoompan by this point and is at the
+    output size. A video clip has not been touched yet, so its own resolution
+    is the one that matters - and it is usually not the output's.
+    """
+    if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
+        return width, height
+    probe = subprocess.run(
+        [
+            executable.replace("ffmpeg", "ffprobe"), "-v", "error",
+            "-select_streams", "v:0", "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x", str(visual),
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=30, check=False,
+    )
+    try:
+        source_width, source_height = (int(part) for part in probe.stdout.strip().split("x")[:2])
+    except (TypeError, ValueError):
+        return width, height
+    return (source_width, source_height) if source_width > 0 and source_height > 0 else (width, height)
 
 
 def _segment_arguments(
@@ -393,17 +471,22 @@ def _segment_arguments(
                 f"zoompan=z='min(zoom+0.0007,1.055)':x='iw/2-(iw/zoom/2)':"
                 f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}"
             )
-    # Before scale/pad: the boxes are worked out against the target frame, and
-    # padding would put bars where a corner mark is expected to be.
-    filters.extend(_cleanup_filters(cleanups or [], width, height))
-    filters.extend([
+    # The marks belong to the source, so they are found on the source's own
+    # frame - before scale, and measured against the clip's real size rather
+    # than the output's. A 1920x1080 clip going out as a 1080x1920 Short was
+    # having its subtitle box worked out for the vertical frame, which put it
+    # off the picture entirely.
+    mark_width, mark_height = _mark_frame_size(visual, executable, width, height)
+    linear_cleanups, blur_regions = _cleanup_filters(cleanups or [], mark_width, mark_height)
+    filters.extend(linear_cleanups)
+    after = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
         "format=yuv420p",
-    ])
+    ]
     if str(transition or "fade").strip().lower() == "fade":
         fade_seconds = 0.12
-        filters.extend([
+        after.extend([
             f"fade=t=in:st=0:d={fade_seconds}",
             f"fade=t=out:st={max(0.0, duration - fade_seconds):.3f}:d={fade_seconds}",
         ])
@@ -419,8 +502,8 @@ def _segment_arguments(
             "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,"
             "Alignment=2,MarginV=64"
         )
-        filters.append(f"subtitles=filename='{escaped_path}':charenc=UTF-8:force_style='{style}'")
-    video_filter = ",".join(filters)
+        after.append(f"subtitles=filename='{escaped_path}':charenc=UTF-8:force_style='{style}'")
+    video_filter = _compose_video_graph(filters, blur_regions, after)
     result = args + ["-map", "0:v:0"]
     if background_music:
         music_level = max(0.0, min(float(music_volume), 0.5))
