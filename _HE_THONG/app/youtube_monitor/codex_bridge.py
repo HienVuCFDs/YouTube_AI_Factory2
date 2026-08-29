@@ -118,6 +118,31 @@ def _parse_json_output(text: str) -> dict[str, Any]:
     return parsed
 
 
+def _strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the OpenAI/Codex strict subset without mutating the caller.
+
+    Codex CLI forwards ``--output-schema`` as Structured Outputs. Every
+    object in that dialect must reject additional properties and list every
+    declared property as required. Other local agents accept ordinary JSON
+    Schema, which is why this incompatibility only appeared when Codex became
+    the live cross-reviewer after its quota reset.
+    """
+    def convert(node: Any) -> Any:
+        if isinstance(node, list):
+            return [convert(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        converted = {key: convert(value) for key, value in node.items()}
+        if converted.get("type") == "object" or isinstance(converted.get("properties"), dict):
+            properties = converted.get("properties")
+            converted["additionalProperties"] = False
+            if isinstance(properties, dict):
+                converted["required"] = list(properties)
+        return converted
+
+    return convert(schema)
+
+
 def call_codex_json(
     system_prompt: str,
     user_prompt: str,
@@ -146,7 +171,10 @@ def call_codex_json(
         workdir = Path(directory)
         schema_path = workdir / "schema.json"
         result_path = workdir / "result.json"
-        schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+        schema_path.write_text(
+            json.dumps(_strict_output_schema(schema), ensure_ascii=False),
+            encoding="utf-8",
+        )
         command = [
             executable,
             "exec",
@@ -215,7 +243,10 @@ def call_codex_vision_json(
         workdir = Path(directory)
         schema_path = workdir / "schema.json"
         result_path = workdir / "result.json"
-        schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+        schema_path.write_text(
+            json.dumps(_strict_output_schema(schema), ensure_ascii=False),
+            encoding="utf-8",
+        )
         command = [
             executable,
             "exec",

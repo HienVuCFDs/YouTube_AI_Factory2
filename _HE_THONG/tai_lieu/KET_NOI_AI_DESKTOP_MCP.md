@@ -65,16 +65,23 @@ Trong **MCP Servers / Add local MCP server**, sử dụng cùng Command, Argumen
 
 ## Cách dùng trong app AI
 
-Mở YT Factory trước, sau đó trong MiniMax/Claude/Antigravity gửi yêu cầu sau:
+Mở YT Factory trước, sau đó có thể giao một yêu cầu cấp cao thay vì điều khiển từng nút:
 
-> Dùng tool youtube_factory_list_projects và youtube_factory_get_storyboard cho dự án 27. Tạo một ảnh 16:9 theo prompt của cảnh 1. Lưu file PNG vào import_folder mà tool trả về, sau đó dùng youtube_factory_import_asset để gắn ảnh vào đúng segment_id cảnh 1.
+> Dùng `youtube_factory_create_project` để tạo video giải thích lịch sử AI cho người mới, dài khoảng 5 phút. Chưa tự render; hãy để Research, Script, Director, Media và QC Agent thực hiện và nghiệm thu chéo, rồi dùng `youtube_factory_get_pipeline_status` báo lại các lỗi còn thiếu.
 
-MCP có 4 tool:
+MCP hiện cung cấp các nhóm tool cấp cao:
 
-1. `youtube_factory_list_projects` — lấy danh sách dự án.
-2. `youtube_factory_get_storyboard` — lấy lời đọc, prompt, ID cảnh và thư mục import.
-3. `youtube_factory_import_asset` — upload + gắn một ảnh/video/audio vào cảnh.
-4. `youtube_factory_import_assets_batch` — upload + gắn nhiều asset.
+1. **Project và đa AI**: `youtube_factory_create_project`, `youtube_factory_start_pipeline`, `youtube_factory_get_pipeline_status`, `youtube_factory_create_agent_task`, `youtube_factory_list_agent_tasks`, `youtube_factory_list_events`.
+2. **Provider Gateway**: `youtube_factory_list_providers`, `youtube_factory_route_provider`.
+3. **Media bất đồng bộ**: `youtube_factory_generate_image`, `youtube_factory_generate_gif`, `youtube_factory_generate_video`, `youtube_factory_get_job_status`, `youtube_factory_approve_scene`.
+4. **Timeline, voice và render**: `youtube_factory_build_timeline`, `youtube_factory_generate_voice`, `youtube_factory_render_video`, `youtube_factory_get_render_status`.
+5. **Tương thích luồng import cũ**: `youtube_factory_list_projects`, `youtube_factory_get_storyboard`, `youtube_factory_import_asset`, `youtube_factory_import_assets_batch`, `youtube_factory_complete_antigravity_scene`.
+
+Các tool tạo media, voice hoặc render yêu cầu `confirmed=true`. Tool tạo video còn bắt buộc `reference_asset_id` của ảnh scene đã có; MCP không được tự hạ xuống text-to-video khi thiếu ảnh nguồn.
+
+Luồng đa AI không cho CLI truy cập trực tiếp SQLite. App lưu `AgentTask`, message A2A, review chéo, event và quyết định provider; MCP chỉ là hợp đồng để agent gọi công cụ cấp cao.
+
+Nếu một reviewer hết hạn mức, pipeline trả trạng thái `review_required` và giữ nguyên output executor. App tự thử lại phần review sau thời điểm reset; nó không chạy lại executor. Khi provider không báo giờ reset nhưng tài khoản đã hồi phục, mở YT Factory và bấm **Cho thử lại** trong banner hạn mức để cho phép một lượt probe ngay.
 
 Asset chỉ được import từ:
 

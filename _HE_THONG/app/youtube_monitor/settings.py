@@ -35,6 +35,7 @@ EDITABLE_INTEGRATION_KEYS = {
     "GOOGLE_OAUTH_REDIRECT_URI",
     "AI_ORCHESTRATOR_PROVIDER",
     "AI_STAGE_ASSIGNMENTS_JSON",
+    "AUTOMATION_POLICY_JSON",
     "GFLOW_CLI_PATH",
     "GFLOW_PROFILE",
     "GFLOW_VIDEO_MODEL",
@@ -305,6 +306,73 @@ def agent_assignments() -> dict[str, dict[str, object]]:
 def agent_assignment(stage: str) -> dict[str, object]:
     assignments = agent_assignments()
     return assignments.get(stage, assignments["orchestration"])
+
+
+def default_automation_policy() -> dict[str, object]:
+    """Safe defaults for unattended work.
+
+    Paid API providers stay locked until the user explicitly enables them;
+    subscriptions already paid for may be used. Publishing always remains a
+    human decision even when every AI review passes.
+    """
+    return {
+        "global_rules": "",
+        "max_attempts": 2,
+        "min_review_score": 8,
+        "min_scene_qc_score": 7,
+        "allow_paid_apis": False,
+        "allow_subscription_media": True,
+        "auto_generate_media": False,
+        "auto_render": False,
+        "require_final_approval": True,
+        "pause_on_provider_exhaustion": True,
+        "max_project_cost": 0.0,
+        "max_daily_cost": 0.0,
+    }
+
+
+def automation_policy() -> dict[str, object]:
+    """Return the validated dashboard-managed automation policy."""
+    policy = default_automation_policy()
+    raw = integration_value("AUTOMATION_POLICY_JSON")
+    if not raw:
+        return policy
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return policy
+    if not isinstance(parsed, dict):
+        return policy
+    policy["global_rules"] = str(parsed.get("global_rules") or "")[:10_000]
+    for key, minimum, maximum in (
+        ("max_attempts", 1, 10),
+        ("min_review_score", 0, 10),
+        ("min_scene_qc_score", 0, 10),
+    ):
+        try:
+            policy[key] = max(minimum, min(int(parsed.get(key, policy[key])), maximum))
+        except (TypeError, ValueError):
+            pass
+    for key in ("max_project_cost", "max_daily_cost"):
+        try:
+            # 0 means "no ceiling". A negative ceiling would silently block
+            # every provider, so it is rejected rather than clamped to zero.
+            amount = float(parsed.get(key, policy[key]))
+        except (TypeError, ValueError):
+            continue
+        if amount >= 0:
+            policy[key] = round(min(amount, 1_000_000.0), 4)
+    for key in (
+        "allow_paid_apis",
+        "allow_subscription_media",
+        "auto_generate_media",
+        "auto_render",
+        "require_final_approval",
+        "pause_on_provider_exhaustion",
+    ):
+        if key in parsed:
+            policy[key] = bool(parsed[key])
+    return policy
 
 
 def orchestrator_provider() -> str:

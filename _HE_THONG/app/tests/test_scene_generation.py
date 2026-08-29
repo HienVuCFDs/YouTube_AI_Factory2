@@ -652,3 +652,23 @@ class ScenePromptTimingTests(unittest.TestCase):
                 if job["status"] in {"queued", "waiting"}
             ]
             self.assertEqual(remaining, [])
+
+    def test_idle_browser_extension_is_reported_as_connected(self):
+        """The extension waits on WebSocket and does not poll while idle."""
+        from youtube_monitor import main as main_module
+
+        class FakeDatabase:
+            EXTERNAL_SIDECAR_PROVIDERS = ("flow_image",)
+            BROWSER_SIDECAR_PROVIDERS = ("flow_image",)
+
+            @staticmethod
+            def get_scene_provider_state(provider):
+                return {"provider": provider, "circuit_open": False}
+
+        with patch.object(main_module, "database", FakeDatabase()), patch.object(
+            main_module, "_browser_extension_connections", 1
+        ), patch.dict(main_module._sidecar_last_seen, {}, clear=True):
+            status = main_module.scene_sidecar_status()
+
+        self.assertFalse(status["flow_image"]["alive"])
+        self.assertTrue(status["flow_image"]["extension_connected"])

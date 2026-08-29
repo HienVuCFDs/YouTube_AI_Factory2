@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -25,11 +25,13 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from pydantic import BaseModel, Field
 
 from .analysis_queue import AnalysisQueue
+from .agent_system import AgentPipeline, AgentTaskWorker, DEFAULT_AGENTS
 from . import settings
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
 from .database import Database
+from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
 from . import operations, usage_limits, workflows
@@ -55,7 +57,14 @@ from .production_worker import (
 from .publisher import PublisherError, PublisherWorker, next_channel_schedule
 from .project_layout import ensure_project_layout
 from .quality_check import build_quality_report
-from .scene_generator import SceneGenerationError, SceneGenerationWorker
+from .scene_generator import SceneGenerationError, SceneGenerationWorker, build_scene_provider_gateway
+from .providers import (
+    ProviderGatewayError,
+    ProviderRoutePolicy,
+    SCENE_ANIMATED_IMAGE,
+    SCENE_IMAGE,
+    SCENE_VIDEO,
+)
 from .thumbnail_generator import ThumbnailGenerationError, generate_frame_thumbnails
 from .premiere_export import build_premiere_export_package
 from .service import SyncService, parse_push_feed
@@ -110,6 +119,59 @@ from .youtube_client import YouTubeApiError, YouTubeClient
 
 
 database = Database(DB_PATH)
+event_bus = EventBus(database)
+database.set_event_publisher(event_bus.publish)
+
+
+def _agent_runtime_available(agent: str) -> bool:
+    usage_limit = database.get_provider_usage_limit(agent)
+    if usage_limit and not usage_limit.get("cleared_at"):
+        resets_at = str(usage_limit.get("resets_at") or "")
+        retry_anchor = str(
+            usage_limit.get("last_failure_at") or usage_limit.get("detected_at") or ""
+        )
+        try:
+            reset_has_passed = bool(resets_at and datetime.fromisoformat(resets_at) <= datetime.now(timezone.utc))
+        except ValueError:
+            reset_has_passed = False
+        try:
+            # Some subscription CLIs only say "weekly limit" and provide no
+            # reset date. Probe once per six hours in that case. A failed
+            # probe updates last_failure_at; a successful model call clears
+            # the outage through usage_limits.set_sink below.
+            unknown_reset_probe_due = bool(
+                not resets_at
+                and retry_anchor
+                and datetime.fromisoformat(retry_anchor) <= datetime.now(timezone.utc) - timedelta(hours=6)
+            )
+        except ValueError:
+            unknown_reset_probe_due = False
+        if reset_has_passed:
+            database.clear_provider_usage_limit(agent)
+        elif not unknown_reset_probe_due:
+            return False
+    status_calls = {
+        "codex_cli": codex_cli_status,
+        "claude_code_cli": claude_code_cli_status,
+        "antigravity": antigravity_cli_status,
+    }
+    status_call = status_calls.get(agent)
+    if status_call is None:
+        return False
+    try:
+        state = status_call()
+    except Exception:
+        return False
+    return bool(state.get("logged_in") or state.get("ready"))
+
+
+agent_task_worker = AgentTaskWorker(
+    database,
+    assignment_resolver=settings.agent_assignment,
+    availability_resolver=_agent_runtime_available,
+    policy_resolver=settings.automation_policy,
+)
+agent_pipeline = AgentPipeline(database, agent_task_worker, settings.automation_policy)
 
 # Running out of a subscription is a normal weekly event here, not a bug, and
 # it used to vanish into a job's error column while the orchestrator quietly
@@ -149,7 +211,12 @@ production_worker = ProductionWorker(
     openmontage_adapter=openmontage_adapter,
 )
 publisher_worker = PublisherWorker(database)
-scene_generation_worker = SceneGenerationWorker(database, PRODUCTION_ARTIFACT_DIR)
+scene_provider_gateway = build_scene_provider_gateway()
+scene_generation_worker = SceneGenerationWorker(
+    database,
+    PRODUCTION_ARTIFACT_DIR,
+    provider_gateway=scene_provider_gateway,
+)
 template_path = Path(__file__).resolve().parent / "templates" / "index.html"
 
 # Tracks the last time each external-sidecar provider (Antigravity/Flow/Meta
@@ -160,6 +227,10 @@ template_path = Path(__file__).resolve().parent / "templates" / "index.html"
 # yet, which is the correct "unknown" state until one polls in.
 _sidecar_last_seen: dict[str, datetime] = {}
 _SIDECAR_STALE_AFTER_SECONDS = 30  # polls happen every 5-10s when idle
+# Browser-extension clients wait on the WebSocket instead of polling while
+# idle. Track those connections separately, otherwise the status endpoint says
+# every Cốc Cốc provider is offline even while the bridge is connected.
+_browser_extension_connections = 0
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -259,6 +330,7 @@ def _stop_runtime_workers() -> None:
         production_worker.stop()
         metadata_queue.stop()
         transcript_queue.stop()
+        agent_task_worker.stop()
 
 
 browser_lease_monitor = BrowserLeaseMonitor()
@@ -272,6 +344,7 @@ async def lifespan(_: FastAPI):
     production_worker.start()
     publisher_worker.start()
     scene_generation_worker.start()
+    agent_task_worker.start()
     browser_lease_monitor.start()
     try:
         yield
@@ -547,7 +620,7 @@ class AttachAssetRequest(BaseModel):
 
 class CreateSceneGenerationRequest(BaseModel):
     timeline_segment_id: int = Field(ge=1)
-    provider: Literal["openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image", "gflow_cli", "gflow_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"] = "gemini_image"
+    provider: str = Field(default="gemini_image", min_length=2, max_length=80)
     prompt: str = Field(min_length=3, max_length=20_000)
     duration_seconds: int = Field(default=5, ge=1, le=30)
     ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
@@ -557,10 +630,7 @@ class CreateSceneGenerationRequest(BaseModel):
     confirmed: bool = False
 
 
-SceneProvider = Literal[
-    "openai_image", "gemini_image", "gemini_veo", "runway", "antigravity_image",
-    "gflow_cli", "gflow_image", "flow_veo", "flow_image", "meta_ai_video", "gemini_web_image", "chatgpt_web_image",
-]
+SceneProvider = str
 
 
 class BatchSceneGenerationRequest(BaseModel):
@@ -2572,6 +2642,15 @@ _MAX_AUTO_REGENERATE = 1
 _REVIEW_PASS_SCORE = 6
 
 
+def _scene_review_pass_score() -> int:
+    """The score a generated scene must reach, as set in Automation Policy."""
+    try:
+        configured = settings.automation_policy().get("min_scene_qc_score", _REVIEW_PASS_SCORE)
+        return max(0, min(int(configured), 10))
+    except (TypeError, ValueError):
+        return _REVIEW_PASS_SCORE
+
+
 def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[str, Any]:
     """Has the orchestrator look at a generated file and judge it.
 
@@ -2674,10 +2753,15 @@ def _run_scene_review(job_id: int) -> dict[str, Any] | None:
         return None
 
     score = int(verdict.get("score") or 0)
-    passed = bool(verdict.get("matches")) and score >= _REVIEW_PASS_SCORE
+    minimum = _scene_review_pass_score()
+    passed = bool(verdict.get("matches")) and score >= minimum
     note_parts = [str(verdict.get("saw") or "").strip()]
     if verdict.get("issues"):
         note_parts.append(f"Loi: {verdict['issues']}")
+    if not passed:
+        # The user has to be able to tell a genuinely bad image from one that
+        # only fell short of the threshold they themselves raised.
+        note_parts.append(f"Diem {score}/10, nguong policy {minimum}/10")
     note = " | ".join(part for part in note_parts if part)
     database.save_scene_job_review(job_id, "pass" if passed else "fail", score, note)
 
@@ -2739,11 +2823,10 @@ _PLAN_VISUALS_SCHEMA = {
 # Which providers can actually produce each kind, so a plan can be honoured
 # by picking from the right pool instead of sending a clip request to an
 # image tool.
-_IMAGE_CAPABLE_PROVIDERS = {
-    "openai_image", "gemini_image", "antigravity_image",
-    "flow_image", "gemini_web_image", "chatgpt_web_image",
-}
-_VIDEO_CAPABLE_PROVIDERS = {"gemini_veo", "runway", "gflow_cli", "flow_veo", "meta_ai_video"}
+_IMAGE_CAPABLE_PROVIDERS = set(scene_provider_gateway.provider_keys(capability=SCENE_IMAGE)) | set(
+    scene_provider_gateway.provider_keys(capability=SCENE_ANIMATED_IMAGE)
+)
+_VIDEO_CAPABLE_PROVIDERS = set(scene_provider_gateway.provider_keys(capability=SCENE_VIDEO))
 
 
 @app.post("/api/projects/{project_id}/timeline/plan-visuals")
@@ -3396,6 +3479,11 @@ scene_generation_worker.set_prompt_crafter(_write_job_prompt)
 
 def _require_scene_provider_config(provider: str) -> None:
     """Rejects a provider whose API key is missing, before any job is made."""
+    adapter = scene_provider_gateway.get(provider)
+    if adapter is None:
+        raise HTTPException(status_code=400, detail=f"Provider chưa được đăng ký: {provider}")
+    if not adapter.descriptor.enabled:
+        raise HTTPException(status_code=400, detail=f"Provider đang tạm khóa: {provider}")
     if provider == "meta_ai_video":
         raise HTTPException(
             status_code=400,
@@ -3443,6 +3531,60 @@ def _scene_failure_kind(error: str) -> str:
     return "provider"
 
 
+def _finish_or_fallback_external_scene_job(
+    job: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    """Apply the same bounded Provider Gateway fallback to sidecar failures."""
+    job_id = int(job["id"])
+    failed_provider = str(job.get("provider") or "").strip().lower()
+    failure_kind = _scene_failure_kind(message)
+    database.finalize_scene_provider_usage(
+        job_id,
+        "failed",
+        metadata={"failure_kind": failure_kind, "error": message[:2000]},
+    )
+    fallback_provider = _route_scene_failure(job, message, failure_kind)
+    if fallback_provider and fallback_provider != failed_provider:
+        database.record_scene_provider_failure(failed_provider, message)
+        rerouted = database.reroute_scene_generation_job(
+            job_id,
+            fallback_provider,
+            previous_error=message,
+            failure_kind=failure_kind,
+        )
+        if rerouted:
+            descriptor = scene_provider_gateway.require(fallback_provider).descriptor
+            kind = str(rerouted.get("job_kind") or "image").strip().lower()
+            capability = {
+                "image": SCENE_IMAGE,
+                "gif": SCENE_ANIMATED_IMAGE,
+                "video": SCENE_VIDEO,
+            }.get(kind, f"scene.{kind}")
+            database.record_provider_usage(
+                project_id=int(rerouted["project_id"]),
+                scene_job_id=job_id,
+                provider=fallback_provider,
+                capability=capability,
+                status="estimated",
+                estimated_cost=descriptor.estimated_unit_cost or 0,
+                metadata={
+                    "billing_mode": descriptor.billing_mode,
+                    "fallback_from": failed_provider,
+                },
+            )
+            if fallback_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                scene_generation_worker.enqueue(job_id)
+            return {"status": "fallback", "job": rerouted, "from_provider": failed_provider}
+    finished = database.finish_scene_generation_job(
+        job_id,
+        "error",
+        error=message,
+        failure_kind=failure_kind,
+    )
+    return {"status": "error", "job": finished}
+
+
 def _reference_image_asset_for_segment(project_id: int, segment: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve/register the timeline's still image as an asset for image-to-video."""
     raw_path = str(segment.get("visual_path") or "").strip()
@@ -3469,6 +3611,31 @@ def _reference_image_asset_for_segment(project_id: int, segment: dict[str, Any])
     )
 
 
+def _record_scene_job_estimate(job: dict[str, Any] | None, *, reason: str = "queued") -> None:
+    if not job:
+        return
+    provider = str(job.get("provider") or "").strip().lower()
+    try:
+        descriptor = scene_provider_gateway.require(provider).descriptor
+    except Exception:
+        return
+    kind = str(job.get("job_kind") or "image").strip().lower()
+    capability = {
+        "image": SCENE_IMAGE,
+        "gif": SCENE_ANIMATED_IMAGE,
+        "video": SCENE_VIDEO,
+    }.get(kind, f"scene.{kind}")
+    database.record_provider_usage(
+        project_id=int(job["project_id"]),
+        scene_job_id=int(job["id"]),
+        provider=provider,
+        capability=capability,
+        status="estimated",
+        estimated_cost=descriptor.estimated_unit_cost or 0,
+        metadata={"billing_mode": descriptor.billing_mode, "reason": reason},
+    )
+
+
 @app.post("/api/projects/{project_id}/scene-jobs")
 def queue_scene_generation_job(
     project_id: int,
@@ -3480,6 +3647,7 @@ def queue_scene_generation_job(
             detail="Tao canh AI se goi dich vu cloud va phat sinh chi phi; can confirmed=true",
         )
     _require_scene_provider_config(payload.provider)
+    _enforce_provider_billing_policy(payload.provider, project_id)
     is_video_provider = payload.provider in _VIDEO_CAPABLE_PROVIDERS
     if payload.motion_as_gif and is_video_provider:
         raise HTTPException(status_code=400, detail="GIF chỉ nhận provider tạo ảnh")
@@ -3513,6 +3681,7 @@ def queue_scene_generation_job(
     )
     if not job:
         raise HTTPException(status_code=400, detail="Segment timeline khong hop le hoac khong thuoc project")
+    _record_scene_job_estimate(job)
     if payload.provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
         scene_generation_worker.enqueue(int(job["id"]))
     delegated = payload.provider in database.EXTERNAL_SIDECAR_PROVIDERS
@@ -3528,6 +3697,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     providers = list(dict.fromkeys(payload.providers)) or [payload.provider]
     for provider in providers:
         _require_scene_provider_config(provider)
+        _enforce_provider_billing_policy(provider, project_id)
     if payload.motion_as_gif:
         if payload.requires_reference_image:
             raise HTTPException(status_code=400, detail="Chế độ GIF không được đồng thời gọi pipeline video")
@@ -3547,6 +3717,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         if payload.reference_image_provider not in _IMAGE_CAPABLE_PROVIDERS:
             raise HTTPException(status_code=400, detail="Provider chuẩn bị ảnh không hỗ trợ tạo ảnh")
         _require_scene_provider_config(payload.reference_image_provider)
+        _enforce_provider_billing_policy(payload.reference_image_provider, project_id)
     project = database.get_production_project(project_id)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
@@ -3564,6 +3735,20 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
     queued: list[dict[str, Any]] = []
     preparation_jobs: list[dict[str, Any]] = []
     counters = {"image": 0, "video": 0}
+    budget_stop = ""
+
+    def _budget_stops(candidate: str) -> bool:
+        """Stop the batch at the ceiling instead of at the first scene.
+
+        Each queued job writes its estimate to the ledger straight away, so
+        this sees the batch's own running total and cuts it off at the exact
+        scene that would cross the line.
+        """
+        nonlocal budget_stop
+        if budget_stop:
+            return True
+        budget_stop = _cost_budget_breach(project_id, candidate)
+        return bool(budget_stop)
     for position, segment in enumerate(timeline):
         if payload.limit is not None and len(queued) >= payload.limit:
             break
@@ -3604,6 +3789,8 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 continue
             provider = video_pool[counters["video"] % len(video_pool)]
             counters["video"] += 1
+            if _budget_stops(provider):
+                break
             reference_asset = _reference_image_asset_for_segment(project_id, segment)
             dependency_job: dict[str, Any] | None = None
             if reference_asset is None:
@@ -3613,6 +3800,8 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 image_provider = payload.reference_image_provider
                 if image_provider not in _IMAGE_CAPABLE_PROVIDERS:
                     image_provider = image_pool[0] if image_pool else "flow_image"
+                if _budget_stops(image_provider):
+                    break
                 dependency_job = database.create_scene_generation_job(
                     project_id,
                     int(segment["id"]),
@@ -3625,6 +3814,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 )
                 if not dependency_job:
                     continue
+                _record_scene_job_estimate(dependency_job, reason="image_to_video_dependency")
                 preparation_jobs.append(dependency_job)
                 if image_provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                     scene_generation_worker.enqueue(int(dependency_job["id"]))
@@ -3642,6 +3832,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
                 prompt_pending=True,
             )
             if job:
+                _record_scene_job_estimate(job, reason="image_to_video")
                 if not dependency_job and provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                     scene_generation_worker.enqueue(int(job["id"]))
                 queued.append(job)
@@ -3682,6 +3873,8 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             pool = [fallback if fallback in _IMAGE_CAPABLE_PROVIDERS else "flow_image"]
         provider = pool[counters["image"] % len(pool)]
         counters["image"] += 1
+        if _budget_stops(provider):
+            break
         if wants_gif and not payload.respect_plan and planned_kind != "gif":
             # Only when the caller deliberately opted out of the plan. While
             # this also ran under respect_plan it quietly rewrote the recorded
@@ -3699,6 +3892,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
             prompt_pending=True,
         )
         if job:
+            _record_scene_job_estimate(job, reason="batch")
             active_segment_ids.add(int(segment["id"]))
             if provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
                 scene_generation_worker.enqueue(int(job["id"]))
@@ -3717,6 +3911,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         "motion_as_gif": payload.motion_as_gif,
         "limit": payload.limit,
         "by_provider": by_provider,
+        "budget_stop": budget_stop,
     }
 
 
@@ -3761,6 +3956,11 @@ def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]
         output_asset_id=asset_id,
         release_dependents=False,
     )
+    database.finalize_scene_provider_usage(
+        job_id,
+        "completed",
+        metadata={"output_path": str(asset["file_path"])},
+    )
     # Judge the result and regenerate a poor one, without making the caller
     # wait out a ~20s CLI call before it can pick up the next job.
     _review_scene_in_background(job_id)
@@ -3773,13 +3973,7 @@ def fail_antigravity_scene_job(job_id: int, error: str = "") -> dict[str, Any]:
     if not job or str(job.get("provider")) != "antigravity_image":
         raise HTTPException(status_code=404, detail="Không tìm thấy job Antigravity")
     message = error.strip() or "Sidecar báo lỗi, không có chi tiết"
-    finished = database.finish_scene_generation_job(
-        job_id,
-        "error",
-        error=message,
-        failure_kind=_scene_failure_kind(message),
-    )
-    return {"status": "error", "job": finished}
+    return _finish_or_fallback_external_scene_job(job, message)
 
 
 @app.get("/api/browser-scene-jobs/next")
@@ -3830,10 +4024,15 @@ def scene_sidecar_status() -> dict[str, Any]:
     for provider in database.EXTERNAL_SIDECAR_PROVIDERS:
         last_seen = _sidecar_last_seen.get(provider)
         seconds_ago = (now - last_seen).total_seconds() if last_seen else None
+        extension_connected = (
+            provider in database.BROWSER_SIDECAR_PROVIDERS
+            and _browser_extension_connections > 0
+        )
         result[provider] = {
             "last_seen_at": last_seen.isoformat() if last_seen else None,
             "seconds_ago": seconds_ago,
             "alive": seconds_ago is not None and seconds_ago <= _SIDECAR_STALE_AFTER_SECONDS,
+            "extension_connected": extension_connected,
             "circuit": database.get_scene_provider_state(provider),
         }
     return result
@@ -3860,6 +4059,11 @@ def complete_browser_scene_job(job_id: int, asset_id: int, claim_token: str = ""
         output_path=str(asset["file_path"]),
         output_asset_id=asset_id,
         release_dependents=False,
+    )
+    database.finalize_scene_provider_usage(
+        job_id,
+        "completed",
+        metadata={"output_path": str(asset["file_path"])},
     )
     # Judge the result and regenerate a poor one, without making the caller
     # wait out a ~20s CLI call before it can pick up the next job.
@@ -4378,6 +4582,29 @@ def list_usage_limits() -> dict[str, Any]:
     return {"limits": active, "count": len(active)}
 
 
+@app.post("/api/usage-limits/{provider}/clear")
+def clear_usage_limit(provider: str) -> dict[str, Any]:
+    """Let a recovered account be probed immediately.
+
+    This clears only the app's local outage marker. If the account is still
+    limited, the next real call records the warning again and starts a fresh
+    six-hour probe cooldown; no credential or provider state is changed.
+    """
+    if provider not in _PROVIDER_LABELS:
+        raise HTTPException(status_code=404, detail="Không nhận ra model/provider")
+    database.clear_provider_usage_limit(provider)
+    event_bus.publish(
+        "provider.usage_limit_cleared",
+        source="user",
+        payload={"provider": provider, "reason": "manual_retry"},
+    )
+    return {
+        "status": "retry_enabled",
+        "provider": provider,
+        "label": _PROVIDER_LABELS[provider],
+    }
+
+
 @app.post("/api/projects/{project_id}/script/fidelity-check")
 def check_script_fidelity(project_id: int) -> dict[str, Any]:
     """Check a retelling against the source it is supposed to be retelling.
@@ -4861,13 +5088,7 @@ def fail_browser_scene_job(job_id: int, error: str = "", claim_token: str = "") 
     if job.get("status") != "running" or not claim_token or claim_token != str(job.get("claim_token") or ""):
         raise HTTPException(status_code=409, detail="Lượt chạy này đã hết hạn hoặc không còn sở hữu job")
     message = error.strip() or "Sidecar báo lỗi, không có chi tiết"
-    finished = database.finish_scene_generation_job(
-        job_id,
-        "error",
-        error=message,
-        failure_kind=_scene_failure_kind(message),
-    )
-    return {"status": "error", "job": finished}
+    return _finish_or_fallback_external_scene_job(job, message)
 
 
 @app.websocket("/ws/browser-scene-jobs")
@@ -4885,7 +5106,9 @@ async def browser_scene_jobs_ws(websocket: WebSocket) -> None:
     load; a browser extension re-hitting this API in a tight client loop
     just to ask "anything new?" is not.
     """
+    global _browser_extension_connections
     await websocket.accept()
+    _browser_extension_connections += 1
     last_queued: dict[str, int] = {}
     try:
         while True:
@@ -4897,6 +5120,8 @@ async def browser_scene_jobs_ws(websocket: WebSocket) -> None:
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         pass
+    finally:
+        _browser_extension_connections = max(0, _browser_extension_connections - 1)
 
 
 @app.get("/api/projects/{project_id}/timeline/{segment_id}/visual-preview")
@@ -6073,6 +6298,1108 @@ async def youtube_push_event(request: Request) -> dict[str, Any]:
         return {"ok": True, "events": len(events), **result}
     except Exception as exc:
         raise _api_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# Durable multi-agent automation (WORK BRIEF phases 3-7)
+# ---------------------------------------------------------------------------
+
+_AGENT_RESEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "topic": {"type": "string"},
+        "summary": {"type": "string"},
+        "target_audience": {"type": "string"},
+        "angle": {"type": "string"},
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "trend_score": {"type": "integer"},
+        "competition_score": {"type": "integer"},
+        "opportunity_score": {"type": "integer"},
+        "facts_to_verify": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["topic", "summary", "target_audience", "angle", "keywords", "facts_to_verify"],
+}
+_AGENT_SCRIPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "hook": {"type": "string"},
+        "intro": {"type": "string"},
+        "main_content": {"type": "string"},
+        "cta": {"type": "string"},
+    },
+    "required": ["title", "hook", "intro", "main_content", "cta"],
+}
+_AGENT_DIRECTOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "scene_index": {"type": "integer"},
+                    "section": {"type": "string"},
+                    "narration": {"type": "string"},
+                    "visual_prompt": {"type": "string"},
+                    "duration": {"type": "integer"},
+                    "camera": {"type": "string"},
+                    "motion": {"type": "string"},
+                    "media_type": {"type": "string", "enum": ["image", "gif", "video"]},
+                },
+                "required": ["scene_index", "narration", "visual_prompt", "duration", "media_type"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
+_AGENT_MEDIA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_id": {"type": "integer"},
+                    "kind": {"type": "string", "enum": ["image", "gif", "video"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["segment_id", "kind", "reason"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
+_AGENT_QC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+        "note": {"type": "string"},
+    },
+    "required": ["approved", "score", "issues", "note"],
+}
+_AGENT_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "note": {"type": "string"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["approved", "score", "note", "issues"],
+}
+
+
+def _call_specific_agent_json(
+    agent: str,
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    calls = {
+        "codex_cli": call_codex_json,
+        "claude_code_cli": call_claude_code_cli_json,
+        "antigravity": call_antigravity_json,
+    }
+    if agent not in calls:
+        raise LlmError(f"Agent không được hỗ trợ: {agent}")
+    return calls[agent](system_prompt, user_prompt, schema)
+
+
+def _provider_runtime_states() -> dict[str, dict[str, Any]]:
+    gflow = gflow_cli_status()
+    antigravity = antigravity_cli_status()
+    runway_key, _ = settings.runway_config()
+    openai_key, _ = settings.openai_config()
+    gemini_key, _, _ = settings.gemini_config()
+    states: dict[str, dict[str, Any]] = {}
+    for descriptor in scene_provider_gateway.descriptors():
+        state = dict(database.get_scene_provider_state(descriptor.key))
+        available = not bool(state.get("circuit_open"))
+        reason = str(state.get("last_error") or "")
+        usage_limit = database.get_provider_usage_limit(descriptor.key)
+        if usage_limit and not usage_limit.get("cleared_at"):
+            available = False
+            reason = str(usage_limit.get("message") or "usage_limit")
+        if descriptor.key == "runway" and not runway_key:
+            available, reason = False, "missing_api_key"
+        elif descriptor.key == "openai_image" and not openai_key:
+            available, reason = False, "missing_api_key"
+        elif descriptor.key in {"gemini_image", "gemini_veo"} and not gemini_key:
+            available, reason = False, "missing_api_key"
+        elif descriptor.key in {"gflow_cli", "gflow_image"} and not gflow.get("logged_in"):
+            available, reason = False, "gflow_not_logged_in"
+        elif descriptor.key == "antigravity_image" and not (
+            antigravity.get("logged_in") or antigravity.get("ready")
+        ):
+            available, reason = False, "antigravity_not_ready"
+        elif descriptor.key in database.BROWSER_SIDECAR_PROVIDERS and _browser_extension_connections <= 0:
+            available, reason = False, "browser_extension_not_connected"
+        state.update({"available": available, "reason": reason})
+        states[descriptor.key] = state
+    return states
+
+
+def _paid_api_allowed() -> bool:
+    return bool(settings.automation_policy().get("allow_paid_apis", False))
+
+
+def _subscription_media_allowed() -> bool:
+    return bool(settings.automation_policy().get("allow_subscription_media", True))
+
+
+def _billing_route_policy(**overrides: Any) -> ProviderRoutePolicy:
+    """Turn the saved automation policy into routing rules, in one place.
+
+    Every caller that routes a capability goes through here, so a policy the
+    user saved cannot be honoured on one code path and ignored on another.
+    """
+    return ProviderRoutePolicy(
+        allow_api_billing=_paid_api_allowed(),
+        allow_subscription_billing=_subscription_media_allowed(),
+        **overrides,
+    )
+
+
+PROVIDER_EXHAUSTED_APPROVAL = "provider_exhausted"
+BUDGET_EXCEEDED_APPROVAL = "budget_exceeded"
+
+
+def _cost_ceilings() -> tuple[float, float]:
+    """Return (per-project, per-day) ceilings in USD. 0 means no ceiling."""
+    policy = settings.automation_policy()
+    try:
+        project_ceiling = max(0.0, float(policy.get("max_project_cost", 0) or 0))
+    except (TypeError, ValueError):
+        project_ceiling = 0.0
+    try:
+        daily_ceiling = max(0.0, float(policy.get("max_daily_cost", 0) or 0))
+    except (TypeError, ValueError):
+        daily_ceiling = 0.0
+    return project_ceiling, daily_ceiling
+
+
+def _cost_budget_breach(project_id: int, provider: str) -> str:
+    """Say why one more call would break a saved spending ceiling.
+
+    A ceiling limits money, so a provider that costs nothing extra (a paid
+    subscription already billed, or a local model) is never blocked by it.
+    Blocking those would stop free work because unrelated paid work overspent.
+    """
+    project_ceiling, daily_ceiling = _cost_ceilings()
+    if not project_ceiling and not daily_ceiling:
+        return ""
+    try:
+        descriptor = scene_provider_gateway.require(provider).descriptor
+    except Exception:
+        return ""
+    upcoming = float(descriptor.estimated_unit_cost or 0)
+    if upcoming <= 0:
+        return ""
+    if project_ceiling and project_id:
+        spent = database.project_provider_cost(int(project_id))
+        if spent + upcoming > project_ceiling:
+            return (
+                f"Dự án đã dùng ${spent:.2f}; thêm ${upcoming:.2f} của "
+                f"{descriptor.display_name} sẽ vượt hạn mức ${project_ceiling:.2f} mỗi dự án."
+            )
+    if daily_ceiling:
+        spent_today = database.today_provider_cost()
+        if spent_today + upcoming > daily_ceiling:
+            return (
+                f"Hôm nay đã dùng ${spent_today:.2f}; thêm ${upcoming:.2f} của "
+                f"{descriptor.display_name} sẽ vượt hạn mức ${daily_ceiling:.2f} mỗi ngày."
+            )
+    return ""
+
+
+def _pause_for_automation_block(
+    project_id: int | None,
+    approval_type: str,
+    title: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Park the pipeline on a pending decision instead of failing silently.
+
+    Returns whether the pipeline is now paused. The approval row de-duplicates
+    itself, so repeated failures raise one question, not a queue of them.
+    """
+    if not project_id:
+        return False
+    try:
+        database.create_automation_approval(
+            int(project_id), approval_type, title=title, payload=payload
+        )
+    except ValueError:
+        return False
+    database.emit_domain_event(
+        "pipeline.paused",
+        project_id=int(project_id),
+        aggregate_type="project",
+        aggregate_id=str(project_id),
+        source="orchestrator",
+        payload={"approval_type": approval_type, **payload},
+    )
+    return True
+
+
+def _automation_pause_active(project_id: int | None) -> str:
+    """Return the pending block type holding this project, if any."""
+    if not project_id:
+        return ""
+    for approval in database.list_automation_approvals(
+        project_id=int(project_id), status="pending", limit=200
+    ):
+        approval_type = str(approval.get("approval_type") or "")
+        if approval_type in {PROVIDER_EXHAUSTED_APPROVAL, BUDGET_EXCEEDED_APPROVAL}:
+            return approval_type
+    return ""
+
+
+def _enforce_provider_billing_policy(provider: str, project_id: int | None = None) -> None:
+    try:
+        descriptor = scene_provider_gateway.require(provider).descriptor
+    except Exception:
+        return
+    if descriptor.billing_mode == "api" and not _paid_api_allowed():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Provider {descriptor.display_name} dùng API trả phí và đang bị khóa bởi Automation Policy. "
+                "Hãy bật 'Cho phép API trả phí' trong Điều phối AI nếu thật sự muốn dùng."
+            ),
+        )
+    if descriptor.billing_mode == "subscription" and not _subscription_media_allowed():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Provider {descriptor.display_name} dùng gói thuê bao và đang bị khóa bởi Automation Policy. "
+                "Hãy bật 'Cho phép media qua gói thuê bao' trong Điều phối AI nếu muốn dùng."
+            ),
+        )
+    breach = _cost_budget_breach(int(project_id or 0), provider)
+    if breach:
+        raise HTTPException(status_code=403, detail=f"Vượt hạn mức chi phí. {breach}")
+
+
+def _route_scene_failure(job: dict[str, Any], error: str, failure_kind: str) -> str | None:
+    """Select and audit one bounded fallback for an existing scene job."""
+    if failure_kind in {"input", "dependency", "cancelled"}:
+        return None
+    current = str(job.get("provider") or "").strip().lower()
+    kind = str(job.get("job_kind") or "image").strip().lower()
+    capability = {
+        "image": SCENE_IMAGE,
+        "gif": SCENE_ANIMATED_IMAGE,
+        "video": SCENE_VIDEO,
+    }.get(kind)
+    if not capability:
+        return None
+    project_id = int(job.get("project_id") or 0)
+    try:
+        descriptor = scene_provider_gateway.require(current).descriptor
+        route = scene_provider_gateway.route(
+            capability,
+            provider_states=_provider_runtime_states(),
+            policy=_billing_route_policy(
+                preferred=descriptor.fallback_keys,
+                excluded=frozenset({current}),
+                prefer_subscription=True,
+            ),
+        )
+    except ProviderGatewayError as exc:
+        # Nothing is left to try for this capability. Silently failing the job
+        # would let the pipeline grind through every remaining scene against
+        # providers that are equally exhausted.
+        if settings.automation_policy().get("pause_on_provider_exhaustion", True):
+            _pause_for_automation_block(
+                project_id,
+                PROVIDER_EXHAUSTED_APPROVAL,
+                "Hết provider khả dụng — pipeline tạm dừng chờ quyết định",
+                {
+                    "capability": capability,
+                    "scene_job_id": int(job["id"]),
+                    "failed_provider": current,
+                    "error": str(error)[:500],
+                    "detail": str(exc)[:1000],
+                },
+            )
+        return None
+    except Exception:
+        return None
+    breach = _cost_budget_breach(project_id, route.selected.key)
+    if breach:
+        _pause_for_automation_block(
+            project_id,
+            BUDGET_EXCEEDED_APPROVAL,
+            "Chi phí chạm hạn mức — pipeline tạm dừng chờ quyết định",
+            {
+                "capability": capability,
+                "scene_job_id": int(job["id"]),
+                "blocked_provider": route.selected.key,
+                "detail": breach,
+            },
+        )
+        return None
+    database.record_provider_route(
+        project_id=project_id,
+        scene_job_id=int(job["id"]),
+        capability=capability,
+        selected_provider=route.selected.key,
+        candidates=list(route.candidates),
+        reason=f"Fallback sau {failure_kind}: {route.reason}; error={error[:500]}",
+        estimated_cost=route.selected.estimated_unit_cost or 0,
+    )
+    return route.selected.key
+
+
+def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
+    role = str(task.get("role") or "")
+    project_id = int(task.get("project_id") or 0)
+    payload = dict(task.get("input") or {})
+    project = database.get_production_project(project_id)
+    if not project:
+        raise ValueError("Project của agent task không còn tồn tại")
+    goal = str(payload.get("goal") or project.get("notes") or project.get("title") or "").strip()
+    previous = dict(payload.get("previous_result") or {})
+
+    if role == "research":
+        return _call_specific_agent_json(
+            agent,
+            (
+                "Bạn là Research Agent cho video YouTube. Phân tích chủ đề, audience, góc nội dung, "
+                "keyword và khoảng trống nội dung. Không bịa dữ liệu thời gian thực: mọi số liệu hoặc "
+                "xu hướng chưa kiểm chứng phải liệt kê trong facts_to_verify. Trả JSON đúng schema."
+            ),
+            f"Yêu cầu cấp cao:\n{goal}",
+            _AGENT_RESEARCH_SCHEMA,
+        )
+
+    if role == "script":
+        result = _call_specific_agent_json(
+            agent,
+            (
+                "Bạn là Script Agent. Viết một kịch bản YouTube nguyên bản, hook rõ, mạch logic, "
+                "giữ chân tốt, không sao chép. main_content phải là lời kể hoàn chỉnh, không chỉ outline. "
+                "Không đưa thông tin chưa kiểm chứng thành sự thật. Trả JSON đúng schema."
+            ),
+            f"Yêu cầu:\n{goal}\n\nKết quả Research Agent:\n{json.dumps(previous, ensure_ascii=False)[:50000]}",
+            _AGENT_SCRIPT_SCHEMA,
+        )
+        script = database.create_project_script(
+            project_id,
+            script_title=str(result.get("title") or project.get("title") or ""),
+            hook=str(result.get("hook") or ""),
+            intro=str(result.get("intro") or ""),
+            main_content=str(result.get("main_content") or ""),
+            cta=str(result.get("cta") or ""),
+            status="review",
+        )
+        if not script:
+            raise RuntimeError("Script Agent không lưu được kịch bản")
+        return {**result, "script_id": int(script["id"]), "goal": goal, "pipeline": payload.get("pipeline") or {}}
+
+    if role == "director":
+        script = database.get_latest_project_script(project_id)
+        if not script:
+            raise ValueError("Director Agent cần kịch bản trước")
+        result = _call_specific_agent_json(
+            agent,
+            (
+                "Bạn là Director Agent. Chia kịch bản thành scene độc lập. Mỗi scene phải có lời đọc, "
+                "visual prompt cụ thể, camera, motion, duration và media_type. Dùng image cho cảnh tĩnh, "
+                "gif khi chuyển động ngắn mang ý nghĩa, video chỉ khi chuyển động thật sự cần thiết. "
+                "Trả JSON đúng schema."
+            ),
+            json.dumps({"goal": goal, "script": script}, ensure_ascii=False)[:60000],
+            _AGENT_DIRECTOR_SCHEMA,
+        )
+        raw_scenes = [item for item in result.get("scenes", []) if isinstance(item, dict)]
+        if not raw_scenes:
+            raise ValueError("Director Agent không trả scene")
+        shots = []
+        for index, scene in enumerate(raw_scenes, start=1):
+            shots.append({
+                "shot_index": index,
+                "section": str(scene.get("section") or "main"),
+                "narration": str(scene.get("narration") or ""),
+                "visual_prompt": " ".join(
+                    item for item in (
+                        str(scene.get("visual_prompt") or ""),
+                        f"Camera: {scene.get('camera')}" if scene.get("camera") else "",
+                        f"Motion: {scene.get('motion')}" if scene.get("motion") else "",
+                    ) if item
+                ),
+                "asset_type": "ai_scene",
+                "duration_seconds": max(2, min(int(scene.get("duration") or 8), 30)),
+            })
+        saved_shots = database.create_project_shots(project_id, int(script["id"]), shots, force=True) or []
+        segments = [
+            {
+                "shot_id": saved_shots[index - 1]["id"] if index <= len(saved_shots) else None,
+                "segment_index": index,
+                "section": shot["section"],
+                "voice_text": shot["narration"],
+                "subtitle_text": shot["narration"],
+                "visual_prompt": shot["visual_prompt"],
+                "asset_type": "ai_scene",
+                "duration_seconds": shot["duration_seconds"],
+            }
+            for index, shot in enumerate(shots, start=1)
+        ]
+        timeline = database.create_project_timeline(project_id, int(script["id"]), segments, force=True) or []
+        for segment, raw_scene in zip(timeline, raw_scenes):
+            database.set_segment_visual_kind(
+                int(segment["id"]),
+                str(raw_scene.get("media_type") or "image"),
+                fps=8 if str(raw_scene.get("media_type")) == "gif" else 0,
+                reason="Director Agent chọn theo nội dung và chuyển động của scene",
+            )
+        database.emit_domain_event(
+            "script.completed",
+            project_id=project_id,
+            aggregate_type="project_script",
+            aggregate_id=int(script["id"]),
+            source="director_agent",
+            correlation_id=str(task.get("correlation_id") or ""),
+            payload={"scene_count": len(timeline)},
+        )
+        return {
+            "scene_count": len(timeline),
+            "script_id": int(script["id"]),
+            "scenes": raw_scenes,
+            "goal": goal,
+            "pipeline": payload.get("pipeline") or {},
+        }
+
+    if role == "media":
+        script = database.get_latest_project_script(project_id)
+        timeline = database.list_project_timeline(project_id, script_id=int(script["id"]) if script else None)
+        if not timeline:
+            raise ValueError("Media Agent cần timeline trước")
+        decision = _call_specific_agent_json(
+            agent,
+            (
+                "Bạn là Media Agent. Với từng scene, chọn image/gif/video. Video tốn credit nên chỉ dùng "
+                "khi chuyển động là phần thiết yếu; infographic hoặc thay đổi ngắn dùng gif; còn lại dùng image. "
+                "Giữ nguyên segment_id và trả JSON đúng schema."
+            ),
+            json.dumps(
+                {"goal": goal, "scenes": [
+                    {"segment_id": item["id"], "narration": item["voice_text"], "visual_prompt": item["visual_prompt"]}
+                    for item in timeline
+                ]},
+                ensure_ascii=False,
+            )[:60000],
+            _AGENT_MEDIA_SCHEMA,
+        )
+        by_id = {int(item["id"]): item for item in timeline}
+        states = _provider_runtime_states()
+        assignments: list[dict[str, Any]] = []
+        for item in decision.get("scenes", []):
+            if not isinstance(item, dict) or int(item.get("segment_id") or 0) not in by_id:
+                continue
+            segment_id = int(item["segment_id"])
+            kind = str(item.get("kind") or "image")
+            capability = {"image": SCENE_IMAGE, "gif": SCENE_ANIMATED_IMAGE, "video": SCENE_VIDEO}[kind]
+            database.set_segment_visual_kind(
+                segment_id,
+                kind,
+                fps=8 if kind == "gif" else 0,
+                reason=str(item.get("reason") or "Media Agent routing"),
+            )
+            try:
+                route = scene_provider_gateway.route(
+                    capability,
+                    provider_states=states,
+                    policy=_billing_route_policy(),
+                )
+                provider = route.selected.key
+                route_record = database.record_provider_route(
+                    project_id=project_id,
+                    capability=capability,
+                    selected_provider=provider,
+                    candidates=list(route.candidates),
+                    reason=route.reason,
+                    estimated_cost=route.selected.estimated_unit_cost or 0,
+                )
+                assignments.append({
+                    "segment_id": segment_id,
+                    "kind": kind,
+                    "provider": provider,
+                    "route_id": route_record["id"],
+                    "reason": str(item.get("reason") or ""),
+                })
+            except Exception as exc:
+                assignments.append({"segment_id": segment_id, "kind": kind, "provider": "", "error": str(exc)})
+
+        pipeline_options = dict(payload.get("pipeline") or {})
+        queued_jobs: list[int] = []
+        unroutable = [item for item in assignments if not item.get("provider")]
+        if unroutable and settings.automation_policy().get("pause_on_provider_exhaustion", True):
+            _pause_for_automation_block(
+                project_id,
+                PROVIDER_EXHAUSTED_APPROVAL,
+                "Hết provider khả dụng — pipeline tạm dừng chờ quyết định",
+                {
+                    "unroutable_segments": [int(item["segment_id"]) for item in unroutable],
+                    "detail": str(unroutable[0].get("error") or "")[:1000],
+                },
+            )
+        blocked = _automation_pause_active(project_id)
+        if pipeline_options.get("auto_generate_media") and not blocked:
+            for assignment in assignments:
+                provider = str(assignment.get("provider") or "")
+                if not provider:
+                    continue
+                breach = _cost_budget_breach(project_id, provider)
+                if breach:
+                    # Stop the whole batch, not just this scene: the next one
+                    # would breach the same ceiling by the same amount.
+                    blocked = BUDGET_EXCEEDED_APPROVAL
+                    _pause_for_automation_block(
+                        project_id,
+                        BUDGET_EXCEEDED_APPROVAL,
+                        "Chi phí chạm hạn mức — pipeline tạm dừng chờ quyết định",
+                        {
+                            "segment_id": int(assignment["segment_id"]),
+                            "blocked_provider": provider,
+                            "detail": breach,
+                        },
+                    )
+                    break
+                segment = by_id[int(assignment["segment_id"])]
+                if str(segment.get("visual_path") or "").strip():
+                    continue
+                kind = str(assignment["kind"])
+                reference_asset = _reference_image_asset_for_segment(project_id, segment) if kind == "video" else None
+                dependency = None
+                if kind == "video" and reference_asset is None:
+                    image_route = scene_provider_gateway.route(
+                        SCENE_IMAGE,
+                        provider_states=states,
+                        policy=_billing_route_policy(),
+                    )
+                    dependency = database.create_scene_generation_job(
+                        project_id,
+                        int(segment["id"]),
+                        image_route.selected.key,
+                        str(segment.get("visual_prompt") or ""),
+                        job_kind="image",
+                        prompt_pending=True,
+                    )
+                    _record_scene_job_estimate(dependency, reason="agent_image_to_video_dependency")
+                    if dependency and image_route.selected.key not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                        scene_generation_worker.enqueue(int(dependency["id"]))
+                job = database.create_scene_generation_job(
+                    project_id,
+                    int(segment["id"]),
+                    provider,
+                    str(segment.get("visual_prompt") or ""),
+                    duration_seconds=max(2, min(int(segment.get("duration_seconds") or 5), 30)),
+                    reference_asset_id=int(reference_asset["id"]) if reference_asset else None,
+                    job_kind=kind,
+                    depends_on_job_id=int(dependency["id"]) if dependency else None,
+                    requires_reference_image=kind == "video",
+                    prompt_pending=True,
+                )
+                if dependency:
+                    queued_jobs.append(int(dependency["id"]))
+                if job:
+                    queued_jobs.append(int(job["id"]))
+                    _record_scene_job_estimate(job, reason="media_agent")
+                    if not dependency and provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+                        scene_generation_worker.enqueue(int(job["id"]))
+            if script and not blocked:
+                render_settings = database.get_project_render_settings(project_id)
+                voice_provider = str(render_settings.get("voice_provider") or "edge_tts")
+                try:
+                    production_worker.enqueue(project_id, int(script["id"]), "voiceover", voice_provider)
+                except ProductionJobError:
+                    pass
+        return {
+            "assignments": assignments,
+            "queued_job_ids": queued_jobs,
+            "auto_generate_media": bool(pipeline_options.get("auto_generate_media")),
+            "paused_by": blocked,
+            "goal": goal,
+            "pipeline": pipeline_options,
+        }
+
+    if role == "qc":
+        script = database.get_latest_project_script(project_id)
+        timeline = database.list_project_timeline(project_id, script_id=int(script["id"]) if script else None)
+        scene_jobs = database.list_scene_generation_jobs(project_id, limit=500)
+        project_jobs = database.list_project_jobs(project_id, limit=100)
+        active = [job for job in [*scene_jobs, *project_jobs] if job.get("status") in {"waiting", "queued", "running"}]
+        issues = []
+        for segment in timeline:
+            if not str(segment.get("visual_path") or "").strip():
+                issues.append(f"Scene {segment.get('segment_index')} thiếu visual")
+            if not str(segment.get("audio_path") or "").strip():
+                issues.append(f"Scene {segment.get('segment_index')} thiếu voice")
+            if not str(segment.get("subtitle_text") or "").strip():
+                issues.append(f"Scene {segment.get('segment_index')} thiếu subtitle")
+        if active:
+            issues.append(f"Còn {len(active)} job đang xử lý")
+        result = _call_specific_agent_json(
+            agent,
+            (
+                "Bạn là QC Agent độc lập. Kiểm tra snapshot dự án, chỉ duyệt khi không thiếu visual/voice/subtitle, "
+                "không còn job chạy và không có scene review fail. Không được che giấu lỗi. Trả JSON đúng schema."
+            ),
+            json.dumps({"project_id": project_id, "issues_detected": issues, "scene_count": len(timeline)}, ensure_ascii=False),
+            _AGENT_QC_SCHEMA,
+        )
+        approved = bool(result.get("approved")) and not issues
+        result = {**result, "approved": approved, "detected_issues": issues, "ready_for_render": approved}
+        if approved:
+            database.emit_domain_event(
+                "project.ready_to_render",
+                project_id=project_id,
+                aggregate_type="production_project",
+                aggregate_id=project_id,
+                source="qc_agent",
+                correlation_id=str(task.get("correlation_id") or ""),
+                payload={"score": result.get("score"), "scene_count": len(timeline)},
+            )
+        return {**result, "goal": goal, "pipeline": payload.get("pipeline") or {}}
+
+    raise ValueError(f"Agent role không được hỗ trợ: {role}")
+
+
+def _review_agent_task(
+    task: dict[str, Any],
+    reviewer_agent: str,
+    output: dict[str, Any],
+) -> dict[str, Any]:
+    return _call_specific_agent_json(
+        reviewer_agent,
+        (
+            "Bạn là AI nghiệm thu chéo. Executor và reviewer phải độc lập. Kiểm tra output có đúng nhiệm vụ, "
+            "đủ dữ liệu, tự nhất quán và không bịa hay không. Với QC task, được phép duyệt chất lượng của báo cáo "
+            "dù báo cáo kết luận project chưa sẵn sàng; approved ở đây nghĩa là output đáng tin, không phải video đã đạt. "
+            "Trả JSON đúng schema."
+        ),
+        json.dumps(
+            {"role": task.get("role"), "task_type": task.get("task_type"), "input": task.get("input"), "output": output},
+            ensure_ascii=False,
+        )[:80000],
+        _AGENT_REVIEW_SCHEMA,
+    )
+
+
+def _pipeline_has_active_media(project_id: int) -> bool:
+    return any(
+        job.get("status") in {"waiting", "queued", "running"}
+        for job in [
+            *database.list_scene_generation_jobs(project_id, limit=500),
+            *database.list_project_jobs(project_id, limit=100),
+        ]
+    )
+
+
+def _resume_media_pipeline(project_id: int) -> None:
+    if _pipeline_has_active_media(project_id):
+        return
+    tasks = database.list_agent_tasks(project_id=project_id, limit=500)
+    children = {str(task.get("parent_task_id") or "") for task in tasks}
+    for task in tasks:
+        if task.get("role") == "media" and task.get("status") == "completed" and str(task["id"]) not in children:
+            agent_pipeline.advance(task)
+            return
+
+
+def _agent_pipeline_completed(task: dict[str, Any]) -> None:
+    role = str(task.get("role") or "")
+    project_id = int(task.get("project_id") or 0)
+    if role == "script":
+        script_id = int((task.get("output") or {}).get("script_id") or 0)
+        if script_id:
+            database.approve_project_script(script_id)
+    if role == "media" and _pipeline_has_active_media(project_id):
+        return
+    if role == "qc":
+        output = dict(task.get("output") or {})
+        options = dict((task.get("input") or {}).get("pipeline") or output.get("pipeline") or {})
+        if output.get("ready_for_render") and options.get("auto_render"):
+            script = database.get_latest_project_script(project_id)
+            if script:
+                production_worker.enqueue(project_id, int(script["id"]), "render", "ffmpeg_builtin")
+        policy = settings.automation_policy()
+        if policy.get("require_final_approval"):
+            if output.get("ready_for_render"):
+                database.create_automation_approval(
+                    project_id,
+                    "final_publish",
+                    title="Video đã qua QC — chờ người dùng duyệt cuối",
+                    payload={
+                        "qc_task_id": task.get("id"),
+                        "score": output.get("score"),
+                        "issues": output.get("detected_issues") or output.get("issues") or [],
+                        "ready_for_render": True,
+                    },
+                )
+            elif options.get("auto_generate_media"):
+                database.create_automation_approval(
+                    project_id,
+                    "pipeline_exception",
+                    title="Pipeline tự động chưa thể hoàn tất — cần quyết định",
+                    payload={
+                        "qc_task_id": task.get("id"),
+                        "score": output.get("score"),
+                        "issues": output.get("detected_issues") or output.get("issues") or [],
+                        "ready_for_render": False,
+                    },
+                )
+        return
+    agent_pipeline.advance(task)
+
+
+def _resume_pipeline_from_event(event) -> None:
+    if event.project_id is not None:
+        _resume_media_pipeline(int(event.project_id))
+
+
+agent_task_worker.configure(
+    executor=_execute_agent_task,
+    reviewer=_review_agent_task,
+    completion_handler=_agent_pipeline_completed,
+)
+scene_generation_worker.set_failure_router(_route_scene_failure)
+event_bus.subscribe("scene.created", _resume_pipeline_from_event)
+event_bus.subscribe("voice.completed", _resume_pipeline_from_event)
+event_bus.subscribe("task.failed", _resume_pipeline_from_event)
+
+
+class AutomationPipelineRequest(BaseModel):
+    goal: str = Field(min_length=10, max_length=10_000)
+    project_id: int | None = Field(default=None, ge=1)
+    title: str = Field(default="", max_length=200)
+    language: str = Field(default="vi", max_length=20)
+    auto_generate_media: bool = False
+    auto_render: bool = False
+
+
+class AutomationApprovalDecisionRequest(BaseModel):
+    decision: Literal["approved", "changes_requested", "dismissed"]
+    note: str = Field(default="", max_length=4000)
+    resume_role: Literal["research", "script", "director", "media", "qc"] = "media"
+
+
+class CreateAgentTaskRequest(BaseModel):
+    project_id: int | None = Field(default=None, ge=1)
+    role: Literal["research", "script", "director", "media", "qc"]
+    task_type: str = Field(default="manual", min_length=2, max_length=120)
+    input: dict[str, Any] = Field(default_factory=dict)
+    assigned_agent: str = Field(default="", max_length=80)
+    reviewer_agent: str = Field(default="", max_length=80)
+    max_attempts: int = Field(default=2, ge=1, le=10)
+
+
+class AgentMessageRequest(BaseModel):
+    project_id: int | None = Field(default=None, ge=1)
+    task_id: str | None = Field(default=None, max_length=80)
+    sender_agent: str = Field(min_length=2, max_length=80)
+    recipient_agent: str = Field(min_length=2, max_length=80)
+    message_type: str = Field(default="message", max_length=80)
+    correlation_id: str = Field(default="", max_length=100)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProviderRouteRequest(BaseModel):
+    capability: Literal["scene.image", "scene.animated_image", "scene.video"]
+    project_id: int | None = Field(default=None, ge=1)
+
+
+@app.get("/api/agent-system/status")
+def agent_system_status() -> dict[str, Any]:
+    return {
+        "worker": agent_task_worker.status(),
+        "agents": [
+            {
+                "role": item.role,
+                "display_name": item.display_name,
+                "responsibility": item.responsibility,
+                "stage": item.stage,
+            }
+            for item in DEFAULT_AGENTS
+        ],
+        "runtimes": {
+            agent: {"available": _agent_runtime_available(agent)}
+            for agent in settings.AGENT_IDS
+        },
+    }
+
+
+@app.post("/api/automation/pipelines")
+def start_automation_pipeline(payload: AutomationPipelineRequest) -> dict[str, Any]:
+    policy = settings.automation_policy()
+    global_rules = str(policy.get("global_rules") or "").strip()
+    effective_goal = payload.goal.strip()
+    if global_rules:
+        effective_goal = f"{effective_goal}\n\nQUY TẮC HỆ THỐNG BẮT BUỘC:\n{global_rules}"
+    project = database.get_production_project(payload.project_id) if payload.project_id else None
+    if payload.project_id and not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy project")
+    if project is None:
+        project = database.create_idea_project(
+            effective_goal,
+            title=payload.title,
+            language=payload.language,
+        )
+    task = agent_pipeline.start(
+        int(project["id"]),
+        effective_goal,
+        auto_generate_media=payload.auto_generate_media,
+        auto_render=payload.auto_render,
+    )
+    return {"status": "queued", "project": project, "task": task}
+
+
+@app.get("/api/automation/projects")
+def list_automation_projects(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for project in database.list_production_projects(limit=limit):
+        tasks = database.list_agent_tasks(project_id=int(project["id"]), limit=200)
+        if not tasks:
+            continue
+        latest = tasks[0]
+        pending_approvals = database.list_automation_approvals(
+            project_id=int(project["id"]), status="pending", limit=20
+        )
+        items.append({
+            "project": project,
+            "latest_task": latest,
+            "task_counts": {
+                status: sum(1 for task in tasks if task.get("status") == status)
+                for status in {str(task.get("status") or "unknown") for task in tasks}
+            },
+            "pending_approvals": len(pending_approvals),
+        })
+    return {"projects": items, "count": len(items)}
+
+
+@app.get("/api/automation/projects/{project_id}")
+def automation_project_status(project_id: int) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy project")
+    script = database.get_latest_project_script(project_id)
+    return {
+        "project": project,
+        "agent_tasks": database.list_agent_tasks(project_id=project_id, limit=500),
+        "agent_messages": database.list_agent_messages(project_id=project_id, limit=1000),
+        "events": [event.as_dict() for event in event_bus.history(project_id=project_id, limit=1000)],
+        "provider_usage": database.list_provider_usage(project_id, limit=500),
+        "timeline": database.list_project_timeline(
+            project_id, script_id=int(script["id"]) if script else None
+        ),
+        "scene_jobs": database.list_scene_generation_jobs(project_id, limit=500),
+        "production_jobs": database.list_project_jobs(project_id, limit=200),
+        "approvals": database.list_automation_approvals(project_id=project_id, limit=200),
+        "policy": settings.automation_policy(),
+        "agent_worker": agent_task_worker.status(),
+    }
+
+
+@app.get("/api/automation/approvals")
+def list_automation_approvals(
+    project_id: int | None = Query(default=None, ge=1),
+    status: str = "pending",
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    approvals = database.list_automation_approvals(
+        project_id=project_id, status=status, limit=limit
+    )
+    projects = {
+        int(item["id"]): item for item in database.list_production_projects(limit=200)
+    }
+    return {
+        "approvals": [
+            {**item, "project": projects.get(int(item["project_id"]))}
+            for item in approvals
+        ],
+        "count": len(approvals),
+    }
+
+
+@app.post("/api/automation/approvals/{approval_id}/decision")
+def decide_automation_approval(
+    approval_id: int,
+    payload: AutomationApprovalDecisionRequest,
+) -> dict[str, Any]:
+    approval = database.get_automation_approval(approval_id)
+    if not approval:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu phê duyệt")
+    decided = database.decide_automation_approval(
+        approval_id, payload.decision, payload.note
+    )
+    if not decided:
+        raise HTTPException(status_code=409, detail="Yêu cầu này đã được xử lý")
+    project_id = int(approval["project_id"])
+    task = None
+    if payload.decision == "approved":
+        database.update_production_project(project_id, status="approved")
+    elif payload.decision == "changes_requested":
+        project = database.get_production_project(project_id) or {}
+        policy = settings.automation_policy()
+        task = database.create_agent_task(
+            project_id,
+            payload.resume_role,
+            "user.change_request",
+            {
+                "goal": payload.note.strip() or f"Sửa project {project.get('title') or project_id} theo báo cáo QC",
+                "pipeline": {
+                    "auto_generate_media": bool(policy.get("auto_generate_media")),
+                    "auto_render": bool(policy.get("auto_render")),
+                },
+                "approval_id": approval_id,
+            },
+            requested_by="user",
+            max_attempts=int(policy.get("max_attempts") or 2),
+        )
+        agent_task_worker.enqueue(str(task["id"]))
+        database.update_production_project(project_id, status="review")
+    event_bus.publish(
+        "approval.decided",
+        project_id=project_id,
+        aggregate_type="automation_approval",
+        aggregate_id=approval_id,
+        source="user",
+        payload={
+            "decision": payload.decision,
+            "note": payload.note,
+            "resume_role": payload.resume_role if task else "",
+            "task_id": str((task or {}).get("id") or ""),
+        },
+    )
+    return {"status": payload.decision, "approval": decided, "task": task}
+
+
+@app.get("/api/agent-tasks")
+def list_agent_tasks(
+    project_id: int | None = Query(default=None, ge=1),
+    status: str = "",
+    role: str = "",
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    return database.list_agent_tasks(project_id=project_id, status=status, role=role, limit=limit)
+
+
+@app.post("/api/agent-tasks")
+def create_agent_task(payload: CreateAgentTaskRequest) -> dict[str, Any]:
+    if payload.project_id and not database.get_production_project(payload.project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy project")
+    task = database.create_agent_task(
+        payload.project_id,
+        payload.role,
+        payload.task_type,
+        payload.input,
+        assigned_agent=payload.assigned_agent,
+        reviewer_agent=payload.reviewer_agent,
+        max_attempts=payload.max_attempts,
+    )
+    agent_task_worker.enqueue(str(task["id"]))
+    return {"status": "queued", "task": task}
+
+
+@app.get("/api/agent-tasks/{task_id}")
+def get_agent_task(task_id: str) -> dict[str, Any]:
+    task = database.get_agent_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Không tìm thấy agent task")
+    return {"task": task, "messages": database.list_agent_messages(task_id=task_id)}
+
+
+@app.post("/api/agent-messages")
+def create_agent_message(payload: AgentMessageRequest) -> dict[str, Any]:
+    message = database.append_agent_message(
+        project_id=payload.project_id,
+        task_id=payload.task_id,
+        sender_agent=payload.sender_agent,
+        recipient_agent=payload.recipient_agent,
+        message_type=payload.message_type,
+        correlation_id=payload.correlation_id,
+        payload=payload.payload,
+    )
+    return {"status": "sent", "message": message}
+
+
+@app.get("/api/events")
+def list_domain_events(
+    after_id: int = Query(default=0, ge=0),
+    project_id: int | None = Query(default=None, ge=1),
+    event_type: list[str] = Query(default=[]),
+    limit: int = Query(default=200, ge=1, le=2000),
+) -> list[dict[str, Any]]:
+    try:
+        return [
+            event.as_dict()
+            for event in event_bus.history(
+                after_id=after_id,
+                project_id=project_id,
+                event_types=event_type,
+                limit=limit,
+            )
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/providers/catalog")
+def provider_catalog() -> dict[str, Any]:
+    states = _provider_runtime_states()
+    return {
+        "providers": [
+            {
+                "key": item.key,
+                "display_name": item.display_name,
+                "capabilities": sorted(item.capabilities),
+                "execution_mode": item.execution_mode,
+                "priority": item.priority,
+                "quality_score": item.quality_score,
+                "billing_mode": item.billing_mode,
+                "estimated_unit_cost": item.estimated_unit_cost,
+                "enabled": item.enabled,
+                "max_attempts": item.max_attempts,
+                "fallback_keys": list(item.fallback_keys),
+                "runtime": states.get(item.key) or {},
+            }
+            for item in scene_provider_gateway.descriptors()
+        ]
+    }
+
+
+@app.post("/api/providers/route")
+def route_provider(payload: ProviderRouteRequest) -> dict[str, Any]:
+    try:
+        route = scene_provider_gateway.route(
+            payload.capability,
+            provider_states=_provider_runtime_states(),
+            policy=_billing_route_policy(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    recorded = database.record_provider_route(
+        project_id=payload.project_id,
+        capability=payload.capability,
+        selected_provider=route.selected.key,
+        candidates=list(route.candidates),
+        reason=route.reason,
+        estimated_cost=route.selected.estimated_unit_cost or 0,
+    )
+    return {"selected_provider": route.selected.key, "candidates": route.candidates, "reason": route.reason, "decision": recorded}
+
+
+@app.get("/api/projects/{project_id}/provider-usage")
+def project_provider_usage(project_id: int) -> list[dict[str, Any]]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy project")
+    return database.list_provider_usage(project_id)
 
 
 if __name__ == "__main__":

@@ -19,10 +19,11 @@ các tab bạn đã đăng nhập sẵn.
 ## Yêu cầu
 
 - App YT Factory phải đang chạy tại `http://127.0.0.1:8787`.
-- Cần có ít nhất 1 tab đã đăng nhập trang tương ứng (gemini.google.com,
-  chatgpt.com, hoặc www.meta.ai) — extension sẽ tự mở tab nền mới bằng
+- Cần đăng nhập trang tương ứng (Flow, Gemini, ChatGPT hoặc Meta AI) trong
+  chính trình duyệt đang cài extension — extension sẽ tự mở tab nền mới bằng
   đúng phiên đăng nhập hiện có trong trình duyệt, không cần bạn giữ tab mở
   sẵn, chỉ cần đã đăng nhập ít nhất một lần trong trình duyệt này trước đó.
+- Không đưa ID/mật khẩu cho app; đăng nhập trực tiếp trên trang của nhà cung cấp.
 
 ## Cách hoạt động
 

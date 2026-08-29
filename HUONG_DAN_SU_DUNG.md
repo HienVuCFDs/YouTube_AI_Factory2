@@ -8,6 +8,29 @@
 
 Không cần sửa code hay database để sử dụng bình thường. API key và cấu hình model chỉ nhập trong **Cài đặt** của app; key không được hiển thị lại trên giao diện.
 
+## Auto Pipeline đa AI
+
+1. Mở **Cài đặt → Auto Pipeline đa AI**.
+2. Viết yêu cầu cấp cao cho video. Chỉ bật **tạo media** hoặc **tự render** khi tài khoản/provider tương ứng đã sẵn sàng; để tắt khi chỉ muốn thử Research → Script → Director → Media → QC mà không tốn credit.
+3. Bấm khởi động. App tự tạo/giao task cho Codex CLI, Claude Code CLI hoặc Antigravity theo cấu hình fixed/auto/fallback. Output của một AI phải được AI khác nghiệm thu trước khi chuyển role.
+4. Theo dõi executor, reviewer, message A2A, event và chi phí ước tính ngay trong panel. Đóng/reload trang không làm mất task vì trạng thái được lưu trong database.
+5. Nếu thấy **CHỜ AI NGHIỆM THU**, output executor vẫn an toàn; reviewer đang hết hạn mức hoặc chưa sẵn sàng. App tự thử lại khi tới giờ reset. Nếu bạn biết tài khoản đã hồi phục, bấm **Cho thử lại** trong banner hạn mức; phần review tiếp tục mà không chạy lại executor.
+
+Auto Pipeline không tự xuất bản. Dù QC đã đạt, người dùng vẫn phải duyệt bước cuối cùng trước khi đưa video ra ngoài.
+
+## Quy tắc và hạn mức tự động
+
+Mở **Cài đặt → Quy tắc & hạn mức tự động**. Đây là luật áp cho mọi lượt chạy tự động; app từ chối job vi phạm ngay khi tạo, không chạy rồi mới báo.
+
+- **Quy tắc bắt buộc**: đoạn văn được gửi kèm mọi task cho AI.
+- **Điểm tối thiểu để AI duyệt task** và **điểm tối thiểu để nhận một cảnh**: dưới ngưỡng thì task quay lại executor, hoặc cảnh bị đánh trượt và tạo lại. Note nghiệm thu ghi rõ điểm/ngưỡng để bạn phân biệt ảnh thật sự hỏng với ảnh chỉ thiếu điểm.
+- **Trần chi phí mỗi dự án / mỗi ngày** (USD, `0` = không giới hạn): chỉ chặn provider thực sự tốn tiền. Flow, Antigravity, ChatGPT/Gemini web chạy bằng gói đã trả nên không bị trần này chặn. Batch dừng đúng tại cảnh sẽ vượt trần và nói rõ lý do, thay vì từ chối cả lượt.
+- **Cho phép API trả phí**: tắt mặc định. Bật thì Runway, OpenAI Image và Gemini/Veo API mới được dùng.
+- **Cho phép media qua gói thuê bao**: tắt nếu muốn app không đụng tới Flow/Antigravity/ChatGPT web.
+- **Hết provider thì tạm dừng**: khi không còn provider nào khả dụng cho một loại media, app dừng và tạo một yêu cầu phê duyệt thay vì để từng cảnh lần lượt thất bại. Lỗi lặp lại chỉ hỏi một lần.
+
+Ô xuất bản cần người duyệt cuối luôn bật và không tắt được.
+
 ## Luồng sản xuất chuẩn
 
 1. Vào **Video** và chọn video nguồn, hoặc tạo project từ media local.
@@ -44,7 +67,14 @@ Luồng tạo video mới trong **Tạo video**:
 3. Bấm **Viết kịch bản bằng AI**. AI phải tạo câu chuyện mới độc lập, không review/tóm tắt/kể lại video gốc. Kết quả có kịch bản hoàn chỉnh và blueprint từng cảnh với prompt cho ảnh/video AI mới.
 4. Bấm **Tạo storyboard bằng AI**. Khi blueprint có sẵn, shot list sẽ ưu tiên `ai_scene` và prompt gốc cho từng cảnh, không yêu cầu cắt lại video tham chiếu.
 
-Lưu ý: phân tích phong cách từ transcript chỉ là suy luận có ghi rõ mức độ tin cậy; nó không thể khẳng định chi tiết khung hình khi chưa có dữ liệu hình ảnh. Khi tạo cảnh thực tế bằng AI, cần cấu hình Runway Video API trong **Công cụ & kết nối**; bước này có thể phát sinh chi phí và app luôn yêu cầu xác nhận trước khi gửi tác vụ.
+Lưu ý: phân tích phong cách từ transcript chỉ là suy luận có ghi rõ mức độ tin cậy; nó không thể khẳng định chi tiết khung hình khi chưa có dữ liệu hình ảnh. Với WF Content, ảnh có thể tạo bằng Flow trong Cốc Cốc, `gflow-cli`, ChatGPT/Gemini web hoặc API đã cấu hình. Video mặc định đi qua Google Flow/Veo bằng `gflow-cli` và luôn dùng ảnh storyboard làm khung đầu. App luôn yêu cầu xác nhận trước khi đưa tác vụ cloud vào hàng đợi.
+
+## Google Flow và Cốc Cốc
+
+- **Flow trong Cốc Cốc** dùng provider `flow_image` (ảnh) hoặc `flow_veo` (video legacy). Cần cài/bật Extension YT Factory trong Cốc Cốc và đăng nhập Google trực tiếp trên trình duyệt. App tự mở/tái sử dụng workspace Flow theo project.
+- **Flow qua gflow-cli** dùng provider `gflow_image` (ảnh/GIF) hoặc `gflow_cli` (video). Tool này có profile đăng nhập riêng; một tab Flow đang mở trong Cốc Cốc không tự biến profile `gflow-cli` thành đã đăng nhập.
+- Không nhập ID/mật khẩu Google vào app. Chỉ đăng nhập một lần trong cửa sổ Google do trình duyệt/tool mở; app không lưu hoặc hiển thị mật khẩu.
+- WF Reup lấy hình từ video nguồn nên không gọi Flow/AI tạo ảnh. Nếu một cảnh Reup thiếu hình, sửa mốc cắt hoặc xuất lại clip nguồn thay vì thay bằng ảnh AI.
 
 ## Quản lý job và dữ liệu
 

@@ -138,6 +138,35 @@ def test_a_video_mark_is_measured_against_the_clip_not_the_output(monkeypatch, t
     assert ffmpeg_renderer._mark_frame_size(clip, "ffmpeg", 1080, 1920) == (1920, 1080)
 
 
+def test_ffprobe_path_does_not_rewrite_a_winget_ffmpeg_directory(monkeypatch, tmp_path) -> None:
+    """WinGet installs FFmpeg below a directory whose name also contains
+    'ffmpeg'. Replacing that word in the entire path creates a directory that
+    does not exist and used to abort every source-video render with WinError 2.
+    """
+    import subprocess as sp
+
+    from youtube_monitor import ffmpeg_renderer
+
+    bin_dir = tmp_path / "ffmpeg-8.1-full_build" / "bin"
+    bin_dir.mkdir(parents=True)
+    ffmpeg = bin_dir / "ffmpeg.exe"
+    ffprobe = bin_dir / "ffprobe.exe"
+    ffmpeg.write_bytes(b"")
+    ffprobe.write_bytes(b"")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"")
+    invoked: list[str] = []
+
+    def fake_run(args, **_kwargs):
+        invoked.append(args[0])
+        return sp.CompletedProcess(args, 0, stdout="1920x1080\n", stderr="")
+
+    monkeypatch.setattr(ffmpeg_renderer.subprocess, "run", fake_run)
+
+    assert ffmpeg_renderer._mark_frame_size(clip, str(ffmpeg), 1080, 1920) == (1920, 1080)
+    assert invoked == [str(ffprobe)]
+
+
 def test_a_still_image_is_already_at_the_output_size(tmp_path) -> None:
     """zoompan has run by then, so the picture is the output's shape."""
     from youtube_monitor import ffmpeg_renderer

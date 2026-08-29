@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import workflows
 
@@ -19,7 +19,21 @@ def utc_now() -> str:
 class Database:
     def __init__(self, path: str | Path):
         self.path = str(path)
+        self._event_publisher: Callable[..., Any] | None = None
         self.initialize()
+
+    def set_event_publisher(self, publisher: Callable[..., Any] | None) -> None:
+        """Attach the app EventBus while keeping standalone Database usable."""
+        self._event_publisher = publisher
+
+    def emit_domain_event(self, event_type: str, **values: Any) -> dict[str, Any]:
+        if self._event_publisher is not None:
+            published = self._event_publisher(event_type, **values)
+            if hasattr(published, "as_dict"):
+                return published.as_dict()
+            if isinstance(published, dict):
+                return published
+        return self.append_domain_event(event_type, **values)
 
     @contextmanager
     def _connect(self):
@@ -485,8 +499,131 @@ class Database:
                     provider TEXT PRIMARY KEY,
                     message TEXT NOT NULL DEFAULT '',
                     detected_at TEXT NOT NULL,
+                    last_failure_at TEXT,
                     resets_at TEXT,
                     cleared_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS domain_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    project_id INTEGER,
+                    aggregate_type TEXT NOT NULL DEFAULT '',
+                    aggregate_id TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'app',
+                    correlation_id TEXT NOT NULL,
+                    causation_id TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_tasks (
+                    id TEXT PRIMARY KEY,
+                    project_id INTEGER,
+                    role TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    requested_by TEXT NOT NULL DEFAULT 'orchestrator',
+                    assigned_agent TEXT NOT NULL DEFAULT '',
+                    reviewer_agent TEXT NOT NULL DEFAULT '',
+                    parent_task_id TEXT,
+                    correlation_id TEXT NOT NULL,
+                    input_json TEXT NOT NULL DEFAULT '{}',
+                    output_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 2,
+                    estimated_cost REAL NOT NULL DEFAULT 0,
+                    actual_cost REAL NOT NULL DEFAULT 0,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (parent_task_id)
+                        REFERENCES agent_tasks(id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    task_id TEXT,
+                    sender_agent TEXT NOT NULL,
+                    recipient_agent TEXT NOT NULL,
+                    message_type TEXT NOT NULL DEFAULT 'message',
+                    correlation_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (task_id)
+                        REFERENCES agent_tasks(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS automation_approvals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    approval_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    title TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    requested_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_route_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    scene_job_id INTEGER,
+                    capability TEXT NOT NULL,
+                    selected_provider TEXT NOT NULL DEFAULT '',
+                    candidates_json TEXT NOT NULL DEFAULT '[]',
+                    reason TEXT NOT NULL DEFAULT '',
+                    estimated_cost REAL NOT NULL DEFAULT 0,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (scene_job_id)
+                        REFERENCES scene_generation_jobs(id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_usage_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    scene_job_id INTEGER,
+                    provider TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'estimated',
+                    units REAL NOT NULL DEFAULT 1,
+                    estimated_cost REAL NOT NULL DEFAULT 0,
+                    actual_cost REAL NOT NULL DEFAULT 0,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (scene_job_id)
+                        REFERENCES scene_generation_jobs(id)
+                        ON DELETE SET NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_video
@@ -521,6 +658,24 @@ class Database:
                     ON scene_generation_jobs(project_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_scene_generation_jobs_status
                     ON scene_generation_jobs(status, id ASC);
+                CREATE INDEX IF NOT EXISTS idx_domain_events_project
+                    ON domain_events(project_id, id ASC);
+                CREATE INDEX IF NOT EXISTS idx_domain_events_type
+                    ON domain_events(event_type, id ASC);
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_project
+                    ON agent_tasks(project_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_status
+                    ON agent_tasks(status, created_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_agent_messages_task
+                    ON agent_messages(task_id, id ASC);
+                CREATE INDEX IF NOT EXISTS idx_automation_approvals_status
+                    ON automation_approvals(status, requested_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_automation_approvals_project
+                    ON automation_approvals(project_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_provider_route_project
+                    ON provider_route_decisions(project_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_provider_usage_project
+                    ON provider_usage_ledger(project_id, id DESC);
                 """
             )
             self._ensure_column(connection, "videos", "local_media_path", "TEXT")
@@ -615,6 +770,11 @@ class Database:
             self._ensure_column(connection, "project_render_settings", "subtitle_model", "TEXT NOT NULL DEFAULT 'timeline'")
             self._ensure_column(connection, "project_render_settings", "publish_language", "TEXT NOT NULL DEFAULT 'vi'")
             self._ensure_column(connection, "project_jobs", "segment_id", "INTEGER")
+            # Keep the first outage time for the activity log, but also keep
+            # the most recent failed probe.  Without the latter, a provider
+            # that did not state a reset time was either disabled forever or
+            # retried on every worker tick after its first cooldown.
+            self._ensure_column(connection, "provider_usage_limits", "last_failure_at", "TEXT")
             for column, ddl in (
                 ("schedule_enabled", "INTEGER NOT NULL DEFAULT 0"),
                 ("schedule_frequency", "TEXT NOT NULL DEFAULT 'weekly'"),
@@ -1240,6 +1400,60 @@ class Database:
                 self.apply_managed_channel_preset(int(project["id"]))
                 project = self.get_production_project(int(project["id"]))
         return project
+
+    def create_idea_project(
+        self,
+        goal: str,
+        *,
+        title: str = "",
+        language: str = "vi",
+    ) -> dict[str, Any]:
+        """Create a content project without requiring a real source video."""
+        channel_id = "UC_YOUTUBE_AI_FACTORY_IDEAS"
+        idea_id = f"idea-{uuid.uuid4().hex}"
+        cleaned_goal = goal.strip()
+        project_title = title.strip() or cleaned_goal[:160] or "AI video project"
+        self.upsert_channel(
+            {
+                "youtube_channel_id": channel_id,
+                "channel_url": "local://youtube-ai-factory/ideas",
+                "title": "YouTube AI Factory Ideas",
+                "description": "Internal source for high-level AI video requests",
+                "uploads_playlist_id": "",
+            }
+        )
+        self.upsert_video(
+            {
+                "youtube_video_id": idea_id,
+                "youtube_channel_id": channel_id,
+                "video_url": f"local://idea/{idea_id}",
+                "title": project_title,
+                "description": cleaned_goal,
+                "default_language": language.strip() or "vi",
+                "metadata_hash": uuid.uuid5(uuid.NAMESPACE_URL, cleaned_goal or idea_id).hex,
+                "raw_payload": {"source": "high_level_request", "goal": cleaned_goal},
+            }
+        )
+        project = self.create_production_project(
+            idea_id,
+            title=project_title,
+            notes=cleaned_goal,
+        )
+        if project is None:
+            raise RuntimeError("Không tạo được project từ yêu cầu cấp cao")
+        self.set_project_workflow(int(project["id"]), "content")
+        created = self.get_production_project(int(project["id"]))
+        if created is None:
+            raise RuntimeError("Project vừa tạo không còn tồn tại")
+        self.emit_domain_event(
+            "project.created",
+            project_id=int(created["id"]),
+            aggregate_type="production_project",
+            aggregate_id=int(created["id"]),
+            source="orchestrator",
+            payload={"goal": cleaned_goal, "source": "high_level_request"},
+        )
+        return created
 
     def list_production_projects(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -2139,7 +2353,21 @@ class Database:
                 "info",
                 f"Đã vào hàng đợi: {job_type.strip()} ({provider.strip()}).",
             )
-        return self.get_project_job(job_id)
+        job = self.get_project_job(job_id)
+        if job:
+            self.emit_domain_event(
+                "task.created",
+                project_id=project_id,
+                aggregate_type="project_job",
+                aggregate_id=job_id,
+                source="job_manager",
+                payload={
+                    "job_type": job_type.strip(),
+                    "provider": provider.strip(),
+                    "segment_id": segment_id,
+                },
+            )
+        return job
 
     def get_project_job(self, job_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -2238,7 +2466,17 @@ class Database:
                 (job_id,),
             ).fetchone()
             self._add_project_job_event(connection, job_id, "info", "Worker đã bắt đầu xử lý job.")
-        return dict(row) if row else None
+        job = dict(row) if row else None
+        if job:
+            self.emit_domain_event(
+                "task.started",
+                project_id=int(job["project_id"]),
+                aggregate_type="project_job",
+                aggregate_id=job_id,
+                source="production_worker",
+                payload={"job_type": job["job_type"], "provider": job["provider"]},
+            )
+        return job
 
     def cancel_queued_project_job(self, job_id: int) -> dict[str, Any] | None:
         """Cancel a job which has not been claimed by the worker yet."""
@@ -2284,7 +2522,42 @@ class Database:
                 message = f"Job kết thúc với trạng thái: {status}."
                 level = "warning"
             self._add_project_job_event(connection, job_id, level, message)
-        return self.get_project_job(job_id)
+        job = self.get_project_job(job_id)
+        if job:
+            event_type = "task.completed" if status == "completed" else "task.failed"
+            self.emit_domain_event(
+                event_type,
+                project_id=int(job["project_id"]),
+                aggregate_type="project_job",
+                aggregate_id=job_id,
+                source="production_worker",
+                payload={
+                    "job_type": job["job_type"],
+                    "provider": job["provider"],
+                    "status": status,
+                    "output_path": output_path,
+                    "error": error,
+                },
+            )
+            if status == "completed" and str(job.get("job_type")) in {"voiceover", "voiceover_segment"}:
+                self.emit_domain_event(
+                    "voice.completed",
+                    project_id=int(job["project_id"]),
+                    aggregate_type="project_job",
+                    aggregate_id=job_id,
+                    source="production_worker",
+                    payload={"output_path": output_path, "segment_id": job.get("segment_id")},
+                )
+            if status == "completed" and str(job.get("job_type")) in {"render", "director_production"}:
+                self.emit_domain_event(
+                    "render.completed",
+                    project_id=int(job["project_id"]),
+                    aggregate_type="project_job",
+                    aggregate_id=job_id,
+                    source="render_engine",
+                    payload={"output_path": output_path},
+                )
+        return job
 
     def project_job_status(self, project_id: int | None = None) -> dict[str, int]:
         query = "SELECT status, COUNT(*) AS count FROM project_jobs"
@@ -3346,7 +3619,22 @@ class Database:
                 ),
             )
             job_id = int(cursor.lastrowid)
-        return self.get_scene_generation_job(job_id)
+        job = self.get_scene_generation_job(job_id)
+        if job:
+            self.emit_domain_event(
+                "task.created",
+                project_id=project_id,
+                aggregate_type="scene_generation_job",
+                aggregate_id=job_id,
+                source="job_manager",
+                payload={
+                    "provider": provider.strip(),
+                    "job_kind": job_kind.strip(),
+                    "timeline_segment_id": timeline_segment_id,
+                    "status": initial_status,
+                },
+            )
+        return job
 
     def get_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -3555,7 +3843,21 @@ class Database:
             )
             if cursor.rowcount != 1:
                 return None
-        return self.get_scene_generation_job(job_id)
+        claimed = self.get_scene_generation_job(job_id)
+        if claimed:
+            self.emit_domain_event(
+                "task.started",
+                project_id=int(claimed["project_id"]),
+                aggregate_type="scene_generation_job",
+                aggregate_id=job_id,
+                source="scene_worker",
+                payload={
+                    "provider": claimed["provider"],
+                    "job_kind": claimed.get("job_kind") or "",
+                    "attempt_count": claimed.get("attempt_count") or 0,
+                },
+            )
+        return claimed
 
     def cancel_pending_scene_generation_jobs(self, project_id: int) -> int:
         """Call off every scene job of a project that has not started yet.
@@ -3717,10 +4019,13 @@ class Database:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO provider_usage_limits (provider, message, detected_at, resets_at, cleared_at)
-                VALUES (?, ?, ?, ?, NULL)
+                INSERT INTO provider_usage_limits (
+                    provider, message, detected_at, last_failure_at, resets_at, cleared_at
+                )
+                VALUES (?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(provider) DO UPDATE SET
                     message = excluded.message,
+                    last_failure_at = excluded.last_failure_at,
                     resets_at = excluded.resets_at,
                     detected_at = CASE
                         WHEN provider_usage_limits.cleared_at IS NULL THEN provider_usage_limits.detected_at
@@ -3728,7 +4033,7 @@ class Database:
                     END,
                     cleared_at = NULL
                 """,
-                (provider, message.strip()[:600], now, resets_at),
+                (provider, message.strip()[:600], now, now, resets_at),
             )
         return self.get_provider_usage_limit(provider)
 
@@ -3854,7 +4159,30 @@ class Database:
                 """,
                 (status.strip()[:20], max(0, min(int(score), 10)), note.strip()[:2000], utc_now(), job_id),
             )
-        return self.get_scene_generation_job(job_id)
+        job = self.get_scene_generation_job(job_id)
+        if job:
+            review_status = status.strip()[:20]
+            self.emit_domain_event(
+                "review.completed",
+                project_id=int(job["project_id"]),
+                aggregate_type="scene_generation_job",
+                aggregate_id=job_id,
+                source="qc_agent",
+                payload={
+                    "status": review_status,
+                    "score": max(0, min(int(score), 10)),
+                    "note": note.strip()[:2000],
+                },
+            )
+            self.emit_domain_event(
+                "scene.approved" if review_status in {"pass", "approved"} else "scene.qc_failed",
+                project_id=int(job["project_id"]),
+                aggregate_type="timeline_segment",
+                aggregate_id=int(job["timeline_segment_id"]),
+                source="qc_agent",
+                payload={"job_id": job_id, "score": max(0, min(int(score), 10))},
+            )
+        return job
 
     def bump_scene_job_auto_retry(self, job_id: int) -> int:
         """Increments and returns how many times this job was auto-regenerated."""
@@ -3867,6 +4195,67 @@ class Database:
                 "SELECT auto_retry_count FROM scene_generation_jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return int(row["auto_retry_count"]) if row else 0
+
+    def reroute_scene_generation_job(
+        self,
+        job_id: int,
+        provider: str,
+        *,
+        previous_error: str = "",
+        failure_kind: str = "provider",
+    ) -> dict[str, Any] | None:
+        """Move a failed running attempt to another provider without losing the job."""
+        target = provider.strip().lower()
+        if not target:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT project_id, provider, attempt_count, max_attempts FROM scene_generation_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row or int(row["attempt_count"] or 0) >= int(row["max_attempts"] or 1):
+                return None
+            previous_provider = str(row["provider"] or "").strip().lower()
+            if previous_provider == target:
+                return None
+            cursor = connection.execute(
+                """
+                UPDATE scene_generation_jobs
+                SET provider = ?, status = 'queued', started_at = NULL,
+                    heartbeat_at = NULL, completed_at = NULL, updated_at = ?,
+                    error = ?, failure_kind = ?, pipeline_stage = 'provider_fallback',
+                    claim_token = '', task_id = ''
+                WHERE id = ? AND status IN ('running', 'error')
+                  AND attempt_count < max_attempts
+                """,
+                (
+                    target,
+                    utc_now(),
+                    previous_error.strip()[:4000],
+                    failure_kind.strip()[:40],
+                    job_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        job = self.get_scene_generation_job(job_id)
+        if job:
+            self.emit_domain_event(
+                "provider.fallback",
+                project_id=int(job["project_id"]),
+                aggregate_type="scene_generation_job",
+                aggregate_id=job_id,
+                source="provider_gateway",
+                payload={
+                    "from_provider": previous_provider,
+                    "to_provider": target,
+                    "attempt_count": job.get("attempt_count") or 0,
+                    "max_attempts": job.get("max_attempts") or 0,
+                    "failure_kind": failure_kind,
+                    "error": previous_error.strip()[:2000],
+                },
+            )
+        return job
 
     def retry_scene_generation_job(self, job_id: int) -> dict[str, Any] | None:
         """Requeue a failed/cancelled scene-generation job for another attempt.
@@ -4032,7 +4421,39 @@ class Database:
             self.record_scene_provider_success(provider)
         elif status == "error":
             self.record_scene_provider_failure(provider, error or "Scene job thất bại")
-        return self.get_scene_generation_job(job_id)
+        job = self.get_scene_generation_job(job_id)
+        if job:
+            self.emit_domain_event(
+                "task.completed" if status == "completed" else "task.failed",
+                project_id=int(job["project_id"]),
+                aggregate_type="scene_generation_job",
+                aggregate_id=job_id,
+                source="scene_worker",
+                payload={
+                    "provider": provider,
+                    "job_kind": job.get("job_kind") or "",
+                    "status": status,
+                    "output_path": output_path,
+                    "output_asset_id": output_asset_id,
+                    "failure_kind": failure_kind,
+                    "error": error,
+                },
+            )
+            if status == "completed":
+                self.emit_domain_event(
+                    "scene.created",
+                    project_id=int(job["project_id"]),
+                    aggregate_type="timeline_segment",
+                    aggregate_id=int(job["timeline_segment_id"]),
+                    source="media_agent",
+                    payload={
+                        "job_id": job_id,
+                        "provider": provider,
+                        "output_path": output_path,
+                        "output_asset_id": job.get("output_asset_id"),
+                    },
+                )
+        return job
 
     def release_scene_generation_dependents(self, job_id: int) -> list[dict[str, Any]]:
         """Release image-to-video children only after their source image is accepted."""
@@ -4172,6 +4593,749 @@ class Database:
             "cancelled": counts.get("cancelled", 0),
             "providers": self.list_scene_provider_states(),
         }
+
+    def append_domain_event(
+        self,
+        event_type: str,
+        *,
+        project_id: int | None = None,
+        aggregate_type: str = "",
+        aggregate_id: str | int = "",
+        source: str = "app",
+        correlation_id: str = "",
+        causation_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        correlation = correlation_id.strip() or uuid.uuid4().hex
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO domain_events (
+                    event_type, project_id, aggregate_type, aggregate_id,
+                    source, correlation_id, causation_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type.strip(),
+                    project_id,
+                    aggregate_type.strip(),
+                    str(aggregate_id),
+                    source.strip() or "app",
+                    correlation,
+                    causation_id.strip(),
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+        event = self.get_domain_event(event_id)
+        if event is None:
+            raise RuntimeError("Không lưu được domain event")
+        return event
+
+    @staticmethod
+    def _decode_json_column(row: dict[str, Any], column: str, target: str) -> None:
+        try:
+            row[target] = json.loads(str(row.pop(column, "") or "{}"))
+        except json.JSONDecodeError:
+            row[target] = {}
+
+    def get_domain_event(self, event_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM domain_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        self._decode_json_column(result, "payload_json", "payload")
+        return result
+
+    def list_domain_events(
+        self,
+        *,
+        after_id: int = 0,
+        project_id: int | None = None,
+        event_types: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["id > ?"]
+        params: list[Any] = [max(0, int(after_id))]
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        cleaned_types = [item.strip() for item in (event_types or []) if item.strip()]
+        if cleaned_types:
+            placeholders = ",".join("?" for _ in cleaned_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(cleaned_types)
+        params.append(max(1, min(int(limit), 2000)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM domain_events WHERE {' AND '.join(clauses)} ORDER BY id ASC LIMIT ?",
+                params,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            self._decode_json_column(item, "payload_json", "payload")
+        return result
+
+    def create_agent_task(
+        self,
+        project_id: int | None,
+        role: str,
+        task_type: str,
+        input_payload: dict[str, Any],
+        *,
+        requested_by: str = "orchestrator",
+        assigned_agent: str = "",
+        reviewer_agent: str = "",
+        parent_task_id: str | None = None,
+        correlation_id: str = "",
+        max_attempts: int = 2,
+        estimated_cost: float = 0,
+        currency: str = "USD",
+    ) -> dict[str, Any]:
+        task_id = f"agt_{uuid.uuid4().hex}"
+        correlation = correlation_id.strip() or uuid.uuid4().hex
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_tasks (
+                    id, project_id, role, task_type, requested_by,
+                    assigned_agent, reviewer_agent, parent_task_id,
+                    correlation_id, input_json, max_attempts,
+                    estimated_cost, currency, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    project_id,
+                    role.strip(),
+                    task_type.strip(),
+                    requested_by.strip() or "orchestrator",
+                    assigned_agent.strip(),
+                    reviewer_agent.strip(),
+                    parent_task_id,
+                    correlation,
+                    json.dumps(input_payload, ensure_ascii=False),
+                    max(1, min(int(max_attempts), 10)),
+                    max(0.0, float(estimated_cost)),
+                    currency.strip().upper()[:8] or "USD",
+                    now,
+                    now,
+                ),
+            )
+        task = self.get_agent_task(task_id)
+        if task is None:
+            raise RuntimeError("Không tạo được agent task")
+        self.emit_domain_event(
+            "task.created",
+            project_id=project_id,
+            aggregate_type="agent_task",
+            aggregate_id=task_id,
+            source=requested_by.strip() or "orchestrator",
+            correlation_id=correlation,
+            payload={
+                "role": role.strip(),
+                "task_type": task_type.strip(),
+                "assigned_agent": assigned_agent.strip(),
+                "reviewer_agent": reviewer_agent.strip(),
+                "parent_task_id": parent_task_id,
+            },
+        )
+        return task
+
+    @staticmethod
+    def _agent_task_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        result = dict(row)
+        for column, target in (("input_json", "input"), ("output_json", "output")):
+            try:
+                result[target] = json.loads(str(result.pop(column, "") or "{}"))
+            except json.JSONDecodeError:
+                result[target] = {}
+        return result
+
+    def get_agent_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return self._agent_task_dict(row)
+
+    def list_agent_tasks(
+        self,
+        *,
+        project_id: int | None = None,
+        status: str = "",
+        role: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["1 = 1"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        if status.strip():
+            clauses.append("status = ?")
+            params.append(status.strip())
+        if role.strip():
+            clauses.append("role = ?")
+            params.append(role.strip())
+        params.append(max(1, min(int(limit), 1000)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [item for row in rows if (item := self._agent_task_dict(row)) is not None]
+
+    def list_queued_agent_task_ids(self, limit: int = 1000) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM agent_tasks
+                WHERE status = 'queued' AND attempt_count < max_attempts
+                ORDER BY created_at ASC LIMIT ?
+                """,
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def list_review_required_agent_task_ids(self, limit: int = 100) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM agent_tasks
+                WHERE status = 'review_required'
+                ORDER BY updated_at ASC LIMIT ?
+                """,
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def requeue_interrupted_agent_tasks(self) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
+                    assigned_agent = '', error = 'Agent worker khởi động lại trước khi hoàn tất',
+                    updated_at = ?, completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE ? END
+                WHERE status = 'running'
+                """,
+                (utc_now(), utc_now()),
+            )
+        return int(cursor.rowcount or 0)
+
+    def claim_agent_task(self, task_id: str, agent: str) -> dict[str, Any] | None:
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'running', assigned_agent = ?, attempt_count = attempt_count + 1,
+                    started_at = COALESCE(started_at, ?), updated_at = ?, error = ''
+                WHERE id = ? AND status = 'queued' AND attempt_count < max_attempts
+                """,
+                (agent.strip(), now, now, task_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        task = self.get_agent_task(task_id)
+        if task:
+            self.emit_domain_event(
+                "task.started",
+                project_id=task.get("project_id"),
+                aggregate_type="agent_task",
+                aggregate_id=task_id,
+                source=agent.strip() or "agent_worker",
+                correlation_id=str(task.get("correlation_id") or ""),
+                payload={
+                    "role": task.get("role"),
+                    "task_type": task.get("task_type"),
+                    "attempt_count": task.get("attempt_count"),
+                },
+            )
+        return task
+
+    def finish_agent_task(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        output: dict[str, Any] | None = None,
+        error: str = "",
+        actual_cost: float = 0,
+    ) -> dict[str, Any] | None:
+        if status not in {"completed", "failed", "cancelled", "review_required", "approved"}:
+            raise ValueError("Trạng thái agent task không hợp lệ")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?, output_json = ?, error = ?, actual_cost = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    json.dumps(output or {}, ensure_ascii=False),
+                    error.strip()[:4000],
+                    max(0.0, float(actual_cost)),
+                    now,
+                    None if status == "review_required" else now,
+                    task_id,
+                ),
+            )
+        task = self.get_agent_task(task_id)
+        if task:
+            event_type = (
+                "task.completed" if status in {"completed", "approved"}
+                else "review.waiting" if status == "review_required"
+                else "task.failed"
+            )
+            self.emit_domain_event(
+                event_type,
+                project_id=task.get("project_id"),
+                aggregate_type="agent_task",
+                aggregate_id=task_id,
+                source=str(task.get("assigned_agent") or "agent_worker"),
+                correlation_id=str(task.get("correlation_id") or ""),
+                payload={
+                    "role": task.get("role"),
+                    "task_type": task.get("task_type"),
+                    "status": status,
+                    "error": error,
+                },
+            )
+        return task
+
+    def requeue_agent_task(self, task_id: str, error: str = "") -> dict[str, Any] | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'queued', assigned_agent = '', error = ?, updated_at = ?, completed_at = NULL
+                WHERE id = ? AND status IN ('running', 'failed', 'review_required')
+                  AND attempt_count < max_attempts
+                """,
+                (error.strip()[:4000], utc_now(), task_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_agent_task(task_id)
+
+    def append_agent_message(
+        self,
+        *,
+        sender_agent: str,
+        recipient_agent: str,
+        payload: dict[str, Any],
+        message_type: str = "message",
+        project_id: int | None = None,
+        task_id: str | None = None,
+        correlation_id: str = "",
+    ) -> dict[str, Any]:
+        correlation = correlation_id.strip() or uuid.uuid4().hex
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO agent_messages (
+                    project_id, task_id, sender_agent, recipient_agent,
+                    message_type, correlation_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    task_id,
+                    sender_agent.strip(),
+                    recipient_agent.strip(),
+                    message_type.strip() or "message",
+                    correlation,
+                    json.dumps(payload, ensure_ascii=False),
+                    utc_now(),
+                ),
+            )
+            message_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM agent_messages WHERE id = ?", (message_id,)
+            ).fetchone()
+        result = dict(row)
+        self._decode_json_column(result, "payload_json", "payload")
+        self.emit_domain_event(
+            "agent.message",
+            project_id=project_id,
+            aggregate_type="agent_task" if task_id else "agent_conversation",
+            aggregate_id=task_id or correlation,
+            source=sender_agent.strip(),
+            correlation_id=correlation,
+            payload={
+                "message_id": message_id,
+                "sender_agent": sender_agent.strip(),
+                "recipient_agent": recipient_agent.strip(),
+                "message_type": message_type.strip() or "message",
+            },
+        )
+        return result
+
+    def list_agent_messages(
+        self,
+        *,
+        task_id: str | None = None,
+        project_id: int | None = None,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        clauses = ["id > ?"]
+        params: list[Any] = [max(0, int(after_id))]
+        if task_id:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        params.append(max(1, min(int(limit), 2000)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM agent_messages WHERE {' AND '.join(clauses)} ORDER BY id ASC LIMIT ?",
+                params,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            self._decode_json_column(item, "payload_json", "payload")
+        return result
+
+    def create_automation_approval(
+        self,
+        project_id: int,
+        approval_type: str,
+        *,
+        title: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create one pending inbox item, reusing an existing duplicate."""
+        if not self.get_production_project(project_id):
+            raise ValueError("Không tìm thấy project")
+        cleaned_type = approval_type.strip()[:80]
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM automation_approvals
+                WHERE project_id = ? AND approval_type = ? AND status = 'pending'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (project_id, cleaned_type),
+            ).fetchone()
+            if existing:
+                result = dict(existing)
+            else:
+                now = utc_now()
+                cursor = connection.execute(
+                    """
+                    INSERT INTO automation_approvals (
+                        project_id, approval_type, status, title, payload_json,
+                        requested_at, updated_at
+                    ) VALUES (?, ?, 'pending', ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        cleaned_type,
+                        title.strip()[:300],
+                        json.dumps(payload or {}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM automation_approvals WHERE id = ?",
+                    (int(cursor.lastrowid),),
+                ).fetchone()
+                result = dict(row)
+        self._decode_json_column(result, "payload_json", "payload")
+        return result
+
+    def get_automation_approval(self, approval_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM automation_approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        self._decode_json_column(result, "payload_json", "payload")
+        return result
+
+    def list_automation_approvals(
+        self,
+        *,
+        project_id: int | None = None,
+        status: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["1 = 1"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        if status.strip():
+            clauses.append("status = ?")
+            params.append(status.strip())
+        params.append(max(1, min(int(limit), 1000)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM automation_approvals WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            self._decode_json_column(item, "payload_json", "payload")
+        return result
+
+    def decide_automation_approval(
+        self,
+        approval_id: int,
+        status: str,
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        if status not in {"approved", "changes_requested", "dismissed"}:
+            raise ValueError("Quyết định phê duyệt không hợp lệ")
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE automation_approvals
+                SET status = ?, note = ?, decided_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (status, note.strip()[:4000], now, now, approval_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_automation_approval(approval_id)
+
+    def record_provider_route(
+        self,
+        *,
+        capability: str,
+        selected_provider: str,
+        candidates: list[dict[str, Any]],
+        reason: str,
+        project_id: int | None = None,
+        scene_job_id: int | None = None,
+        estimated_cost: float = 0,
+        currency: str = "USD",
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO provider_route_decisions (
+                    project_id, scene_job_id, capability, selected_provider,
+                    candidates_json, reason, estimated_cost, currency, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    scene_job_id,
+                    capability.strip(),
+                    selected_provider.strip(),
+                    json.dumps(candidates, ensure_ascii=False),
+                    reason.strip()[:2000],
+                    max(0.0, float(estimated_cost)),
+                    currency.strip().upper()[:8] or "USD",
+                    utc_now(),
+                ),
+            )
+            route_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM provider_route_decisions WHERE id = ?", (route_id,)
+            ).fetchone()
+        result = dict(row)
+        try:
+            result["candidates"] = json.loads(str(result.pop("candidates_json", "") or "[]"))
+        except json.JSONDecodeError:
+            result["candidates"] = []
+        return result
+
+    def record_provider_usage(
+        self,
+        *,
+        provider: str,
+        capability: str,
+        status: str,
+        project_id: int | None = None,
+        scene_job_id: int | None = None,
+        units: float = 1,
+        estimated_cost: float = 0,
+        actual_cost: float = 0,
+        currency: str = "USD",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO provider_usage_ledger (
+                    project_id, scene_job_id, provider, capability, status,
+                    units, estimated_cost, actual_cost, currency,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    scene_job_id,
+                    provider.strip(),
+                    capability.strip(),
+                    status.strip(),
+                    max(0.0, float(units)),
+                    max(0.0, float(estimated_cost)),
+                    max(0.0, float(actual_cost)),
+                    currency.strip().upper()[:8] or "USD",
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            usage_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM provider_usage_ledger WHERE id = ?", (usage_id,)
+            ).fetchone()
+        result = dict(row)
+        self._decode_json_column(result, "metadata_json", "metadata")
+        return result
+
+    def finalize_scene_provider_usage(
+        self,
+        scene_job_id: int,
+        status: str,
+        *,
+        actual_cost: float = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Finish the latest ledger entry, creating one for manually queued jobs."""
+        job = self.get_scene_generation_job(scene_job_id)
+        if not job:
+            return None
+        now = utc_now()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, metadata_json FROM provider_usage_ledger
+                WHERE scene_job_id = ? AND provider = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (scene_job_id, str(job.get("provider") or "")),
+            ).fetchone()
+            if row:
+                try:
+                    merged_metadata = json.loads(str(row["metadata_json"] or "{}"))
+                except json.JSONDecodeError:
+                    merged_metadata = {}
+                merged_metadata.update(metadata or {})
+                connection.execute(
+                    """
+                    UPDATE provider_usage_ledger
+                    SET status = ?, actual_cost = ?, metadata_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status.strip(),
+                        max(0.0, float(actual_cost)),
+                        json.dumps(merged_metadata, ensure_ascii=False),
+                        now,
+                        int(row["id"]),
+                    ),
+                )
+                usage_id = int(row["id"])
+            else:
+                kind = str(job.get("job_kind") or "image").strip().lower()
+                capability = {
+                    "image": "scene.image",
+                    "gif": "scene.animated_image",
+                    "video": "scene.video",
+                }.get(kind, f"scene.{kind or 'image'}")
+                cursor = connection.execute(
+                    """
+                    INSERT INTO provider_usage_ledger (
+                        project_id, scene_job_id, provider, capability, status,
+                        units, estimated_cost, actual_cost, currency,
+                        metadata_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, 'USD', ?, ?, ?)
+                    """,
+                    (
+                        int(job["project_id"]),
+                        scene_job_id,
+                        str(job.get("provider") or ""),
+                        capability,
+                        status.strip(),
+                        max(0.0, float(actual_cost)),
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                usage_id = int(cursor.lastrowid)
+            result_row = connection.execute(
+                "SELECT * FROM provider_usage_ledger WHERE id = ?", (usage_id,)
+            ).fetchone()
+        result = dict(result_row) if result_row else None
+        if result is not None:
+            self._decode_json_column(result, "metadata_json", "metadata")
+        return result
+
+    def list_provider_usage(self, project_id: int, limit: int = 500) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM provider_usage_ledger
+                WHERE project_id = ? ORDER BY id DESC LIMIT ?
+                """,
+                (project_id, max(1, min(int(limit), 2000))),
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            self._decode_json_column(item, "metadata_json", "metadata")
+        return result
+
+    # A cancelled request never reached the provider, so it must not eat the
+    # user's budget. Every other row is counted, including failures: a failed
+    # generation can still have consumed a credit on the provider's side.
+    _BUDGET_COST_SQL = (
+        "SELECT COALESCE(SUM(MAX(actual_cost, estimated_cost)), 0) FROM provider_usage_ledger "
+        "WHERE status != 'cancelled'"
+    )
+
+    def project_provider_cost(self, project_id: int) -> float:
+        """Total money already committed to one project, in USD."""
+        with self._connect() as connection:
+            row = connection.execute(
+                f"{self._BUDGET_COST_SQL} AND project_id = ?", (int(project_id),)
+            ).fetchone()
+        return round(float(row[0] or 0), 6)
+
+    def provider_cost_since(self, since: str) -> float:
+        """Total money committed across all projects since an ISO timestamp."""
+        with self._connect() as connection:
+            row = connection.execute(
+                f"{self._BUDGET_COST_SQL} AND created_at >= ?", (str(since),)
+            ).fetchone()
+        return round(float(row[0] or 0), 6)
+
+    def today_provider_cost(self) -> float:
+        """Total money committed since midnight UTC.
+
+        The ledger stores timezone-aware ISO strings, so a lexicographic
+        comparison against the start of the day is exact and needs no parsing.
+        """
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        return self.provider_cost_since(start)
 
     def summary(self) -> dict[str, int]:
         with self._connect() as connection:

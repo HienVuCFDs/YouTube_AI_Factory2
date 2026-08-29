@@ -425,6 +425,22 @@ class AgentAssignmentsRequest(BaseModel):
     assignments: dict[str, StageAgentAssignmentRequest]
 
 
+class AutomationPolicyRequest(BaseModel):
+    global_rules: str = Field(default="", max_length=10_000)
+    max_attempts: int = Field(default=2, ge=1, le=10)
+    min_review_score: int = Field(default=8, ge=0, le=10)
+    min_scene_qc_score: int = Field(default=7, ge=0, le=10)
+    allow_paid_apis: bool = False
+    allow_subscription_media: bool = True
+    auto_generate_media: bool = False
+    auto_render: bool = False
+    require_final_approval: bool = True
+    pause_on_provider_exhaustion: bool = True
+    # 0 means no ceiling. Both are USD and cover estimated provider spend.
+    max_project_cost: float = Field(default=0.0, ge=0, le=1_000_000)
+    max_daily_cost: float = Field(default=0.0, ge=0, le=1_000_000)
+
+
 def _agent_options() -> list[dict[str, Any]]:
     return [
         {
@@ -474,6 +490,23 @@ def save_agent_assignments(payload: AgentAssignmentsRequest) -> dict[str, Any]:
         "AI_STAGE_ASSIGNMENTS_JSON": json.dumps(current, ensure_ascii=False, separators=(",", ":")),
     })
     return get_agent_assignments()
+
+
+@router.get("/api/settings/automation-policy")
+def get_automation_policy() -> dict[str, Any]:
+    return {"policy": settings.automation_policy()}
+
+
+@router.post("/api/settings/automation-policy")
+def save_automation_policy(payload: AutomationPolicyRequest) -> dict[str, Any]:
+    policy = payload.model_dump()
+    # This safety boundary is part of the product contract, not merely a
+    # checkbox: even an imported policy may not disable final approval.
+    policy["require_final_approval"] = True
+    settings.save_integration_values({
+        "AUTOMATION_POLICY_JSON": json.dumps(policy, ensure_ascii=False, separators=(",", ":")),
+    })
+    return {"status": "saved", "policy": settings.automation_policy()}
 
 
 class LocateElementRequest(BaseModel):

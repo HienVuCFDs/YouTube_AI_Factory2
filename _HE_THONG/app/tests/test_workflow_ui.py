@@ -74,3 +74,29 @@ def test_a_card_short_of_pictures_is_visible_as_such(page: str) -> None:
     word for it the card renders a bare "NEEDS_VISUAL" and reads as a glitch."""
     assert "needs_visual: ['red', 'THIẾU HÌNH']" in page
     assert "Cảnh này thiếu hình minh hoạ" in page
+
+
+def test_single_scene_image_picker_has_real_providers_only(page: str) -> None:
+    """The batch-only pseudo-provider must not be sent to the single-job API."""
+    options = re.search(r"const IMAGE_PROVIDER_OPTIONS = '([^']+)'", page)
+
+    assert options is not None
+    assert 'value="auto_parallel"' not in options.group(1)
+    assert 'value="gflow_image"' in options.group(1)
+
+
+def test_gflow_image_is_exposed_in_the_content_batch_picker(page: str) -> None:
+    picker_at = page.index('id="studioSceneImageProviderSelect"')
+    picker = page[picker_at:page.index('</select>', picker_at)]
+
+    assert 'value="gflow_image"' in picker
+
+
+def test_auto_pipeline_distinguishes_waiting_for_cross_review(page: str) -> None:
+    assert "CHỜ AI NGHIỆM THU" in page
+    assert "task.status === 'review_required'" in page
+
+
+def test_usage_limit_banner_can_allow_a_safe_retry(page: str) -> None:
+    assert "Cho thử lại" in page
+    assert "/api/usage-limits/${encodeURIComponent(provider)}/clear" in page

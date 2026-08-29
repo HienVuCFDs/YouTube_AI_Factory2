@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -9,8 +10,10 @@ from youtube_monitor.main import (
     BatchSceneGenerationRequest,
     CreateSceneGenerationRequest,
     _REVIEW_SCENE_SCHEMA,
+    _agent_runtime_available,
     _call_orchestrator_json,
     app,
+    database,
 )
 
 
@@ -74,6 +77,77 @@ class MainApiTests(unittest.TestCase):
         response = self.client.get("/api/tool-status")
         self.assertEqual(response.status_code, 200)
         self.assertIsInstance(response.json(), list)
+
+    def test_provider_gateway_catalog_exposes_routing_metadata(self) -> None:
+        response = self.client.get("/api/providers/catalog")
+        self.assertEqual(response.status_code, 200)
+        providers = response.json()["providers"]
+        self.assertGreaterEqual(len(providers), 10)
+        flow = next(item for item in providers if item["key"] == "flow_veo")
+        self.assertIn("scene.video", flow["capabilities"])
+        self.assertEqual(flow["billing_mode"], "subscription")
+        self.assertIn("runtime", flow)
+
+    def test_usage_limit_can_be_cleared_to_probe_a_recovered_account(self) -> None:
+        database.record_provider_usage_limit("codex_cli", "weekly usage limit", None)
+
+        response = self.client.post("/api/usage-limits/codex_cli/clear")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "retry_enabled")
+        self.assertIsNotNone(database.get_provider_usage_limit("codex_cli")["cleared_at"])
+
+    def test_unknown_usage_limit_provider_is_rejected(self) -> None:
+        response = self.client.post("/api/usage-limits/not-real/clear")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_unknown_reset_limit_is_probed_only_after_cooldown(self) -> None:
+        database.record_provider_usage_limit("codex_cli", "weekly usage limit", None)
+        old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        with database._connect() as connection:
+            connection.execute(
+                "UPDATE provider_usage_limits SET last_failure_at = ? WHERE provider = ?",
+                (old, "codex_cli"),
+            )
+
+        with patch("youtube_monitor.main.codex_cli_status", return_value={"logged_in": True}):
+            self.assertTrue(_agent_runtime_available("codex_cli"))
+
+        database.record_provider_usage_limit("codex_cli", "weekly usage limit", None)
+        with patch("youtube_monitor.main.codex_cli_status") as status:
+            self.assertFalse(_agent_runtime_available("codex_cli"))
+            status.assert_not_called()
+
+    def test_high_level_pipeline_creates_project_and_durable_research_task(self) -> None:
+        with patch("youtube_monitor.main.agent_pipeline.start") as start:
+            start.return_value = {
+                "id": "task-research-1",
+                "role": "research",
+                "status": "queued",
+            }
+            response = self.client.post(
+                "/api/automation/pipelines",
+                json={
+                    "goal": "Tao video giai thich cach cac AI hop tac voi nhau",
+                    "title": "He thong da AI",
+                    "auto_generate_media": False,
+                    "auto_render": False,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "queued")
+        self.assertEqual(body["project"]["title"], "He thong da AI")
+        start.assert_called_once_with(
+            body["project"]["id"],
+            "Tao video giai thich cach cac AI hop tac voi nhau",
+            auto_generate_media=False,
+            auto_render=False,
+        )
+        status = self.client.get(f"/api/automation/projects/{body['project']['id']}")
+        self.assertEqual(status.status_code, 200)
+        self.assertTrue(any(item["event_type"] == "project.created" for item in status.json()["events"]))
 
     def test_integrations_never_leak_api_key_values(self) -> None:
         response = self.client.get("/api/integrations")

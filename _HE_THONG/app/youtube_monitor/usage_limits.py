@@ -18,10 +18,13 @@ import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Phrases that mean the account is out, not that the call went wrong.
 _LIMIT_PHRASES = (
     "hit your usage limit",
+    "hit your weekly limit",
+    "weekly usage limit",
     "usage limit reached",
     "usage limit exceeded",
     "rate limit",
@@ -53,6 +56,11 @@ _RESET_AT = re.compile(
 _RESET_IN = re.compile(
     r"(?:reset|try again|thử lại|quay lại)\s*(?:in|after|sau)\s+"
     r"(?P<amount>\d{1,3})\s*(?P<unit>hours?|hrs?|h|minutes?|mins?|m|giờ|phút|ngày|days?)",
+    re.IGNORECASE,
+)
+_RESET_CLOCK = re.compile(
+    r"(?:resets?\s+|try again at\s+)(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>[AaPp][Mm])"
+    r"(?:\s*\((?P<zone>[^)]+)\))?",
     re.IGNORECASE,
 )
 
@@ -122,6 +130,28 @@ def parse_reset_at(message: str, *, now: datetime | None = None) -> datetime | N
         seconds = _UNIT_SECONDS.get(relative.group("unit").lower())
         if seconds:
             return moment + timedelta(seconds=int(relative.group("amount")) * seconds)
+    clock = _RESET_CLOCK.search(text)
+    if clock:
+        hour = int(clock.group("hour"))
+        meridiem = clock.group("meridiem").lower()
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        try:
+            zone = ZoneInfo(clock.group("zone") or "Asia/Bangkok")
+        except ZoneInfoNotFoundError:
+            zone = moment.astimezone().tzinfo or timezone.utc
+        local_now = moment.astimezone(zone)
+        reset = local_now.replace(
+            hour=hour,
+            minute=int(clock.group("minute") or 0),
+            second=0,
+            microsecond=0,
+        )
+        if reset <= local_now:
+            reset += timedelta(days=1)
+        return reset.astimezone(timezone.utc)
     return None
 
 

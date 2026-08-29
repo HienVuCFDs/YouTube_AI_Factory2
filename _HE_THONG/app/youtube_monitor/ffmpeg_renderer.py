@@ -29,6 +29,17 @@ def resolve_ffmpeg(binary: str = "ffmpeg") -> str | None:
     return shutil.which(candidate)
 
 
+def resolve_ffprobe(ffmpeg_binary: str = "ffmpeg") -> str | None:
+    """Find ffprobe without rewriting directory names containing ``ffmpeg``."""
+    ffmpeg_path = resolve_ffmpeg(ffmpeg_binary)
+    if ffmpeg_path:
+        for name in ("ffprobe.exe", "ffprobe"):
+            sibling = Path(ffmpeg_path).with_name(name)
+            if sibling.is_file():
+                return str(sibling)
+    return shutil.which("ffprobe")
+
+
 def ffmpeg_available(binary: str = "ffmpeg") -> bool:
     return resolve_ffmpeg(binary) is not None
 
@@ -38,17 +49,8 @@ def media_duration_seconds(path: Path, ffmpeg_binary: str = "ffmpeg") -> float |
     target = Path(path)
     if not target.is_file():
         return None
-    ffmpeg_path = resolve_ffmpeg(ffmpeg_binary)
-    candidates: list[str] = []
-    if ffmpeg_path:
-        for name in ("ffprobe.exe", "ffprobe"):
-            sibling = Path(ffmpeg_path).with_name(name)
-            if sibling.is_file():
-                candidates.append(str(sibling))
-    system_probe = shutil.which("ffprobe")
-    if system_probe:
-        candidates.append(system_probe)
-    for probe in dict.fromkeys(candidates):
+    probe = resolve_ffprobe(ffmpeg_binary)
+    if probe:
         try:
             result = subprocess.run(
                 [
@@ -65,7 +67,7 @@ def media_duration_seconds(path: Path, ffmpeg_binary: str = "ffmpeg") -> float |
                 if duration > 0:
                     return duration
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            continue
+            pass
     return None
 
 
@@ -385,15 +387,21 @@ def _mark_frame_size(
     """
     if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
         return width, height
-    probe = subprocess.run(
-        [
-            executable.replace("ffmpeg", "ffprobe"), "-v", "error",
-            "-select_streams", "v:0", "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x", str(visual),
-        ],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=30, check=False,
-    )
+    ffprobe = resolve_ffprobe(executable)
+    if not ffprobe:
+        return width, height
+    try:
+        probe = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                "-of", "csv=p=0:s=x", str(visual),
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return width, height
     try:
         source_width, source_height = (int(part) for part in probe.stdout.strip().split("x")[:2])
     except (TypeError, ValueError):

@@ -107,6 +107,15 @@
     .workflow-step strong { display: block; margin-top: 10px; font-size: 11px; }
     .workflow-step p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
     .workflow-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 11px; color: var(--muted); font-size: 11px; }
+    .automation-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, .8fr); gap: 10px; }
+    .automation-grid textarea { width: 100%; min-height: 104px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(9,11,16,.72); outline: none; font: inherit; font-size: 12px; line-height: 1.5; }
+    .automation-grid textarea:focus { border-color: rgba(245,158,11,.65); box-shadow: 0 0 0 2px rgba(245,158,11,.1); }
+    .automation-options { display: grid; gap: 8px; align-content: start; padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
+    .automation-option { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .automation-status { margin-top: 10px; display: grid; gap: 7px; }
+    .automation-task { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
+    .automation-task-role { color: var(--cyan); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+    .automation-task-meta { color: var(--muted); font-size: 10px; margin-top: 3px; }
     .tool-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .tool-status-card { min-height: 78px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.72); }
     .tool-status-card.ready { border-color: rgba(34,197,94,.24); }
@@ -360,7 +369,7 @@
     .video-link { grid-template-columns: 104px minmax(190px, 1fr); min-width: 355px; }
     .empty { font-size: 14px; }
     @keyframes pulse { 50% { opacity: .3; } }
-    @media (max-width: 1100px) { .sidebar { width: 200px; flex-basis: 200px; } .split { grid-template-columns: 1fr; } .workflow-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tool-status-grid, .integration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .studio-grid, .studio-result-columns { grid-template-columns: 1fr; } .studio-summary-grid { grid-template-columns: 1fr; } .studio-chat-row { grid-template-columns: 1fr; } }
+    @media (max-width: 1100px) { .sidebar { width: 200px; flex-basis: 200px; } .split { grid-template-columns: 1fr; } .workflow-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tool-status-grid, .integration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .studio-grid, .studio-result-columns, .automation-grid { grid-template-columns: 1fr; } .studio-summary-grid { grid-template-columns: 1fr; } .studio-chat-row { grid-template-columns: 1fr; } }
     @media (max-width: 800px) { .sidebar { display: none; } .topbar { padding: 0 16px; } .content { padding: 18px 16px; } .metrics { grid-template-columns: repeat(2, 1fr); } .page-head { align-items: flex-start; flex-direction: column; } .register-grid, .integration-grid { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .metrics { grid-template-columns: 1fr 1fr; gap: 8px; } .metric { padding: 12px; } .metric-value { font-size: 22px; } .top-actions .status-pill:first-child { display: none; } .analysis-grid, .analysis-columns, .transcript-grid { grid-template-columns: 1fr; } }
   </style>
@@ -485,7 +494,7 @@
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><span data-wf="content"><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select></span><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
-          <div class="studio-actions" data-wf="content" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" data-wf="content" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
+          <div class="studio-actions" data-wf="content" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" data-wf="content" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn primary">1. Tải video nguồn về máy</button><button id="studioCutByDialogueButton" class="btn primary">2. Cắt cảnh theo lời thoại</button><button id="studioCutSourceScenesButton" class="btn primary">3. Xuất clip từ video gốc</button><button id="studioPlanSourceCuesButton" class="btn ghost">Chọn lại đoạn hình (tuỳ chọn)</button></div><div class="studio-model-note" data-wf="reup" style="margin-top:6px" hidden><b>1.</b> Tải file gốc về máy → <b>2.</b> Dựng timeline theo từng lượt thoại (mỗi cảnh một câu, lấy đúng mốc giây câu đó được nói) → <b>3.</b> FFmpeg cắt clip câm từ file gốc theo các mốc đó.<br>Quy trình này <b>không gọi AI tạo ảnh hay tạo video</b>, nên không tốn tín dụng.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
@@ -598,6 +607,26 @@
         <div id="integrationBody" class="panel-body"><div class="empty">Đang tải cấu hình AI...</div></div>
       </section>
 
+      <section id="automationPipeline" class="panel workspace-panel" style="margin-bottom:14px">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">&#8644;</span> AUTO PIPELINE ĐA AI</div><div class="panel-sub">Một yêu cầu cấp cao được bàn giao lần lượt cho Research, Script, Director, Media và QC Agent; mỗi output do một AI khác nghiệm thu.</div></div><span id="automationStateTag" class="tag cyan">SẴN SÀNG</span></div>
+        <div class="panel-body">
+          <div class="automation-grid">
+            <div>
+              <div class="studio-field"><label for="automationTitle">Tên dự án (không bắt buộc)</label><input id="automationTitle" placeholder="Ví dụ: Lịch sử trí tuệ nhân tạo" /></div>
+              <div class="studio-field" style="margin-top:8px"><label for="automationGoal">Quy tắc và yêu cầu cho các AI</label><textarea id="automationGoal" placeholder="Mô tả chủ đề, khán giả, phong cách, thời lượng, điều phải làm và điều không được làm..."></textarea></div>
+            </div>
+            <div class="automation-options">
+              <label class="automation-option"><input id="automationGenerateMedia" type="checkbox" /> <span>Tự tạo ảnh/GIF/video sau khi Director chia scene. Gateway ưu tiên gói đăng ký và tự fallback.</span></label>
+              <label class="automation-option"><input id="automationAutoRender" type="checkbox" /> <span>Tự render khi QC xác nhận đủ visual, voice và subtitle. Mặc định tắt để bạn duyệt bước cuối.</span></label>
+              <button id="automationStartButton" class="btn primary" type="button" onclick="startAutomationPipeline()">Bắt đầu chuỗi đa AI</button>
+              <button id="automationRefreshButton" class="btn ghost" type="button" onclick="loadAutomationStatus()" disabled>Cập nhật trạng thái</button>
+            </div>
+          </div>
+          <div id="automationSummary" class="secondary-text" style="margin-top:8px">Chưa có pipeline đang theo dõi.</div>
+          <div id="automationStatus" class="automation-status"></div>
+        </div>
+      </section>
+
       <section id="orchestratorSettings" class="panel workspace-panel" style="margin-bottom:14px">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">◈</span> AI ĐIỀU PHỐI CHÍNH</div><div class="panel-sub">CLI đã đăng nhập trên máy (không phải API key) dùng để tự tìm phần tử trên web app lạ — ví dụ nút Generate/Download trong web_video_sidecar.py khi selector cố định không khớp.</div></div></div>
         <div class="panel-body">
@@ -607,6 +636,30 @@
           <div class="panel-sub" style="margin-top:16px">PHÂN CÔNG AI THEO CÔNG ĐOẠN</div>
           <div id="agentAssignmentsBody" style="margin-top:8px"><div class="empty">Đang tải quy tắc phân công...</div></div>
           <div class="queue-controls" style="margin-top:8px"><button class="btn small primary" type="button" onclick="saveAgentAssignments()">Lưu phân công</button><button class="btn small ghost" type="button" onclick="loadAgentAssignments()">Nạp lại</button></div>
+        </div>
+      </section>
+
+      <section id="automationPolicyPanel" class="panel workspace-panel" style="margin-bottom:14px">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">&#9878;</span> QUY TẮC &amp; HẠN MỨC TỰ ĐỘNG</div><div class="panel-sub">Luật áp cho mọi lượt chạy tự động: ngưỡng nghiệm thu, loại provider được phép và trần chi phí. App từ chối job vi phạm thay vì chạy rồi báo sau.</div></div><span id="automationPolicyTag" class="tag cyan">ĐANG TẢI</span></div>
+        <div class="panel-body">
+          <div class="studio-field"><label for="policyGlobalRules">Quy tắc bắt buộc gửi kèm mọi task</label><textarea id="policyGlobalRules" style="width:100%;min-height:72px" placeholder="Ví dụ: không dùng hình có mặt người thật; luôn viết bằng tiếng Việt..."></textarea></div>
+          <div class="integration-grid" style="margin-top:10px">
+            <div class="studio-field"><label for="policyMaxAttempts">Số lần thử lại mỗi task</label><input id="policyMaxAttempts" type="number" min="1" max="10" step="1" /></div>
+            <div class="studio-field"><label for="policyMinReviewScore">Điểm tối thiểu để AI duyệt task</label><input id="policyMinReviewScore" type="number" min="0" max="10" step="1" /></div>
+            <div class="studio-field"><label for="policyMinSceneQcScore">Điểm tối thiểu để nhận một cảnh</label><input id="policyMinSceneQcScore" type="number" min="0" max="10" step="1" /></div>
+            <div class="studio-field"><label for="policyMaxProjectCost">Trần chi phí mỗi dự án (USD, 0 = không giới hạn)</label><input id="policyMaxProjectCost" type="number" min="0" step="0.5" /></div>
+            <div class="studio-field"><label for="policyMaxDailyCost">Trần chi phí mỗi ngày (USD, 0 = không giới hạn)</label><input id="policyMaxDailyCost" type="number" min="0" step="0.5" /></div>
+          </div>
+          <div class="automation-options" style="margin-top:10px">
+            <label class="automation-option"><input id="policyAllowPaidApis" type="checkbox" /> <span>Cho phép API trả phí (Runway, OpenAI Image, Gemini/Veo API). Tắt thì app chỉ dùng gói thuê bao đã trả.</span></label>
+            <label class="automation-option"><input id="policyAllowSubscriptionMedia" type="checkbox" /> <span>Cho phép media qua gói thuê bao (Flow, Antigravity, ChatGPT/Gemini web).</span></label>
+            <label class="automation-option"><input id="policyPauseOnExhaustion" type="checkbox" /> <span>Hết provider khả dụng thì tạm dừng và hỏi, thay vì để từng cảnh lần lượt thất bại.</span></label>
+            <label class="automation-option"><input id="policyAutoGenerateMedia" type="checkbox" /> <span>Mặc định tự tạo media khi khởi động pipeline mới.</span></label>
+            <label class="automation-option"><input id="policyAutoRender" type="checkbox" /> <span>Mặc định tự render khi QC xác nhận đủ điều kiện.</span></label>
+            <label class="automation-option"><input type="checkbox" checked disabled /> <span>Xuất bản luôn cần người duyệt cuối. Đây là hàng rào cố định, không tắt được.</span></label>
+          </div>
+          <div class="queue-controls" style="margin-top:10px"><button class="btn small primary" type="button" onclick="saveAutomationPolicy()">Lưu quy tắc</button><button class="btn small ghost" type="button" onclick="loadAutomationPolicy()">Nạp lại</button></div>
+          <div id="automationPolicyHint" class="secondary-text" style="margin-top:6px"></div>
         </div>
       </section>
 
@@ -700,7 +753,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [] };
+  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [], automationProjectId: null, automationStatus: null };
   const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const number = (value) => value == null ? '—' : Number(value).toLocaleString('vi-VN');
   const date = (value) => value ? new Date(value).toLocaleString('vi-VN', {dateStyle:'short', timeStyle:'short'}) : '—';
@@ -869,7 +922,7 @@
     settings: {
       label: 'Cài đặt', eyebrow: 'HỆ THỐNG', title: 'Công cụ, model và kết nối',
       description: 'Kết nối Codex, GPU, Whisper, TTS, FFmpeg và các AI cloud khi cần.',
-      panels: ['toolStatusPanel', 'modelCatalogPanel', 'integrations'],
+      panels: ['automationPipeline', 'orchestratorSettings', 'automationPolicyPanel', 'toolStatusPanel', 'modelCatalogPanel', 'integrations'],
     },
   };
 
@@ -891,6 +944,89 @@
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
+
+  const AUTOMATION_ROLE_LABELS = {
+    research: 'Research', script: 'Script', director: 'Director', media: 'Media', qc: 'QC',
+  };
+
+  function renderAutomationStatus(data) {
+    const target = $('automationStatus');
+    const summary = $('automationSummary');
+    const tag = $('automationStateTag');
+    if (!target || !summary || !tag || !data) return;
+    const tasks = [...(data.agent_tasks || [])].reverse();
+    const active = tasks.filter((task) => ['queued', 'running'].includes(task.status));
+    const waitingReview = tasks.filter((task) => task.status === 'review_required');
+    const failed = tasks.filter((task) => task.status === 'failed');
+    const qc = [...tasks].reverse().find((task) => task.role === 'qc' && task.status === 'completed');
+    const ready = Boolean(qc?.output?.ready_for_render);
+    const estimated = (data.provider_usage || []).reduce((total, item) => total + Number(item.estimated_cost || 0), 0);
+    tag.className = `tag ${failed.length ? 'red' : (active.length || waitingReview.length) ? 'orange' : ready ? 'green' : 'cyan'}`;
+    tag.textContent = failed.length ? 'CÓ TASK LỖI' : active.length ? `${active.length} ĐANG CHẠY` : waitingReview.length ? `${waitingReview.length} CHỜ AI NGHIỆM THU` : ready ? 'QC ĐÃ DUYỆT' : tasks.length ? 'PIPELINE ĐÃ DỪNG' : 'ĐANG KHỞI TẠO';
+    summary.innerHTML = `Dự án <b>#${esc(data.project?.id)}</b> · ${esc(data.project?.title || '')} · ${tasks.length} task · ${data.agent_messages?.length || 0} message A2A · chi phí ước tính ${estimated.toFixed(2)} USD
+      <button class="btn small ghost" style="margin-left:8px" onclick="setWorkspace('production'); openProjectDetail(${Number(data.project?.id || 0)})">Mở dự án</button>`;
+    target.innerHTML = tasks.map((task) => {
+      const execution = task.output?._execution || {};
+      const review = execution.review || {};
+      const statusClass = task.status === 'completed' ? 'green' : task.status === 'failed' ? 'red' : ['running', 'review_required'].includes(task.status) ? 'orange' : 'cyan';
+      const executor = execution.executor || task.assigned_agent || 'chờ điều phối';
+      const reviewer = execution.reviewer || task.reviewer_agent || 'auto';
+      const note = task.error || review.note || task.task_type || '';
+      return `<div class="automation-task">
+        <div class="automation-task-role">${esc(AUTOMATION_ROLE_LABELS[task.role] || task.role)}</div>
+        <div><div>${esc(executor)} → nghiệm thu: ${esc(reviewer)}</div><div class="automation-task-meta">${esc(note)}</div></div>
+        <span class="tag ${statusClass}">${esc(task.status)}</span>
+      </div>`;
+    }).join('') || '<div class="empty">Orchestrator đang tạo Research task đầu tiên...</div>';
+  }
+
+  async function loadAutomationStatus(quiet = false) {
+    const projectId = Number(state.automationProjectId || 0);
+    if (!projectId) return;
+    try {
+      const data = await api(`/api/automation/projects/${projectId}`);
+      state.automationStatus = data;
+      renderAutomationStatus(data);
+      if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
+    } catch (error) {
+      if (!quiet && $('automationSummary')) $('automationSummary').textContent = `Không tải được pipeline: ${error.message}`;
+    }
+  }
+
+  async function startAutomationPipeline() {
+    const goal = $('automationGoal')?.value.trim() || '';
+    if (goal.length < 10) return setMessage('Hãy viết yêu cầu cấp cao tối thiểu 10 ký tự.', 'error');
+    const button = $('automationStartButton');
+    if (button) button.disabled = true;
+    if ($('automationStateTag')) $('automationStateTag').textContent = 'ĐANG XẾP TASK';
+    try {
+      const result = await api('/api/automation/pipelines', {
+        method: 'POST',
+        body: JSON.stringify({
+          goal,
+          title: $('automationTitle')?.value.trim() || '',
+          language: 'vi',
+          auto_generate_media: Boolean($('automationGenerateMedia')?.checked),
+          auto_render: Boolean($('automationAutoRender')?.checked),
+        }),
+      });
+      state.automationProjectId = Number(result.project.id);
+      try { localStorage.setItem('ytFactory.automationProjectId', String(state.automationProjectId)); } catch (_) {}
+      if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
+      setMessage(`Đã giao Research task cho dự án #${state.automationProjectId}.`, 'success');
+      await loadAutomationStatus();
+    } catch (error) {
+      if ($('automationSummary')) $('automationSummary').textContent = `Không khởi động được: ${error.message}`;
+      setMessage(`Auto pipeline lỗi: ${error.message}`, 'error');
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  try {
+    state.automationProjectId = Number(localStorage.getItem('ytFactory.automationProjectId') || 0) || null;
+    if (state.automationProjectId && $('automationRefreshButton')) $('automationRefreshButton').disabled = false;
+  } catch (_) {}
 
   function uiPreference(key, fallback = true) {
     try {
@@ -1330,7 +1466,7 @@
 
   async function reloadClaudeCodeStatus() {
     try {
-      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings()]);
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings(), loadAutomationPolicy()]);
       setMessage('Đã kiểm tra lại trạng thái Claude Code CLI.', 'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }
@@ -1370,6 +1506,67 @@
       hint.innerHTML = `Codex: ${codex?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Claude: ${claude?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Antigravity: ${antigravity?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'}`;
     }
     await loadAgentAssignments();
+  }
+
+  const POLICY_NUMBER_FIELDS = {
+    policyMaxAttempts: 'max_attempts',
+    policyMinReviewScore: 'min_review_score',
+    policyMinSceneQcScore: 'min_scene_qc_score',
+    policyMaxProjectCost: 'max_project_cost',
+    policyMaxDailyCost: 'max_daily_cost',
+  };
+  const POLICY_FLAG_FIELDS = {
+    policyAllowPaidApis: 'allow_paid_apis',
+    policyAllowSubscriptionMedia: 'allow_subscription_media',
+    policyPauseOnExhaustion: 'pause_on_provider_exhaustion',
+    policyAutoGenerateMedia: 'auto_generate_media',
+    policyAutoRender: 'auto_render',
+  };
+
+  async function loadAutomationPolicy() {
+    const tag = $('automationPolicyTag');
+    try {
+      const data = await api('/api/settings/automation-policy');
+      const policy = data.policy || {};
+      const rules = $('policyGlobalRules');
+      if (rules) rules.value = policy.global_rules || '';
+      Object.entries(POLICY_NUMBER_FIELDS).forEach(([id, key]) => {
+        const field = $(id);
+        if (field) field.value = Number(policy[key] ?? 0);
+      });
+      Object.entries(POLICY_FLAG_FIELDS).forEach(([id, key]) => {
+        const field = $(id);
+        if (field) field.checked = Boolean(policy[key]);
+      });
+      const ceilings = [];
+      if (Number(policy.max_project_cost) > 0) ceilings.push(`$${Number(policy.max_project_cost).toFixed(2)}/dự án`);
+      if (Number(policy.max_daily_cost) > 0) ceilings.push(`$${Number(policy.max_daily_cost).toFixed(2)}/ngày`);
+      const hint = $('automationPolicyHint');
+      if (hint) {
+        hint.textContent = ceilings.length
+          ? `Trần chi phí đang áp: ${ceilings.join(' · ')}. Provider miễn phí hoặc đã trả theo gói không bị trần này chặn.`
+          : 'Chưa đặt trần chi phí. Chỉ có khoá API trả phí đang bảo vệ bạn khỏi chi tiêu ngoài ý muốn.';
+      }
+      if (tag) { tag.className = 'tag green'; tag.textContent = 'ĐANG ÁP DỤNG'; }
+    } catch (error) {
+      if (tag) { tag.className = 'tag red'; tag.textContent = 'KHÔNG TẢI ĐƯỢC'; }
+      setMessage(error.message, 'error');
+    }
+  }
+
+  async function saveAutomationPolicy() {
+    const body = {global_rules: $('policyGlobalRules')?.value || ''};
+    Object.entries(POLICY_NUMBER_FIELDS).forEach(([id, key]) => {
+      body[key] = Number($(id)?.value || 0);
+    });
+    Object.entries(POLICY_FLAG_FIELDS).forEach(([id, key]) => {
+      body[key] = Boolean($(id)?.checked);
+    });
+    try {
+      await api('/api/settings/automation-policy', {method: 'POST', body: JSON.stringify(body)});
+      setMessage('Đã lưu quy tắc và hạn mức tự động.', 'success');
+      await loadAutomationPolicy();
+    } catch (error) { setMessage(error.message, 'error'); }
   }
 
   async function saveOrchestratorProvider() {
@@ -2165,6 +2362,8 @@
   const SUBSCRIPTION_PROVIDER_HINTS = {
     antigravity_image: 'Antigravity sẽ dùng gói AI đã đăng nhập để tạo ảnh và tự gắn vào storyboard. Cần bật sidecar YT Factory một lần trong Antigravity.',
     gflow_cli: 'Google Flow/Veo sẽ dùng gói Google đã đăng ký qua gflow-cli. App tự chạy worker, nhận MP4 và gắn vào timeline; không cần Extension.',
+    gflow_image: 'Google Flow sẽ tạo ảnh/GIF qua profile riêng của gflow-cli; không dùng credit Veo và không cần Extension.',
+    flow_image: 'Google Flow sẽ tạo ảnh ngay trong Cốc Cốc đang đăng nhập qua Extension YT Factory; không dùng credit Veo.',
     flow_veo: 'Flow Extension (legacy) giữ lại làm dự phòng. Cần Extension trình duyệt đang kết nối.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập để tạo video miễn phí và tự gắn vào storyboard. Cần chạy `python web_video_sidecar.py --provider meta_ai_video` và đăng nhập một lần.',
     gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập để tạo ảnh qua giao diện chat, không cần API key. Cần chạy `python web_video_sidecar.py --provider gemini_web_image --login` và đăng nhập Google một lần.',
@@ -2173,6 +2372,8 @@
   const SUBSCRIPTION_PROVIDER_SHORT = {
     antigravity_image: 'Antigravity sẽ dùng gói đã đăng nhập.',
     gflow_cli: 'Google Flow/Veo sẽ dùng gói Google đã đăng ký qua gflow-cli.',
+    gflow_image: 'Google Flow ảnh sẽ dùng profile gflow-cli đã đăng nhập.',
+    flow_image: 'Google Flow ảnh sẽ dùng phiên Cốc Cốc đã đăng nhập.',
     flow_veo: 'Flow Extension legacy sẽ dùng gói Google đã đăng nhập.',
     meta_ai_video: 'Meta AI (Vibes) sẽ dùng tài khoản Facebook/Instagram đã đăng nhập (miễn phí).',
     gemini_web_image: 'Gemini (web) sẽ dùng gói Google AI Pro/Ultra đã đăng nhập.',
@@ -2182,17 +2383,21 @@
 
   async function sidecarWarningText(provider) {
     if (!isSubscriptionProvider(provider)) return '';
-    if (provider === 'gflow_cli') {
+    if (provider === 'gflow_cli' || provider === 'gflow_image') {
       const ready = Boolean(state.integrations?.find((item) => item.key === 'gflow_cli')?.ready);
-      return ready ? '' : '⚠ gflow-cli chưa sẵn sàng. Cần cài tool và đăng nhập Google Flow một lần trước khi tạo video.';
+      const mediaKind = provider === 'gflow_image' ? 'ảnh/GIF' : 'video';
+      return ready ? '' : `⚠ gflow-cli chưa sẵn sàng. Cần cài tool và đăng nhập Google Flow một lần trước khi tạo ${mediaKind}.`;
     }
     try {
       const status = await api('/api/scene-sidecar-status');
       const info = status[provider];
-      if (info && !info.alive) {
+      if (info && !info.alive && !info.extension_connected) {
         const seenText = info.seconds_ago == null ? 'chưa từng thấy poll lần nào kể từ khi mở app'
           : `lần poll gần nhất cách đây ${Math.round(info.seconds_ago)}s`;
-        return `⚠ Sidecar chưa chạy (${seenText}) — job sẽ nằm chờ mãi ở "queued", tiến độ sẽ không nhích. Hãy khởi động sidecar (${provider === 'antigravity_image' ? 'trong Antigravity' : `python web_video_sidecar.py --provider ${provider}`}) trước khi bấm tạo.`;
+        const startHint = provider === 'antigravity_image'
+          ? 'bật sidecar trong Antigravity'
+          : 'mở Cốc Cốc và bật Extension YT Factory';
+        return `⚠ Sidecar chưa chạy (${seenText}) — job sẽ nằm chờ mãi ở "queued", tiến độ sẽ không nhích. Hãy ${startHint} trước khi bấm tạo.`;
       }
     } catch { /* status check is best-effort; don't block the hint on it */ }
     return '';
@@ -4049,7 +4254,7 @@
 
   function sceneProviderLabel(provider) {
     return {
-      antigravity_image: 'Antigravity', gflow_cli: 'Google Flow/Veo (gflow-cli)', flow_veo: 'Flow Extension (legacy)', meta_ai_video: 'Meta AI (Vibes)',
+      antigravity_image: 'Antigravity', gflow_cli: 'Google Flow/Veo (gflow-cli)', gflow_image: 'Flow ảnh (gflow-cli)', flow_veo: 'Flow Extension (legacy)', meta_ai_video: 'Meta AI (Vibes)',
       gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
       gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)', flow_image: 'Flow (ảnh)', auto_parallel: 'nhiều AI song song',
     }[provider] || provider || 'AI';
@@ -4108,8 +4313,10 @@ Chạy các bước này?`)) return;
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
-  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
-  const IMAGE_PROVIDER_OPTIONS = '<option value="auto_parallel">Nhiều AI song song</option><option value="flow_image">Flow (Nano Banana) · 0 tín dụng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
+  // This list is used by single-scene controls. `auto_parallel` belongs only
+  // to batch generation; sending it to POST /scene-jobs is an invalid provider.
+  const IMAGE_PROVIDER_OPTIONS = '<option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
   const VIDEO_PROVIDER_OPTIONS = '<option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo (API)</option>';
 
   async function findReferenceImageAssetId(projectId, visualPath) {
@@ -4970,12 +5177,24 @@ Chạy các bước này?`)) return;
       banner.hidden = false;
       banner.innerHTML = `<div class="usage-limit-title">⚠ ${limits.length} model đang hết hạn mức</div>
         <ul>${limits.map((item) => `<li><b>${esc(item.label)}</b> — ${esc(formatLimitReset(item.resets_at))}
+          <button class="btn small ghost" style="margin-left:8px" onclick="retryUsageLimitedProvider('${esc(item.provider)}')">Cho thử lại</button>
           <div class="usage-limit-when">${esc(item.message || '')}</div></li>`).join('')}</ul>`;
       if (fresh.length) {
         setMessage(`Hết hạn mức: ${fresh.join(', ')}. Các bước dùng model này sẽ chuyển sang model khác hoặc dừng lại.`, 'error');
       }
     } catch (_) {
       // Không để việc báo hạn mức làm hỏng vòng refresh.
+    }
+  }
+
+  async function retryUsageLimitedProvider(provider) {
+    try {
+      const result = await api(`/api/usage-limits/${encodeURIComponent(provider)}/clear`, {method: 'POST'});
+      setMessage(`Đã cho phép ${result.label || provider} thử lại. Task chờ nghiệm thu sẽ tự tiếp tục.`, 'success');
+      await loadUsageLimits();
+      await loadAutomationStatus(true);
+    } catch (error) {
+      setMessage(`Không mở lại được model: ${error.message}`, 'error');
     }
   }
 
@@ -5030,6 +5249,7 @@ Chạy các bước này?`)) return;
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();
+      if (state.automationProjectId) await loadAutomationStatus(true);
     } catch (error) { setMessage(error.message, 'error'); }
   }
 

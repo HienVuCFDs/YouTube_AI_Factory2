@@ -30,6 +30,7 @@ CODEX_LIMIT = (
     "Khong du tin dung de tao video",
     "Không đủ tín dụng",
     "Hết hạn mức Flow",
+    "You've hit your weekly limit · resets 6pm (Asia/Bangkok)",
 ])
 def test_a_quota_message_is_recognised(message: str) -> None:
     assert usage_limits.is_usage_limit(message)
@@ -60,6 +61,28 @@ def test_a_relative_reset_is_read_too() -> None:
     reset = usage_limits.parse_reset_at("Individual quota reached. Reset in 4 hours", now=now)
 
     assert reset == now + timedelta(hours=4)
+
+
+def test_a_clock_only_reset_uses_the_named_zone_and_next_occurrence() -> None:
+    now = datetime(2026, 8, 28, 1, 0, tzinfo=timezone.utc)  # 08:00 in Bangkok
+
+    reset = usage_limits.parse_reset_at(
+        "You've hit your weekly limit · resets 6pm (Asia/Bangkok)",
+        now=now,
+    )
+
+    assert reset == datetime(2026, 8, 28, 11, 0, tzinfo=timezone.utc)
+
+
+def test_codex_clock_only_retry_uses_bangkok_and_next_day_when_needed() -> None:
+    now = datetime(2026, 8, 28, 1, 0, tzinfo=timezone.utc)  # 08:00 in Bangkok
+
+    reset = usage_limits.parse_reset_at(
+        "You've hit your usage limit; try again at 6:30 AM",
+        now=now,
+    )
+
+    assert reset == datetime(2026, 8, 28, 23, 30, tzinfo=timezone.utc)
 
 
 def test_no_stated_time_gives_no_guess() -> None:
@@ -126,6 +149,7 @@ def test_repeated_failures_keep_the_first_time_it_broke() -> None:
 
     assert again["detected_at"] == first["detected_at"]
     assert again["message"] == "het tin dung lan hai"
+    assert again["last_failure_at"] is not None
 
 
 def test_a_new_outage_after_recovery_gets_a_new_time() -> None:

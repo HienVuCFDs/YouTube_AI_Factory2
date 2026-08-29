@@ -139,3 +139,10 @@ def test_heartbeat_runs_for_every_frame(
     )
 
     assert database.beats == [f"gflow_gif_frame_{index + 1}" for index in range(GFLOW_GIF_FRAME_COUNT)]
+
+
+def test_gflow_image_is_a_batch_image_provider() -> None:
+    from youtube_monitor import main
+
+    assert "gflow_image" in main._IMAGE_CAPABLE_PROVIDERS
+    assert "gflow_image" not in main._VIDEO_CAPABLE_PROVIDERS

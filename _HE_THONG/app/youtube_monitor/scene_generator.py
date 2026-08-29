@@ -28,6 +28,16 @@ from .gflow_bridge import (
     generate_gflow_video,
 )
 from .project_layout import ensure_project_layout
+from .providers import (
+    EXECUTION_EXTERNAL_SIDECAR,
+    SCENE_ANIMATED_IMAGE,
+    SCENE_IMAGE,
+    SCENE_VIDEO,
+    FunctionSceneProviderAdapter,
+    ProviderDescriptor,
+    ProviderGateway,
+    SidecarSceneProviderAdapter,
+)
 
 
 class SceneGenerationError(RuntimeError):
@@ -473,12 +483,132 @@ def generate_gflow_image_scene(database: Database, job: dict[str, Any], artifact
     )
 
 
+# Rough per-scene cost estimates in USD, used only to enforce the spending
+# ceilings in Automation Policy and to rank providers. They are not billing
+# figures: providers change prices, and a clip's real cost depends on its
+# length and resolution. Each value is deliberately on the high side, so a
+# ceiling stops work slightly early rather than slightly late.
+ESTIMATED_SCENE_COST_USD = {
+    "runway": 0.50,
+    "openai_image": 0.04,
+    "gemini_image": 0.04,
+    "gemini_veo": 1.60,
+}
+# Work covered by a subscription the user already pays for, or run locally,
+# adds nothing to a money ceiling. Stating 0 rather than leaving it unknown is
+# what lets the ceiling skip these providers instead of guessing.
+SUBSCRIPTION_SCENE_COST_USD = 0.0
+
+
+def build_scene_provider_gateway() -> ProviderGateway:
+    """Build the provider catalog used by scene workers and future routing.
+
+    The lambdas intentionally resolve the module functions at execution time.
+    Existing tests and local extensions can therefore still monkeypatch a
+    provider implementation without rebuilding the whole app.
+    """
+    gateway = ProviderGateway(
+        (
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "runway", "Runway", frozenset({SCENE_VIDEO}),
+                    priority=90, quality_score=88, billing_mode="api",
+                    estimated_unit_cost=ESTIMATED_SCENE_COST_USD["runway"],
+                    fallback_keys=("gflow_cli", "gemini_veo"),
+                ),
+                lambda database, job, root: generate_runway_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "openai_image", "OpenAI Image API", frozenset({SCENE_IMAGE, SCENE_ANIMATED_IMAGE}),
+                    priority=80, quality_score=87, billing_mode="api",
+                    estimated_unit_cost=ESTIMATED_SCENE_COST_USD["openai_image"],
+                    fallback_keys=("gflow_image", "chatgpt_web_image"),
+                ),
+                lambda database, job, root: generate_openai_image_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "gemini_image", "Google Gemini Image API", frozenset({SCENE_IMAGE, SCENE_ANIMATED_IMAGE}),
+                    priority=85, quality_score=85, billing_mode="api",
+                    estimated_unit_cost=ESTIMATED_SCENE_COST_USD["gemini_image"],
+                    fallback_keys=("gflow_image", "gemini_web_image"),
+                ),
+                lambda database, job, root: generate_gemini_image_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "gemini_veo", "Google Veo API", frozenset({SCENE_VIDEO}),
+                    priority=80, quality_score=92, billing_mode="api",
+                    estimated_unit_cost=ESTIMATED_SCENE_COST_USD["gemini_veo"],
+                    fallback_keys=("gflow_cli",),
+                ),
+                lambda database, job, root: generate_gemini_veo_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "gflow_cli", "Google Flow CLI (video)", frozenset({SCENE_VIDEO}),
+                    priority=10, quality_score=92, billing_mode="subscription",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    fallback_keys=("gemini_veo", "runway"),
+                ),
+                lambda database, job, root: generate_gflow_cli_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "gflow_image",
+                    "Google Flow CLI (image/GIF)",
+                    frozenset({SCENE_IMAGE, SCENE_ANIMATED_IMAGE}),
+                    priority=10,
+                    quality_score=86,
+                    billing_mode="subscription",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    fallback_keys=("chatgpt_web_image", "gemini_web_image", "flow_image"),
+                ),
+                lambda database, job, root: generate_gflow_image_scene(database, job, root),
+            ),
+        )
+    )
+    external_providers = {
+        "antigravity_image": ("Google Antigravity (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 25, 84, True),
+        "flow_veo": ("Google Flow web (video, legacy)", {SCENE_VIDEO}, 95, 88, True),
+        "flow_image": ("Google Flow web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 35, 84, True),
+        "meta_ai_video": ("Meta AI web (video)", {SCENE_VIDEO}, 100, 70, False),
+        "gemini_web_image": ("Google Gemini web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 30, 84, True),
+        "chatgpt_web_image": ("ChatGPT web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 20, 87, True),
+    }
+    for key in Database.EXTERNAL_SIDECAR_PROVIDERS:
+        display_name, capabilities, priority, quality, enabled = external_providers[key]
+        gateway.register(
+            SidecarSceneProviderAdapter(
+                ProviderDescriptor(
+                    key,
+                    display_name,
+                    frozenset(capabilities),
+                    execution_mode=EXECUTION_EXTERNAL_SIDECAR,
+                    priority=priority,
+                    quality_score=quality,
+                    billing_mode="subscription",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    enabled=enabled,
+                )
+            )
+        )
+    return gateway
+
+
 class SceneGenerationWorker:
     """Persistent local worker for paid cloud scene-generation jobs."""
 
-    def __init__(self, database: Database, artifact_root: Path):
+    def __init__(
+        self,
+        database: Database,
+        artifact_root: Path,
+        provider_gateway: ProviderGateway | None = None,
+    ):
         self.database = database
         self.artifact_root = Path(artifact_root)
+        self.provider_gateway = provider_gateway or build_scene_provider_gateway()
         self._jobs: Queue[int | None] = Queue()
         self._stop = Event()
         self._lock = Lock()
@@ -486,6 +616,7 @@ class SceneGenerationWorker:
         self._thread: Thread | None = None
         self._watchdog_thread: Thread | None = None
         self._completion_callback: Callable[[int], None] | None = None
+        self._failure_router: Callable[[dict[str, Any], str, str], str | None] | None = None
         # Writing a scene's prompt takes a CLI round trip, so it happens when
         # the job runs rather than when it is queued — otherwise queueing a
         # batch of 30 scenes held the HTTP request for minutes and could not
@@ -502,6 +633,13 @@ class SceneGenerationWorker:
     def set_prompt_crafter(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
         """Let the app write a job's prompt just before the job runs."""
         self._prompt_crafter = callback
+
+    def set_failure_router(
+        self,
+        callback: Callable[[dict[str, Any], str, str], str | None] | None,
+    ) -> None:
+        """Choose another adapter after a bounded provider failure."""
+        self._failure_router = callback
 
     def start(self) -> None:
         with self._lock:
@@ -635,23 +773,22 @@ class SceneGenerationWorker:
         job = self.database.claim_scene_generation_job(job_id)
         if not job:
             return
+        capability = ""
         try:
             job = self._ensure_prompt_written(job)
             provider = str(job.get("provider") or "").strip().lower()
-            if provider == "runway":
-                output_path = generate_runway_scene(self.database, job, self.artifact_root)
-            elif provider == "openai_image":
-                output_path = generate_openai_image_scene(self.database, job, self.artifact_root)
-            elif provider == "gemini_image":
-                output_path = generate_gemini_image_scene(self.database, job, self.artifact_root)
-            elif provider == "gemini_veo":
-                output_path = generate_gemini_veo_scene(self.database, job, self.artifact_root)
-            elif provider == "gflow_cli":
-                output_path = generate_gflow_cli_scene(self.database, job, self.artifact_root)
-            elif provider == "gflow_image":
-                output_path = generate_gflow_image_scene(self.database, job, self.artifact_root)
-            else:
-                raise SceneGenerationError(f"Scene provider chua duoc ho tro: {provider}")
+            capability = {
+                "image": SCENE_IMAGE,
+                "gif": SCENE_ANIMATED_IMAGE,
+                "video": SCENE_VIDEO,
+            }.get(str(job.get("job_kind") or "").strip().lower(), "")
+            output_path = self.provider_gateway.execute_scene(
+                provider,
+                self.database,
+                job,
+                self.artifact_root,
+                capability=capability,
+            )
             asset = self._register_output_asset(job, output_path)
             if asset and str(job.get("job_kind") or "") == "gif":
                 asset = materialize_gif_asset(
@@ -667,6 +804,11 @@ class SceneGenerationWorker:
                 output_path=output_path,
                 output_asset_id=int(asset["id"]) if asset else None,
                 release_dependents=self._completion_callback is None,
+            )
+            self.database.finalize_scene_provider_usage(
+                job_id,
+                "completed",
+                metadata={"output_path": output_path},
             )
             if self._completion_callback is not None:
                 try:
@@ -689,6 +831,44 @@ class SceneGenerationWorker:
                 or any(key in normalized for key in ("quota", "credit", "tín dụng", "resource_exhausted")) else
                 "provider"
             )
+            self.database.finalize_scene_provider_usage(
+                job_id,
+                "failed",
+                metadata={"failure_kind": failure_kind, "error": message[:2000]},
+            )
+            fallback_provider = ""
+            if self._failure_router is not None and failure_kind not in {"input", "dependency"}:
+                try:
+                    fallback_provider = str(
+                        self._failure_router(job, message, failure_kind) or ""
+                    ).strip().lower()
+                except Exception:
+                    fallback_provider = ""
+            if fallback_provider and fallback_provider != failed_provider:
+                self.database.record_scene_provider_failure(failed_provider, message)
+                rerouted = self.database.reroute_scene_generation_job(
+                    job_id,
+                    fallback_provider,
+                    previous_error=message,
+                    failure_kind=failure_kind,
+                )
+                if rerouted:
+                    descriptor = self.provider_gateway.require(fallback_provider).descriptor
+                    self.database.record_provider_usage(
+                        project_id=int(rerouted["project_id"]),
+                        scene_job_id=job_id,
+                        provider=fallback_provider,
+                        capability=capability or f"scene.{rerouted.get('job_kind') or 'image'}",
+                        status="estimated",
+                        estimated_cost=descriptor.estimated_unit_cost or 0,
+                        metadata={
+                            "billing_mode": descriptor.billing_mode,
+                            "fallback_from": failed_provider,
+                        },
+                    )
+                    if fallback_provider not in self.database.EXTERNAL_SIDECAR_PROVIDERS:
+                        self._jobs.put(job_id)
+                    return
             self.database.finish_scene_generation_job(
                 job_id,
                 "error",

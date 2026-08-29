@@ -1269,3 +1269,138 @@ Nghiệm thu trên dự án 27: 15 cảnh chia thành 9 video / 4 ảnh tĩnh / 
 - **Chuyển sang MCP**: `gflow mcp` có sẵn. Danh mục công cụ của orchestrator (mục 43) mới là phần cốt lõi; có nó rồi thì đổi sang MCP chỉ là đổi lớp vận chuyển.
 
 Trạng thái nghiệm thu tại thời điểm cập nhật: compile Python và JavaScript đạt; 162 test tự động đạt.
+
+## 49. Đối chiếu lại hệ thống sau đợt sửa lớn và khôi phục đường Flow ảnh (2026-08-27)
+
+Đã đọc lại cấu trúc mới dưới `_HE_THONG`, hai workflow tách file, bridge AI/Flow, browser extension, tài liệu MCP, UI và toàn bộ test. Kết quả kiểm chứng thực tế sau các commit ngày 2026-08-25/26 khác đáng kể mốc mục 48:
+
+- Bộ test hiện có **465 test**, không còn là 162. Toàn bộ đạt trước khi vá tiếp; JavaScript giao diện và bốn file JavaScript của extension đều parse thành công.
+- App khởi động thật tại `http://127.0.0.1:8787`; Codex CLI, Claude Code CLI và Antigravity đều đang đăng nhập. `gflow-cli 0.59.0` đã cài nhưng profile `default` đang đăng xuất.
+- Extension YT Factory trong Cốc Cốc kết nối WebSocket thành công. Trạng thái cũ vẫn báo các provider trình duyệt `alive=false` vì extension chờ push và không poll khi rảnh; đã sửa API để phân biệt `extension_connected` với heartbeat của một job.
+- Dự án đang làm mới nhất là project 40, workflow **Reup**, có 70/70 clip nguồn đã gắn timeline. Không chạy thử Flow ảnh lên project này vì sẽ ghi đè hình nguồn và vi phạm đúng quy tắc WF Reup vừa được tách riêng.
+
+Các lỗ hổng tìm thấy và đã vá:
+
+1. `gflow_image` có worker tạo ảnh/GIF thật nhưng bị thiếu khỏi `_IMAGE_CAPABLE_PROVIDERS`, nên batch từ UI bị từ chối dù code sinh media đã tồn tại. Đã thêm lại và có test hồi quy.
+2. `gflow_image` không xuất hiện trong bất kỳ dropdown ảnh nào. Đã đưa lên Studio và các control từng cảnh, đồng thời tách nhãn rõ `Flow trong Cốc Cốc` và `Flow qua gflow-cli`.
+3. Dropdown tạo **một cảnh** lại đặt `auto_parallel` làm lựa chọn đầu tiên, trong khi đây chỉ là pseudo-provider của batch và API một cảnh không chấp nhận. Đã bỏ khỏi control từng cảnh; batch vẫn giữ nhiều AI song song.
+4. UI không còn cảnh báo sai rằng extension Cốc Cốc đang offline chỉ vì chưa có job. Khi WebSocket đang nối, provider trình duyệt được coi là có bridge sẵn sàng nhận push.
+5. Hướng dẫn cũ vẫn nói Runway API là điều kiện tạo cảnh. Đã cập nhật đúng kiến trúc hiện tại: Flow/Cốc Cốc hoặc gflow-cli cho ảnh, Flow/Veo qua gflow-cli cho video, và WF Reup không gọi AI tạo hình.
+
+Kiểm thử sau khi vá: **469/469 test đạt**; JavaScript nhúng trong giao diện và bốn file JavaScript của extension đều parse thành công. App thật được restart, extension Cốc Cốc tự nối lại và `/api/scene-sidecar-status` xác nhận `extension_connected=true` cho các provider trình duyệt.
+
+Thứ tự nghiệm thu tiếp theo:
+
+1. Tạo/chọn một project **WF Content** có ít nhất một cảnh `needs_visual`, rồi chạy đúng một ảnh bằng `flow_image` để nghiệm thu đường Cốc Cốc mà không làm hỏng project Reup.
+2. Nếu muốn dùng đường không phụ thuộc Extension, đăng nhập profile `gflow-cli` một lần rồi chạy đúng một ảnh `gflow_image`; sau đó mới thử GIF bốn khung nối tiếp.
+3. Khi Flow có lại credit video, chạy đúng một I2V qua `gflow_cli`, kiểm tra MP4 → asset → timeline → review; chưa chạy batch video trước khi mốc này đạt.
+4. Chạy render/QC trọn vẹn cho một WF Reup và một WF Content. Chỉ sau hai acceptance test đó mới bật vòng điều phối nền không người giám sát; xuất bản vẫn bắt buộc người dùng duyệt cuối.
+
+## 50. WORK BRIEF - Bước 1: chuẩn hoá Provider Adapter và Provider Gateway (2026-08-27)
+
+Đã hoàn thành lớp nền đầu tiên của kiến trúc đa AI theo WORK BRIEF:
+
+- Tạo interface chung `ProviderAdapter`, metadata `ProviderDescriptor` và payload trung lập `ProviderRequest` trong package `youtube_monitor/providers`.
+- Tạo `ProviderGateway` làm registry và điểm thực thi duy nhất cho provider; hỗ trợ tra cứu theo capability và chế độ chạy, chặn trùng key, báo rõ provider không tồn tại hoặc sai capability.
+- Bọc sáu provider nội bộ hiện có: `runway`, `openai_image`, `gemini_image`, `gemini_veo`, `gflow_cli`, `gflow_image`.
+- Đưa sáu provider ngoài tiến trình vào cùng catalog: `antigravity_image`, `flow_veo`, `flow_image`, `meta_ai_video`, `gemini_web_image`, `chatgpt_web_image`. Các provider này vẫn nhận việc qua sidecar/web queue; gateway không chạy nhầm chúng trong worker nội bộ.
+- `SceneGenerationWorker` không còn chọn hãng bằng chuỗi `if/elif`; mọi job nội bộ đi qua gateway và được kiểm tra capability `scene.image`, `scene.animated_image` hoặc `scene.video`.
+- Giữ tương thích ngược: các hàm sinh media cũ không đổi chữ ký; gateway cho phép tiêm adapter giả khi test và là điểm mở rộng để thêm provider mới mà không sửa worker.
+
+Nghiệm thu: Python compile đạt; **475/475 test đạt**, gồm test registry, delegate, unknown/duplicate provider, sidecar isolation, catalog đầy đủ và worker chạy qua adapter được tiêm.
+
+**Bước tiếp theo tại thời điểm mốc 50:** tạo Event Bus chuẩn hoá các sự kiện `task.created`, `task.started`, `task.completed`, `task.failed`, `review.requested`, `review.completed`. Bước này và các lớp sau đã được hoàn thành ở mục 51; ghi chú này được giữ để thể hiện đúng lịch sử triển khai từng bước.
+
+## 51. WORK BRIEF - Hoàn thành các lớp 2–7 của hệ thống đa AI (2026-08-28)
+
+Sau mốc 50, các bước còn lại trong WORK BRIEF đã được triển khai theo đúng nguyên tắc **App là nguồn sự thật**, agent không chat tự do và không truy cập SQLite trực tiếp.
+
+### 51.1 Event Bus và Job Manager bền vững
+
+- Thêm `domain_events` và `EventBus`: sự kiện được ghi database trước khi phát cho subscriber, có `correlation_id`, `causation_id`, project, aggregate và payload JSON.
+- Chuẩn hoá các event task/review/script/scene/voice/render. MCP hoặc agent có thể đọc tiếp từ event ID sau khi app khởi động lại.
+- `AgentTask`, `AgentMessage`, scene job và production job đều là bản ghi bền vững; worker nhận claim, có trạng thái, số lần thử, lỗi và output. Task chưa xong không biến mất khi reload giao diện.
+
+### 51.2 Provider Gateway, routing, fallback và sổ sử dụng
+
+- Catalog provider nay trả capability, runtime, billing mode, chi phí ước tính và tình trạng sẵn sàng. Cả worker nội bộ lẫn job trình duyệt ghi quyết định định tuyến.
+- Điều phối có thể chọn provider theo capability `scene.image`, `scene.animated_image`, `scene.video`, theo cấu hình người dùng và trạng thái circuit/quota.
+- Lỗi provider được phân loại; nếu còn provider tương thích, job được reroute có giới hạn thay vì thất bại ngay. Mỗi lượt ghi `provider_route_decisions` và `provider_usage_ledger` để truy vết provider đã chọn, fallback và chi phí ước tính.
+- Hạn mức thuê bao Codex/Claude/Flow được nhận diện riêng với lỗi kỹ thuật. Nếu lỗi có giờ reset, app tự mở lại model khi tới giờ; nếu không có giờ, chỉ probe tối đa một lần mỗi sáu giờ. Người dùng có thể bấm **Cho thử lại** khi biết tài khoản đã hồi phục.
+
+### 51.3 MCP cấp cao
+
+- MCP local đã mở các nhóm tool tạo/khởi động/theo dõi pipeline, giao task agent, đọc event, xem catalog/route provider, tạo ảnh/GIF/video, nghiệm thu scene, tạo timeline/voice/render và đọc trạng thái job.
+- Các lệnh tốn tài nguyên bắt buộc `confirmed=true`; video bắt buộc có `reference_asset_id` của ảnh scene, không tự hạ xuống text-to-video.
+- MCP chỉ gọi API cấp cao của App. File import bị giới hạn trong thư mục `ai_desktop_import` của đúng project; không trao cookie, mật khẩu hoặc quyền database cho agent.
+
+### 51.4 Orchestrator, năm role agent và A2A nghiệm thu chéo
+
+Pipeline cấp cao hiện chạy:
+
+```text
+Research → Script → Director → Media → QC
+```
+
+- Mỗi role có `assignment_mode` fixed/auto/fallback, executor, reviewer, allowed/fallback agent và số lần thử theo cấu hình đã có.
+- Executor được chọn giữa Codex CLI, Claude Code CLI và Antigravity; reviewer phải khác executor khi còn AI khác sẵn sàng.
+- Bàn giao giữa role là `AgentMessage` kiểu `handoff`; giao việc, kết quả, yêu cầu review, kết luận review và lỗi đều có message/event để AI khác đọc được.
+- Reviewer từ chối thì task quay lại executor trong giới hạn; reviewer lỗi thì thử reviewer kế tiếp. Nếu không còn reviewer, task chuyển `review_required`, giữ nguyên output executor và **không giả mạo là đã duyệt**.
+- Worker nền chỉ chạy lại phần review của task `review_required`; không gọi lại executor và không tiêu lại công đã hoàn thành. Khi model reviewer hồi phục, pipeline tự đi tiếp sang role sau.
+
+### 51.5 Giao diện và API vận hành
+
+- Trong **Cài đặt → Auto Pipeline đa AI**, người dùng nhập một yêu cầu cấp cao, chọn có/không tạo media và render, sau đó theo dõi từng role, executor, reviewer, A2A message và chi phí ước tính.
+- Trạng thái `review_required` hiển thị rõ **CHỜ AI NGHIỆM THU**, không còn bị mô tả nhầm là “đã dừng ở QC”.
+- Có API theo dõi pipeline, task, message, event, provider catalog/route, usage limit và API mở lại một provider để probe có kiểm soát.
+
+## 52. Nghiệm thu thực tế và phần còn phụ thuộc tài khoản (2026-08-28)
+
+Đã chạy pipeline thật không tạo media/render trên project **41 – `[ACCEPTANCE] Multi-Agent Task va Review`**:
+
+- Một lượt trước bản vá đã đi qua đủ năm role bằng Antigravity, nhưng lộ lỗi quan trọng: khi mọi reviewer đều lỗi/hết hạn mức, task bị đánh dấu duyệt tự động. Lỗi này đã được sửa và có regression test.
+- Lượt sau bản vá: Antigravity hoàn thành output; Codex được giao nghiệm thu nhưng báo hết hạn mức. Task `agt_4e4ed2c03f8c43a98f977a1b60ab4935` dừng đúng ở `review_required`, giữ output và ghi đủ `review_request`/`review_error`.
+- Khi Codex qua giờ reset, worker tự lấy lại task. Acceptance này phát hiện thêm schema JSON lồng nhau chưa thuộc strict subset của Codex; bridge đã được sửa để tự thêm `additionalProperties=false` và bắt buộc đủ property ở mọi object/array item mà không làm thay đổi schema của caller.
+- Sau bản sửa schema, task tiếp tục và tạo đúng chuỗi mới **Research → Script → Director → Media → QC**. Cả năm task đều `completed`: Codex là executor, Antigravity là reviewer độc lập, năm review đều `approved=true`, điểm 10/10. Cảnh báo quota Codex được tự xoá sau cuộc gọi thành công.
+- Lượt này đặt `auto_generate_media=false`, `auto_render=false`, nên tạo **0 scene job**, không dùng credit Flow. QC trả `ready_for_render=false` vì chưa có visual/voice/subtitle — đây là kết luận đúng, còn review chéo duyệt rằng báo cáo QC đó đáng tin.
+- Claude Code CLI vẫn đang báo weekly limit tới giờ reset đã ghi trong App. Điều này không cản pipeline vì Codex và Antigravity đang dùng được và đã chứng minh nghiệm thu chéo thật.
+
+Những phần **chưa thể tuyên bố nghiệm thu xong**:
+
+1. **Google Flow video thật:** cần Flow có lại credit/session hợp lệ để chạy đúng một I2V, kiểm tra MP4 → asset → timeline → AI review. Không chạy batch trước khi một scene đạt.
+2. **Acceptance media:** sau I2V đơn, chạy ba scene tuần tự và một bản nháp 60–90 giây; kiểm tra render/QC toàn video.
+3. **Xuất bản:** vẫn cố ý yêu cầu người dùng duyệt bước cuối. Đây là hàng rào an toàn đã chốt, không phải hạng mục thiếu.
+
+Như vậy phần mã kiến trúc trong WORK BRIEF đã hoàn tất; công việc tiếp theo là **acceptance với tài khoản/credit thật**, không phải vá thêm framework đa AI hoặc ghép một dự án GitHub khác vào App.
+
+Kiểm thử cuối mốc: Python compile đạt, JavaScript giao diện và extension parse đạt, `git diff --check` không có lỗi; toàn bộ **500/500 test tự động đạt**.
+
+## 53. Thi hành các cờ policy đã hứa và thêm trần chi phí (2026-08-28)
+
+Rà lại mục 51–52 phát hiện một lỗ hổng cùng loại với mục 48: **tính năng viết xong nhưng không nơi nào gọi**. Ba cờ trong Automation Policy được API nhận và `settings.py` lưu, nhưng không đoạn code nào đọc:
+
+| Cờ | Trước | Sau |
+|---|---|---|
+| `pause_on_provider_exhaustion` | không nơi nào đọc | hết provider thì tạo approval `provider_exhausted` và dừng, thay vì để từng cảnh lần lượt thất bại |
+| `allow_subscription_media` | không nơi nào đọc | `ProviderRoutePolicy.allow_subscription_billing` loại provider thuê bao khi tắt; API trả 403 nếu gọi trực tiếp |
+| `min_scene_qc_score` | hằng số cứng `_REVIEW_PASS_SCORE = 6` | ngưỡng nhận một cảnh lấy từ policy, ghi rõ điểm/ngưỡng vào note khi trượt |
+
+Ngoài ra, phần còn thiếu của mục 44 (“hạn mức chi phí theo ngày/project”) đã được làm nốt:
+
+- Thêm `max_project_cost` và `max_daily_cost` (USD, `0` = không giới hạn) vào policy, API và giao diện.
+- `database.project_provider_cost()`, `today_provider_cost()` cộng sổ theo `MAX(actual_cost, estimated_cost)` và **bỏ qua job `cancelled`** — job bị huỷ chưa từng tới provider nên không được ăn vào ngân sách; job `failed` vẫn tính vì provider có thể đã trừ credit.
+- Trần chỉ chặn provider **thực sự tốn tiền**. Provider chạy bằng gói thuê bao đã trả hoặc chạy local có chi phí 0, nên không bị trần tiền chặn — nếu không, một lần tiêu API quá tay sẽ khoá luôn cả đường Flow miễn phí.
+- Batch dừng đúng tại cảnh sẽ vượt trần chứ không từ chối cả lượt: mỗi job ghi ước tính vào sổ ngay khi tạo, nên vòng lặp thấy được tổng đang tăng của chính nó. Kết quả trả thêm `budget_stop` để giao diện nói rõ vì sao dừng sớm.
+
+Hai sửa lỗi đi kèm, phát hiện trong lúc làm:
+
+1. **Không provider trả phí nào khai `estimated_unit_cost`**, nên trần chi phí sẽ không bao giờ chặn được gì. Đã khai ước tính cho `runway`, `openai_image`, `gemini_image`, `gemini_veo`, và khai tường minh `0.0` cho toàn bộ provider thuê bao/sidecar. Có test chặn hồi quy: mọi provider phải khai chi phí, provider thuê bao phải là 0, provider API phải lớn hơn 0. Đây là **ước tính để chặn ngân sách, không phải giá thật**; giá nhà cung cấp thay đổi và chi phí thật còn phụ thuộc độ dài/độ phân giải.
+2. **Automation Policy chưa từng có giao diện** — chỉ đặt được qua API. Đã thêm panel `QUY TẮC & HẠN MỨC TỰ ĐỘNG` trong tab Cài đặt: quy tắc bắt buộc, ngưỡng nghiệm thu, hai trần chi phí và các công tắc billing. Ô “xuất bản cần người duyệt cuối” hiển thị bật và khoá, đúng với việc API luôn ép `require_final_approval=True`.
+
+Mọi đường định tuyến nay đi qua một hàm `_billing_route_policy()` duy nhất, nên một policy đã lưu không thể được tôn trọng ở nhánh này mà bỏ qua ở nhánh khác.
+
+Approval do pause sinh ra tự khử trùng lặp: lỗi lặp lại chỉ đặt **một** câu hỏi, không tạo hàng đợi approval. Người dùng quyết định xong thì approval hết `pending` và pipeline chạy tiếp — nếu chưa nâng trần thì nó sẽ dừng lại đúng chỗ đó lần nữa, đây là hành vi mong muốn.
+
+Nghiệm thu: Python compile đạt, JavaScript giao diện parse đạt, `git diff --check` sạch, **532/532 test đạt** (thêm 32 test mới cho policy, sổ chi phí, trần theo batch và catalog).
+
+Phần còn lại của mục 52 không đổi: vẫn cần Flow có credit để nghiệm thu một I2V thật, rồi ba cảnh tuần tự và một bản nháp 60–90 giây.
