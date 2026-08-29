@@ -58,7 +58,11 @@ from .publisher import PublisherError, PublisherWorker, next_channel_schedule
 from .project_layout import ensure_project_layout
 from .quality_check import build_quality_report
 from .scene_generator import SceneGenerationError, SceneGenerationWorker, build_scene_provider_gateway
-from .motion_graphics import composer_ready as motion_composer_ready
+from .motion_graphics import (
+    MOTION_CUT_TYPES,
+    composer_ready as motion_composer_ready,
+    set_spec_builder as motion_graphics_set_spec_builder,
+)
 from .providers import (
     ProviderGatewayError,
     ProviderRoutePolicy,
@@ -3467,10 +3471,72 @@ def _write_job_prompt(job: dict[str, Any]) -> str:
             return json.dumps({"frames": frames}, ensure_ascii=False)
         return _craft_gif_sheet_prompt(raw_prompt, context=context)
     if kind == "video":
+        if str(job.get("provider") or "") == "motion_graphics":
+            # Motion graphics draws data, not a picture. Rewriting the scene
+            # into a camera prompt here would throw away the numbers the
+            # chart needs; the spec builder below reads the storyboard line.
+            return raw_prompt
         return _craft_video_prompt(
             raw_prompt, has_reference_image=bool(job.get("requires_reference_image"))
         )
     return _craft_image_prompt(raw_prompt, context=context)
+
+
+_MOTION_SPEC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": sorted(MOTION_CUT_TYPES)},
+        "title": {"type": "string"},
+        "text": {"type": "string"},
+        "stat": {"type": "string"},
+        "subtitle": {"type": "string"},
+        "chartData": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    # A string here renders as NaN: the count-up animation
+                    # parses it as a number. Currency belongs in `prefix`.
+                    "value": {"type": "number"},
+                    "prefix": {"type": "string"},
+                    "suffix": {"type": "string"},
+                },
+                "required": ["label", "value", "prefix", "suffix"],
+            },
+        },
+    },
+    "required": ["type", "title", "text", "stat", "subtitle", "chartData"],
+}
+
+
+def _build_motion_cut_spec(job: dict[str, Any]) -> dict[str, Any]:
+    """Turn one storyboard line into a motion-graphics cut spec."""
+    verdict = _call_orchestrator_json(
+        (
+            "Bạn chuyển một câu mô tả cảnh storyboard thành đặc tả đồ hoạ chuyển động. "
+            "Chọn 'type' hợp nội dung: có số liệu so sánh thì bar_chart/pie_chart, "
+            "nhiều chỉ số thì kpi_grid, một con số lớn thì stat_card, "
+            "chỉ có chữ thì text_card hoặc hero_title. "
+            "chartData chỉ dùng cho bar_chart, pie_chart, kpi_grid. "
+            "'value' phải là số; ký hiệu tiền tệ đặt ở 'prefix'. "
+            "Không bịa số liệu không có trong mô tả: khi không có số, dùng text_card. "
+            "Trường không dùng thì để chuỗi rỗng hoặc mảng rỗng."
+        ),
+        str(job.get("prompt") or "")[:8000],
+        _MOTION_SPEC_SCHEMA,
+        stage="storyboard",
+    )
+    # Empty fields are how the strict schema says "not used"; passing them on
+    # would draw a blank title over the chart.
+    return {
+        key: value
+        for key, value in dict(verdict).items()
+        if value not in ("", [], None)
+    }
+
+
+motion_graphics_set_spec_builder(_build_motion_cut_spec)
 
 
 # Registered here, after the definition above: the worker only calls it

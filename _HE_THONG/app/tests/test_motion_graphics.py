@@ -36,8 +36,14 @@ def _job(**overrides: object) -> dict[str, object]:
 
 
 class CutSpecTests(unittest.TestCase):
-    def tearDown(self) -> None:
+    def setUp(self) -> None:
+        # The app installs a real builder at import time. Wiping it here
+        # would make a later test think the wiring was never done.
+        self._installed = motion_graphics._spec_builder
         set_spec_builder(None)
+
+    def tearDown(self) -> None:
+        set_spec_builder(self._installed)
 
     def test_a_caller_supplied_json_spec_is_used_as_is(self) -> None:
         spec = {"type": "bar_chart", "chartData": [{"label": "A", "value": 1}]}
@@ -178,6 +184,68 @@ class GenerateSceneTests(unittest.TestCase):
                     generate_motion_graphics_scene(None, _job(), Path(directory))
             leftovers = list(Path(directory).rglob("*.raw.mp4"))
             self.assertEqual(leftovers, [])
+
+
+class SpecBuilderWiringTests(unittest.TestCase):
+    """A hook nothing calls is the bug this project keeps finding."""
+
+    def test_the_app_actually_installs_a_spec_builder(self) -> None:
+        import youtube_monitor.main  # noqa: F401  (importing wires it)
+
+        self.assertIsNotNone(motion_graphics._spec_builder)
+
+    def test_a_motion_job_keeps_its_storyboard_line_for_the_spec_builder(self) -> None:
+        """Rewriting it into a camera prompt would lose the numbers."""
+        from youtube_monitor import main
+
+        job = {
+            "provider": "motion_graphics",
+            "job_kind": "video",
+            "prompt": "Doanh thu quý 1 là 120 tỷ, quý 2 là 180 tỷ",
+            "timeline_segment_id": 1,
+            "project_id": 1,
+        }
+        with mock.patch.object(main, "_craft_video_prompt") as camera_prompt:
+            written = main._write_job_prompt(job)
+        camera_prompt.assert_not_called()
+        self.assertEqual(written, job["prompt"])
+
+    def test_another_video_provider_still_gets_a_camera_prompt(self) -> None:
+        from youtube_monitor import main
+
+        job = {
+            "provider": "gflow_cli",
+            "job_kind": "video",
+            "prompt": "Một chiếc thuyền trên biển",
+            "timeline_segment_id": 1,
+            "project_id": 1,
+        }
+        with mock.patch.object(main, "_craft_video_prompt", return_value="crafted") as camera:
+            written = main._write_job_prompt(job)
+        camera.assert_called_once()
+        self.assertEqual(written, "crafted")
+
+    def test_unused_schema_fields_are_dropped_before_they_reach_the_scene(self) -> None:
+        """Strict schemas fill every field; blanks would draw an empty title."""
+        from youtube_monitor import main
+
+        verdict = {
+            "type": "bar_chart",
+            "title": "Doanh thu",
+            "text": "",
+            "stat": "",
+            "subtitle": "",
+            "chartData": [{"label": "Q1", "value": 120, "prefix": "", "suffix": ""}],
+        }
+        with mock.patch.object(main, "_call_orchestrator_json", return_value=verdict):
+            spec = main._build_motion_cut_spec({"prompt": "Doanh thu quý 1"})
+        self.assertEqual(sorted(spec), ["chartData", "title", "type"])
+
+    def test_the_schema_only_offers_types_the_composition_can_draw(self) -> None:
+        from youtube_monitor import main
+
+        offered = set(main._MOTION_SPEC_SCHEMA["properties"]["type"]["enum"])
+        self.assertEqual(offered, set(MOTION_CUT_TYPES))
 
 
 class MotionProviderRegistrationTests(unittest.TestCase):
