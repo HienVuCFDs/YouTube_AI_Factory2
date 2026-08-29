@@ -28,6 +28,7 @@ from .gflow_bridge import (
     generate_gflow_video,
 )
 from .project_layout import ensure_project_layout
+from .stock_footage import generate_stock_footage_scene
 from .providers import (
     EXECUTION_EXTERNAL_SIDECAR,
     SCENE_ANIMATED_IMAGE,
@@ -544,6 +545,25 @@ def build_scene_provider_gateway() -> ProviderGateway:
                     fallback_keys=("gflow_cli",),
                 ),
                 lambda database, job, root: generate_gemini_veo_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "stock_footage",
+                    "Kho footage mở (Archive.org + NASA)",
+                    frozenset({SCENE_VIDEO}),
+                    # Ranked below Flow on purpose: Flow makes footage for the
+                    # scene, while an archive can only offer the nearest real
+                    # thing. It wins when Flow has no credit, which is the
+                    # situation this provider exists for.
+                    priority=60,
+                    quality_score=70,
+                    billing_mode="local",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    fallback_keys=("gflow_cli",),
+                ),
+                lambda database, job, root: generate_stock_footage_scene(
+                    database, job, root, ffmpeg_binary=settings.FFMPEG_BINARY
+                ),
             ),
             FunctionSceneProviderAdapter(
                 ProviderDescriptor(

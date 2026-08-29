@@ -6436,6 +6436,10 @@ def _provider_runtime_states() -> dict[str, dict[str, Any]]:
             antigravity.get("logged_in") or antigravity.get("ready")
         ):
             available, reason = False, "antigravity_not_ready"
+        elif descriptor.key == "stock_footage" and not ffmpeg_available(FFMPEG_BINARY):
+            # The archives hand over a whole film; FFmpeg is what turns it
+            # into one scene-length clip, so without it there is no output.
+            available, reason = False, "ffmpeg_not_available"
         elif descriptor.key in database.BROWSER_SIDECAR_PROVIDERS and _browser_extension_connections <= 0:
             available, reason = False, "browser_extension_not_connected"
         state.update({"available": available, "reason": reason})

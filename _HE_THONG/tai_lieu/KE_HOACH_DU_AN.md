@@ -1404,3 +1404,47 @@ Approval do pause sinh ra tự khử trùng lặp: lỗi lặp lại chỉ đặ
 Nghiệm thu: Python compile đạt, JavaScript giao diện parse đạt, `git diff --check` sạch, **532/532 test đạt** (thêm 32 test mới cho policy, sổ chi phí, trần theo batch và catalog).
 
 Phần còn lại của mục 52 không đổi: vẫn cần Flow có credit để nghiệm thu một I2V thật, rồi ba cảnh tuần tự và một bản nháp 60–90 giây.
+
+## 54. Provider footage mở: gỡ thế kẹt "chờ Flow có credit" (2026-08-29)
+
+Từ mục 43.2 (2026-08-20) tới nay mọi acceptance video đều dừng ở cùng một chỗ: không có credit Flow thì không có cảnh động nào để chạy thử. App không có bất kỳ nguồn footage thật nào — mọi cảnh động đều phải sinh bằng AI trả tiền.
+
+### 54.1 Khảo sát trước khi viết code
+
+Gọi thẳng API của ba kho mở, không dùng dòng code nào của OpenMontage:
+
+- **Archive.org** (bộ sưu tập Prelinger, toàn bộ public domain): search API + `/metadata/{id}` trả danh sách file mp4. Không cần key.
+- **NASA** (`images-api.nasa.gov`): public domain theo chính sách, mỗi clip có 4 mức `~large`/`~medium`/`~mobile`/`~small`. Không cần key.
+- **Wikimedia Commons**: chạy được nhưng trả `.webm` và **giấy phép khác nhau theo từng file**, thường buộc ghi công đúng cách. Cố ý chưa dùng: kiểm tra giấy phép theo file là việc khác hẳn và lớn hơn kiểm theo nguồn.
+
+Tải thật một clip NASA và `ffprobe` xác nhận: h264, 640×360, 30fps, 190 giây — dùng được ngay.
+
+### 54.2 Kết luận: không ghép OpenMontage vào app
+
+Ba nguồn trên là HTTP/JSON thuần. Viết adapter riêng vừa tránh giấy phép AGPLv3 của OpenMontage, vừa tránh phụ thuộc code vendor không track trong git, vừa đúng với điều mục 52 đã tự dặn: *không ghép một dự án GitHub khác vào App*.
+
+### 54.3 Provider `stock_footage`
+
+`youtube_monitor/stock_footage.py`, đăng ký vào gateway với `capability=scene.video`, `billing_mode="local"`, `estimated_unit_cost=0.0`.
+
+- **Rút từ khoá**: prompt storyboard viết cho model ảnh, đầy từ tả ánh sáng và ống kính; kho lưu trữ lại khớp theo văn bản mục lục. Bộ lọc bỏ từ tả phong cách, giữ từ tả nội dung.
+- **Nới dần truy vấn**: 6 từ → 4 → 2. Truy vấn sáu từ tả đúng một khuôn hình gần như luôn trả 0 kết quả.
+- **Xếp hạng theo mức trùng tên**: nới truy vấn để có kết quả cũng cho lọt phim chỉ tình cờ chung một từ. Chấm theo số từ khoá trùng tiêu đề, chắc chắn tốt hơn "kho nào trả lời trước". Vision review sẵn có của app vẫn chấm clip thành phẩm so với storyboard sau đó.
+- **Cắt cảnh**: lấy cửa sổ ở giữa clip (phim tư liệu mở đầu bằng tiêu đề, leader, đếm ngược — đúng thứ một cảnh storyboard không được có), scale/crop về đúng tỉ lệ, 30fps, **`-an`** vì lời dẫn do timeline trộn vào. Encode bằng NVENC khi có.
+- **Trần tải 160 MB**, kiểm cả `content-length` lẫn lúc đang stream, vì bản master tư liệu có thể nặng hàng trăm MB.
+- **Ứng viên lỗi không làm hỏng cảnh**: thử tiếp ứng viên sau, chỉ báo lỗi khi tất cả đều hỏng.
+- **Ghi nguồn**: mỗi clip được ghi vào `NGUON_FOOTAGE.json` trong thư mục dự án (nguồn, tiêu đề, URL trang, giấy phép, dòng ghi công). Public domain không bắt buộc ghi công, nhưng câu hỏi "cảnh này lấy ở đâu" chỉ trả lời được nếu xuất xứ được giữ ngay lúc dùng.
+
+### 54.4 Định tuyến
+
+Đặt `priority=60`, `quality_score=70` — thấp hơn Flow có chủ ý: Flow **tạo** footage cho cảnh, còn kho lưu trữ chỉ đưa được thứ có thật gần nhất. Kiểm chứng bằng test: Flow còn dùng được thì gateway chọn `gflow_cli`; Flow hết credit/chưa đăng nhập thì tự chuyển sang `stock_footage`. Đây đúng là tình huống provider này sinh ra để giải.
+
+`_VIDEO_CAPABLE_PROVIDERS` được suy ra từ gateway nên provider tự lan ra API và batch. Nhưng dropdown video trong Studio là hardcoded — đúng loại lỗi "viết xong nhưng không nơi nào gọi" của mục 48 — nên đã thêm option và hint riêng, kèm chặn không cho hỏi trạng thái sidecar cho một provider không có sidecar.
+
+### 54.5 Nghiệm thu
+
+Chạy thật `generate_stock_footage_scene` với prompt *"Earth seen from orbit at night with city lights"*: chọn được clip NASA *"Earth Rise as Seen from Orion Spacecraft"*, tải, cắt 6 giây, xuất **1280×720 h264, 0.49 MB, 13.8 giây**, ghi đúng `NGUON_FOOTAGE.json`.
+
+Python compile đạt, JavaScript giao diện parse đạt, **564/564 test đạt** (thêm 30 test cho provider này; `test_subprocess_encoding` tự bắt thêm file mới).
+
+**Ý nghĩa với mục 52:** acceptance "một cảnh động thật → asset → timeline → review" nay chạy được **ngay, không tốn một đồng nào**, không phải chờ credit Flow. Khi Flow có credit trở lại, chỉ việc đổi provider — phần còn lại của chuỗi đã được chứng minh là thông.

@@ -76,6 +76,16 @@ Lưu ý: phân tích phong cách từ transcript chỉ là suy luận có ghi r�
 - Không nhập ID/mật khẩu Google vào app. Chỉ đăng nhập một lần trong cửa sổ Google do trình duyệt/tool mở; app không lưu hoặc hiển thị mật khẩu.
 - WF Reup lấy hình từ video nguồn nên không gọi Flow/AI tạo ảnh. Nếu một cảnh Reup thiếu hình, sửa mốc cắt hoặc xuất lại clip nguồn thay vì thay bằng ảnh AI.
 
+## Kho footage mở — tạo cảnh động không tốn credit
+
+Trong **Tạo video → Studio**, ô chọn loại video có mục **Kho footage mở · Archive.org + NASA · miễn phí**. Nó lấy footage thật public-domain thay vì sinh cảnh bằng AI, nên không cần API key, không dùng credit Flow và không cần Extension.
+
+- Dùng khi Flow hết credit hoặc chưa đăng nhập, hoặc khi cảnh cần hình ảnh có thật (vũ trụ, tư liệu lịch sử, đời sống Mỹ giữa thế kỷ 20) hơn là hình do AI vẽ.
+- App tự rút từ khoá từ prompt storyboard, nới dần truy vấn nếu quá hẹp, xếp ứng viên theo mức khớp tiêu đề, rồi cắt đúng thời lượng cảnh và chuẩn hoá về tỉ lệ dự án. Clip lấy ở giữa phim để tránh tiêu đề và đếm ngược đầu phim.
+- Clip không có tiếng; lời dẫn vẫn do timeline trộn vào như mọi cảnh khác.
+- Nguồn từng clip được ghi vào **`NGUON_FOOTAGE.json`** trong thư mục dự án: nguồn, tiêu đề, URL trang, giấy phép và dòng ghi công. Public domain không bắt buộc ghi công, nhưng hãy giữ file này để trả lời được khi có người hỏi cảnh lấy ở đâu.
+- Khi Flow còn dùng được, app vẫn tự ưu tiên Flow: Flow tạo footage đúng cho cảnh, còn kho lưu trữ chỉ đưa được thứ có thật gần nhất. Ảnh do AI chấm lại như mọi cảnh khác, cảnh lệch nội dung sẽ bị đánh trượt và làm lại.
+
 ## Quản lý job và dữ liệu
 
 - Job đang chờ có thể **Hủy**. Job đang chạy không bị dừng cưỡng bức để tránh tạo file media hỏng.
