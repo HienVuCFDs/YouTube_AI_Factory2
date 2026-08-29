@@ -192,6 +192,11 @@ def _integration_status() -> list[dict[str, Any]]:
     from .. import main as _app
 
     browser_connected = _app._browser_extension_connections > 0
+    playwright_workers = sorted(
+        provider
+        for provider in _app.PLAYWRIGHT_SIDECAR_PROVIDERS
+        if _app._sidecar_recently_polled(provider)
+    )
     antigravity_sidecar_alive = _app._sidecar_recently_polled("antigravity_image")
     openai_key, openai_model = settings.openai_config()
     gemini_key, gemini_image_model, gemini_video_model = settings.gemini_config()
@@ -311,15 +316,22 @@ def _integration_status() -> list[dict[str, Any]]:
             # at all about the extension, so there was nowhere to see why a web
             # provider could not be picked.
             "key": "browser_extension",
-            "label": "Cốc Cốc + Extension YT Factory",
+            "label": "Trình duyệt cho provider web",
             "category": "Tạo ảnh/video bằng gói đã đăng nhập trong trình duyệt",
-            "ready": browser_connected,
+            "ready": browser_connected or playwright_workers,
             "connection": "browser_extension",
-            "model": "flow_image · flow_veo · chatgpt_web_image · gemini_web_image",
+            "model": "flow_veo · chatgpt_web_image · gemini_web_image · meta_ai_video (Playwright) · flow_image (chỉ Extension)",
             "detail": (
-                "Extension đang kết nối; provider trình duyệt nhận việc được."
+                f"Đang có worker: {', '.join(playwright_workers)}"
+                if playwright_workers
+                else "Extension YT Factory đang kết nối."
                 if browser_connected
-                else "Chưa có extension nào kết nối. Mở Cốc Cốc, bật Extension YT Factory và giữ trình duyệt mở."
+                else (
+                    "Chưa có worker nào. Hai cách, chọn một: chạy "
+                    "`python web_video_sidecar.py --provider <tên> --login` một lần rồi chạy không cờ "
+                    "(Playwright, KHÔNG cần extension); hoặc mở Cốc Cốc với Extension YT Factory. "
+                    "Riêng flow_image chỉ chạy được bằng Extension."
+                )
             ),
         },
         {

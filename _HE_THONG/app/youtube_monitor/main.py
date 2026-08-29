@@ -4081,6 +4081,15 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
     return {"job": job}
 
 
+# Sites web_video_sidecar.py can drive with Playwright, needing no browser
+# extension — only a session saved once with `--login`. flow_image is absent
+# on purpose: it has no Playwright entry, so it is the one provider that
+# really does require the extension.
+PLAYWRIGHT_SIDECAR_PROVIDERS = frozenset(
+    {"flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"}
+)
+
+
 @app.get("/api/scene-sidecar-status")
 def _sidecar_recently_polled(provider: str) -> bool:
     """Whether an external sidecar has asked for work recently enough."""
@@ -6530,8 +6539,20 @@ def _provider_runtime_states() -> dict[str, dict[str, Any]]:
             # The archives hand over a whole film; FFmpeg is what turns it
             # into one scene-length clip, so without it there is no output.
             available, reason = False, "ffmpeg_not_available"
-        elif descriptor.key in database.BROWSER_SIDECAR_PROVIDERS and _browser_extension_connections <= 0:
-            available, reason = False, "browser_extension_not_connected"
+        elif descriptor.key in database.BROWSER_SIDECAR_PROVIDERS and not (
+            _browser_extension_connections > 0 or _sidecar_recently_polled(descriptor.key)
+        ):
+            # There are two ways to drive a logged-in site, and only one of
+            # them is the browser extension. web_video_sidecar.py drives the
+            # same sites with Playwright and its own saved session, and it
+            # pulls jobs from the same queue — asking only about the extension
+            # declared those providers dead while their sidecar was working.
+            available, reason = (
+                False,
+                "browser_extension_not_connected"
+                if descriptor.key not in PLAYWRIGHT_SIDECAR_PROVIDERS
+                else "no_browser_worker",
+            )
         state.update({"available": available, "reason": reason})
         states[descriptor.key] = state
     return states

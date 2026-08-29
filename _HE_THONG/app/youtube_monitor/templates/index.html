@@ -1088,7 +1088,8 @@
   // The catalogue already carries the answer; nothing was reading it.
   const PROVIDER_BLOCK_REASONS = {
     gflow_not_logged_in: 'Chưa đăng nhập gflow-cli — chạy `gflow auth login` một lần',
-    browser_extension_not_connected: 'Chưa mở Cốc Cốc với Extension YT Factory',
+    browser_extension_not_connected: 'Chỉ chạy được qua Extension YT Factory trong Cốc Cốc',
+    no_browser_worker: 'Chưa có worker — chạy web_video_sidecar.py (Playwright, không cần extension) hoặc mở Extension',
     antigravity_sidecar_not_running: 'Antigravity đã đăng nhập nhưng sidecar chưa chạy',
     antigravity_not_ready: 'Antigravity CLI chưa đăng nhập',
     missing_api_key: 'Chưa nhập API key trong Kết nối AI',

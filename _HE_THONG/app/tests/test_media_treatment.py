@@ -128,6 +128,65 @@ def test_the_sidecar_card_is_separate_from_the_cli_login() -> None:
     assert items["antigravity_cli"]["connection"] != fresh["antigravity_sidecar"]["connection"]
 
 
+class PlaywrightSidecarCountsAsAWorkerTests(unittest.TestCase):
+    """The extension is one way to drive a logged-in site, not the only way.
+
+    web_video_sidecar.py drives the same sites with Playwright and its own
+    saved session, and pulls from the same queue. Asking only whether the
+    extension was connected declared four providers dead while their sidecar
+    was working.
+    """
+
+    def _states(self, polled: tuple[str, ...] = ()) -> dict:
+        from datetime import datetime, timezone
+
+        seen = {name: datetime.now(timezone.utc) for name in polled}
+        with mock.patch.dict(main._sidecar_last_seen, seen, clear=True):
+            with mock.patch.object(main, "_browser_extension_connections", 0):
+                return main._provider_runtime_states()
+
+    def test_a_polling_playwright_sidecar_makes_its_provider_usable(self) -> None:
+        states = self._states(("chatgpt_web_image",))
+        self.assertTrue(states["chatgpt_web_image"]["available"])
+
+    def test_it_does_not_vouch_for_a_provider_with_no_worker(self) -> None:
+        states = self._states(("chatgpt_web_image",))
+        self.assertFalse(states["gemini_web_image"]["available"])
+        self.assertEqual(states["gemini_web_image"]["reason"], "no_browser_worker")
+
+    def test_with_no_worker_flow_image_is_told_the_extension_is_its_only_route(self) -> None:
+        """The poll signal is shared: the extension claims jobs through the
+        same endpoint the Playwright sidecar does. So a poll for flow_image
+        already means something is driving it. What differs is the advice
+        when nothing is — only flow_image has no Playwright entry to fall
+        back on."""
+        states = self._states()
+        self.assertEqual(states["flow_image"]["reason"], "browser_extension_not_connected")
+        self.assertEqual(states["flow_veo"]["reason"], "no_browser_worker")
+
+    def test_the_extension_alone_still_works(self) -> None:
+        with mock.patch.dict(main._sidecar_last_seen, {}, clear=True):
+            with mock.patch.object(main, "_browser_extension_connections", 1):
+                states = main._provider_runtime_states()
+        self.assertTrue(states["flow_image"]["available"])
+        self.assertTrue(states["flow_veo"]["available"])
+
+    def test_the_playwright_list_matches_what_the_sidecar_can_drive(self) -> None:
+        source = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "web_video_sidecar.py"
+        ).read_text(encoding="utf-8")
+        import re
+
+        configured = set(re.findall(r'^ +"([a-z_]+)": *ProviderConfig', source, re.M))
+        self.assertEqual(configured, set(main.PLAYWRIGHT_SIDECAR_PROVIDERS))
+
+
+def test_the_page_offers_both_ways_to_drive_a_web_provider(page: str) -> None:
+    assert "no_browser_worker" in page
+    assert "web_video_sidecar.py" in page
+
+
 def test_the_new_cards_have_something_to_render_them(page: str) -> None:
     assert "item.connection === 'browser_extension'" in page
     assert "item.connection === 'sidecar'" in page
