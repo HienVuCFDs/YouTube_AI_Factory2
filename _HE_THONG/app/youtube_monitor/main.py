@@ -7012,14 +7012,34 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         scene_jobs = database.list_scene_generation_jobs(project_id, limit=500)
         project_jobs = database.list_project_jobs(project_id, limit=100)
         active = [job for job in [*scene_jobs, *project_jobs] if job.get("status") in {"waiting", "queued", "running"}]
-        issues = []
-        for segment in timeline:
-            if not str(segment.get("visual_path") or "").strip():
-                issues.append(f"Scene {segment.get('segment_index')} thiếu visual")
-            if not str(segment.get("audio_path") or "").strip():
-                issues.append(f"Scene {segment.get('segment_index')} thiếu voice")
-            if not str(segment.get("subtitle_text") or "").strip():
-                issues.append(f"Scene {segment.get('segment_index')} thiếu subtitle")
+        # The measurable checks the manual Quality Check panel already runs.
+        # Reading the database column only proves a path was written down;
+        # this proves the file is on disk, and measures the audio besides.
+        report = build_quality_report(timeline, "", FFMPEG_BINARY)
+        # Only the checks that mean anything before a render exists. The rest
+        # of the report is about final.mp4, its loudness and its thumbnail —
+        # all of them necessarily failing at the point QC decides whether a
+        # render should be attempted at all.
+        checks = dict(report.get("checks") or {})
+        pre_render_faults = {
+            "has_all_visuals": "Có cảnh chưa có file hình trên đĩa",
+            "has_all_voice": "Có cảnh chưa có file giọng đọc trên đĩa",
+            "subtitle_ready": "Có cảnh chưa có phụ đề",
+            "no_abnormal_voice_silence": "Giọng đọc có khoảng lặng bất thường trên 1,5 giây",
+        }
+        issues = [
+            message for key, message in pre_render_faults.items() if not checks.get(key, True)
+        ]
+        issues += [
+            issue
+            for issue in report.get("issues", [])
+            if issue.startswith(("Thiếu cảnh hình ảnh", "Thiếu voice", "Voice có khoảng lặng"))
+        ]
+        failed_reviews = [
+            job for job in scene_jobs if str(job.get("review_status") or "") == "fail"
+        ]
+        if failed_reviews:
+            issues.append(f"{len(failed_reviews)} cảnh bị AI chấm trượt")
         if active:
             issues.append(f"Còn {len(active)} job đang xử lý")
         result = _call_specific_agent_json(
@@ -7028,7 +7048,16 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
                 "Bạn là QC Agent độc lập. Kiểm tra snapshot dự án, chỉ duyệt khi không thiếu visual/voice/subtitle, "
                 "không còn job chạy và không có scene review fail. Không được che giấu lỗi. Trả JSON đúng schema."
             ),
-            json.dumps({"project_id": project_id, "issues_detected": issues, "scene_count": len(timeline)}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "project_id": project_id,
+                    "issues_detected": issues,
+                    "scene_count": len(timeline),
+                    "quality_checks": checks,
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:60000],
             _AGENT_QC_SCHEMA,
         )
         approved = bool(result.get("approved")) and not issues

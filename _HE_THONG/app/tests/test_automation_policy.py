@@ -400,6 +400,77 @@ class ProviderCatalogCostTests(unittest.TestCase):
                 )
 
 
+class QcAgentUsesMeasuredChecksTests(unittest.TestCase):
+    """QC must prove the files exist, not that a path was written down."""
+
+    def _timeline(self, visual: str, audio: str) -> list[dict[str, object]]:
+        return [
+            {
+                "id": 1,
+                "segment_index": 1,
+                "visual_path": visual,
+                "audio_path": audio,
+                "subtitle_text": "Loi thoai",
+                "voice_text": "Loi thoai",
+            }
+        ]
+
+    def _run_qc(self, timeline: list[dict[str, object]]) -> dict[str, object]:
+        captured: dict[str, object] = {}
+
+        def fake_agent(agent, system, user, schema):
+            captured.update(json.loads(user))
+            return {"approved": True, "score": 10, "note": ""}
+
+        task = {"project_id": 1, "role": "qc", "input": {}, "correlation_id": ""}
+        with mock.patch.object(main, "_call_specific_agent_json", side_effect=fake_agent):
+            with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "title": "T"}):
+                with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 1}):
+                    with mock.patch.object(main.database, "list_project_timeline", return_value=timeline):
+                        with mock.patch.object(main.database, "list_scene_generation_jobs", return_value=[]):
+                            with mock.patch.object(main.database, "list_project_jobs", return_value=[]):
+                                # Approving emits project.ready_to_render; the
+                                # fake project id has no row to reference.
+                                with mock.patch.object(main.database, "emit_domain_event"):
+                                    result = main._execute_agent_task(task, "codex_cli")
+        return {"result": result, "sent": captured}
+
+    def test_a_path_pointing_at_no_file_is_caught(self) -> None:
+        """The old check only asked whether the column was non-empty."""
+        timeline = self._timeline("F:/khong-ton-tai/hinh.png", "F:/khong-ton-tai/voice.wav")
+        outcome = self._run_qc(timeline)
+        issues = outcome["sent"]["issues_detected"]
+        self.assertTrue(any("file hình" in issue for issue in issues), issues)
+        self.assertTrue(any("giọng đọc" in issue for issue in issues), issues)
+        # An agent that says yes cannot override a measured fault.
+        self.assertFalse(outcome["result"]["approved"])
+        self.assertFalse(outcome["result"]["ready_for_render"])
+
+    def test_post_render_faults_do_not_block_a_pre_render_decision(self) -> None:
+        """No final.mp4 or thumbnail exists yet; that is not a QC failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            visual = Path(directory) / "hinh.png"
+            audio = Path(directory) / "voice.wav"
+            visual.write_bytes(b"png")
+            audio.write_bytes(b"wav")
+            with mock.patch.object(main, "build_quality_report") as report:
+                report.return_value = {
+                    "checks": {
+                        "has_all_visuals": True, "has_all_voice": True,
+                        "subtitle_ready": True, "no_abnormal_voice_silence": True,
+                        "has_final_file": False, "has_thumbnail": False,
+                        "gpu_encoded": False, "technical_video_valid": False,
+                    },
+                    "issues": [
+                        "Chưa có final.mp4 để kiểm tra",
+                        "Chưa chọn thumbnail hợp lệ cho project",
+                    ],
+                }
+                outcome = self._run_qc(self._timeline(str(visual), str(audio)))
+        self.assertEqual(outcome["sent"]["issues_detected"], [])
+        self.assertTrue(outcome["result"]["ready_for_render"])
+
+
 class BillingPolicyGateTests(unittest.TestCase):
     def test_paid_api_stays_blocked_by_default(self) -> None:
         with mock.patch.object(settings, "automation_policy", return_value=_policy()):
