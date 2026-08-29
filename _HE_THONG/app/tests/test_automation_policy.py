@@ -446,6 +446,22 @@ class QcAgentUsesMeasuredChecksTests(unittest.TestCase):
         self.assertFalse(outcome["result"]["approved"])
         self.assertFalse(outcome["result"]["ready_for_render"])
 
+    def test_the_agent_is_not_handed_checks_it_cannot_act_on(self) -> None:
+        """Passing the whole report made QC list "no final.mp4" as a fault."""
+        with tempfile.TemporaryDirectory() as directory:
+            visual = Path(directory) / "hinh.png"
+            audio = Path(directory) / "voice.wav"
+            visual.write_bytes(b"png")
+            audio.write_bytes(b"wav")
+            outcome = self._run_qc(self._timeline(str(visual), str(audio)))
+        sent = outcome["sent"]["quality_checks"]
+        self.assertEqual(
+            sorted(sent),
+            ["has_all_visuals", "has_all_voice", "no_abnormal_voice_silence", "subtitle_ready"],
+        )
+        for post_render in ("has_final_file", "has_thumbnail", "gpu_encoded", "technical_video_valid"):
+            self.assertNotIn(post_render, sent)
+
     def test_post_render_faults_do_not_block_a_pre_render_decision(self) -> None:
         """No final.mp4 or thumbnail exists yet; that is not a QC failure."""
         with tempfile.TemporaryDirectory() as directory:
@@ -469,6 +485,60 @@ class QcAgentUsesMeasuredChecksTests(unittest.TestCase):
                 outcome = self._run_qc(self._timeline(str(visual), str(audio)))
         self.assertEqual(outcome["sent"]["issues_detected"], [])
         self.assertTrue(outcome["result"]["ready_for_render"])
+
+
+class SidecarLivenessGatesRoutingTests(unittest.TestCase):
+    """A logged-in CLI is not a running worker.
+
+    The Media Agent queued three jobs to antigravity_image while no sidecar
+    was polling. They sat queued forever and the pipeline stalled with no
+    error anywhere — the status endpoint knew the sidecar was dead, but the
+    routing state never asked it.
+    """
+
+    def _states(self):
+        from datetime import datetime, timedelta, timezone
+
+        return datetime, timedelta, timezone
+
+    def test_a_provider_whose_sidecar_never_polled_is_not_offered(self) -> None:
+        with mock.patch.dict(main._sidecar_last_seen, {}, clear=True):
+            with mock.patch.object(
+                main, "antigravity_cli_status", return_value={"logged_in": True, "ready": True}
+            ):
+                state = main._provider_runtime_states()["antigravity_image"]
+        self.assertFalse(state["available"])
+        self.assertEqual(state["reason"], "antigravity_sidecar_not_running")
+
+    def test_a_recently_polling_sidecar_is_offered(self) -> None:
+        datetime, _, timezone = self._states()
+        now = {"antigravity_image": datetime.now(timezone.utc)}
+        with mock.patch.dict(main._sidecar_last_seen, now, clear=True):
+            with mock.patch.object(
+                main, "antigravity_cli_status", return_value={"logged_in": True, "ready": True}
+            ):
+                state = main._provider_runtime_states()["antigravity_image"]
+        self.assertTrue(state["available"], state["reason"])
+
+    def test_a_stale_poll_counts_as_no_sidecar(self) -> None:
+        datetime, timedelta, timezone = self._states()
+        stale = datetime.now(timezone.utc) - timedelta(
+            seconds=main._SIDECAR_STALE_AFTER_SECONDS + 5
+        )
+        with mock.patch.dict(main._sidecar_last_seen, {"antigravity_image": stale}, clear=True):
+            with mock.patch.object(
+                main, "antigravity_cli_status", return_value={"logged_in": True, "ready": True}
+            ):
+                state = main._provider_runtime_states()["antigravity_image"]
+        self.assertFalse(state["available"])
+
+    def test_a_logged_out_cli_is_still_reported_as_such(self) -> None:
+        with mock.patch.dict(main._sidecar_last_seen, {}, clear=True):
+            with mock.patch.object(
+                main, "antigravity_cli_status", return_value={"logged_in": False, "ready": False}
+            ):
+                state = main._provider_runtime_states()["antigravity_image"]
+        self.assertEqual(state["reason"], "antigravity_not_ready")
 
 
 class BillingPolicyGateTests(unittest.TestCase):

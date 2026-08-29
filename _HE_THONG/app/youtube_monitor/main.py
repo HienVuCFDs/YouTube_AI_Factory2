@@ -4082,6 +4082,15 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
 
 
 @app.get("/api/scene-sidecar-status")
+def _sidecar_recently_polled(provider: str) -> bool:
+    """Whether an external sidecar has asked for work recently enough."""
+    last_seen = _sidecar_last_seen.get(provider)
+    if last_seen is None:
+        return False
+    age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+    return age <= _SIDECAR_STALE_AFTER_SECONDS
+
+
 def scene_sidecar_status() -> dict[str, Any]:
     """Whether each external-sidecar provider has polled recently enough to
     be considered alive — lets the UI say "no sidecar is running" instead of
@@ -6499,10 +6508,14 @@ def _provider_runtime_states() -> dict[str, dict[str, Any]]:
             available, reason = False, "missing_api_key"
         elif descriptor.key in {"gflow_cli", "gflow_image"} and not gflow.get("logged_in"):
             available, reason = False, "gflow_not_logged_in"
-        elif descriptor.key == "antigravity_image" and not (
-            antigravity.get("logged_in") or antigravity.get("ready")
-        ):
-            available, reason = False, "antigravity_not_ready"
+        elif descriptor.key == "antigravity_image":
+            if not (antigravity.get("logged_in") or antigravity.get("ready")):
+                available, reason = False, "antigravity_not_ready"
+            elif not _sidecar_recently_polled(descriptor.key):
+                # A logged-in CLI is not a running worker. Jobs for this
+                # provider are pulled by a sidecar; with none polling, they
+                # sit queued forever and the pipeline stalls with no error.
+                available, reason = False, "antigravity_sidecar_not_running"
         elif descriptor.key == "motion_graphics":
             composer_ok, composer_detail = motion_composer_ready()
             if not composer_ok:
@@ -7020,13 +7033,19 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         # of the report is about final.mp4, its loudness and its thumbnail —
         # all of them necessarily failing at the point QC decides whether a
         # render should be attempted at all.
-        checks = dict(report.get("checks") or {})
+        all_checks = dict(report.get("checks") or {})
         pre_render_faults = {
             "has_all_visuals": "Có cảnh chưa có file hình trên đĩa",
             "has_all_voice": "Có cảnh chưa có file giọng đọc trên đĩa",
             "subtitle_ready": "Có cảnh chưa có phụ đề",
             "no_abnormal_voice_silence": "Giọng đọc có khoảng lặng bất thường trên 1,5 giây",
         }
+        # Only these travel to the agent. Handing it the whole report made it
+        # dutifully list "no final.mp4", "no thumbnail" and "not GPU encoded"
+        # as faults — all of them true, none of them actionable, at the moment
+        # QC is deciding whether a render should happen at all. The reviewer
+        # rejected that report as untrustworthy, and was right to.
+        checks = {key: all_checks.get(key, True) for key in pre_render_faults}
         issues = [
             message for key, message in pre_render_faults.items() if not checks.get(key, True)
         ]
