@@ -189,6 +189,10 @@ def summary() -> dict[str, int]:
 
 
 def _integration_status() -> list[dict[str, Any]]:
+    from .. import main as _app
+
+    browser_connected = _app._browser_extension_connections > 0
+    antigravity_sidecar_alive = _app._sidecar_recently_polled("antigravity_image")
     openai_key, openai_model = settings.openai_config()
     gemini_key, gemini_image_model, gemini_video_model = settings.gemini_config()
     anthropic_key, anthropic_model = settings.anthropic_config()
@@ -299,6 +303,39 @@ def _integration_status() -> list[dict[str, Any]]:
             "connection": "local_engine",
             "model": openmontage_adapter.configured_runtime,
             "detail": str(openmontage_adapter.status()["detail"]),
+        },
+        {
+            # Four scene providers run inside the user's logged-in browser, and
+            # until now nothing in Connections represented the thing they all
+            # depend on. The panel showed Antigravity "ready" and said nothing
+            # at all about the extension, so there was nowhere to see why a web
+            # provider could not be picked.
+            "key": "browser_extension",
+            "label": "Cốc Cốc + Extension YT Factory",
+            "category": "Tạo ảnh/video bằng gói đã đăng nhập trong trình duyệt",
+            "ready": browser_connected,
+            "connection": "browser_extension",
+            "model": "flow_image · flow_veo · chatgpt_web_image · gemini_web_image",
+            "detail": (
+                "Extension đang kết nối; provider trình duyệt nhận việc được."
+                if browser_connected
+                else "Chưa có extension nào kết nối. Mở Cốc Cốc, bật Extension YT Factory và giữ trình duyệt mở."
+            ),
+        },
+        {
+            "key": "antigravity_sidecar",
+            "label": "Antigravity Sidecar",
+            "category": "Worker kéo việc tạo ảnh cho Antigravity",
+            # Being logged in is not the same as pulling work: an idle sidecar
+            # means jobs sit queued with no error anywhere.
+            "ready": antigravity_sidecar_alive,
+            "connection": "sidecar",
+            "model": "antigravity_image",
+            "detail": (
+                "Sidecar đang lấy việc."
+                if antigravity_sidecar_alive
+                else "Chưa chạy. Bật sidecar YT Factory trong Antigravity, hoặc chạy youtube_monitor/antigravity_scene_sidecar.py."
+            ),
         },
         {
             "key": "claude_desktop",

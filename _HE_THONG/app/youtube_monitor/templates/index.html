@@ -1578,6 +1578,19 @@
         <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
       </div>`;
     }
+    if (item.connection === 'browser_extension' || item.connection === 'sidecar') {
+      // These two cannot be switched on from here: one needs a browser window
+      // left open, the other a worker started outside the app. Saying so
+      // plainly beats a button that would only ever fail.
+      const stateLabel = item.ready ? 'ĐANG KẾT NỐI' : 'CHƯA KẾT NỐI';
+      return `<div class="integration-card ${item.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${stateLabel}</span></div>
+        <div class="secondary-text">${esc(item.category)}</div>
+        <div class="secondary-text" style="margin-top:4px">Cấp nguồn cho: ${esc(item.model)}</div>
+        <div class="secondary-text" style="margin-top:6px">${esc(item.detail)}</div>
+        <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
+      </div>`;
+    }
     if (item.connection === 'cloud_subscription' && item.key === 'gflow_cli') {
       const stateLabel = item.ready ? 'ĐÃ ĐĂNG NHẬP' : item.installed ? 'CẦN ĐĂNG NHẬP' : 'CHƯA CÀI CLI';
       return `<div class="integration-card ${item.ready ? 'connected' : ''}">

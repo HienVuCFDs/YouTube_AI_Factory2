@@ -102,6 +102,37 @@ def test_the_prompt_teaches_the_rule_the_run_discovered(page: str) -> None:
     assert "bịa ra số liệu sai" in source
 
 
+def test_connections_covers_the_browser_the_web_providers_run_in() -> None:
+    """Four scene providers run inside the logged-in browser and Connections
+    had no card for it, so there was nowhere to see why one was unusable."""
+    from fastapi.testclient import TestClient
+    from youtube_monitor.main import app
+
+    with TestClient(app) as client:
+        keys = {item["key"] for item in client.get("/api/integrations").json()}
+    assert "browser_extension" in keys
+    assert "antigravity_sidecar" in keys
+
+
+def test_the_sidecar_card_is_separate_from_the_cli_login() -> None:
+    """Being logged in is not the same as pulling work."""
+    from fastapi.testclient import TestClient
+    from youtube_monitor.main import app
+
+    with TestClient(app) as client:
+        items = {item["key"]: item for item in client.get("/api/integrations").json()}
+    with mock.patch.object(main, "_sidecar_recently_polled", return_value=False):
+        with TestClient(app) as client:
+            fresh = {item["key"]: item for item in client.get("/api/integrations").json()}
+    assert fresh["antigravity_sidecar"]["ready"] is False
+    assert items["antigravity_cli"]["connection"] != fresh["antigravity_sidecar"]["connection"]
+
+
+def test_the_new_cards_have_something_to_render_them(page: str) -> None:
+    assert "item.connection === 'browser_extension'" in page
+    assert "item.connection === 'sidecar'" in page
+
+
 def test_the_page_shows_the_event_log_and_the_a2a_handoffs(page: str) -> None:
     assert 'id="automationEvents"' in page
     assert 'id="automationMessages"' in page
