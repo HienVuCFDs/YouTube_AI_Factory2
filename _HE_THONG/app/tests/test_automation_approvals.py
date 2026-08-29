@@ -56,6 +56,15 @@ def test_approvals_are_rendered_whenever_status_is_refreshed(page: str) -> None:
     assert "renderAutomationApprovals(data);" in page
 
 
+def test_a_running_pipeline_can_be_reopened_without_the_browser_that_started_it(page: str) -> None:
+    """The id lived only in localStorage, so a run started elsewhere — another
+    machine, another browser, the API — was invisible in the interface."""
+    assert 'id="automationProjectPicker"' in page
+    assert "loadAutomationProjectList" in page
+    assert "openAutomationProject(this.value)" in page
+    assert "/api/automation/projects'" in page
+
+
 def _project_database(directory: str) -> tuple[Database, int]:
     database = Database(Path(directory) / "approvals.db")
     database.upsert_channel(

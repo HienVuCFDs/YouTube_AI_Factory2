@@ -638,6 +638,7 @@
               <label class="automation-option"><input id="automationAutoRender" type="checkbox" /> <span>Tự render khi QC xác nhận đủ visual, voice và subtitle. Mặc định tắt để bạn duyệt bước cuối.</span></label>
               <button id="automationStartButton" class="btn primary" type="button" onclick="startAutomationPipeline()">Bắt đầu chuỗi đa AI</button>
               <button id="automationRefreshButton" class="btn ghost" type="button" onclick="loadAutomationStatus()" disabled>Cập nhật trạng thái</button>
+              <select id="automationProjectPicker" aria-label="Mở lại một chuỗi đã chạy" onchange="openAutomationProject(this.value)"><option value="">Mở lại chuỗi đã chạy...</option></select>
             </div>
           </div>
           <div id="automationSummary" class="secondary-text" style="margin-top:8px">Chưa có pipeline đang theo dõi.</div>
@@ -1141,6 +1142,36 @@
     }
   }
 
+  // Until now the only way back into a pipeline was the browser that started
+  // it: the id lived in localStorage and nothing listed what else existed. A
+  // run started from another machine, another browser, or the API was
+  // invisible even though the server had every task, event and approval.
+  async function loadAutomationProjectList() {
+    const picker = $('automationProjectPicker');
+    if (!picker) return;
+    try {
+      const data = await api('/api/automation/projects');
+      const current = String(state.automationProjectId || '');
+      const options = (data.projects || []).map((entry) => {
+        const project = entry.project || entry;
+        const tasks = entry.agent_tasks || entry.tasks || [];
+        const done = tasks.filter((task) => task.status === 'completed').length;
+        const label = `#${project.id} · ${String(project.title || '').slice(0, 40)}${tasks.length ? ` · ${done}/${tasks.length} task` : ''}`;
+        return `<option value="${project.id}"${String(project.id) === current ? ' selected' : ''}>${esc(label)}</option>`;
+      });
+      picker.innerHTML = '<option value="">Mở lại chuỗi đã chạy...</option>' + options.join('');
+    } catch (_) { /* the picker is a convenience; its failure must not break the panel */ }
+  }
+
+  async function openAutomationProject(projectId) {
+    const id = Number(projectId || 0);
+    if (!id) return;
+    state.automationProjectId = id;
+    try { localStorage.setItem('ytFactory.automationProjectId', String(id)); } catch (_) {}
+    if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
+    await loadAutomationStatus();
+  }
+
   async function loadAutomationStatus(quiet = false) {
     const projectId = Number(state.automationProjectId || 0);
     if (!projectId) return;
@@ -1177,6 +1208,7 @@
       try { localStorage.setItem('ytFactory.automationProjectId', String(state.automationProjectId)); } catch (_) {}
       if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
       setMessage(`Đã giao Research task cho dự án #${state.automationProjectId}.`, 'success');
+      await loadAutomationProjectList();
       await loadAutomationStatus();
     } catch (error) {
       if ($('automationSummary')) $('automationSummary').textContent = `Không khởi động được: ${error.message}`;
@@ -1629,7 +1661,7 @@
 
   async function reloadClaudeCodeStatus() {
     try {
-      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings(), loadAutomationPolicy(), loadProviderCatalog()]);
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings(), loadAutomationPolicy(), loadProviderCatalog(), loadAutomationProjectList()]);
       setMessage('Đã kiểm tra lại trạng thái Claude Code CLI.', 'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }
