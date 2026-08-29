@@ -58,6 +58,7 @@ from .publisher import PublisherError, PublisherWorker, next_channel_schedule
 from .project_layout import ensure_project_layout
 from .quality_check import build_quality_report
 from .scene_generator import SceneGenerationError, SceneGenerationWorker, build_scene_provider_gateway
+from .motion_graphics import composer_ready as motion_composer_ready
 from .providers import (
     ProviderGatewayError,
     ProviderRoutePolicy,
@@ -6436,6 +6437,12 @@ def _provider_runtime_states() -> dict[str, dict[str, Any]]:
             antigravity.get("logged_in") or antigravity.get("ready")
         ):
             available, reason = False, "antigravity_not_ready"
+        elif descriptor.key == "motion_graphics":
+            composer_ok, composer_detail = motion_composer_ready()
+            if not composer_ok:
+                available, reason = False, composer_detail
+            elif not ffmpeg_available(FFMPEG_BINARY):
+                available, reason = False, "ffmpeg_not_available"
         elif descriptor.key == "stock_footage" and not ffmpeg_available(FFMPEG_BINARY):
             # The archives hand over a whole film; FFmpeg is what turns it
             # into one scene-length clip, so without it there is no output.

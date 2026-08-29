@@ -28,6 +28,7 @@ from .gflow_bridge import (
     generate_gflow_video,
 )
 from .project_layout import ensure_project_layout
+from .motion_graphics import generate_motion_graphics_scene
 from .stock_footage import generate_stock_footage_scene
 from .providers import (
     EXECUTION_EXTERNAL_SIDECAR,
@@ -545,6 +546,23 @@ def build_scene_provider_gateway() -> ProviderGateway:
                     fallback_keys=("gflow_cli",),
                 ),
                 lambda database, job, root: generate_gemini_veo_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "motion_graphics",
+                    "Motion graphics (bieu do, so lieu, tieu de dong)",
+                    frozenset({SCENE_VIDEO}),
+                    # Not a rival to Flow: it draws what no footage can show —
+                    # a chart building, a number counting. The Director picks
+                    # it per scene, so it is ranked last for blind routing.
+                    priority=120,
+                    quality_score=68,
+                    billing_mode="local",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                ),
+                lambda database, job, root: generate_motion_graphics_scene(
+                    database, job, root, ffmpeg_binary=settings.FFMPEG_BINARY
+                ),
             ),
             FunctionSceneProviderAdapter(
                 ProviderDescriptor(

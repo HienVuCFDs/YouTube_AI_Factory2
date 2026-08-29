@@ -86,6 +86,18 @@ Trong **Tạo video → Studio**, ô chọn loại video có mục **Kho footage
 - Nguồn từng clip được ghi vào **`NGUON_FOOTAGE.json`** trong thư mục dự án: nguồn, tiêu đề, URL trang, giấy phép và dòng ghi công. Public domain không bắt buộc ghi công, nhưng hãy giữ file này để trả lời được khi có người hỏi cảnh lấy ở đâu.
 - Khi Flow còn dùng được, app vẫn tự ưu tiên Flow: Flow tạo footage đúng cho cảnh, còn kho lưu trữ chỉ đưa được thứ có thật gần nhất. Ảnh do AI chấm lại như mọi cảnh khác, cảnh lệch nội dung sẽ bị đánh trượt và làm lại.
 
+## Motion graphics — vẽ biểu đồ và số liệu động
+
+Trong ô chọn loại video còn mục **Motion graphics · biểu đồ/số liệu/tiêu đề động · miễn phí**. Nó không sinh ảnh và không tìm footage: nó **vẽ** cảnh bằng đồ hoạ chuyển động — thứ không máy quay nào quay được và AI tạo ảnh cũng không làm gọn được.
+
+- 11 kiểu cảnh: biểu đồ cột/đường/tròn, lưới KPI, thẻ số liệu, thẻ chữ lớn, tiêu đề lớn, khung nhấn mạnh, bảng so sánh, thanh tiến trình, cảnh terminal.
+- Không tốn credit, không cần API key. Cần Node.js; lần đầu chạy `npm ci` trong `_HE_THONG/app/motion_composer`.
+- Muốn chỉ định chính xác, đặt prompt của cảnh là JSON, ví dụ:
+  `{"type": "bar_chart", "title": "Doanh thu", "chartData": [{"label": "Q1", "value": 120}]}`
+  Với `kpi_grid` và các biểu đồ, `value` **phải là số**; ký hiệu tiền đặt ở `prefix` (`{"value": 0, "prefix": "$"}`), nếu không sẽ ra `NaN`.
+- Nếu prompt là văn xuôi, app nhờ AI chuyển thành spec; không có AI thì cảnh vẫn ra dưới dạng thẻ chữ lớn chứ không hỏng job.
+- Phần đồ hoạ được sao chép từ dự án OpenMontage theo giấy phép AGPL-3.0 — đọc `_HE_THONG/app/motion_composer/NGUON_GOC.md` **trước khi** phát hành hoặc chia sẻ app cho người khác.
+
 ## Quản lý job và dữ liệu
 
 - Job đang chờ có thể **Hủy**. Job đang chạy không bị dừng cưỡng bức để tránh tạo file media hỏng.

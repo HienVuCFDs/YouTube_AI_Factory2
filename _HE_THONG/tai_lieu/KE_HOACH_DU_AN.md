@@ -1448,3 +1448,47 @@ Chạy thật `generate_stock_footage_scene` với prompt *"Earth seen from orbi
 Python compile đạt, JavaScript giao diện parse đạt, **564/564 test đạt** (thêm 30 test cho provider này; `test_subprocess_encoding` tự bắt thêm file mới).
 
 **Ý nghĩa với mục 52:** acceptance "một cảnh động thật → asset → timeline → review" nay chạy được **ngay, không tốn một đồng nào**, không phải chờ credit Flow. Khi Flow có credit trở lại, chỉ việc đổi provider — phần còn lại của chuỗi đã được chứng minh là thông.
+
+## 55. Motion graphics: lấy phần mạnh nhất của OpenMontage vào app (2026-08-29)
+
+Sau khi đối chiếu, chỉ có **hai** thứ OpenMontage mạnh hơn thật sự mà app chưa có: motion graphics và research tra web. Mục này làm cái thứ nhất.
+
+### 55.1 Quyết định: copy code, không gọi qua subprocess
+
+Người dùng chọn copy thẳng vào app. Hệ quả AGPL-3.0 đã ghi rõ trong `_HE_THONG/app/motion_composer/NGUON_GOC.md`: chạy cục bộ cho kênh của mình **không phát sinh nghĩa vụ gì**; nghĩa vụ chỉ kích hoạt khi phân phối app hoặc chạy thành dịch vụ cho người khác.
+
+Copy `remotion-composer/` → `_HE_THONG/app/motion_composer/`: **41 file nguồn** (`src/` chỉ 0,2 MB). `node_modules` 648 MB **không copy** — cài bằng `npm ci` với `package-lock.json` đã kèm, và đã nằm trong `.gitignore`.
+
+Quyết định này hoá ra đúng, vì hai lỗi dưới đây chỉ vá được khi ta sở hữu bản copy.
+
+### 55.2 Hai lỗi phát hiện khi chạy thật
+
+1. **Lỗi upstream: theme không tới được chart.** `Explainer.tsx` truyền `colors`, `title`, `showGrid`, `backgroundColor` cho `BarChart`/`LineChart`/`PieChart`/`KPIGrid` nhưng **không truyền `textColor`**, mà các component này mặc định `textColor = "#1F2937"` (gần đen). Trên theme nền tối, toàn bộ tiêu đề và nhãn trục **vô hình**. Đã vá cả bốn.
+2. **Lỗi do bản vá trên gây ra.** Truyền `textColor` trắng cho `KPIGrid` làm nhãn trắng trên thẻ nền sáng `#F9FAFB` mặc định → lại vô hình. Vá đúng là truyền thêm `cardBackgroundColor={theme.surfaceColor}` để thẻ theo đúng theme.
+
+Ngoài ra `KPIGrid` yêu cầu `value` là **số**; truyền `"$0"` cho ra `NaN`. Ký hiệu tiền phải đi qua trường `prefix`. Đã ghi vào test.
+
+### 55.3 Provider `motion_graphics`
+
+`youtube_monitor/motion_graphics.py` — code của dự án này, giao tiếp với phần React **chỉ qua dòng lệnh `remotion render` và một file props JSON**, không import gì từ nó.
+
+- Mỗi cảnh là một `Cut` với `type` thuộc 11 kiểu: `text_card`, `hero_title`, `stat_card`, `callout`, `comparison`, `bar_chart`, `line_chart`, `pie_chart`, `kpi_grid`, `progress_bar`, `terminal_scene`.
+- Nguồn spec theo thứ tự: JSON trong prompt (Director agent hoặc MCP truyền sẵn) → `set_spec_builder()` do app tiêm (mô phỏng đúng cơ chế `set_prompt_crafter` sẵn có) → cuối cùng là `text_card` từ prose. **Thiếu model thì cảnh xuống cấp, không mất job.**
+- **Luôn ép một theme hợp lệ.** Đây là hàng rào cho lỗi 55.2.1: không có theme thì composition vẽ chữ tối trên nền tối.
+- Composition đệm thêm 1 giây để fade; FFmpeg cắt lại đúng thời lượng cảnh, scale/pad về tỉ lệ dự án, `-an`, encode NVENC khi có.
+
+### 55.4 Không đụng chính sách GPU-only
+
+Lo ngại ở mục 38/54 rằng Remotion sẽ vi phạm GPU-only **không xảy ra**: guard chỉ áp cho job `render`/`source_visuals`/`director_production`, còn đây là **scene job**. Render cuối vẫn là `ffmpeg_builtin` + NVENC. Việc rasterise khung bằng Chrome là CPU và không tránh được, nhưng khâu encode của chính clip này vẫn dùng NVENC.
+
+### 55.5 Nghiệm thu
+
+Chạy thật qua provider: spec `kpi_grid` 3 thẻ → **1280×720 h264, đúng 5,000 giây, 27,8 giây xử lý**, không sót file `.raw`. Kiểm tra khung hình: tiêu đề, số và nhãn đều rõ sau khi vá.
+
+`_VIDEO_CAPABLE_PROVIDERS` suy ra từ gateway nên provider tự lan; dropdown Studio vẫn hardcoded nên đã thêm option + hint thủ công, lần thứ hai gặp đúng cái bẫy mục 48.
+
+Đặt `priority=120` — **thấp hơn cả `stock_footage`**. Nó không cạnh tranh với footage thật: nó vẽ thứ không máy quay nào quay được (biểu đồ đang dựng, con số đang đếm). Director chọn nó theo từng cảnh, không phải để định tuyến mù.
+
+Python compile đạt, `tsc --noEmit` đạt, JavaScript giao diện parse đạt, **593/593 test đạt** (thêm 25 test).
+
+**Còn lại của mục 54.x:** research tra web thật cho Research Agent — prompt hiện cấm bịa số liệu và chỉ liệt kê `facts_to_verify`, chưa hề tra web. Việc này không cần OpenMontage, chỉ mượn cách làm.
