@@ -113,6 +113,17 @@
     .automation-options { display: grid; gap: 8px; align-content: start; padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
     .automation-option { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
     .automation-status { margin-top: 10px; display: grid; gap: 7px; }
+    .trace-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 10px; }
+    .trace-box { border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); padding: 9px 10px; }
+    .trace-box h4 { margin: 0 0 6px; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--cyan); }
+    .trace-line { color: var(--muted); font-size: 10.5px; line-height: 1.55; border-bottom: 1px solid rgba(255,255,255,.05); padding: 3px 0; word-break: break-word; }
+    .trace-line:last-child { border-bottom: 0; }
+    .trace-line b { color: var(--text); font-weight: 650; }
+    .trace-scroll { max-height: 220px; overflow-y: auto; }
+    .provider-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 10.5px; }
+    .provider-row:last-child { border-bottom: 0; }
+    .provider-why { color: var(--muted); font-size: 10px; }
+    @media (max-width: 1100px) { .trace-grid { grid-template-columns: 1fr; } }
     .approval-card { border: 1px solid rgba(245,158,11,.45); border-radius: 8px; background: rgba(245,158,11,.07); padding: 11px 12px; display: grid; gap: 8px; }
     .approval-card.blocking { border-color: rgba(239,68,68,.55); background: rgba(239,68,68,.08); }
     .approval-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -632,6 +643,10 @@
           <div id="automationSummary" class="secondary-text" style="margin-top:8px">Chưa có pipeline đang theo dõi.</div>
           <div id="automationApprovals" class="automation-status"></div>
           <div id="automationStatus" class="automation-status"></div>
+          <div class="trace-grid">
+            <div class="trace-box"><h4>Sự kiện hệ thống</h4><div id="automationEvents" class="trace-scroll"><div class="empty">Chưa có sự kiện.</div></div></div>
+            <div class="trace-box"><h4>Bàn giao giữa các AI (A2A)</h4><div id="automationMessages" class="trace-scroll"><div class="empty">Chưa có bàn giao.</div></div></div>
+          </div>
         </div>
       </section>
 
@@ -645,6 +660,11 @@
           <div id="agentAssignmentsBody" style="margin-top:8px"><div class="empty">Đang tải quy tắc phân công...</div></div>
           <div class="queue-controls" style="margin-top:8px"><button class="btn small primary" type="button" onclick="saveAgentAssignments()">Lưu phân công</button><button class="btn small ghost" type="button" onclick="loadAgentAssignments()">Nạp lại</button></div>
         </div>
+      </section>
+
+      <section id="providerCatalogPanel" class="panel workspace-panel" style="margin-bottom:14px">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">&#9673;</span> KHO PROVIDER &amp; LÝ DO KHOÁ</div><div class="panel-sub">Provider nào đang dùng được, và nếu không thì vì sao. Đây là chỗ trả lời câu "sao không tạo được ảnh/video".</div></div><button class="btn small ghost" type="button" onclick="loadProviderCatalog()">Kiểm tra lại</button></div>
+        <div class="panel-body"><div id="providerCatalogBody"><div class="empty">Đang tải danh mục provider...</div></div></div>
       </section>
 
       <section id="automationPolicyPanel" class="panel workspace-panel" style="margin-bottom:14px">
@@ -930,7 +950,7 @@
     settings: {
       label: 'Cài đặt', eyebrow: 'HỆ THỐNG', title: 'Công cụ, model và kết nối',
       description: 'Kết nối Codex, GPU, Whisper, TTS, FFmpeg và các AI cloud khi cần.',
-      panels: ['automationPipeline', 'orchestratorSettings', 'automationPolicyPanel', 'toolStatusPanel', 'modelCatalogPanel', 'integrations'],
+      panels: ['automationPipeline', 'orchestratorSettings', 'providerCatalogPanel', 'automationPolicyPanel', 'toolStatusPanel', 'modelCatalogPanel', 'integrations'],
     },
   };
 
@@ -1063,6 +1083,64 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  // Why a provider is unusable is the question every stalled run raises.
+  // The catalogue already carries the answer; nothing was reading it.
+  const PROVIDER_BLOCK_REASONS = {
+    gflow_not_logged_in: 'Chưa đăng nhập gflow-cli — chạy `gflow auth login` một lần',
+    browser_extension_not_connected: 'Chưa mở Cốc Cốc với Extension YT Factory',
+    antigravity_sidecar_not_running: 'Antigravity đã đăng nhập nhưng sidecar chưa chạy',
+    antigravity_not_ready: 'Antigravity CLI chưa đăng nhập',
+    missing_api_key: 'Chưa nhập API key trong Kết nối AI',
+    ffmpeg_not_available: 'Không tìm thấy FFmpeg trên máy',
+    paid_api_disabled: 'Bị khoá bởi Automation Policy (API trả phí)',
+    subscription_media_disabled: 'Bị khoá bởi Automation Policy (gói thuê bao)',
+    usage_limit: 'Đã hết hạn mức, chờ tới giờ reset',
+  };
+  const BILLING_LABELS = {subscription: 'gói thuê bao', api: 'API trả phí', local: 'máy của bạn', unknown: 'không rõ'};
+
+  async function loadProviderCatalog() {
+    const target = $('providerCatalogBody');
+    if (!target) return;
+    try {
+      const data = await api('/api/providers/catalog');
+      const rows = (data.providers || []).map((item) => {
+        const runtime = item.runtime || {};
+        const ok = runtime.available !== false;
+        const why = PROVIDER_BLOCK_REASONS[runtime.reason] || runtime.reason || '';
+        const cost = Number(item.estimated_unit_cost || 0);
+        const money = cost > 0 ? `$${cost.toFixed(2)}/cảnh` : 'không tốn thêm';
+        return `<div class="provider-row">
+          <div><b>${esc(item.display_name || item.key)}</b>
+            <div class="provider-why">${esc((item.capabilities || []).join(', '))} · ${esc(BILLING_LABELS[item.billing_mode] || item.billing_mode)} · ${esc(money)}${ok ? '' : ` · ${esc(why)}`}</div>
+          </div>
+          <span class="tag ${ok ? 'green' : 'orange'}">${ok ? 'DÙNG ĐƯỢC' : 'KHOÁ'}</span>
+        </div>`;
+      });
+      target.innerHTML = rows.join('') || '<div class="empty">Chưa đăng ký provider nào.</div>';
+    } catch (error) {
+      target.innerHTML = `<div class="empty">Không tải được danh mục: ${esc(error.message)}</div>`;
+    }
+  }
+
+  function renderAutomationTrace(data) {
+    const eventBox = $('automationEvents');
+    if (eventBox) {
+      const events = [...(data?.events || [])].reverse().slice(0, 60);
+      eventBox.innerHTML = events.map((event) => {
+        const when = String(event.created_at || '').slice(11, 19);
+        return `<div class="trace-line"><b>${esc(event.event_type)}</b> · ${esc(event.source || 'app')} · ${esc(when)}</div>`;
+      }).join('') || '<div class="empty">Chưa có sự kiện.</div>';
+    }
+    const messageBox = $('automationMessages');
+    if (messageBox) {
+      const messages = [...(data?.agent_messages || [])].reverse().slice(0, 60);
+      messageBox.innerHTML = messages.map((message) => {
+        const when = String(message.created_at || '').slice(11, 19);
+        return `<div class="trace-line"><b>${esc(message.sender_agent)} → ${esc(message.recipient_agent)}</b> · ${esc(message.message_type)} · ${esc(when)}</div>`;
+      }).join('') || '<div class="empty">Chưa có bàn giao.</div>';
+    }
+  }
+
   async function loadAutomationStatus(quiet = false) {
     const projectId = Number(state.automationProjectId || 0);
     if (!projectId) return;
@@ -1071,6 +1149,7 @@
       state.automationStatus = data;
       renderAutomationApprovals(data);
       renderAutomationStatus(data);
+      renderAutomationTrace(data);
       if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
     } catch (error) {
       if (!quiet && $('automationSummary')) $('automationSummary').textContent = `Không tải được pipeline: ${error.message}`;
@@ -1550,7 +1629,7 @@
 
   async function reloadClaudeCodeStatus() {
     try {
-      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings(), loadAutomationPolicy()]);
+      await Promise.all([loadIntegrations(), loadToolStatus(), loadOrchestratorSettings(), loadAutomationPolicy(), loadProviderCatalog()]);
       setMessage('Đã kiểm tra lại trạng thái Claude Code CLI.', 'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }

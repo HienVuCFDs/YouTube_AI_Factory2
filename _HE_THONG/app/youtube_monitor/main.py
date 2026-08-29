@@ -6439,9 +6439,13 @@ _AGENT_MEDIA_SCHEMA = {
                 "properties": {
                     "segment_id": {"type": "integer"},
                     "kind": {"type": "string", "enum": ["image", "gif", "video"]},
+                    "treatment": {
+                        "type": "string",
+                        "enum": ["real_world", "data_graphics", "illustration"],
+                    },
                     "reason": {"type": "string"},
                 },
-                "required": ["segment_id", "kind", "reason"],
+                "required": ["segment_id", "kind", "treatment", "reason"],
             },
         }
     },
@@ -6873,8 +6877,12 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         decision = _call_specific_agent_json(
             agent,
             (
-                "Bạn là Media Agent. Với từng scene, chọn image/gif/video. Video tốn credit nên chỉ dùng "
-                "khi chuyển động là phần thiết yếu; infographic hoặc thay đổi ngắn dùng gif; còn lại dùng image. "
+                "Bạn là Media Agent. Với từng scene, chọn 'kind' (image/gif/video) và 'treatment'. "
+                "Video tốn credit nên chỉ dùng khi chuyển động là phần thiết yếu; infographic hoặc thay đổi ngắn dùng gif; còn lại dùng image. "
+                "'treatment' quyết định cảnh được lấy từ đâu: "
+                "- 'data_graphics': cảnh trình bày số liệu, so sánh, quy trình, khái niệm trừu tượng (bảo mật, sao lưu, hiệu suất). App sẽ VẼ biểu đồ và thẻ số động. Không kho tư liệu nào quay được một khái niệm, còn AI tạo ảnh thì bịa ra số liệu sai. "
+                "- 'real_world': cảnh có thật quay được — địa danh, vũ trụ, tư liệu lịch sử, đời sống thường ngày. "
+                "- 'illustration': cảnh cần hình vẽ minh hoạ nhân vật hoặc bối cảnh tưởng tượng. "
                 "Giữ nguyên segment_id và trả JSON đúng schema."
             ),
             json.dumps(
@@ -6894,18 +6902,29 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
                 continue
             segment_id = int(item["segment_id"])
             kind = str(item.get("kind") or "image")
+            treatment = str(item.get("treatment") or "illustration")
+            if treatment == "data_graphics":
+                # Only a renderer can draw a chart that is actually correct.
+                # An image model asked for one returns a picture of a chart
+                # with invented numbers, and an archive has no footage of a
+                # concept at all — a real run scored one such scene 1/10.
+                kind = "video"
             capability = {"image": SCENE_IMAGE, "gif": SCENE_ANIMATED_IMAGE, "video": SCENE_VIDEO}[kind]
+            preferred = {
+                "data_graphics": ("motion_graphics",),
+                "real_world": ("stock_footage", "gflow_cli"),
+            }.get(treatment, ())
             database.set_segment_visual_kind(
                 segment_id,
                 kind,
                 fps=8 if kind == "gif" else 0,
-                reason=str(item.get("reason") or "Media Agent routing"),
+                reason=f"{item.get('reason') or 'Media Agent routing'} [{treatment}]",
             )
             try:
                 route = scene_provider_gateway.route(
                     capability,
                     provider_states=states,
-                    policy=_billing_route_policy(),
+                    policy=_billing_route_policy(preferred=preferred),
                 )
                 provider = route.selected.key
                 route_record = database.record_provider_route(
@@ -6919,12 +6938,16 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
                 assignments.append({
                     "segment_id": segment_id,
                     "kind": kind,
+                    "treatment": treatment,
                     "provider": provider,
                     "route_id": route_record["id"],
                     "reason": str(item.get("reason") or ""),
                 })
             except Exception as exc:
-                assignments.append({"segment_id": segment_id, "kind": kind, "provider": "", "error": str(exc)})
+                assignments.append({
+                    "segment_id": segment_id, "kind": kind, "treatment": treatment,
+                    "provider": "", "error": str(exc),
+                })
 
         pipeline_options = dict(payload.get("pipeline") or {})
         queued_jobs: list[int] = []

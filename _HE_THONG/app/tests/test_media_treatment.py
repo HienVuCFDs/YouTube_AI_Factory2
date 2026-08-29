@@ -1,0 +1,124 @@
+"""The Media Agent must say what a scene needs, not only how long it runs.
+
+A real run routed a scene about backing up data to the open-footage
+provider, which scored 1/10: no archive holds footage of a concept, and an
+image model asked for a chart invents the numbers on it.
+"""
+
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from youtube_monitor import main
+
+PAGE = Path(__file__).resolve().parent.parent / "youtube_monitor" / "templates" / "index.html"
+
+
+@pytest.fixture(scope="module")
+def page() -> str:
+    return PAGE.read_text(encoding="utf-8")
+
+
+class MediaSchemaTests(unittest.TestCase):
+    def test_the_agent_must_state_a_treatment(self) -> None:
+        item = main._AGENT_MEDIA_SCHEMA["properties"]["scenes"]["items"]
+        self.assertIn("treatment", item["properties"])
+        self.assertIn("treatment", item["required"])
+
+    def test_the_three_treatments_are_the_ones_routing_understands(self) -> None:
+        item = main._AGENT_MEDIA_SCHEMA["properties"]["scenes"]["items"]
+        self.assertEqual(
+            set(item["properties"]["treatment"]["enum"]),
+            {"real_world", "data_graphics", "illustration"},
+        )
+
+
+class MediaRoutingByTreatmentTests(unittest.TestCase):
+    def _run_media(self, scenes: list[dict], timeline: list[dict]) -> dict:
+        routes: list[dict] = []
+
+        def fake_route(capability, provider_states=None, policy=None):
+            routes.append({"capability": capability, "preferred": policy.preferred})
+            selected = mock.Mock()
+            selected.key = (policy.preferred or ("gflow_cli",))[0]
+            selected.estimated_unit_cost = 0
+            return mock.Mock(selected=selected, candidates=[], reason="test")
+
+        task = {"project_id": 1, "role": "media", "input": {"pipeline": {}}, "correlation_id": ""}
+        with mock.patch.object(main, "_call_specific_agent_json", return_value={"scenes": scenes}):
+            with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "title": "T"}):
+                with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 1}):
+                    with mock.patch.object(main.database, "list_project_timeline", return_value=timeline):
+                        with mock.patch.object(main.database, "set_segment_visual_kind"):
+                            with mock.patch.object(main.database, "record_provider_route", return_value={"id": 1}):
+                                with mock.patch.object(main.scene_provider_gateway, "route", side_effect=fake_route):
+                                    with mock.patch.object(main, "_provider_runtime_states", return_value={}):
+                                        result = main._execute_agent_task(task, "codex_cli")
+        return {"result": result, "routes": routes}
+
+    def _timeline(self) -> list[dict]:
+        return [{"id": 7, "voice_text": "loi thoai", "visual_prompt": "mo ta", "duration_seconds": 6}]
+
+    def test_a_concept_scene_is_drawn_rather_than_searched_for(self) -> None:
+        scenes = [{"segment_id": 7, "kind": "image", "treatment": "data_graphics", "reason": "khai niem"}]
+        outcome = self._run_media(scenes, self._timeline())
+        route = outcome["routes"][0]
+        # Forced to video: motion graphics is the only capability that draws.
+        self.assertEqual(route["capability"], main.SCENE_VIDEO)
+        self.assertEqual(route["preferred"], ("motion_graphics",))
+        self.assertEqual(outcome["result"]["assignments"][0]["provider"], "motion_graphics")
+
+    def test_a_real_world_scene_prefers_real_footage(self) -> None:
+        scenes = [{"segment_id": 7, "kind": "video", "treatment": "real_world", "reason": "co that"}]
+        outcome = self._run_media(scenes, self._timeline())
+        self.assertEqual(outcome["routes"][0]["preferred"], ("stock_footage", "gflow_cli"))
+
+    def test_an_illustration_scene_leaves_the_choice_to_the_gateway(self) -> None:
+        scenes = [{"segment_id": 7, "kind": "image", "treatment": "illustration", "reason": "ve minh hoa"}]
+        outcome = self._run_media(scenes, self._timeline())
+        route = outcome["routes"][0]
+        self.assertEqual(route["capability"], main.SCENE_IMAGE)
+        self.assertEqual(route["preferred"], ())
+
+    def test_the_treatment_is_recorded_so_a_bad_call_can_be_traced(self) -> None:
+        scenes = [{"segment_id": 7, "kind": "video", "treatment": "real_world", "reason": "co that"}]
+        outcome = self._run_media(scenes, self._timeline())
+        self.assertEqual(outcome["result"]["assignments"][0]["treatment"], "real_world")
+
+    def test_a_missing_treatment_does_not_break_the_scene(self) -> None:
+        scenes = [{"segment_id": 7, "kind": "image", "reason": "khong khai"}]
+        outcome = self._run_media(scenes, self._timeline())
+        self.assertEqual(outcome["result"]["assignments"][0]["treatment"], "illustration")
+
+
+def test_the_prompt_teaches_the_rule_the_run_discovered(page: str) -> None:
+    source = (Path(__file__).resolve().parent.parent / "youtube_monitor" / "main.py").read_text(encoding="utf-8")
+    assert "data_graphics" in source
+    assert "bịa ra số liệu sai" in source
+
+
+def test_the_page_shows_the_event_log_and_the_a2a_handoffs(page: str) -> None:
+    assert 'id="automationEvents"' in page
+    assert 'id="automationMessages"' in page
+    assert "renderAutomationTrace(data);" in page
+
+
+def test_the_page_explains_why_a_provider_is_locked(page: str) -> None:
+    assert 'id="providerCatalogPanel"' in page
+    assert "/api/providers/catalog" in page
+    for reason in (
+        "gflow_not_logged_in",
+        "browser_extension_not_connected",
+        "antigravity_sidecar_not_running",
+        "missing_api_key",
+    ):
+        assert reason in page
+
+
+if __name__ == "__main__":
+    unittest.main()

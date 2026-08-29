@@ -1492,3 +1492,47 @@ Chạy thật qua provider: spec `kpi_grid` 3 thẻ → **1280×720 h264, đúng
 Python compile đạt, `tsc --noEmit` đạt, JavaScript giao diện parse đạt, **593/593 test đạt** (thêm 25 test).
 
 **Còn lại của mục 54.x:** research tra web thật cho Research Agent — prompt hiện cấm bịa số liệu và chỉ liệt kê `facts_to_verify`, chưa hề tra web. Việc này không cần OpenMontage, chỉ mượn cách làm.
+
+## 56. Chạy thật lần đầu toàn tuyến WF Content, và những gì nó lộ ra (2026-08-30)
+
+Lần đầu chạy pipeline đa AI **có tạo media** trên project 42 (một yêu cầu cấp cao: video 3 cảnh về sao lưu dữ liệu).
+
+### 56.1 Chạy được tới đâu
+
+Research → Script → Director → Media đều `completed`, executor Codex. Media Agent tự tạo 4 scene job; worker chạy; **3/3 cảnh có hình thật và có giọng đọc**. Vision review chấm từng cảnh và bắt lỗi thật (1/10, 5/10, 8/10) rồi tự tạo lại. Nghiệm thu chéo hoạt động: Claude Code chấm báo cáo QC của Codex 6/10 → dưới ngưỡng 8 → trả task về → hết lượt → `failed`. Toàn bộ là hành vi đúng.
+
+### 56.2 Ba lỗi chỉ lộ ra khi chạy
+
+1. **Job giao cho worker không tồn tại.** Media Agent giao 3 cảnh cho `antigravity_image` — provider chạy qua sidecar — trong khi không sidecar nào poll. Job nằm `queued` vĩnh viễn, **không có lỗi ở bất cứ đâu**. Gateway coi nó sẵn sàng chỉ vì CLI đã đăng nhập. Tín hiệu `_sidecar_last_seen` đã tồn tại và `/api/scene-sidecar-status` vẫn dùng; chỉ hàm định tuyến là không hỏi. Đã sửa.
+2. **QC kêu sai.** Bản vá QC mục 55 truyền cả `build_quality_report()` cho agent, nên nó liệt kê "chưa có final.mp4", "chưa có thumbnail", "chưa mã hoá GPU" thành lỗi — đều đúng nhưng vô nghĩa ở thời điểm QC đang quyết định *có nên render hay không*. Reviewer bác đúng vì lý do đó. Nay chỉ 4 check trước-render tới được agent.
+3. **`set_spec_builder` của motion graphics không ai gọi** — phát hiện khi đối chiếu, đã sửa ở mục 55.
+
+Ngoài ra `$PARAMETER_NAME` xuất hiện trong kết quả review của Claude Code: model tự sinh thêm key, không có trong code ta, vô hại vì ta chỉ đọc `approved`/`score`/`note`.
+
+### 56.3 Media Agent nay chọn theo tính chất cảnh
+
+`stock_footage` bị chấm **1/10** cho cảnh "vì sao nên sao lưu dữ liệu". Đó là giới hạn thật: **không kho tư liệu nào quay được một khái niệm**, còn AI tạo ảnh thì bịa ra số liệu sai trên biểu đồ.
+
+Schema Media Agent thêm trường bắt buộc `treatment`:
+
+| treatment | Nghĩa | Định tuyến |
+|---|---|---|
+| `data_graphics` | số liệu, so sánh, quy trình, khái niệm trừu tượng | **ép sang video** và ưu tiên `motion_graphics` — chỉ renderer mới vẽ được biểu đồ đúng |
+| `real_world` | địa danh, vũ trụ, tư liệu lịch sử, đời sống | ưu tiên `stock_footage`, rồi `gflow_cli` |
+| `illustration` | nhân vật, bối cảnh tưởng tượng | để gateway tự chấm điểm |
+
+`treatment` được ghi vào assignment để truy vết khi agent chọn sai.
+
+### 56.4 Ba panel đọc dữ liệu vốn đã có
+
+`/api/automation/projects/{id}` trả 11 khối, giao diện chỉ dùng 2. Nay thêm:
+
+- **Sự kiện hệ thống** — Event Bus, mục 8 của brief, trước đây không có chỗ nào xem
+- **Bàn giao giữa các AI (A2A)** — mục 3 của brief
+- **Kho provider & lý do khoá** — trả lời thẳng câu "sao không tạo được ảnh/video", dịch mã lý do sang tiếng Việt (`gflow_not_logged_in`, `antigravity_sidecar_not_running`…). Hôm qua chính người viết phải gọi API bằng tay mới biết điều này.
+
+Không tốn thêm request nào; dữ liệu đã nằm trong response.
+
+Nghiệm thu: Python compile đạt, JavaScript giao diện parse đạt, **623/623 test đạt**.
+
+**Còn lại:** QC duyệt → render → `final.mp4` cho WF Content chưa chạy tới; trần chi phí và cơ chế pause chưa kích hoạt thật lần nào; Research Agent vẫn không tra web (brief mục 3 yêu cầu); `main.py` 7533 dòng.
