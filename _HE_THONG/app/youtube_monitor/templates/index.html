@@ -113,6 +113,13 @@
     .automation-options { display: grid; gap: 8px; align-content: start; padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
     .automation-option { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
     .automation-status { margin-top: 10px; display: grid; gap: 7px; }
+    .approval-card { border: 1px solid rgba(245,158,11,.45); border-radius: 8px; background: rgba(245,158,11,.07); padding: 11px 12px; display: grid; gap: 8px; }
+    .approval-card.blocking { border-color: rgba(239,68,68,.55); background: rgba(239,68,68,.08); }
+    .approval-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .approval-title { font-size: 12px; font-weight: 700; color: var(--text); }
+    .approval-detail { color: var(--muted); font-size: 11px; line-height: 1.5; word-break: break-word; }
+    .approval-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .approval-actions input { flex: 1; min-width: 200px; }
     .automation-task { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
     .automation-task-role { color: var(--cyan); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
     .automation-task-meta { color: var(--muted); font-size: 10px; margin-top: 3px; }
@@ -623,6 +630,7 @@
             </div>
           </div>
           <div id="automationSummary" class="secondary-text" style="margin-top:8px">Chưa có pipeline đang theo dõi.</div>
+          <div id="automationApprovals" class="automation-status"></div>
           <div id="automationStatus" class="automation-status"></div>
         </div>
       </section>
@@ -980,12 +988,88 @@
     }).join('') || '<div class="empty">Orchestrator đang tạo Research task đầu tiên...</div>';
   }
 
+  // A pending approval is not a notice: `_automation_pause_active()` refuses to
+  // queue any further media while one is open, so without a control here the
+  // pipeline stays parked forever.
+  const APPROVAL_LABELS = {
+    provider_exhausted: 'Hết provider khả dụng',
+    budget_exceeded: 'Chạm trần chi phí',
+    final_publish: 'QC đã đạt — chờ bạn duyệt cuối',
+    pipeline_exception: 'Pipeline chưa hoàn tất',
+  };
+  const BLOCKING_APPROVALS = ['provider_exhausted', 'budget_exceeded'];
+
+  function approvalDetailText(approval) {
+    const payload = approval.payload || {};
+    const lines = [];
+    if (payload.detail) lines.push(String(payload.detail));
+    if (payload.error) lines.push(`Lỗi: ${payload.error}`);
+    if (payload.capability) lines.push(`Loại media: ${payload.capability}`);
+    if (payload.failed_provider) lines.push(`Provider lỗi: ${payload.failed_provider}`);
+    if (payload.blocked_provider) lines.push(`Provider bị chặn: ${payload.blocked_provider}`);
+    if (payload.score !== undefined && payload.score !== null) lines.push(`Điểm QC: ${payload.score}`);
+    const issues = payload.issues || [];
+    if (issues.length) lines.push(`Vấn đề: ${issues.slice(0, 5).join(' · ')}`);
+    return lines.join(' · ');
+  }
+
+  function renderAutomationApprovals(data) {
+    const target = $('automationApprovals');
+    if (!target) return;
+    const pending = (data?.approvals || []).filter((item) => item.status === 'pending');
+    if (!pending.length) { target.innerHTML = ''; return; }
+    target.innerHTML = pending.map((approval) => {
+      const kind = String(approval.approval_type || '');
+      const blocking = BLOCKING_APPROVALS.includes(kind);
+      const label = APPROVAL_LABELS[kind] || kind;
+      const detail = approvalDetailText(approval);
+      return `<div class="approval-card ${blocking ? 'blocking' : ''}">
+        <div class="approval-head">
+          <span class="tag ${blocking ? 'red' : 'orange'}">${esc(label)}</span>
+          <span class="approval-title">${esc(approval.title || label)}</span>
+        </div>
+        ${detail ? `<div class="approval-detail">${esc(detail)}</div>` : ''}
+        <div class="approval-actions">
+          <input id="approvalNote${approval.id}" type="text" placeholder="Ghi chú cho AI (bắt buộc khi yêu cầu sửa)" />
+          <select id="approvalRole${approval.id}" aria-label="Chạy lại từ vai">
+            <option value="media">Chạy lại từ Media</option>
+            <option value="director">Chạy lại từ Director</option>
+            <option value="script">Chạy lại từ Script</option>
+            <option value="research">Chạy lại từ Research</option>
+            <option value="qc">Chạy lại từ QC</option>
+          </select>
+          <button class="btn small primary" type="button" onclick="decideApproval(${approval.id}, 'approved')">Duyệt</button>
+          <button class="btn small" type="button" onclick="decideApproval(${approval.id}, 'changes_requested')">Yêu cầu sửa</button>
+          <button class="btn small ghost" type="button" onclick="decideApproval(${approval.id}, 'dismissed')">Bỏ qua</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  async function decideApproval(approvalId, decision) {
+    const note = $(`approvalNote${approvalId}`)?.value?.trim() || '';
+    const resumeRole = $(`approvalRole${approvalId}`)?.value || 'media';
+    if (decision === 'changes_requested' && !note) {
+      setMessage('Hãy ghi rõ cần sửa gì trước khi giao lại cho AI.', 'error');
+      return;
+    }
+    try {
+      await api(`/api/automation/approvals/${approvalId}/decision`, {
+        method: 'POST',
+        body: JSON.stringify({decision, note, resume_role: resumeRole}),
+      });
+      setMessage('Đã ghi quyết định. Pipeline được mở lại.', 'success');
+      await loadAutomationStatus();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function loadAutomationStatus(quiet = false) {
     const projectId = Number(state.automationProjectId || 0);
     if (!projectId) return;
     try {
       const data = await api(`/api/automation/projects/${projectId}`);
       state.automationStatus = data;
+      renderAutomationApprovals(data);
       renderAutomationStatus(data);
       if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
     } catch (error) {
