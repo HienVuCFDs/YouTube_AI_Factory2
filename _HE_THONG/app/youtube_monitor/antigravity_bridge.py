@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import operations, settings
+from .status_cache import BackgroundStatus
 
 
 class AntigravityBridgeError(RuntimeError):
@@ -24,19 +25,14 @@ def _antigravity_environment() -> dict[str, str]:
 # resource contention that it was starving the actual sidecar's own agy
 # calls. A short TTL keeps the status reasonably fresh without re-spawning a
 # process on every poll.
-_status_cache: dict[str, Any] | None = None
-_status_cache_at = 0.0
-_STATUS_CACHE_TTL_SECONDS = 20.0
+# A TTL alone still made whichever request landed on the expiry pay the whole
+# probe, several at once, each holding a worker thread. The cached answer now
+# goes back immediately and the refresh happens off the request path.
+_status = BackgroundStatus(lambda: _antigravity_cli_status_uncached(), ttl_seconds=20.0)
 
 
-def antigravity_cli_status() -> dict[str, Any]:
-    global _status_cache, _status_cache_at
-    now = time.monotonic()
-    if _status_cache is not None and (now - _status_cache_at) < _STATUS_CACHE_TTL_SECONDS:
-        return _status_cache
-    result = _antigravity_cli_status_uncached()
-    _status_cache, _status_cache_at = result, now
-    return result
+def antigravity_cli_status(*, force: bool = False) -> dict[str, Any]:
+    return _status.get(force=force)
 
 
 def _antigravity_cli_status_uncached() -> dict[str, Any]:
@@ -61,6 +57,16 @@ def _antigravity_cli_status_uncached() -> dict[str, Any]:
             check=False,
             env=_antigravity_environment(),
         )
+    except subprocess.TimeoutExpired:
+        # `agy models` can sit for the full timeout when the machine is busy.
+        # Raising here reached the page as a 500 on a status check; the honest
+        # answer is that we could not tell, not that everything is broken.
+        return {
+            "installed": True,
+            "logged_in": False,
+            "path": executable,
+            "detail": "Antigravity CLI khong tra loi trong 20 giay, chua xac dinh duoc trang thai dang nhap",
+        }
     except OSError as exc:
         return {
             "installed": False,
