@@ -271,3 +271,34 @@ class ShortIsReachableFromThePageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortRenderIsQueuedCorrectlyTests(unittest.TestCase):
+    """The button sent confirmation as a query parameter, so every press came
+    back "job needs confirmed=true" and no short was ever rendered."""
+
+    def setUp(self) -> None:
+        self.page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+
+    def test_confirmation_travels_in_the_body_where_the_model_reads_it(self) -> None:
+        self.assertIn("job_type: 'render_short', provider: 'ffmpeg_builtin', confirmed: true", self.page)
+        self.assertNotIn("/jobs?confirmed=true", self.page)
+
+    def test_the_request_carries_only_fields_the_model_declares(self) -> None:
+        from youtube_monitor.main import CreateProductionJobRequest
+
+        allowed = set(CreateProductionJobRequest.model_fields)
+        self.assertIn("confirmed", allowed)
+        self.assertNotIn("script_id", allowed)
+        start = self.page.index("async function queueShortRender")
+        body = self.page[start:start + 1600]
+        self.assertNotIn("script_id", body)
+
+    def test_it_plans_the_short_when_none_exists_yet(self) -> None:
+        """Rendering without a plan could only ever fail in the worker."""
+        start = self.page.index("async function queueShortRender")
+        body = self.page[start:start + 1600]
+        self.assertIn("/short/plan", body)

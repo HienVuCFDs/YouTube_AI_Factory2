@@ -1452,12 +1452,28 @@
   async function queueShortRender() {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
     if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
-    const script = state.scriptId || (await api(`/api/projects/${projectId}/scripts`).catch(() => null))?.[0]?.id;
-    if (!script) { setMessage('Dự án chưa có kịch bản đã duyệt.', 'error'); return; }
+    // The render needs a plan to know which scenes to use. Making one here
+    // when there is none saves a job that could only fail.
+    let short = null;
     try {
-      await api(`/api/projects/${projectId}/jobs?confirmed=true`, {
+      short = (await api(`/api/projects/${projectId}/short`))?.short || null;
+    } catch (_) { short = null; }
+    if (!short) {
+      setMessage('Chưa có kịch bản video ngắn — đang lên kế hoạch trước...', '');
+      try {
+        const planned = await api(`/api/projects/${projectId}/short/plan`, {
+          method: 'POST',
+          body: JSON.stringify({profile: $('studioShortProfile')?.value || 'youtube_shorts', use_model: true}),
+        });
+        renderShortSummary(planned.short, planned);
+      } catch (error) { setMessage(`Không lên được kịch bản video ngắn: ${error.message}`, 'error'); return; }
+    }
+    try {
+      // `confirmed` is a field of the request, not a query parameter, and the
+      // endpoint takes the project's latest script itself.
+      await api(`/api/projects/${projectId}/jobs`, {
         method: 'POST',
-        body: JSON.stringify({job_type: 'render_short', provider: 'ffmpeg_builtin', script_id: script}),
+        body: JSON.stringify({job_type: 'render_short', provider: 'ffmpeg_builtin', confirmed: true}),
       });
       setMessage('Đã đưa video ngắn vào hàng đợi dựng.', 'success');
       await loadProductionQueueStatus?.();
