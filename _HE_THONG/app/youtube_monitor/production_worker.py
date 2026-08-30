@@ -20,6 +20,7 @@ from .project_layout import ensure_project_layout
 from .quality_check import build_quality_report, quality_report_markdown
 from .openmontage_adapter import OpenMontageAdapter
 from .settings import GPU_DEVICE_INDEX, GPU_ONLY
+from .burned_in_marks import MarkDetectionError, detect_burned_in_marks
 from .shot_planner import is_section_heading
 from .source_visuals import SourceVisualError, prepare_source_visuals
 from .timeline_builder import timeline_to_manifest
@@ -615,6 +616,48 @@ def run_source_visuals_job(
     return str(layout["assets"] / "source_clips")
 
 
+def _autocover_source_marks(
+    database: Database,
+    project: dict[str, Any],
+    script: dict[str, Any],
+    timeline: list[dict[str, Any]],
+    ffmpeg_binary: str,
+) -> list[dict[str, Any]]:
+    """Blur the source's own subtitles and logo without being asked.
+
+    Every clip in a reup is cut from one film, so whatever that film burns
+    into its picture is on all of them. It used to be the edit planner's job
+    to say so, but the planner was given the scene's words and never a frame,
+    and a model with no picture cannot report a mark it has not seen - so
+    nothing was ever marked and every finished video carried the source's
+    subtitles under the new narration.
+
+    Measuring it is both possible and cheap, so it happens by default. A
+    marking already on the timeline is left alone, whether it came from the
+    user, the planner or an earlier render.
+    """
+    if any(str(item.get("edit_cleanups") or "").strip() not in {"", "[]"} for item in timeline):
+        return timeline
+    video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    source_path = Path(str(video.get("local_media_path") or ""))
+    if not source_path.is_file():
+        # An AI-generated project draws its own pictures; there is no source
+        # film underneath to carry anyone else's marks.
+        return timeline
+    try:
+        marks = detect_burned_in_marks(source_path, ffmpeg_binary=ffmpeg_binary)
+    except (MarkDetectionError, OSError, ValueError):
+        return timeline
+    if not marks:
+        return timeline
+    database.set_timeline_cleanups(
+        int(project["id"]), marks, script_id=int(script["id"]) if script else None
+    )
+    return database.list_project_timeline(
+        int(project["id"]), script_id=int(script["id"]) if script else None
+    )
+
+
 def run_render_job(
     database: Database,
     job: dict[str, Any],
@@ -625,6 +668,10 @@ def run_render_job(
 ) -> str:
     project, script, timeline = _context(database, job)
     provider = str(job["provider"]).strip().lower()
+    if provider not in {"dry_run", "preview", "mock"}:
+        timeline = _autocover_source_marks(
+            database, project, script, timeline, ffmpeg_binary
+        )
     layout = ensure_project_layout(artifact_root, project["id"])
     project_dir = layout["work"] / "render"
     project_dir.mkdir(parents=True, exist_ok=True)

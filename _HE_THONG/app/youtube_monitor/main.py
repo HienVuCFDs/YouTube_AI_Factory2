@@ -117,6 +117,7 @@ from .settings import (
     YOUTUBE_PUSH_VERIFY_TOKEN,
 )
 from .script_builder import build_script_draft, script_to_markdown
+from .burned_in_marks import MarkDetectionError, detect_burned_in_marks
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
 from .transcriber import (
@@ -3158,6 +3159,20 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    # The planner is asked about the source's own marks, but it is asked in
+    # words - it holds the scene's dialogue and a sentence of style, never a
+    # frame. It answers, correctly, that it has seen no logo and no burned-in
+    # subtitle, which is why running the plan never cleaned anything. So the
+    # picture is measured instead, and what is measured outranks what was
+    # guessed: measurement also gives the rectangle, which a guess cannot.
+    measured: list[dict[str, Any]] = []
+    source_media = Path(str((source_video or {}).get("local_media_path") or ""))
+    if source_media.is_file():
+        try:
+            measured = detect_burned_in_marks(source_media, ffmpeg_binary=FFMPEG_BINARY)
+        except (MarkDetectionError, OSError, ValueError):
+            measured = []
+
     by_index = {int(segment.get("segment_index") or 0): segment for segment in timeline}
     planned: list[dict[str, Any]] = []
     for entry in result.get("scenes") or []:
@@ -3166,7 +3181,9 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             continue
         transition = str(entry.get("transition") or "fade")
         effect = str(entry.get("effect") or "zoom_in")
-        cleanups = [item for item in (entry.get("cleanups") or []) if isinstance(item, dict)]
+        cleanups = measured or [
+            item for item in (entry.get("cleanups") or []) if isinstance(item, dict)
+        ]
         database.save_segment_edit(
             int(segment["id"]), transition, effect, str(entry.get("note") or ""),
             trim_head_seconds=float(entry.get("trim_head_seconds") or 0),
@@ -7570,6 +7587,9 @@ class TimelineCleanupRequest(BaseModel):
     ] = "bottom_center"
     method: Literal["blur", "crop"] = "blur"
     clear: bool = False
+    # Measuring the source beats naming a preset: a subtitle burned higher
+    # than usual falls outside every preset box.
+    detect: bool = False
 
 
 @app.post("/api/projects/{project_id}/timeline/cleanups")
@@ -7579,17 +7599,36 @@ def set_timeline_cleanups(project_id: int, payload: TimelineCleanupRequest) -> d
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     script = database.get_latest_project_script(project_id)
-    cleanups: list[dict[str, Any]] = (
-        [] if payload.clear else [{"position": payload.position, "method": payload.method}]
-    )
-    changed = database.set_timeline_cleanups(
-        project_id, cleanups, script_id=int(script["id"]) if script else None
-    )
-    return {
-        "status": "cleared" if payload.clear else "saved",
-        "segments": changed,
-        "cleanups": cleanups,
-    }
+    script_id = int(script["id"]) if script else None
+
+    if payload.clear:
+        # Not an empty list: a render with nothing marked now measures the
+        # source and covers what it finds, and an empty list is exactly the
+        # state it reads as "nobody has decided yet". Turning covering off has
+        # to say so, or the next render would quietly turn it back on.
+        cleanups: list[dict[str, Any]] = [{"kind": "none", "source": "user_cleared"}]
+        status = "cleared"
+    elif payload.detect:
+        video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+        source_path = Path(str(video.get("local_media_path") or ""))
+        if not source_path.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail="Chưa có video nguồn trên máy để dò. Hãy tải video nguồn trước.",
+            )
+        try:
+            cleanups = detect_burned_in_marks(source_path, ffmpeg_binary=FFMPEG_BINARY)
+        except MarkDetectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not cleanups:
+            return {"status": "nothing_found", "segments": 0, "cleanups": []}
+        status = "detected"
+    else:
+        cleanups = [{"position": payload.position, "method": payload.method}]
+        status = "saved"
+
+    changed = database.set_timeline_cleanups(project_id, cleanups, script_id=script_id)
+    return {"status": status, "segments": changed, "cleanups": cleanups}
 
 
 @app.get("/api/projects/{project_id}/short")

@@ -85,7 +85,7 @@ def test_every_part_of_one_scenes_plan_lands_together(clip, tmp_path) -> None:
 
     assert "fade=" in graph
     assert "zoompan" in graph
-    assert "boxblur" in graph
+    assert "gblur" in graph
     assert args.index("-ss") < args.index("-i")
 
 

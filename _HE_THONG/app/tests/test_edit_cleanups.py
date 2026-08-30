@@ -51,7 +51,7 @@ def test_the_blur_graph_splits_crops_and_lays_the_copy_back() -> None:
     graph = _compose_video_graph([], blurs, AFTER)
 
     assert graph.startswith("split[base][b0]")
-    assert "crop=" in graph and "boxblur=" in graph and "overlay=" in graph
+    assert "crop=" in graph and "gblur=" in graph and "overlay=" in graph
     assert graph.endswith(",".join(AFTER)), "phan con lai cua chuoi phai chay tiep sau overlay"
 
 
@@ -278,7 +278,27 @@ class CleanupIsReachableFromTheStoryboardTests(unittest.TestCase):
         self.assertIn("applyTimelineCleanup(true)", self.page)
 
     def test_it_says_what_happens_when_nothing_is_marked(self) -> None:
-        self.assertIn("render sẽ giữ nguyên phụ đề và logo", self.page)
+        """Nothing marked no longer means nothing covered.
+
+        Leaving it unmarked was the normal case, not the rare one - the only
+        way to mark anything was a planning step that could not see the
+        picture - so an unmarked timeline now has the source measured at
+        render time, and the storyboard has to say so rather than warn that
+        the marks will survive.
+        """
+        self.assertIn("tự đo trên video gốc", self.page)
+
+    def test_turning_covering_off_is_its_own_state(self) -> None:
+        """Otherwise the next render would quietly switch it back on.
+
+        An empty cleanup list is what an untouched project looks like, and
+        that is exactly the state auto-covering acts on. A deliberate "leave
+        the picture alone" has to be distinguishable from it.
+        """
+        self.assertIn("Đã tắt che", self.page)
+
+    def test_the_storyboard_can_ask_for_a_measurement(self) -> None:
+        self.assertIn("detectTimelineCleanup()", self.page)
 
     def test_the_endpoint_exists(self) -> None:
         from youtube_monitor.main import app

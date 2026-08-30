@@ -262,9 +262,42 @@ _MARK_BOXES: dict[str, tuple[float, float, float, float]] = {
     "full": (0.0, 0.0, 1.0, 1.0),
 }
 
-# Strong enough that letterforms stop resolving, not so strong that the patch
-# reads as a grey rectangle laid over the picture.
-_BLUR = r"boxblur=luma_radius=min(w\,h)/8:luma_power=2:chroma_radius=min(cw\,ch)/8:chroma_power=2"
+# boxblur caps its radius against the plane it is given - on a subtitle band,
+# which is wide and only a few dozen rows tall, the chroma cap lands around 16
+# and FFmpeg refuses anything larger. Blurring a whole line of type at that
+# radius smeared the letters without destroying them: CJK subtitles stayed
+# legible through it. gblur takes a sigma with no such ceiling.
+_BLUR_FALLBACK = "gblur=sigma=16:steps=3"
+
+
+def _blur_filter(region_width: float, region_height: float) -> str:
+    """A blur sized to the region, strong enough that type stops resolving.
+
+    Fixed strength cannot work: the same band is 40 pixels tall on a 480p
+    source and 160 on a 4K one. Tied to the shorter side of the region, a
+    subtitle dissolves at any resolution without the patch reading as a plain
+    grey rectangle laid over the picture.
+    """
+    shorter = min(float(region_width), float(region_height))
+    if shorter <= 0:
+        return _BLUR_FALLBACK
+    sigma = max(6.0, min(shorter / 2.5, 120.0))
+    return f"gblur=sigma={sigma:.1f}:steps=3"
+
+
+def _explicit_box(value: Any) -> tuple[float, float, float, float] | None:
+    """A cleanup's own rectangle, as fractions of the frame, if it has one."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x, y, w, h = (float(part) for part in value)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    x = min(max(x, 0.0), 1.0)
+    y = min(max(y, 0.0), 1.0)
+    return x, y, min(w, 1.0 - x), min(h, 1.0 - y)
 
 
 def _cleanup_filters(
@@ -288,7 +321,13 @@ def _cleanup_filters(
     for cleanup in cleanups:
         if not isinstance(cleanup, dict):
             continue
-        box = _MARK_BOXES.get(str(cleanup.get("position") or "").strip().lower())
+        # A measured box beats a named one. The presets are guesses at where a
+        # mark usually sits, and a subtitle that a source burns higher than
+        # usual falls outside them entirely - blurring the preset then covers
+        # clean picture and leaves the lettering legible.
+        box = _explicit_box(cleanup.get("box")) or _MARK_BOXES.get(
+            str(cleanup.get("position") or "").strip().lower()
+        )
         if not box:
             continue
         fx, fy, fw, fh = box
@@ -318,6 +357,7 @@ def _compose_video_graph(
     before: list[str],
     blurs: list[tuple[float, float, float, float]],
     after: list[str],
+    frame_size: tuple[int, int] | None = None,
 ) -> str:
     """One filtergraph for -vf, blurred regions and all.
 
@@ -332,10 +372,11 @@ def _compose_video_graph(
     split = "split" if branches == 2 else f"split={branches}"
     head = ",".join([*before, split])
     chains = [head + "[base]" + "".join(f"[b{i}]" for i in range(len(blurs)))]
+    frame_width, frame_height = frame_size or (1920, 1080)
     for index, (fx, fy, fw, fh) in enumerate(blurs):
         chains.append(
             f"[b{index}]crop=w=iw*{fw:.4f}:h=ih*{fh:.4f}:x=iw*{fx:.4f}:y=ih*{fy:.4f},"
-            f"{_BLUR}[f{index}]"
+            f"{_blur_filter(frame_width * fw, frame_height * fh)}[f{index}]"
         )
     source = "[base]"
     for index, (fx, fy, _w, _h) in enumerate(blurs):
@@ -540,7 +581,9 @@ def _segment_arguments(
             "Alignment=2,MarginV=64"
         )
         after.append(f"subtitles=filename='{escaped_path}':charenc=UTF-8:force_style='{style}'")
-    video_filter = _compose_video_graph(filters, blur_regions, after)
+    video_filter = _compose_video_graph(
+        filters, blur_regions, after, frame_size=(mark_width, mark_height)
+    )
     result = args + ["-map", "0:v:0"]
     if background_music:
         music_level = max(0.0, min(float(music_volume), 0.5))
