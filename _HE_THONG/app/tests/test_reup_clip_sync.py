@@ -212,6 +212,89 @@ class SegmentStateNamesBothHalvesTests(unittest.TestCase):
         self.assertIn("segment.audio_path", page)
 
 
+class ConcurrentJobsDoNotEraseEachOtherTests(unittest.TestCase):
+    """Cutting the scene and generating its voice run at the same time.
+
+    The update used to read the whole row, merge, and write all nine columns
+    back. Two jobs each read before the other had written, so whichever
+    finished last restored an empty path for the half it had never seen — the
+    picture and the voice took turns erasing each other, which is what looked
+    like the storyboard losing one of them.
+    """
+
+    def _segment(self, directory: str):
+        from youtube_monitor.database import Database
+
+        database = Database(Path(directory) / "race.db")
+        database.upsert_channel({
+            "youtube_channel_id": "UC000000000000000000000D",
+            "channel_url": "https://www.youtube.com/channel/UC000000000000000000000D",
+            "title": "c", "uploads_playlist_id": "UU000000000000000000000D",
+        })
+        database.upsert_video({
+            "youtube_video_id": "video-race-1",
+            "youtube_channel_id": "UC000000000000000000000D",
+            "video_url": "https://www.youtube.com/watch?v=video-race-1",
+            "title": "t", "metadata_hash": "h", "raw_payload": {},
+        })
+        project = database.create_production_project("video-race-1")
+        script = database.create_project_script(project["id"], script_title="s")
+        timeline = database.create_project_timeline(project["id"], script["id"], [
+            {"segment_index": 1, "voice_text": "a", "subtitle_text": "a",
+             "visual_prompt": "p", "duration_seconds": 5},
+        ])
+        return database, int(project["id"]), int(timeline[0]["id"])
+
+    def test_the_voice_written_last_keeps_the_picture_written_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, segment_id = self._segment(directory)
+            # Both jobs read the row here, before either has written.
+            database.get_project_timeline_segment(segment_id)
+            database.get_project_timeline_segment(segment_id)
+            database.update_project_timeline_segment(segment_id, visual_path="C:/x/clip.mp4")
+            database.update_project_timeline_segment(segment_id, audio_path="C:/x/voice.wav")
+            row = database.get_project_timeline_segment(segment_id)
+            self.assertEqual(row["visual_path"], "C:/x/clip.mp4")
+            self.assertEqual(row["audio_path"], "C:/x/voice.wav")
+
+    def test_the_picture_written_last_keeps_the_voice_written_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, segment_id = self._segment(directory)
+            database.update_project_timeline_segment(segment_id, audio_path="C:/x/voice.wav")
+            database.update_project_timeline_segment(segment_id, visual_path="C:/x/clip.mp4")
+            row = database.get_project_timeline_segment(segment_id)
+            self.assertEqual(row["audio_path"], "C:/x/voice.wav")
+            self.assertEqual(row["visual_path"], "C:/x/clip.mp4")
+
+    def test_an_update_leaves_every_column_it_was_not_given(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, _project_id, segment_id = self._segment(directory)
+            database.update_project_timeline_segment(
+                segment_id, audio_path="C:/x/voice.wav", subtitle_text="phu de",
+            )
+            database.update_project_timeline_segment(segment_id, visual_path="C:/x/clip.mp4")
+            row = database.get_project_timeline_segment(segment_id)
+            self.assertEqual(row["subtitle_text"], "phu de")
+            self.assertEqual(row["voice_text"], "a")
+
+    def test_an_update_with_nothing_to_change_is_harmless(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, _project_id, segment_id = self._segment(directory)
+            database.update_project_timeline_segment(segment_id, audio_path="C:/x/voice.wav")
+            row = database.update_project_timeline_segment(segment_id)
+            self.assertEqual(row["audio_path"], "C:/x/voice.wav")
+
+    def test_a_scene_holding_both_ends_up_ready_whichever_finished_last(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, segment_id = self._segment(directory)
+            database.update_project_timeline_segment(segment_id, visual_path="C:/x/clip.mp4")
+            database.update_project_timeline_segment(segment_id, audio_path="C:/x/voice.wav")
+            database.resync_timeline_segment_states(project_id)
+            self.assertEqual(
+                database.get_project_timeline_segment(segment_id)["status"], "ready"
+            )
+
+
 class ShortJobIsAcceptedByTheApiTests(unittest.TestCase):
     """The worker knew the job type; the request model did not."""
 

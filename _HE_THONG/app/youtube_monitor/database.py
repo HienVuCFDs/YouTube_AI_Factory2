@@ -2283,38 +2283,38 @@ class Database:
         existing = self.get_project_timeline_segment(segment_id)
         if not existing:
             return None
-        values = {
-            "voice_text": existing["voice_text"] if voice_text is None else voice_text.strip(),
-            "subtitle_text": existing["subtitle_text"] if subtitle_text is None else subtitle_text.strip(),
-            "visual_prompt": existing["visual_prompt"] if visual_prompt is None else visual_prompt.strip(),
-            "asset_type": existing["asset_type"] if asset_type is None else asset_type.strip(),
-            "duration_seconds": existing["duration_seconds"] if duration_seconds is None else duration_seconds,
-            "audio_path": existing["audio_path"] if audio_path is None else audio_path.strip(),
-            "visual_path": existing["visual_path"] if visual_path is None else visual_path.strip(),
-            "subtitle_path": existing.get("subtitle_path", "") if subtitle_path is None else subtitle_path.strip(),
-            "status": existing["status"] if status is None else status,
-        }
+        # Only the columns the caller actually passed are written. Rewriting
+        # all nine from a read taken beforehand loses the other job's work
+        # whenever two run at once: cutting the scene and generating the
+        # voice each read the row before the other had written, so whichever
+        # finished last put back an empty path for the half it had not seen.
+        # The scene and the voice then took turns erasing each other.
+        updates: list[tuple[str, Any]] = []
+        if voice_text is not None:
+            updates.append(("voice_text", voice_text.strip()))
+        if subtitle_text is not None:
+            updates.append(("subtitle_text", subtitle_text.strip()))
+        if visual_prompt is not None:
+            updates.append(("visual_prompt", visual_prompt.strip()))
+        if asset_type is not None:
+            updates.append(("asset_type", asset_type.strip()))
+        if duration_seconds is not None:
+            updates.append(("duration_seconds", max(1, int(duration_seconds))))
+        if audio_path is not None:
+            updates.append(("audio_path", audio_path.strip()))
+        if visual_path is not None:
+            updates.append(("visual_path", visual_path.strip()))
+        if subtitle_path is not None:
+            updates.append(("subtitle_path", subtitle_path.strip()))
+        if status is not None:
+            updates.append(("status", status))
+        if not updates:
+            return self.get_project_timeline_segment(segment_id)
+        assignments = ", ".join(f"{column} = ?" for column, _ in updates)
         with self._connect() as connection:
             connection.execute(
-                """
-                UPDATE project_timeline_segments
-                SET voice_text = ?, subtitle_text = ?, visual_prompt = ?, asset_type = ?,
-                    duration_seconds = ?, audio_path = ?, visual_path = ?, subtitle_path = ?, status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    values["voice_text"],
-                    values["subtitle_text"],
-                    values["visual_prompt"],
-                    values["asset_type"],
-                    max(1, int(values["duration_seconds"])),
-                    values["audio_path"],
-                    values["visual_path"],
-                    values["subtitle_path"],
-                    values["status"],
-                    utc_now(),
-                    segment_id,
-                ),
+                f"UPDATE project_timeline_segments SET {assignments}, updated_at = ? WHERE id = ?",
+                [*(value for _, value in updates), utc_now(), segment_id],
             )
             self._reflow_project_timeline(
                 connection,

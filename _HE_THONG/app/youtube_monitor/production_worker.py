@@ -545,8 +545,8 @@ def run_voiceover_job(
             # finished scene read as "voice only" right after the voiceover
             # and "asset only" right after the cut, which looked like the
             # other half had been lost.
-            status="ready" if str(item.get("visual_path") or "").strip() else "voice_ready",
         )
+    database.resync_timeline_segment_states(int(project["id"]))
     return str(audio_dir)
 
 
@@ -585,13 +585,16 @@ def run_source_visuals_job(
     except SourceVisualError as exc:
         raise ProductionJobError(str(exc)) from exc
     for cut in cuts:
-        segment = next(item for item in timeline if int(item["id"]) == cut["segment_id"])
         database.update_project_timeline_segment(
             cut["segment_id"],
             visual_path=cut["visual_path"],
             duration_seconds=cut["duration_seconds"],
-            status="ready" if str(segment.get("audio_path") or "").strip() else "asset_ready",
         )
+    # The status column names one thing, so with the voiceover running
+    # alongside this job neither can tell from its own stale read what a
+    # scene now holds. Deriving it from the stored row afterwards is the
+    # only answer that stays true whichever job finished last.
+    database.resync_timeline_segment_states(int(project["id"]))
     source_manifest = work_dir / "source-visual-cuts.json"
     source_manifest.write_text(json.dumps(cuts, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(layout["assets"] / "source_clips")

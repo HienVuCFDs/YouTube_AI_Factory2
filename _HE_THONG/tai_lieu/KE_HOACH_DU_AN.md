@@ -1635,3 +1635,30 @@ Không phải `voice_text` hay `audio_path` bị xoá: `update_project_timeline_
 Project 39 và 40 đã lệch sẵn. Cách khắc phục: **chạy lại job `source_visuals`** — giờ giọng đã có nên clip sẽ được cắt vừa đúng. Không cần cắt lại timeline, không mất kịch bản.
 
 **704/704 test đạt** (thêm 10 test, trong đó phần đo lệch chạy FFmpeg thật vì độ lệch chỉ thấy được trong file).
+
+## 60. Cắt cảnh và tạo giọng chạy song song thì xoá lẫn nhau (2026-08-30)
+
+### 60.1 Lỗi thật: mất cập nhật khi ghi đồng thời
+
+Người dùng báo: chạy **cắt cảnh và tạo giọng cùng lúc**, cảnh gắn vào storyboard xong thì giọng xong lại làm mất cảnh, luân phiên "được này mất kia"; bấm nghe trong storyboard cũng không có gì.
+
+`update_project_timeline_segment()` là **đọc – trộn – ghi đè cả chín cột**, với dữ liệu đọc từ *trước* transaction:
+
+1. Job giọng đọc dòng → thấy `visual_path = ""`
+2. Job cắt đọc dòng → thấy `audio_path = ""`
+3. Job cắt ghi **cả chín cột**: có hình, `audio_path = ""` (theo bản đọc cũ)
+4. Job giọng ghi **cả chín cột**: có tiếng, `visual_path = ""` ← **xoá clip vừa gắn**
+
+Đây là lost update kinh điển. Không phải hiển thị sai — **dữ liệu bị xoá thật**, nên bấm nghe không ra gì là đúng.
+
+### 60.2 Cách sửa
+
+- Hàm chỉ ghi **những cột được truyền vào**. Hai job chạm hai cột khác nhau thì không thể đè nhau nữa.
+- Cột `status` cũng cùng vấn đề: nó chỉ nói được một việc, mà mỗi job lại suy ra từ bản đọc cũ của mình. Nay **cả hai job gọi `resync_timeline_segment_states(project_id)` sau khi xong**, suy trạng thái từ dòng đã lưu — đúng dù job nào về đích trước.
+- Mục 59 sửa phần *nhãn* nói dối; mục này sửa phần *dữ liệu* bị mất. Hai lỗi khác nhau, cùng một triệu chứng.
+
+### 60.3 Kiểm chứng
+
+5 test tái hiện đúng cuộc đua: hai job đọc trước rồi ghi sau, theo cả hai thứ tự; kết quả phải giữ đủ hình và tiếng. Thêm test rằng update không đụng cột không được truyền, và update rỗng vô hại.
+
+**713/713 test đạt.**
