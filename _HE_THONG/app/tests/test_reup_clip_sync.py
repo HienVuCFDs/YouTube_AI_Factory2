@@ -295,6 +295,34 @@ class ConcurrentJobsDoNotEraseEachOtherTests(unittest.TestCase):
             )
 
 
+class DialogueCutWarnsWhatItDestroysTests(unittest.TestCase):
+    """Cutting by dialogue rebuilds from the source transcript.
+
+    It drops whatever is attached to the current timeline, and its narration
+    comes from the transcript rather than from any script that was written.
+    The confirm said only "the timeline will be replaced", which cost a user
+    twenty minutes of voice they had just generated.
+    """
+
+    def setUp(self) -> None:
+        self.page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+
+    def test_the_warning_counts_the_work_that_will_be_lost(self) -> None:
+        self.assertIn("const withVoice = current.filter", self.page)
+        self.assertIn("const withVisual = current.filter", self.page)
+        self.assertIn("Phải tạo lại từ đầu", self.page)
+
+    def test_the_warning_says_where_the_words_will_come_from(self) -> None:
+        self.assertIn("TRANSCRIPT của video gốc", self.page)
+        self.assertIn("KHÔNG phải từ kịch bản", self.page)
+
+    def test_it_still_asks_before_replacing_anything(self) -> None:
+        self.assertIn("if (!confirm(warning)) return;", self.page)
+
+
 class ShortJobIsAcceptedByTheApiTests(unittest.TestCase):
     """The worker knew the job type; the request model did not."""
 

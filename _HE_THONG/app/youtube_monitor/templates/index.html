@@ -3185,7 +3185,24 @@
 
   async function cutStudioScenesByDialogue() {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
-    if (!confirm('Dựng lại timeline theo từng lượt thoại của video gốc? Timeline hiện tại sẽ bị thay.')) return;
+    // The old wording said only that the timeline would be replaced. It cost
+    // a user twenty minutes of freshly generated voice, because this path
+    // rebuilds from the source transcript and drops whatever is attached.
+    const current = state.timeline || [];
+    const withVoice = current.filter((item) => String(item.audio_path || '').trim()).length;
+    const withVisual = current.filter((item) => String(item.visual_path || '').trim()).length;
+    const losing = [];
+    if (withVoice) losing.push(`${withVoice} cảnh đã có giọng đọc`);
+    if (withVisual) losing.push(`${withVisual} cảnh đã có hình`);
+    const warning = [
+      'Dựng lại timeline theo từng lượt thoại của video gốc?',
+      '',
+      'Lời thoại sẽ lấy từ TRANSCRIPT của video gốc, KHÔNG phải từ kịch bản bạn đã viết.',
+      ...(losing.length ? ['', `Sẽ mất: ${losing.join(' và ')}. Phải tạo lại từ đầu.`] : []),
+      '',
+      'Tiếp tục?',
+    ].join(String.fromCharCode(10));
+    if (!confirm(warning)) return;
     const button = $('studioCutByDialogueButton');
     if (button) button.disabled = true;
     setMessage('Đang cắt cảnh theo lời thoại...');
