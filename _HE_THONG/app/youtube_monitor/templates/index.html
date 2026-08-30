@@ -5714,8 +5714,33 @@ Chạy các bước này?`)) return;
   }
 
   async function loadProductionQueueStatus() {
+    const previous = state.productionQueue;
     state.productionQueue = await api('/api/production-queue');
     syncStudioRenderProvider();
+    await refreshStudioAfterFinishedJobs(previous, state.productionQueue);
+  }
+
+  // A voiceover writes its files and attaches them to the scenes, but the page
+  // went on showing the timeline it had loaded before the job started — so a
+  // finished voiceover looked like a failed one, the play buttons were never
+  // drawn, and the obvious next move was to run something destructive.
+  // The queue reports counts, not a job list, so a change in how many have
+  // finished is the signal that something new is on disk.
+  function finishedJobSignature(queue) {
+    if (!queue) return '';
+    return `${queue.completed ?? 0}:${queue.error ?? 0}:${queue.running ?? 0}`;
+  }
+
+  async function refreshStudioAfterFinishedJobs(previous, current) {
+    if (!previous || !state.studioProjectId) return;
+    const before = finishedJobSignature(previous);
+    const after = finishedJobSignature(current);
+    if (before === after) return;
+    try {
+      const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      state.timeline = bundle.latest_timeline || [];
+      renderStudioStoryboard(bundle.latest_shots || [], state.timeline);
+    } catch (_) { /* the poll must keep running even if one refresh fails */ }
   }
 
   function syncStudioRenderProvider() {

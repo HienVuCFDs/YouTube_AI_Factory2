@@ -125,3 +125,21 @@ def test_orchestration_loads_existing_runs_not_only_local_storage(page: str) -> 
 def test_usage_limit_banner_can_allow_a_safe_retry(page: str) -> None:
     assert "Cho thử lại" in page
     assert "/api/usage-limits/${encodeURIComponent(provider)}/clear" in page
+
+
+def test_the_storyboard_reloads_itself_when_a_job_finishes(page: str) -> None:
+    """A finished voiceover left the page showing the timeline from before it.
+
+    The files were on disk and attached in the database, but no play button
+    had been drawn, so the run looked like a failure and the obvious next
+    move was to run something that destroyed it.
+    """
+    assert "refreshStudioAfterFinishedJobs" in page
+    assert "finishedJobSignature" in page
+    assert "renderStudioStoryboard(bundle.latest_shots || [], state.timeline);" in page
+
+
+def test_the_refresh_never_breaks_the_polling_loop(page: str) -> None:
+    start = page.index("async function refreshStudioAfterFinishedJobs")
+    body = page[start:start + 900]
+    assert "catch" in body
