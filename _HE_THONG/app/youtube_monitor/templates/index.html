@@ -161,6 +161,9 @@
     .tool-status-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 650; }
     .tool-status-detail { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.4; }
     .integration-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .have-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px; border-radius: 999px; margin-left: 5px; }
+    .have-badge.on { color: #86efac; background: rgba(34,197,94,.14); border: 1px solid rgba(34,197,94,.35); }
+    .have-badge.off { color: var(--muted); background: rgba(148,163,184,.08); border: 1px solid var(--line); }
     .integration-group { border: 1px solid var(--line); border-radius: 8px; background: rgba(21,26,34,.5); margin-bottom: 10px; }
     .integration-group > summary { cursor: pointer; padding: 10px 12px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; list-style: none; }
     .integration-group > summary::-webkit-details-marker { display: none; }
@@ -1406,6 +1409,17 @@
     try { localStorage.setItem('ytFactory.automationProjectId', String(id)); } catch (_) {}
     if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
     await loadAutomationStatus();
+  }
+
+  // A scene holds a picture and a voice independently, but `status` can only
+  // name one of them — and the voiceover job and the source cut each wrote
+  // their own answer over the other's. Reading the paths says what is really
+  // there, so finishing one half stops looking like losing the other.
+  function segmentHaveBadges(segment) {
+    const hasVisual = Boolean(String(segment.visual_path || '').trim());
+    const hasVoice = Boolean(String(segment.audio_path || '').trim());
+    return `<span class="have-badge ${hasVisual ? 'on' : 'off'}" title="${hasVisual ? esc(segment.visual_path) : 'Chưa có hình'}">${hasVisual ? '◉' : '○'} hình</span>`
+      + `<span class="have-badge ${hasVoice ? 'on' : 'off'}" title="${hasVoice ? esc(segment.audio_path) : 'Chưa có giọng đọc'}">${hasVoice ? '◉' : '○'} tiếng</span>`;
   }
 
   async function planProjectShort() {
@@ -4313,7 +4327,7 @@
         <button class="btn small primary" onclick="generateSceneVideo(${project.id}, ${segment.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(String(segment.visual_path || '')) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button>`;
       return `
       <div class="job-row" style="align-items:flex-start">
-        <span class="job-dot ${segment.status === 'done' || segment.status === 'ready' ? 'completed' : segment.status === 'voice_ready' || segment.status === 'asset_ready' ? 'running' : ''}"></span>
+        <span class="job-dot ${segment.status === 'done' || segment.status === 'ready' ? 'completed' : segment.status === 'voice_ready' || segment.status === 'asset_ready' ? 'running' : ''}"></span>${segmentHaveBadges(segment)}
         <div class="job-main">
           <div class="job-title">Đoạn ${number(segment.segment_index)} · ${esc(segment.section)} · ${segment.start_seconds}s–${segment.end_seconds}s · ${timelineStatusTag(segment.status)}</div>
           <div class="transcript-grid" style="grid-template-columns:1fr 1fr; margin-top:8px">

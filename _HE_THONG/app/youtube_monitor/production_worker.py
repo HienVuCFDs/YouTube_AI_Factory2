@@ -540,7 +540,12 @@ def run_voiceover_job(
             subtitle_text=subtitle_text,
             subtitle_path=subtitle_path,
             duration_seconds=max(1, int(math.ceil(actual_duration or duration))),
-            status="voice_ready",
+            # One status column cannot say "has voice" and "has picture" at
+            # once, and each job used to overwrite the other's answer — so a
+            # finished scene read as "voice only" right after the voiceover
+            # and "asset only" right after the cut, which looked like the
+            # other half had been lost.
+            status="ready" if str(item.get("visual_path") or "").strip() else "voice_ready",
         )
     return str(audio_dir)
 

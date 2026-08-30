@@ -5414,6 +5414,44 @@ class Database:
             )
         return self.get_project_short(project_id)
 
+    def resync_timeline_segment_states(self, project_id: int | None = None) -> int:
+        """Correct scenes marked as having only half of what they hold.
+
+        The status column can hold one answer, and the voiceover and the
+        source cut each wrote their own over the other's. Scenes that have
+        both a picture and a voice are marked ready; the rest are named for
+        whichever half they actually have.
+        """
+        clauses = ["status NOT IN ('done', 'skipped')"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE project_timeline_segments
+                SET status = CASE
+                        WHEN TRIM(COALESCE(visual_path, '')) <> ''
+                         AND TRIM(COALESCE(audio_path, '')) <> '' THEN 'ready'
+                        WHEN TRIM(COALESCE(audio_path, '')) <> '' THEN 'voice_ready'
+                        WHEN TRIM(COALESCE(visual_path, '')) <> '' THEN 'asset_ready'
+                        ELSE status
+                    END,
+                    updated_at = ?
+                WHERE {' AND '.join(clauses)}
+                  AND status <> CASE
+                        WHEN TRIM(COALESCE(visual_path, '')) <> ''
+                         AND TRIM(COALESCE(audio_path, '')) <> '' THEN 'ready'
+                        WHEN TRIM(COALESCE(audio_path, '')) <> '' THEN 'voice_ready'
+                        WHEN TRIM(COALESCE(visual_path, '')) <> '' THEN 'asset_ready'
+                        ELSE status
+                    END
+                """,
+                [utc_now(), *params],
+            )
+            return int(cursor.rowcount or 0)
+
     def summary(self) -> dict[str, int]:
         with self._connect() as connection:
             channels = connection.execute("SELECT COUNT(*) FROM channels").fetchone()[0]

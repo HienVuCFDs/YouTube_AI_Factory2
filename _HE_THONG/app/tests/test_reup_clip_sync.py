@@ -131,6 +131,87 @@ class QcSeesTheMismatchTests(unittest.TestCase):
         self.assertFalse(result["ready_for_render"])
 
 
+class SegmentStateNamesBothHalvesTests(unittest.TestCase):
+    """One status column cannot say "has voice" and "has picture" at once.
+
+    The voiceover wrote voice_ready over the cut's asset_ready and the cut
+    wrote asset_ready back, so a finished scene always read as holding only
+    the half that finished last — which is what looked like losing the other.
+    """
+
+    def _database(self, directory: str):
+        from youtube_monitor.database import Database
+
+        database = Database(Path(directory) / "state.db")
+        database.upsert_channel({
+            "youtube_channel_id": "UC000000000000000000000C",
+            "channel_url": "https://www.youtube.com/channel/UC000000000000000000000C",
+            "title": "c", "uploads_playlist_id": "UU000000000000000000000C",
+        })
+        database.upsert_video({
+            "youtube_video_id": "video-state-1",
+            "youtube_channel_id": "UC000000000000000000000C",
+            "video_url": "https://www.youtube.com/watch?v=video-state-1",
+            "title": "t", "metadata_hash": "h", "raw_payload": {},
+        })
+        project = database.create_production_project("video-state-1")
+        script = database.create_project_script(project["id"], script_title="s")
+        timeline = database.create_project_timeline(project["id"], script["id"], [
+            {"segment_index": 1, "voice_text": "a", "subtitle_text": "a", "visual_prompt": "p", "duration_seconds": 5},
+            {"segment_index": 2, "voice_text": "b", "subtitle_text": "b", "visual_prompt": "p", "duration_seconds": 5},
+            {"segment_index": 3, "voice_text": "c", "subtitle_text": "c", "visual_prompt": "p", "duration_seconds": 5},
+        ])
+        return database, timeline
+
+    def test_a_scene_holding_both_is_marked_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, timeline = self._database(directory)
+            database.update_project_timeline_segment(
+                timeline[0]["id"], visual_path="C:/x/a.mp4", audio_path="C:/x/a.wav",
+                status="voice_ready",
+            )
+            database.resync_timeline_segment_states()
+            self.assertEqual(
+                database.get_project_timeline_segment(timeline[0]["id"])["status"], "ready"
+            )
+
+    def test_a_scene_holding_one_half_keeps_naming_that_half(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, timeline = self._database(directory)
+            database.update_project_timeline_segment(
+                timeline[1]["id"], visual_path="C:/x/b.mp4", status="voice_ready"
+            )
+            database.update_project_timeline_segment(
+                timeline[2]["id"], audio_path="C:/x/c.wav", status="asset_ready"
+            )
+            database.resync_timeline_segment_states()
+            self.assertEqual(
+                database.get_project_timeline_segment(timeline[1]["id"])["status"], "asset_ready"
+            )
+            self.assertEqual(
+                database.get_project_timeline_segment(timeline[2]["id"])["status"], "voice_ready"
+            )
+
+    def test_running_it_twice_changes_nothing_the_second_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, timeline = self._database(directory)
+            database.update_project_timeline_segment(
+                timeline[0]["id"], visual_path="C:/x/a.mp4", audio_path="C:/x/a.wav",
+                status="voice_ready",
+            )
+            self.assertEqual(database.resync_timeline_segment_states(), 1)
+            self.assertEqual(database.resync_timeline_segment_states(), 0)
+
+    def test_the_storyboard_reads_the_files_rather_than_the_label(self) -> None:
+        page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("function segmentHaveBadges", page)
+        self.assertIn("segment.visual_path", page)
+        self.assertIn("segment.audio_path", page)
+
+
 class ShortJobIsAcceptedByTheApiTests(unittest.TestCase):
     """The worker knew the job type; the request model did not."""
 

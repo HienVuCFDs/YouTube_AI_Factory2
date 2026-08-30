@@ -367,6 +367,9 @@ async def lifespan(_: FastAPI):
     with _runtime_stop_lock:
         _runtime_workers_stopped = False
     database.initialize()
+    # Scenes whose status named only half of what they hold. Cheap and
+    # idempotent: it touches only rows whose label disagrees with their files.
+    database.resync_timeline_segment_states()
     metadata_queue.start()
     transcript_queue.start()
     production_worker.start()
