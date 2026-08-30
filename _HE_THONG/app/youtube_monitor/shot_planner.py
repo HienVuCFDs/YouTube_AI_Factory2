@@ -4,6 +4,22 @@ import re
 from typing import Any
 
 
+# The writer lays its script out with headings — "Cảnh 5 · main_content" —
+# and every line here becomes a scene. Half of one script was headings, so
+# half its scenes were the narrator reading a section label aloud: 26 scenes
+# and 102 seconds of "Cảnh 5 · main_content" inside a fourteen minute video.
+_SECTION_HEADING = re.compile(
+    r"^(?:cảnh|canh|scene|phần|phan|part|đoạn|doan)\s*\d+\s*[·:.\-–—]?\s*"
+    r"(?:hook|intro|main_content|main|cta|outro|kết|ket)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_section_heading(line: str) -> bool:
+    """A line that only names a section is a label, not something to say."""
+    return bool(_SECTION_HEADING.match(str(line or "").strip()))
+
+
 def _clean_lines(text: str) -> list[str]:
     lines: list[str] = []
     for raw_line in text.splitlines():
@@ -11,7 +27,7 @@ def _clean_lines(text: str) -> list[str]:
         if not line:
             continue
         line = re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s*", "", line).strip()
-        if line:
+        if line and not is_section_heading(line):
             lines.append(line)
     return lines
 

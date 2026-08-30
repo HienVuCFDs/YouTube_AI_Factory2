@@ -120,3 +120,46 @@ def test_the_page_refuses_to_voice_a_stale_timeline() -> None:
     ).read_text(encoding="utf-8")
     assert "timelineResult?.stale" in page
     assert "force: true" in page
+
+
+def test_a_section_heading_is_not_something_to_read_aloud() -> None:
+    """The writer lays a script out with headings, and every line became a
+    scene. Half of one script was headings, so twenty-six of its fifty-five
+    scenes were the narrator saying "Cảnh 5 · main_content" out loud."""
+    from youtube_monitor.shot_planner import is_section_heading
+
+    for heading in (
+        "Cảnh 3 · intro",
+        "Cảnh 5 · main_content",
+        "Scene 7: main",
+        "Phần 2",
+        "Cảnh 12 · cta",
+    ):
+        assert is_section_heading(heading), heading
+
+
+def test_a_line_that_only_starts_like_a_heading_is_kept() -> None:
+    from youtube_monitor.shot_planner import is_section_heading
+
+    for narration in (
+        "Cảnh 5 · main_content: Yvan bắt đầu đào",
+        "All right. You have all heard him say it",
+        "Cảnh sát điều tra vụ án suốt đêm",
+    ):
+        assert not is_section_heading(narration), narration
+
+
+def test_headings_never_reach_the_shot_list() -> None:
+    script = {
+        "version": 2, "script_title": "t", "hook": "", "intro": "",
+        "main_content": chr(10).join([
+            "Cảnh 1 · main_content",
+            "Yvan bắt đầu đào",
+            "Cảnh 2 · main_content",
+            "Anh dựng khung",
+        ]),
+        "cta": "",
+    }
+    shots = build_shot_plan({"title": "p"}, script)
+    narrations = [shot["narration"] for shot in shots]
+    assert narrations == ["Yvan bắt đầu đào", "Anh dựng khung"], narrations
