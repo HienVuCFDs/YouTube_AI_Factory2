@@ -201,6 +201,49 @@ class PlaywrightSidecarCountsAsAWorkerTests(unittest.TestCase):
         self.assertEqual(configured, set(main.PLAYWRIGHT_SIDECAR_PROVIDERS))
 
 
+class ConnectionsPanelIsGroupedTests(unittest.TestCase):
+    """Ten kinds of connection in one flat list made the panel unreadable.
+
+    Grouping by the action each needs is what keeps it short: usually only
+    one group has anything outstanding.
+    """
+
+    def _items(self) -> list[dict]:
+        from fastapi.testclient import TestClient
+        from youtube_monitor.main import app
+
+        with TestClient(app) as client:
+            return client.get("/api/integrations").json()
+
+    def test_every_connection_lands_in_a_group(self) -> None:
+        groups = {item.get("group") for item in self._items()}
+        self.assertTrue(groups)
+        self.assertEqual(groups - {"api_key", "login", "worker", "builtin"}, set())
+
+    def test_a_key_you_type_is_not_grouped_with_a_worker_you_start(self) -> None:
+        by_key = {item["key"]: item["group"] for item in self._items()}
+        self.assertEqual(by_key["openai_gpt"], "api_key")
+        self.assertEqual(by_key["gflow_cli"], "login")
+        self.assertEqual(by_key["browser_extension"], "worker")
+        self.assertEqual(by_key["antigravity_sidecar"], "worker")
+
+    def test_readiness_is_a_boolean_the_page_can_count(self) -> None:
+        """`connected or workers` returned the empty worker list, not False."""
+        for item in self._items():
+            self.assertIsInstance(item["ready"], bool, item["key"])
+
+    def test_the_page_folds_groups_and_names_what_is_outstanding(self) -> None:
+        page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("renderIntegrationGroups", page)
+        self.assertIn("INTEGRATION_GROUPS", page)
+        self.assertIn("integration-todo", page)
+        # A group with nothing pending opens closed.
+        self.assertIn("const open = pending > 0 ? ' open' : '';", page)
+
+
 def test_the_page_offers_both_ways_to_drive_a_web_provider(page: str) -> None:
     assert "no_browser_worker" in page
     assert "web_video_sidecar.py" in page

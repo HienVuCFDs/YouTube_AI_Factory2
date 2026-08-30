@@ -161,6 +161,16 @@
     .tool-status-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 650; }
     .tool-status-detail { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.4; }
     .integration-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .integration-group { border: 1px solid var(--line); border-radius: 8px; background: rgba(21,26,34,.5); margin-bottom: 10px; }
+    .integration-group > summary { cursor: pointer; padding: 10px 12px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; list-style: none; }
+    .integration-group > summary::-webkit-details-marker { display: none; }
+    .integration-group > summary::before { content: '▸'; color: var(--muted); font-size: 11px; }
+    .integration-group[open] > summary::before { content: '▾'; }
+    .integration-group-name { font-size: 11px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; color: var(--text); }
+    .integration-group-why { color: var(--muted); font-size: 10.5px; }
+    .integration-group-body { padding: 0 12px 12px; }
+    .integration-todo { border: 1px solid rgba(245,158,11,.45); background: rgba(245,158,11,.07); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 11.5px; line-height: 1.6; color: var(--text); }
+    .integration-todo b { color: var(--orange, #f59e0b); }
     .integration-card { padding: 13px; border: 1px solid var(--line); border-radius: 8px; background: rgba(14,18,25,.82); }
     .integration-card.connected { border-color: rgba(34,197,94,.38); }
     .integration-card.handoff { border-color: rgba(34,211,238,.28); }
@@ -1810,6 +1820,37 @@
     return { key: `integrationKey-${provider}`, model: `integrationModel-${provider}` };
   }
 
+  const INTEGRATION_GROUPS = [
+    ['api_key', 'Nhập API key', 'Chỉ cần khi bạn muốn dùng dịch vụ tính phí theo lần gọi. Bỏ trống cũng không sao.'],
+    ['login', 'Đăng nhập một lần', 'Các gói bạn đã trả tiền. Đăng nhập xong thì app dùng lại mãi.'],
+    ['worker', 'Cần đang mở hoặc đang chạy', 'Phải bật lúc tạo media, không phải bật một lần rồi thôi.'],
+    ['builtin', 'Có sẵn trên máy', 'Không cần làm gì.'],
+  ];
+
+  function renderIntegrationGroups(items) {
+    const list = items || [];
+    const missing = list.filter((item) => !item.ready);
+    // A group with nothing outstanding starts folded: the point of the panel
+    // is what still needs doing, not an inventory of what already works.
+    const sections = INTEGRATION_GROUPS.map(([group, name, why]) => {
+      const rows = list.filter((item) => (item.group || 'builtin') === group);
+      if (!rows.length) return '';
+      const pending = rows.filter((item) => !item.ready).length;
+      const open = pending > 0 ? ' open' : '';
+      const tag = pending
+        ? `<span class="tag orange">${pending} chưa xong</span>`
+        : '<span class="tag green">đủ</span>';
+      return `<details class="integration-group"${open}>
+        <summary><span class="integration-group-name">${esc(name)}</span>${tag}<span class="integration-group-why">${esc(why)}</span></summary>
+        <div class="integration-group-body"><div class="integration-grid">${rows.map(renderIntegrationCard).join('')}</div></div>
+      </details>`;
+    }).join('');
+    const todo = missing.length
+      ? `<div class="integration-todo">Còn <b>${missing.length}</b> mục chưa sẵn sàng: ${missing.map((item) => esc(item.label)).join(' · ')}.<br>Chỉ cần làm những mục thuộc đường bạn định dùng — xem <b>Kho provider &amp; lý do khoá</b> để biết mục nào đang chặn việc tạo media.</div>`
+      : '<div class="integration-todo">Mọi kết nối đều sẵn sàng.</div>';
+    return todo + sections;
+  }
+
   function renderIntegrationCard(item) {
     const cardClass = item.connection === 'handoff' ? 'handoff' : (item.ready ? 'connected' : '');
     const status = item.connection === 'handoff' ? 'HANDOFF' : (item.ready ? 'ĐÃ KẾT NỐI' : 'CHƯA CẤU HÌNH');
@@ -1900,7 +1941,7 @@
     const connected = state.integrations.filter((item) => item.connection === 'api_key' && item.ready).length;
     const cloud = state.integrations.filter((item) => item.connection === 'api_key').length;
     $('integrationSummary').textContent = `${connected}/${cloud} AI CLOUD ĐÃ KẾT NỐI`;
-    $('integrationBody').innerHTML = `<div class="integration-grid">${state.integrations.map(renderIntegrationCard).join('')}</div><div class="workflow-hint"><span class="tag cyan">KIẾN TRÚC</span><span>Codex CLI, Claude Code CLI và Antigravity là các client của AI cloud đã đăng nhập. App giao việc theo từng công đoạn; Google Flow/Veo là trình tạo video mặc định và không cần API key.</span></div>`;
+    $('integrationBody').innerHTML = renderIntegrationGroups(state.integrations);
     updateStudioSceneGenerationAvailability();
   }
 

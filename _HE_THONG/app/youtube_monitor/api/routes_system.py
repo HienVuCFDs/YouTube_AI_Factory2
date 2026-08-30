@@ -318,7 +318,7 @@ def _integration_status() -> list[dict[str, Any]]:
             "key": "browser_extension",
             "label": "Trình duyệt cho provider web",
             "category": "Tạo ảnh/video bằng gói đã đăng nhập trong trình duyệt",
-            "ready": browser_connected or playwright_workers,
+            "ready": bool(browser_connected or playwright_workers),
             "connection": "browser_extension",
             "model": "flow_veo · chatgpt_web_image · gemini_web_image · meta_ai_video (Playwright) · flow_image (chỉ Extension)",
             "detail": (
@@ -361,10 +361,34 @@ def _integration_status() -> list[dict[str, Any]]:
     ]
 
 
+# Ten kinds of connection had grown, each rendered as an equal card in one
+# flat list, so a user looking for the one thing blocking them read all
+# thirteen. Grouping by the action each needs is what makes the list short:
+# most of the time only one group has anything outstanding.
+_INTEGRATION_GROUPS = {
+    "openai_gpt": "api_key",
+    "google_gemini": "api_key",
+    "anthropic_claude": "api_key",
+    "runway": "api_key",
+    "codex_cli": "login",
+    "claude_code_cli": "login",
+    "antigravity_cli": "login",
+    "gflow_cli": "login",
+    "youtube_oauth": "login",
+    "browser_extension": "worker",
+    "antigravity_sidecar": "worker",
+    "openmontage": "builtin",
+    "claude_desktop": "builtin",
+}
+
+
 @router.get("/api/integrations")
 def list_integrations() -> list[dict[str, Any]]:
     """Return provider state only; API secrets are never sent to the browser."""
-    return _integration_status()
+    return [
+        {**item, "group": _INTEGRATION_GROUPS.get(str(item.get("key")), "builtin")}
+        for item in _integration_status()
+    ]
 
 
 @router.post("/api/integrations")
