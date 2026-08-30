@@ -3387,7 +3387,22 @@
       await saveRenderSettings(state.studioProjectId);
       setStudioProgress(18, 'Đang chuẩn bị các cảnh và timeline từ kịch bản...');
       await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
-      await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      const timelineResult = await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      // Without force an existing timeline comes back untouched. After a
+      // script rewrite that means the old scenes stay and the voice is then
+      // generated from them - the button appears to work while nothing it
+      // produces has anything to do with the new script.
+      if (timelineResult?.stale) {
+        const rebuild = confirm(
+          `Timeline dang co ${timelineResult.timeline?.length ?? '?'} canh nhung kich ban moi nhat cho ${timelineResult.shot_count} canh. `
+          + 'Dung lai timeline theo kich ban moi? Cac canh hien tai se bi thay, ke ca giong doc va hinh da gan.'
+        );
+        if (!rebuild) {
+          setMessage('Da dung: timeline van theo kich ban cu, nen chua tao giong.', 'error');
+          return;
+        }
+        await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: true})});
+      }
       setStudioProgress(25, 'Đang đưa toàn bộ lời dẫn vào hàng đợi tạo giọng đọc...');
       const provider = $('studioVoiceProviderSelect')?.value || 'edge_tts';
       const response = await api(`/api/projects/${state.studioProjectId}/jobs`, {method: 'POST', body: JSON.stringify({job_type: 'voiceover', provider, confirmed: true})});

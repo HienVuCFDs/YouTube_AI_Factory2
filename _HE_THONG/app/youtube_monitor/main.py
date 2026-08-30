@@ -1401,6 +1401,7 @@ def generate_project_timeline(
     shots = database.list_project_shots(project_id, script_id=int(script["id"]))
     if not shots:
         raise HTTPException(status_code=400, detail="Project chưa có shot list để tạo timeline")
+    previous_count = len(database.list_project_timeline(project_id, script_id=int(script["id"])))
     planned = build_timeline(project, script, shots)
     timeline = database.create_project_timeline(
         project_id,
@@ -1411,9 +1412,18 @@ def generate_project_timeline(
     if timeline is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     _write_project_document(project_id, "timeline.md", timeline_to_markdown(project, script, timeline))
+    # Without `force` an existing timeline is returned untouched, so pressing
+    # the button after rewriting the script looked like it had worked while
+    # the old scenes stayed. Say which happened, and whether the timeline
+    # still matches the shot list it should have been built from.
+    rebuilt = bool(payload.force) or previous_count == 0
+    stale = not rebuilt and len(timeline) != len(shots)
     return {
         "status": "saved",
         "script_id": script["id"],
+        "rebuilt": rebuilt,
+        "stale": stale,
+        "shot_count": len(shots),
         "total_duration_seconds": sum(int(item["duration_seconds"]) for item in timeline),
         "timeline": timeline,
     }

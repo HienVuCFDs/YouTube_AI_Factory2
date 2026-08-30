@@ -97,3 +97,26 @@ def test_a_rewrite_with_no_words_of_its_own_keeps_the_blueprints() -> None:
     empty = {"version": 3, "script_title": "Rong", "hook": "", "intro": "", "main_content": "", "cta": ""}
     shots = build_shot_plan({"title": "p"}, empty, writer_content=blueprints)
     assert shots[0]["narration"] == "Cau tu blueprint"
+
+
+def test_the_timeline_endpoint_says_whether_it_rebuilt() -> None:
+    """Without force an existing timeline came back untouched and silent, so
+    pressing the button after a rewrite looked like it had worked."""
+    from youtube_monitor import main
+    import inspect
+
+    source = inspect.getsource(main.generate_project_timeline)
+    assert '"rebuilt"' in source
+    assert '"stale"' in source
+    assert '"shot_count"' in source
+
+
+def test_the_page_refuses_to_voice_a_stale_timeline() -> None:
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parent.parent
+        / "youtube_monitor" / "templates" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "timelineResult?.stale" in page
+    assert "force: true" in page
