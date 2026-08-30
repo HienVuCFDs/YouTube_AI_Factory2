@@ -34,7 +34,22 @@ def _visual_prompt(section: str, narration: str, project_title: str) -> str:
 
 def build_shot_plan(project: dict[str, Any], script: dict[str, Any], writer_content: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     project_title = str(project.get("title") or script.get("script_title") or "Project").strip()
+    # The blueprints belong to the script the writer produced them with, and
+    # that is version 1. Returning them for every later script meant a rewrite
+    # was silently ignored: the shot list, the timeline and therefore the
+    # narration all stayed as the first draft, so a new script was spoken in
+    # the old script's words.
+    try:
+        script_version = int(script.get("version") or 1)
+    except (TypeError, ValueError):
+        script_version = 1
+    has_own_words = any(
+        str(script.get(field) or "").strip()
+        for field in ("hook", "intro", "main_content", "cta")
+    )
     blueprints = (writer_content or {}).get("scene_blueprints") if isinstance(writer_content, dict) else None
+    if script_version > 1 and has_own_words:
+        blueprints = None
     if isinstance(blueprints, list):
         ai_shots: list[dict[str, Any]] = []
         for index, item in enumerate(blueprints, start=1):

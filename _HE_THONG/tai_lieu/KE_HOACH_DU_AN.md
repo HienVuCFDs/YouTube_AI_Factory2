@@ -1662,3 +1662,32 @@ Người dùng báo: chạy **cắt cảnh và tạo giọng cùng lúc**, cản
 5 test tái hiện đúng cuộc đua: hai job đọc trước rồi ghi sau, theo cả hai thứ tự; kết quả phải giữ đủ hình và tiếng. Thêm test rằng update không đụng cột không được truyền, và update rỗng vô hại.
 
 **713/713 test đạt.**
+
+## 61. Viết lại kịch bản nhưng giọng đọc vẫn là bản cũ (2026-08-30)
+
+### 61.1 Chuỗi gây lỗi
+
+Người dùng viết kịch bản mới, tạo giọng vẫn ra lời của bản cũ. Truy trên project 43 (WF Reup):
+
+- Script **#52 version 1** và **#53 version 2** có nội dung **khác hẳn** (main 5786 vs 3741 ký tự, tiêu đề khác).
+- Nhưng shot list của cả hai **giống hệt: 15/15 shot trùng lời**, kéo theo timeline trùng, kéo theo giọng trùng.
+
+Nguyên nhân nằm ở `build_shot_plan()`: nó lấy `scene_blueprints` từ **phân tích của video** (`analysis_type="writer"`) và **thoát ngay** nếu có, không hề đọc `hook`/`intro`/`main_content`/`cta` của kịch bản được truyền vào.
+
+Blueprint gắn với **video**, không gắn với kịch bản. Nên một khi video đã có phân tích writer, **mọi kịch bản viết sau đều bị bỏ qua** — lời thoại đóng băng ở bản nháp đầu tiên.
+
+Job có `script_id` đúng (53), timeline có `script_id` đúng — nhìn đâu cũng thấy "đã dùng kịch bản mới", nhưng **nội dung** thì không.
+
+### 61.2 Cách sửa
+
+Blueprint thuộc về kịch bản mà writer đã sinh ra cùng nó, tức **version 1**. Nay:
+
+- `version > 1` **và** kịch bản có chữ của riêng nó → dùng kịch bản, bỏ blueprint.
+- `version == 1` → giữ nguyên hành vi cũ; blueprint mang thêm `visual_prompt`, `asset_type`, `speaker` cho từng cảnh, không nên vứt.
+- Bản viết lại mà **rỗng** → vẫn dùng blueprint, để dự án không mất sạch lời thoại.
+
+### 61.3 Sửa dữ liệu đang có
+
+Project 43 cần **tạo lại shot list rồi tạo lại timeline** cho script 53, sau đó chạy lại voiceover. Trước khi vá thì thao tác đó cũng vô ích vì shot list luôn quay về blueprint.
+
+**716/716 test đạt** (thêm 3 test: bản viết lại thắng, bản đầu giữ blueprint, bản viết lại rỗng không làm mất lời).

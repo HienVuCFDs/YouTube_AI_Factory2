@@ -57,3 +57,43 @@ class ShotPlannerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_a_rewritten_script_is_spoken_in_its_own_words() -> None:
+    """A new script was being narrated with the first draft's sentences.
+
+    The writer's scene blueprints are attached to the video, not to a script,
+    and build_shot_plan returned them whenever they existed. So a rewrite
+    produced the same shot list, the same timeline and the same voice — the
+    user asked for a new script and heard the old one.
+    """
+    blueprints = {"scene_blueprints": [
+        {"narration": "Cau tu ban nhap dau tien", "section": "main", "duration_seconds": 6},
+    ]}
+    rewritten = {
+        "version": 2, "script_title": "Ban viet lai",
+        "hook": "", "intro": "", "main_content": "Cau moi cua ban viet lai", "cta": "",
+    }
+    shots = build_shot_plan({"title": "p"}, rewritten, writer_content=blueprints)
+    assert "viet lai" in shots[0]["narration"]
+
+
+def test_the_first_draft_still_uses_the_blueprints_it_came_from() -> None:
+    blueprints = {"scene_blueprints": [
+        {"narration": "Cau tu blueprint", "section": "main", "duration_seconds": 6},
+    ]}
+    first = {
+        "version": 1, "script_title": "Ban dau",
+        "hook": "", "intro": "", "main_content": "Chu cua kich ban", "cta": "",
+    }
+    shots = build_shot_plan({"title": "p"}, first, writer_content=blueprints)
+    assert shots[0]["narration"] == "Cau tu blueprint"
+
+
+def test_a_rewrite_with_no_words_of_its_own_keeps_the_blueprints() -> None:
+    """An empty rewrite must not leave the project with no narration at all."""
+    blueprints = {"scene_blueprints": [
+        {"narration": "Cau tu blueprint", "section": "main", "duration_seconds": 6},
+    ]}
+    empty = {"version": 3, "script_title": "Rong", "hook": "", "intro": "", "main_content": "", "cta": ""}
+    shots = build_shot_plan({"title": "p"}, empty, writer_content=blueprints)
+    assert shots[0]["narration"] == "Cau tu blueprint"
