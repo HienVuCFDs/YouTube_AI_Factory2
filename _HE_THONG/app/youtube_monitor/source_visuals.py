@@ -101,6 +101,48 @@ def _supports_nvenc(executable: str) -> bool:
     return result.returncode == 0 and "h264_nvenc" in (result.stdout or "")
 
 
+# A cut is sized against the voice it has to cover. Half a second is the most
+# it may drift before the picture runs out mid-sentence, or holds after it.
+CLIP_VOICE_TOLERANCE_SECONDS = 0.5
+
+
+def mismatched_source_clips(
+    timeline: list[dict[str, Any]], ffmpeg_binary: str = "ffmpeg"
+) -> list[dict[str, Any]]:
+    """Find scenes whose source clip no longer matches their narration.
+
+    Cutting before the voiceover exists sizes every clip against the planned
+    duration instead of the real one. The voiceover then rewrites the
+    segment's duration, but nothing re-cuts the clip — so the picture and the
+    voice disagree, and at render the narration is what gets lost.
+    """
+    executable = resolve_ffmpeg(ffmpeg_binary)
+    if not executable:
+        return []
+    stale: list[dict[str, Any]] = []
+    for item in timeline:
+        visual = Path(str(item.get("visual_path") or ""))
+        audio = Path(str(item.get("audio_path") or ""))
+        # Only clips cut from the source have to match; a generated still has
+        # no length of its own and is held for as long as the voice needs.
+        if "source_clips" not in visual.as_posix() or not visual.is_file() or not audio.is_file():
+            continue
+        clip_seconds = media_duration_seconds(visual, executable)
+        voice_seconds = media_duration_seconds(audio, executable)
+        if not clip_seconds or not voice_seconds:
+            continue
+        drift = round(clip_seconds - voice_seconds, 3)
+        if abs(drift) > CLIP_VOICE_TOLERANCE_SECONDS:
+            stale.append({
+                "segment_id": int(item.get("id") or 0),
+                "segment_index": int(item.get("segment_index") or 0),
+                "clip_seconds": round(clip_seconds, 3),
+                "voice_seconds": round(voice_seconds, 3),
+                "drift_seconds": drift,
+            })
+    return stale
+
+
 def prepare_source_visuals(
     timeline: list[dict[str, Any]],
     source_path: Path,
@@ -130,6 +172,15 @@ def prepare_source_visuals(
         raise SourceVisualError(
             "GPU-only mode is enabled but FFmpeg has no h264_nvenc encoder. "
             "The app will not cut source visuals with libx264/CPU."
+        )
+    voiced = [item for item in timeline if Path(str(item.get("audio_path") or "")).is_file()]
+    if timeline and not voiced:
+        # Every cut here is sized against the voice it must cover. With no
+        # voice yet there is nothing to match, and the clips produced would
+        # all have to be cut again.
+        raise SourceVisualError(
+            "Chưa có giọng đọc cho cảnh nào. Hãy chạy voiceover trước, rồi mới xuất clip "
+            "từ video gốc — clip được cắt vừa đúng độ dài lời đọc."
         )
     results: list[dict[str, Any]] = []
 

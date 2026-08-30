@@ -1605,3 +1605,33 @@ Giao diện: ô **Loại nguồn** thêm lựa chọn **"Link bất kỳ · Bili
 **690/690 test đạt** (thêm 21 test).
 
 **Giới hạn:** site nào yt-dlp đọc được thì app đọc được — không hơn. Site cần đăng nhập vẫn cần cookie, và `download_video()` đã có sẵn tham số `cookie_file` cho việc đó.
+
+## 59. WF Reup: clip nguồn không phủ hết giọng đọc (2026-08-30)
+
+### 59.1 Triệu chứng và nguyên nhân
+
+Người dùng báo: cắt clip từ cảnh gốc thì **mất giọng đọc**. Đo trên dữ liệu thật project 40 — **64/70 cảnh** có clip không khớp giọng, phần lớn **ngắn hơn lời đọc 1,4–3,6 giây**, hai cảnh dài hơn tận +24 giây.
+
+Nguyên nhân là **thứ tự chạy**:
+
+1. `prepare_source_visuals()` cắt clip **vừa đúng độ dài giọng đọc** — nhưng chỉ khi giọng đã tồn tại. Nếu chưa, nó rơi về `duration_seconds` *dự kiến* của bước cắt theo lời thoại.
+2. Sau đó `run_voiceover_job()` ghi đè `duration_seconds` bằng **độ dài giọng thật**.
+3. **Không có gì cắt lại clip.** Hình và tiếng lệch nhau vĩnh viễn, và khi render thì hình hết trước — phần cuối lời đọc bị mất.
+
+Không phải `voice_text` hay `audio_path` bị xoá: `update_project_timeline_segment()` giữ nguyên mọi cột không truyền. Cái mất là **phần cuối của giọng đọc khi phát**, không phải dữ liệu.
+
+### 59.2 Cách xử lý
+
+- `prepare_source_visuals()` **từ chối chạy khi chưa cảnh nào có giọng**, kèm câu chỉ đúng thứ tự: chạy voiceover trước rồi mới xuất clip. Toàn bộ tiền đề của hàm này là cắt theo độ dài giọng; không có giọng thì mọi clip đều phải cắt lại.
+- `mismatched_source_clips()` đo lại clip và giọng trên đĩa, báo cảnh nào lệch quá **0,5 giây**. Chỉ xét clip cắt từ nguồn: ảnh tĩnh không có độ dài riêng, nó được giữ đúng bằng thời gian giọng cần.
+- **QC Agent đọc kết quả đó** và liệt kê từng cảnh lệch kèm số giây, nên dự án không thể qua QC với clip lệch.
+
+### 59.3 Kèm một lỗi của chính mục 57
+
+`render_short` được thêm vào `JOB_TYPES` của worker nhưng **thiếu trong `ProductionJobType` Literal của API** — nút "Dựng video ngắn" sẽ bị API từ chối 422. Đã thêm vào Literal và khai provider `ffmpeg_builtin` cho nó. Lại đúng loại lỗi "hai đầu không khớp nhau".
+
+### 59.4 Sửa dữ liệu đang có
+
+Project 39 và 40 đã lệch sẵn. Cách khắc phục: **chạy lại job `source_visuals`** — giờ giọng đã có nên clip sẽ được cắt vừa đúng. Không cần cắt lại timeline, không mất kịch bản.
+
+**704/704 test đạt** (thêm 10 test, trong đó phần đo lệch chạy FFmpeg thật vì độ lệch chỉ thấy được trong file).

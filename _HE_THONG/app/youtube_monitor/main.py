@@ -63,6 +63,7 @@ from .motion_graphics import (
     composer_ready as motion_composer_ready,
     set_spec_builder as motion_graphics_set_spec_builder,
 )
+from .source_visuals import mismatched_source_clips
 from .source_links import (
     SourceLinkError,
     is_http_url,
@@ -592,7 +593,7 @@ class GenerateThumbnailsRequest(BaseModel):
     variants: int = Field(default=3, ge=1, le=6)
 
 
-ProductionJobType = Literal["voiceover", "voiceover_segment", "source_visuals", "render", "premiere_draft", "director_production"]
+ProductionJobType = Literal["voiceover", "voiceover_segment", "source_visuals", "render", "render_short", "premiere_draft", "director_production"]
 
 
 class CreateProductionJobRequest(BaseModel):
@@ -5496,6 +5497,7 @@ def queue_project_job(
         "voiceover": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
         "voiceover_segment": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
         "source_visuals": {"dry_run", "preview", "mock", "source_video", "source", "local_source"},
+        "render_short": {"ffmpeg_builtin"},
         "render": {
             "dry_run",
             "preview",
@@ -7220,6 +7222,11 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             for issue in report.get("issues", [])
             if issue.startswith(("Thiếu cảnh hình ảnh", "Thiếu voice", "Voice có khoảng lặng"))
         ]
+        for stale in mismatched_source_clips(timeline, FFMPEG_BINARY):
+            issues.append(
+                f"Cảnh {stale['segment_index']}: clip nguồn dài {stale['clip_seconds']}s "
+                f"nhưng giọng đọc {stale['voice_seconds']}s — cắt lại clip từ video gốc"
+            )
         failed_reviews = [
             job for job in latest_scene_jobs if str(job.get("review_status") or "") == "fail"
         ]
