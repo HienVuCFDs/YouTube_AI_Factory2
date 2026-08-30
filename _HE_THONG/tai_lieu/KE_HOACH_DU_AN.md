@@ -1536,3 +1536,43 @@ Không tốn thêm request nào; dữ liệu đã nằm trong response.
 Nghiệm thu: Python compile đạt, JavaScript giao diện parse đạt, **623/623 test đạt**.
 
 **Còn lại:** QC duyệt → render → `final.mp4` cho WF Content chưa chạy tới; trần chi phí và cơ chế pause chưa kích hoạt thật lần nào; Research Agent vẫn không tra web (brief mục 3 yêu cầu); `main.py` 7533 dòng.
+
+## 57. Video ngắn (Short) song song với video dài, cho mọi workflow (2026-08-30)
+
+Yêu cầu: mỗi workflow, sau khi có video dài, phải kèm **kịch bản và các đoạn cắt ghép** để dựng một video ngắn.
+
+### 57.1 Vì sao một cơ chế dùng được cho cả hai WF
+
+Cả hai workflow đều kết thúc ở cùng một thứ: timeline gồm các cảnh, mỗi cảnh có hình và giọng đọc. WF Content sinh cảnh, WF Reup cắt từ video nguồn — nhưng tới lúc xong thì **short là bài toán chọn lọc, không phải bài toán sản xuất**. Nên `shorts.py` không cần biết workflow nào tạo ra timeline.
+
+Short **dùng lại giọng đọc sẵn có** của từng cảnh thay vì đọc lại. Hình và tiếng khớp sẵn, không tốn credit, không cần TTS. Đọc lại bằng giọng khác là việc khác và cố ý chưa làm.
+
+### 57.2 Kịch bản và cắt ghép
+
+- `build_plan()` hỏi model ở stage `storyboard`: chọn cảnh, viết `hook` (câu giữ chân ở giây đầu) và `captions` cho từng cảnh.
+- **Giữ nguyên thứ tự thời gian** của video dài: đảo thứ tự thì thành video khác, không phải bản cô đọng.
+- `fit_to_short()` cắt xuống ≤ **60 giây** (quá 60 giây YouTube không coi là Short nữa).
+- `default_plan()` dựng được kế hoạch **không cần model nào** — lấy từ cảnh mở đầu cho tới khi chạm giới hạn. Model hỏng thì tính năng xuống cấp chứ không mất.
+- Model chỉ được xem những cảnh **đã có đủ hình và giọng**; cảnh chưa xong không lọt vào lựa chọn.
+- Kế hoạch mới **xoá đường dẫn file đã dựng của kế hoạch cũ**: file render thuộc về kế hoạch sinh ra nó.
+
+### 57.3 Hai lỗi phát hiện khi làm
+
+1. **`output_profile` bị bỏ qua hoàn toàn.** Project đặt `youtube_shorts` vẫn render 1920×1080, vì `run_render_job` gọi `render_timeline_with_ffmpeg` mà **không truyền `width`/`height`**. Chỉ đường OpenMontage truyền `profile`, mà đường đó bị guard GPU-only chặn. Nghĩa là khổ dọc chưa từng hoạt động. Đã thêm bảng `OUTPUT_PROFILE_SIZES` và truyền kích thước.
+2. **Letterbox sai chuẩn Short.** Renderer luôn `scale:decrease` + `pad`, đúng cho video dài (không cắt mất nội dung) nhưng cho Short thì ra hai vệt đen khổng lồ. Thêm tham số `fit`: `pad` giữ mặc định cho video dài, `cover` (`increase` + `crop`) cho khổ dọc.
+
+Lưu ý kỹ thuật: `fit` phải nằm **cuối** chữ ký `_segment_arguments` vì lời gọi truyền mọi tham số trước đó theo vị trí — lần đầu tôi chèn vào giữa, `compileall` vẫn qua nhưng sẽ hỏng lúc chạy. Có test khoá vị trí này.
+
+### 57.4 Nghiệm thu thật
+
+Trên project 42 (WF Content, 3 cảnh đủ hình + giọng):
+
+- Lập kế hoạch: 3 cảnh, **18 giây**, hook lấy đúng câu mở đầu.
+- Render: **1080×1920 h264 + aac, 16,8 giây, 3,6 MB, mất 4,3 giây**.
+- Kiểm tra khung hình: lấp đầy khung dọc, hook tiếng Việt cháy vào cảnh đầu.
+
+Đáng chú ý: **project 42 giờ có video dựng xong, trong khi đường video dài vẫn kẹt ở QC.** Short về đích trước.
+
+Python compile đạt, JavaScript giao diện parse đạt, **669/669 test đạt** (thêm 30 test).
+
+**Chưa làm:** đọc lại giọng riêng cho short; chọn khung hình theo chủ thể (hiện `cover` cắt giữa); đăng short lên YouTube.

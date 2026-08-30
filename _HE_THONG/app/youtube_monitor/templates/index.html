@@ -564,7 +564,17 @@
             <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option></select></div></div>
           </div>
           <div id="studioRenderSummary" class="studio-summary-grid"><div class="studio-summary-card"><label>Timeline</label><strong>Chưa tạo</strong></div><div class="studio-summary-card"><label>Voice</label><strong>Chưa lưu</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>YouTube ngang</strong></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioRenderReupButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div>
+          <div class="studio-actions" style="margin-top:10px;gap:6px;flex-wrap:wrap">
+            <select id="studioShortProfile" aria-label="Khổ video ngắn">
+              <option value="youtube_shorts">YouTube Shorts · 9:16</option>
+              <option value="instagram_reels">Instagram Reels · 9:16</option>
+              <option value="tiktok">TikTok · 9:16</option>
+            </select>
+            <button id="studioPlanShortButton" class="btn" type="button" onclick="planProjectShort()">Lên kịch bản video ngắn</button>
+            <button id="studioRenderShortButton" class="btn" type="button" onclick="queueShortRender()">Dựng video ngắn</button>
+          </div>
+          <div id="studioShortSummary" class="studio-model-note" style="margin-top:6px">Video ngắn được cắt từ chính video dài này: chọn các cảnh đắt nhất, giữ nguyên thứ tự, tối đa 60 giây. Không tạo lại media nên không tốn credit.</div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioRenderReupButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
         </div>
         <div id="studioStep7" class="studio-step" data-studio-step="7" hidden>
           <p class="studio-step-note">Video sau khi render sẽ nằm trong project. Bạn có thể xem lại, tải xuống hoặc chuyển sang lịch đăng của kênh đích.</p>
@@ -1386,6 +1396,49 @@
     try { localStorage.setItem('ytFactory.automationProjectId', String(id)); } catch (_) {}
     if ($('automationRefreshButton')) $('automationRefreshButton').disabled = false;
     await loadAutomationStatus();
+  }
+
+  async function planProjectShort() {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) { setMessage('Hãy mở một dự án trước khi lên kịch bản video ngắn.', 'error'); return; }
+    const profile = $('studioShortProfile')?.value || 'youtube_shorts';
+    setMessage('Đang chọn cảnh và viết hook cho video ngắn...', '');
+    try {
+      const data = await api(`/api/projects/${projectId}/short/plan`, {
+        method: 'POST',
+        body: JSON.stringify({profile, use_model: true}),
+      });
+      renderShortSummary(data.short, data);
+      setMessage(`Đã lên kịch bản video ngắn: ${data.scene_count} cảnh, ${data.duration_seconds}s.`, 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function queueShortRender() {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
+    const script = state.scriptId || (await api(`/api/projects/${projectId}/scripts`).catch(() => null))?.[0]?.id;
+    if (!script) { setMessage('Dự án chưa có kịch bản đã duyệt.', 'error'); return; }
+    try {
+      await api(`/api/projects/${projectId}/jobs?confirmed=true`, {
+        method: 'POST',
+        body: JSON.stringify({job_type: 'render_short', provider: 'ffmpeg_builtin', script_id: script}),
+      });
+      setMessage('Đã đưa video ngắn vào hàng đợi dựng.', 'success');
+      await loadProductionQueueStatus?.();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  function renderShortSummary(short, extra = {}) {
+    const box = $('studioShortSummary');
+    if (!box) return;
+    if (!short) { return; }
+    const plan = short.plan || {};
+    const scenes = (plan.segment_ids || []).length;
+    const seconds = Number(short.duration_seconds || extra.duration_seconds || 0);
+    const output = short.output_path ? ' · đã dựng xong' : '';
+    box.innerHTML = `<b>${esc(short.title || 'Video ngắn')}</b> — ${scenes} cảnh · ${seconds}s · ${esc(plan.profile || 'youtube_shorts')}${output}`
+      + (short.hook ? `<br>Hook: ${esc(short.hook)}` : '')
+      + (plan.reason ? `<br><span class="secondary-text">${esc(plan.reason)}</span>` : '');
   }
 
   async function loadAutomationStatus(quiet = false) {

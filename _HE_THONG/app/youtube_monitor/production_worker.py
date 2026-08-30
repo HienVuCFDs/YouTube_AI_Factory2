@@ -13,6 +13,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 
 from .database import Database
+from .shorts import ShortPlan, ShortsPlanError, build_short_timeline, is_vertical, profile_size
 from .ffmpeg_renderer import generate_local_visual_draft, media_duration_seconds, render_timeline_with_ffmpeg
 from .premiere_export import build_premiere_export_package
 from .project_layout import ensure_project_layout
@@ -24,7 +25,7 @@ from .timeline_builder import timeline_to_manifest
 from .transcriber import TranscriptionError, transcribe_local_file
 
 
-JOB_TYPES = {"voiceover", "voiceover_segment", "voice_preview", "source_visuals", "render", "premiere_draft", "director_production"}
+JOB_TYPES = {"voiceover", "voiceover_segment", "voice_preview", "source_visuals", "render", "render_short", "premiere_draft", "director_production"}
 OPENMONTAGE_RENDER_PROVIDERS = {
     "openmontage",
     "openmontage_ffmpeg",
@@ -643,11 +644,14 @@ def run_render_job(
             )
         render_settings = database.get_project_render_settings(int(project["id"]))
         music_path = Path(str(render_settings.get("music_file_path") or ""))
+        width, height = profile_size(str(render_settings.get("output_profile") or "youtube_landscape"))
         return render_timeline_with_ffmpeg(
             timeline,
             project_dir,
             output_filename=str(output_path),
             binary=ffmpeg_binary,
+            width=width,
+            height=height,
             background_music=music_path if music_path.is_file() else None,
             music_volume=float(render_settings.get("music_volume") or 0.12),
             transition=str(render_settings.get("transition_style") or "fade"),
@@ -767,6 +771,51 @@ def run_director_production_job(
     # must not turn a valid MP4 into a failed render job. The report remains
     # beside the video and Publisher can require the missing item later.
     return final_path
+
+
+def run_short_render_job(
+    database: Database,
+    job: dict[str, Any],
+    artifact_root: Path,
+    ffmpeg_binary: str = "ffmpeg",
+) -> str:
+    """Render the vertical short a project already has a plan for.
+
+    Deliberately FFmpeg-only: the short is a re-cut of segments that have
+    already been produced and reviewed, so there is nothing here for a
+    generation provider to do.
+    """
+    project, _script, timeline = _context(database, job)
+    project_id = int(project["id"])
+    record = database.get_project_short(project_id)
+    if not record:
+        raise ProductionJobError("Chưa có kế hoạch short cho dự án này")
+    plan = ShortPlan.from_dict(dict(record.get("plan") or {}))
+    try:
+        short_timeline = build_short_timeline(timeline, plan)
+    except ShortsPlanError as exc:
+        raise ProductionJobError(str(exc)) from exc
+    layout = ensure_project_layout(artifact_root, project_id)
+    work_dir = layout["work"] / "render_short"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_path = layout["exports"] / "final_short.mp4"
+    width, height = profile_size(plan.profile)
+    render_settings = database.get_project_render_settings(project_id)
+    music_path = Path(str(render_settings.get("music_file_path") or ""))
+    rendered = render_timeline_with_ffmpeg(
+        short_timeline,
+        work_dir,
+        output_filename=str(output_path),
+        binary=ffmpeg_binary,
+        width=width,
+        height=height,
+        background_music=music_path if music_path.is_file() else None,
+        music_volume=float(render_settings.get("music_volume") or 0.12),
+        transition=str(render_settings.get("transition_style") or "fade"),
+        fit="cover" if is_vertical(plan.profile) else "pad",
+    )
+    database.save_project_short_output(project_id, rendered)
+    return rendered
 
 
 def run_premiere_draft_job(
@@ -993,6 +1042,13 @@ class ProductionWorker:
                     self.ffmpeg_command,
                     self.ffmpeg_binary,
                     self.openmontage_adapter,
+                )
+            elif job["job_type"] == "render_short":
+                output_path = run_short_render_job(
+                    self.database,
+                    job,
+                    self.artifact_root,
+                    self.ffmpeg_binary,
                 )
             elif job["job_type"] == "premiere_draft":
                 output_path = run_premiere_draft_job(

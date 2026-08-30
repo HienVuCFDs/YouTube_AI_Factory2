@@ -63,6 +63,14 @@ from .motion_graphics import (
     composer_ready as motion_composer_ready,
     set_spec_builder as motion_graphics_set_spec_builder,
 )
+from .shorts import (
+    MAX_SHORT_SECONDS,
+    ShortPlan,
+    ShortsPlanError,
+    build_plan as build_short_plan,
+    plan_duration_seconds,
+    set_plan_builder as shorts_set_plan_builder,
+)
 from .providers import (
     ProviderGatewayError,
     ProviderRoutePolicy,
@@ -7335,6 +7343,105 @@ class AgentMessageRequest(BaseModel):
 class ProviderRouteRequest(BaseModel):
     capability: Literal["scene.image", "scene.animated_image", "scene.video"]
     project_id: int | None = Field(default=None, ge=1)
+
+
+_SHORT_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "hook": {"type": "string"},
+        "reason": {"type": "string"},
+        "segment_ids": {"type": "array", "items": {"type": "integer"}},
+        "captions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_id": {"type": "integer"},
+                    "text": {"type": "string"},
+                },
+                "required": ["segment_id", "text"],
+            },
+        },
+    },
+    "required": ["title", "hook", "reason", "segment_ids", "captions"],
+}
+
+
+def _write_short_plan(request: dict[str, Any]) -> dict[str, Any]:
+    """Choose the moments that carry the story, and write the hook."""
+    return _call_orchestrator_json(
+        (
+            "Bạn dựng một video Short dọc từ timeline của một video dài đã hoàn tất. "
+            f"Chọn các cảnh cộng lại KHÔNG quá {MAX_SHORT_SECONDS} giây. "
+            "Giữ nguyên thứ tự thời gian của video dài; short là bản cô đọng, không phải bản dựng lại. "
+            "Chọn cảnh mang trọn một ý hoàn chỉnh, bỏ cảnh dẫn nhập hoặc chuyển tiếp. "
+            "'hook' là câu chữ hiện lên ngay giây đầu để giữ người xem, viết ngắn và cụ thể. "
+            "'captions' là chữ hiện trên từng cảnh, chỉ thêm khi thật sự giúp hiểu. "
+            "Chỉ dùng segment_id có trong dữ liệu, không bịa."
+        ),
+        json.dumps(request, ensure_ascii=False)[:60000],
+        _SHORT_PLAN_SCHEMA,
+        stage="storyboard",
+    )
+
+
+shorts_set_plan_builder(_write_short_plan)
+
+
+class ShortPlanRequest(BaseModel):
+    goal: str = Field(default="", max_length=4000)
+    profile: Literal["youtube_shorts", "instagram_reels", "tiktok"] = "youtube_shorts"
+    use_model: bool = True
+
+
+@app.post("/api/projects/{project_id}/short/plan")
+def plan_project_short(project_id: int, payload: ShortPlanRequest) -> dict[str, Any]:
+    """Write the short's script and pick its cuts from the finished long video."""
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    timeline = database.list_project_timeline(
+        project_id, script_id=int(script["id"]) if script else None
+    )
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Dự án chưa có timeline để cắt short")
+    try:
+        if payload.use_model:
+            plan = build_short_plan(
+                timeline,
+                title=str(project.get("title") or ""),
+                goal=payload.goal,
+                profile=payload.profile,
+            )
+        else:
+            from .shorts import default_plan
+
+            base = default_plan(timeline, title=str(project.get("title") or ""))
+            plan = ShortPlan(
+                title=base.title, hook=base.hook, segment_ids=base.segment_ids,
+                captions=base.captions, profile=payload.profile, reason=base.reason,
+            )
+    except ShortsPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    seconds = plan_duration_seconds(timeline, plan.segment_ids)
+    record = database.save_project_short(project_id, plan.as_dict(), duration_seconds=seconds)
+    database.emit_domain_event(
+        "short.planned",
+        project_id=project_id,
+        aggregate_type="production_project",
+        aggregate_id=project_id,
+        source="app",
+        payload={"segments": len(plan.segment_ids), "seconds": seconds},
+    )
+    return {"short": record, "duration_seconds": seconds, "scene_count": len(plan.segment_ids)}
+
+
+@app.get("/api/projects/{project_id}/short")
+def get_project_short(project_id: int) -> dict[str, Any]:
+    record = database.get_project_short(project_id)
+    return {"short": record, "max_seconds": MAX_SHORT_SECONDS}
 
 
 @app.get("/api/agent-system/status")

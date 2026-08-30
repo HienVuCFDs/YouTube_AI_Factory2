@@ -454,6 +454,7 @@ def _segment_arguments(
     cleanups: list[dict[str, Any]] | None = None,
     trim_head: float = 0.0,
     trim_tail: float = 0.0,
+    fit: str = "pad",
 ) -> list[str]:
     if not visual:
         raise FfmpegRenderError(
@@ -504,11 +505,22 @@ def _segment_arguments(
         # to a vertical frame.
         filters.extend(linear_cleanups)
         after.extend(_motion_filters(effect, mark_width, mark_height, fps))
-    after.extend([
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        "format=yuv420p",
-    ])
+    if str(fit or "pad").strip().lower() == "cover":
+        # A vertical short letterboxed from 16:9 is mostly black bars, and a
+        # viewer scrolls past it. Filling the frame loses the sides, which for
+        # a short is the right trade; the long edit keeps padding, where
+        # losing picture would be the wrong one.
+        after.extend([
+            f"scale={width}:{height}:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}",
+            "format=yuv420p",
+        ])
+    else:
+        after.extend([
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            "format=yuv420p",
+        ])
     if str(transition or "fade").strip().lower() == "fade":
         fade_seconds = 0.12
         after.extend([
@@ -571,6 +583,7 @@ def render_timeline_with_ffmpeg(
     background_music: Path | None = None,
     music_volume: float = 0.12,
     transition: str = "fade",
+    fit: str = "pad",
 ) -> str:
     """Render timeline segments locally without requiring a custom command template.
 
@@ -645,6 +658,7 @@ def render_timeline_with_ffmpeg(
             width, height, fps, index, preferred_codec, subtitle_path,
             background_music, music_volume, segment_transition, segment_effect,
             segment_cleanups, trim_head, trim_tail,
+            fit=fit,
         )
         try:
             _run(args, output_dir)
@@ -658,6 +672,7 @@ def render_timeline_with_ffmpeg(
                     width, height, fps, index, "libx264", subtitle_path,
                     background_music, music_volume, segment_transition, segment_effect,
                     segment_cleanups, trim_head, trim_tail,
+                    fit=fit,
                 ),
                 output_dir,
             )

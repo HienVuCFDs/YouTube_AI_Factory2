@@ -585,6 +585,20 @@ class Database:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS project_shorts (
+                    project_id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    hook TEXT NOT NULL DEFAULT '',
+                    plan_json TEXT NOT NULL DEFAULT '{}',
+                    duration_seconds REAL NOT NULL DEFAULT 0,
+                    output_path TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS provider_route_decisions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER,
@@ -5336,6 +5350,69 @@ class Database:
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         return self.provider_cost_since(start)
+
+    def save_project_short(
+        self,
+        project_id: int,
+        plan: dict[str, Any],
+        *,
+        duration_seconds: float = 0,
+    ) -> dict[str, Any]:
+        """Store the one current short plan for a project.
+
+        Replanning replaces rather than accumulates: a project has one short
+        in flight, and a stale plan pointing at scenes that were regenerated
+        would render the wrong video.
+        """
+        if not self.get_production_project(project_id):
+            raise ValueError("Không tìm thấy project")
+        now = utc_now()
+        payload = json.dumps(plan or {}, ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO project_shorts (
+                    project_id, title, hook, plan_json, duration_seconds,
+                    output_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    title = excluded.title,
+                    hook = excluded.hook,
+                    plan_json = excluded.plan_json,
+                    duration_seconds = excluded.duration_seconds,
+                    output_path = '',
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(project_id),
+                    str(plan.get("title") or "")[:300],
+                    str(plan.get("hook") or "")[:600],
+                    payload,
+                    max(0.0, float(duration_seconds)),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_project_short(project_id)
+
+    def get_project_short(self, project_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM project_shorts WHERE project_id = ?", (int(project_id),)
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        self._decode_json_column(result, "plan_json", "plan")
+        return result
+
+    def save_project_short_output(self, project_id: int, output_path: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE project_shorts SET output_path = ?, updated_at = ? WHERE project_id = ?",
+                (str(output_path), utc_now(), int(project_id)),
+            )
+        return self.get_project_short(project_id)
 
     def summary(self) -> dict[str, int]:
         with self._connect() as connection:
