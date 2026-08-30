@@ -1576,3 +1576,32 @@ Trên project 42 (WF Content, 3 cảnh đủ hình + giọng):
 Python compile đạt, JavaScript giao diện parse đạt, **669/669 test đạt** (thêm 30 test).
 
 **Chưa làm:** đọc lại giọng riêng cho short; chọn khung hình theo chủ thể (hiện `cover` cắt giữa); đăng short lên YouTube.
+
+## 58. Nhận video nguồn từ link của nền tảng bất kỳ (2026-08-30)
+
+### 58.1 Lỗ hổng
+
+`service.add_video()` gọi **YouTube Data API** để lấy metadata, nên một link Bilibili, TikTok, Vimeo hay Facebook **không nhập được**. Bằng chứng ngay trong database: hai project Reup 39 và 40 là video bilibili nhưng vào app dưới dạng `local-*` với `file:///` — người dùng phải **tải tay rồi upload file**.
+
+Trong khi đó `video_downloader.py` đã dùng **yt-dlp** từ đầu, đọc được khoảng 1800 trang. Năng lực có sẵn, chỉ thiếu đường vào.
+
+### 58.2 Cách làm
+
+`source_links.py` hỏi chính yt-dlp phần metadata (`extract_info(download=False)`), không tải file. Kết quả thành một `video` row bình thường kèm một `channel` tổng hợp cho từng tác giả trên từng site — nên transcript, phân tích và WF Reup không cần biết nguồn ở đâu ra.
+
+- **Link YouTube vẫn đi đường cũ.** Data API cho biết video thuộc kênh nào và số liệu lượt xem — thứ yt-dlp không có, mà tính năng theo dõi kênh thì cần.
+- ID tự sinh: `web-<hash>` cho video, `WEB-<SITE>-<hash>` cho kênh, cắt vừa 24 ký tự của cột vốn dành cho ID YouTube. Cùng một ID trên hai site không đụng nhau.
+- **Không tải gì khi nhập.** Tải về vẫn là hành động riêng, có xác nhận.
+- Link phát trực tiếp đang diễn ra bị từ chối thay vì nhập nửa vời.
+- Link danh sách phát chỉ lấy video đầu: một link là một video nguồn.
+
+### 58.3 Nghiệm thu thật
+
+- `https://archive.org/details/203325_Marathon_Trims_R1` → nhập được: platform `ArchiveOrg`, tiêu đề, tác giả, **1471 giây**, sinh đúng `video_id` và `channel_id`.
+- Vimeo trả lỗi xác thực của chính yt-dlp; thông báo được truyền nguyên vẹn sang tiếng Việt thay vì nuốt đi. Đây là giới hạn của yt-dlp với site đó, không phải lỗi app.
+
+Giao diện: ô **Loại nguồn** thêm lựa chọn **"Link bất kỳ · Bilibili, TikTok, Vimeo, Archive..."**, kèm dòng nói rõ chỉ đọc metadata chứ chưa tải file. Hàm `updateSourceImportForm()` sẵn có được mở rộng thay vì viết hàm thứ hai.
+
+**690/690 test đạt** (thêm 21 test).
+
+**Giới hạn:** site nào yt-dlp đọc được thì app đọc được — không hơn. Site cần đăng nhập vẫn cần cookie, và `download_video()` đã có sẵn tham số `cookie_file` cho việc đó.

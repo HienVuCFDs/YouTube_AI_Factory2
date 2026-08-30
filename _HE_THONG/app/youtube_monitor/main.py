@@ -63,6 +63,11 @@ from .motion_graphics import (
     composer_ready as motion_composer_ready,
     set_spec_builder as motion_graphics_set_spec_builder,
 )
+from .source_links import (
+    SourceLinkError,
+    is_http_url,
+    probe_url as probe_source_link,
+)
 from .shorts import (
     MAX_SHORT_SECONDS,
     ShortPlan,
@@ -774,10 +779,90 @@ def add_channel(payload: AddChannelRequest) -> dict[str, Any]:
 
 @app.post("/api/videos/import")
 def import_reference_video(payload: ImportVideoRequest) -> dict[str, Any]:
+    # A YouTube reference keeps its own path: the Data API gives channel
+    # membership and view counts that yt-dlp does not, and the tracked-channel
+    # features depend on them. Anything else is a plain link.
+    if is_http_url(payload.reference) and not _looks_like_youtube(payload.reference):
+        return _import_video_from_link(payload.reference, group_name=payload.group_name)
     try:
         return service.add_video(payload.reference, group_name=payload.group_name)
     except Exception as exc:
         raise _api_error(exc) from exc
+
+
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def _looks_like_youtube(reference: str) -> bool:
+    lowered = str(reference or "").lower()
+    return any(host in lowered for host in _YOUTUBE_HOSTS)
+
+
+class ImportVideoLinkRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    group_name: str = Field(default="", max_length=120)
+
+
+def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]:
+    """Register a source video from any site yt-dlp can read.
+
+    The row looks exactly like a tracked or uploaded one, so transcript,
+    analysis and the reup workflow need no knowledge of where it came from.
+    Nothing is downloaded here: that stays an explicit, confirmed action.
+    """
+    try:
+        details = probe_source_link(url)
+    except SourceLinkError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if details["is_live"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Đây là buổi phát trực tiếp đang diễn ra; hãy nhập lại khi đã có bản lưu.",
+        )
+    database.upsert_channel({
+        "youtube_channel_id": details["channel_id"],
+        "channel_url": details["uploader_url"] or details["webpage_url"],
+        "title": f"{details['uploader']} · {details['platform']}"[:200],
+        "uploads_playlist_id": details["channel_id"],
+        "group_name": group_name or details["platform"],
+    })
+    database.upsert_video({
+        "youtube_video_id": details["video_id"],
+        "youtube_channel_id": details["channel_id"],
+        "video_url": details["webpage_url"],
+        "title": details["title"],
+        "description": details["description"],
+        "duration_seconds": details["duration_seconds"],
+        "thumbnail_url": details["thumbnail"],
+        "metadata_hash": details["video_id"],
+        "raw_payload": {
+            "source": "link_import",
+            "platform": details["platform"],
+            "native_id": details["native_id"],
+        },
+    })
+    return {
+        "status": "imported",
+        "import_mode": "link",
+        "platform": details["platform"],
+        "video": database.get_video(details["video_id"]),
+        "channel": database.get_channel(details["channel_id"]),
+    }
+
+
+@app.post("/api/videos/import-link")
+def import_video_from_link(payload: ImportVideoLinkRequest) -> dict[str, Any]:
+    """Import a source video from a link on any supported platform."""
+    return _import_video_from_link(payload.url, group_name=payload.group_name)
+
+
+@app.get("/api/videos/probe-link")
+def probe_video_link(url: str = Query(min_length=8, max_length=2000)) -> dict[str, Any]:
+    """Show what a link is before anything is written or downloaded."""
+    try:
+        return {"video": probe_source_link(url)}
+    except SourceLinkError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/managed-channels")

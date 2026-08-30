@@ -752,12 +752,12 @@
         <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN THAM CHIẾU</div><div class="panel-sub">Chọn thêm cả kênh hoặc chỉ một URL video. Không tải file video.</div></div><span class="tag orange">YOUTUBE API</span></div>
         <div class="panel-body">
           <form id="addChannelForm" class="register-grid">
-            <div class="field"><label for="sourceImportType">Loại nguồn</label><select id="sourceImportType"><option value="channel">Kênh · lấy video trong kênh</option><option value="video">Một video · chỉ lấy video này</option></select></div>
+            <div class="field"><label for="sourceImportType">Loại nguồn</label><select id="sourceImportType"><option value="channel">Kênh · lấy video trong kênh</option><option value="video">Một video YouTube · chỉ lấy video này</option><option value="link">Link bất kỳ · Bilibili, TikTok, Vimeo, Archive...</option></select></div>
             <div class="field"><label for="reference" id="referenceLabel">URL kênh / @handle / ID</label><input id="reference" required placeholder="https://youtube.com/@GoogleDevelopers" /></div>
             <div class="field"><label for="groupName">Nhãn nhóm</label><input id="groupName" placeholder="Công nghệ" /></div>
             <button class="btn primary" type="submit" id="sourceImportSubmit">＋ Thêm & đồng bộ</button>
           </form>
-          <div id="message" class="message">Sẵn sàng. Hãy thêm một kênh để bắt đầu.</div>
+          <div id="sourceImportLinkHint" class="secondary-text" style="margin-top:6px" hidden></div><div id="message" class="message">Sẵn sàng. Hãy thêm một kênh để bắt đầu.</div>
           <div id="sourceImportResult" class="source-import-result" hidden>
             <div>
               <div id="sourceImportResultTitle" class="source-import-result-title"></div>
@@ -6003,13 +6003,37 @@ Chạy các bước này?`)) return;
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  const SOURCE_IMPORT_FORM = {
+    channel: {
+      label: 'URL kênh / @handle / ID',
+      placeholder: 'https://youtube.com/@GoogleDevelopers',
+      submit: '＋ Thêm & đồng bộ',
+    },
+    video: {
+      label: 'URL video YouTube',
+      placeholder: 'https://www.youtube.com/watch?v=...',
+      submit: '＋ Thêm video này',
+    },
+    link: {
+      label: 'Link video từ nền tảng bất kỳ',
+      placeholder: 'https://www.bilibili.com/video/BV1... · TikTok · Vimeo · Archive.org',
+      submit: '＋ Thêm từ link',
+    },
+  };
+
   function updateSourceImportForm() {
     const mode = $('sourceImportType')?.value || 'channel';
-    const isVideo = mode === 'video';
+    const shape = SOURCE_IMPORT_FORM[mode] || SOURCE_IMPORT_FORM.channel;
     $('sourceImportResult')?.setAttribute('hidden', '');
-    $('referenceLabel').textContent = isVideo ? 'URL video YouTube' : 'URL kênh / @handle / ID';
-    $('reference').placeholder = isVideo ? 'https://www.youtube.com/watch?v=...' : 'https://youtube.com/@GoogleDevelopers';
-    $('sourceImportSubmit').textContent = isVideo ? '＋ Thêm video này' : '＋ Thêm & đồng bộ';
+    $('referenceLabel').textContent = shape.label;
+    $('reference').placeholder = shape.placeholder;
+    $('sourceImportSubmit').textContent = shape.submit;
+    const hint = $('sourceImportLinkHint');
+    if (hint) {
+      hint.hidden = mode !== 'link';
+      // Metadata only: nothing is fetched until a download is asked for.
+      hint.textContent = 'App đọc tiêu đề, tác giả và thời lượng bằng yt-dlp (khoảng 1800 trang được hỗ trợ). Chưa tải file về máy; bấm Tải video/audio ở bước sau khi cần.';
+    }
   }
 
   function showSourceImportResult(video) {
@@ -6028,14 +6052,31 @@ Chạy các bước này?`)) return;
     const submit = event.target.querySelector('button[type="submit"]');
     const mode = $('sourceImportType')?.value || 'channel';
     const isVideo = mode === 'video';
+    const isLink = mode === 'link';
+    const reference = $('reference').value;
+    const groupName = $('groupName').value;
     submit.disabled = true;
-    setMessage(isVideo ? 'Đang lấy metadata của đúng một video...' : 'Đang đăng ký kênh và đồng bộ metadata...');
+    setMessage(
+      isLink ? 'Đang đọc thông tin video từ link...'
+      : isVideo ? 'Đang lấy metadata của đúng một video...'
+      : 'Đang đăng ký kênh và đồng bộ metadata...'
+    );
     try {
-      const result = await api(isVideo ? '/api/videos/import' : '/api/channels', {method: 'POST', body: JSON.stringify({reference: $('reference').value, group_name: $('groupName').value})});
+      let result;
+      if (isLink) {
+        result = await api('/api/videos/import-link', {method: 'POST', body: JSON.stringify({url: reference, group_name: groupName})});
+      } else {
+        result = await api(isVideo ? '/api/videos/import' : '/api/channels', {method: 'POST', body: JSON.stringify({reference, group_name: groupName})});
+      }
       $('reference').value = '';
-      setMessage(isVideo ? `Đã thêm đúng video “${result.video?.title || ''}”. Không quét các video khác của kênh.` : `Đã đăng ký kênh. Đã lưu ${result.videos_new} video mới.`, 'success');
+      setMessage(
+        isLink ? `Đã thêm “${result.video?.title || ''}” từ ${result.platform}. Chưa tải file về máy.`
+        : isVideo ? `Đã thêm đúng video “${result.video?.title || ''}”. Không quét các video khác của kênh.`
+        : `Đã đăng ký kênh. Đã lưu ${result.videos_new} video mới.`,
+        'success'
+      );
       await refresh();
-      if (isVideo) showSourceImportResult(result.video);
+      if (isVideo || isLink) showSourceImportResult(result.video);
     } catch (error) { setMessage(error.message, 'error'); }
     finally { submit.disabled = false; }
   });
