@@ -20,6 +20,7 @@ from .project_layout import ensure_project_layout
 from .quality_check import build_quality_report, quality_report_markdown
 from .openmontage_adapter import OpenMontageAdapter
 from .settings import GPU_DEVICE_INDEX, GPU_ONLY
+from .shot_planner import is_section_heading
 from .source_visuals import SourceVisualError, prepare_source_visuals
 from .timeline_builder import timeline_to_manifest
 from .transcriber import TranscriptionError, transcribe_local_file
@@ -396,6 +397,20 @@ def run_voiceover_job(
     if provider == "edge_tts" and not edge_tts_command.strip():
         raise ProductionJobError("Chưa cấu hình EDGE_TTS_COMMAND")
 
+    # A timeline built before the planner learned to drop them can still
+    # hold scenes whose whole narration is a section label. Reading
+    # "Cảnh 5 · main_content" aloud wastes a scene, the picture it wants,
+    # and the time to make both, so they are skipped rather than voiced.
+    heading_scenes = [
+        item for item in timeline if is_section_heading(str(item.get("voice_text") or ""))
+    ]
+    if heading_scenes:
+        timeline = [item for item in timeline if item not in heading_scenes]
+        if not timeline:
+            raise ProductionJobError(
+                "Mọi cảnh trong timeline chỉ là tiêu đề mục của kịch bản, không có lời nào "
+                "để đọc. Hãy tạo lại storyboard từ kịch bản."
+            )
     if provider == "voxcpm" and (not voxcpm_python.strip() or not voxcpm_runner.strip()):
         raise ProductionJobError("VoxCPM runtime is not configured")
     if provider == "voxcpm" and not voxcpm_reference_audio:

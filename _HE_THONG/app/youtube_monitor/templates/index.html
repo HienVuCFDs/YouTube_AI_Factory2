@@ -3367,7 +3367,12 @@
       const response = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
       const shots = response.shots || [];
       if ($('studioShotSummary')) $('studioShotSummary').textContent = `${shots.length} cảnh`;
-      renderStudioStoryboard(shots, []);
+      // Drawing with an empty timeline hid every player: scenes that already
+      // had voice attached came back reading "no narration yet", which looked
+      // exactly like a voiceover that had failed.
+      const storyboardBundle = await api(`/api/projects/${state.studioProjectId}`).catch(() => null);
+      state.timeline = storyboardBundle?.latest_timeline || state.timeline || [];
+      renderStudioStoryboard(shots, state.timeline);
       if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
       updateStudioSceneGenerationAvailability();
       setStudioProgress(100, `Storyboard ${shots.length} cảnh đã hoàn tất.`);

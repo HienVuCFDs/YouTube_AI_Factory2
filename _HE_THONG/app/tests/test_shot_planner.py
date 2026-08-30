@@ -163,3 +163,35 @@ def test_headings_never_reach_the_shot_list() -> None:
     shots = build_shot_plan({"title": "p"}, script)
     narrations = [shot["narration"] for shot in shots]
     assert narrations == ["Yvan bắt đầu đào", "Anh dựng khung"], narrations
+
+
+def test_the_voiceover_skips_a_scene_that_is_only_a_heading() -> None:
+    """A timeline built before the planner learned to drop them still holds
+    them, and reading one aloud wastes a scene and the picture it wants."""
+    import inspect
+
+    from youtube_monitor import production_worker
+
+    source = inspect.getsource(production_worker.run_voiceover_job)
+    assert "is_section_heading" in source
+    assert "heading_scenes" in source
+
+
+def test_a_timeline_of_nothing_but_headings_is_refused() -> None:
+    import inspect
+
+    from youtube_monitor import production_worker
+
+    source = inspect.getsource(production_worker.run_voiceover_job)
+    assert "chỉ là tiêu đề mục" in source
+
+
+def test_the_storyboard_keeps_its_timeline_when_shots_are_regenerated() -> None:
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parent.parent
+        / "youtube_monitor" / "templates" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "renderStudioStoryboard(shots, state.timeline);" in page
+    assert "renderStudioStoryboard(shots, []);" not in page
