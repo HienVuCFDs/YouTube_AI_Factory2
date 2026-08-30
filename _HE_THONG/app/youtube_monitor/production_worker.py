@@ -855,8 +855,11 @@ def run_short_render_job(
     already been produced and reviewed, so there is nothing here for a
     generation provider to do.
     """
-    project, _script, timeline = _context(database, job)
+    project, script, timeline = _context(database, job)
     project_id = int(project["id"])
+    # A short is usually the first thing rendered, not the last, so it cannot
+    # rely on the long video's render having measured the source already.
+    timeline = _autocover_source_marks(database, project, script, timeline, ffmpeg_binary)
     record = database.get_project_short(project_id)
     if not record:
         raise ProductionJobError("Chưa có kế hoạch short cho dự án này")
