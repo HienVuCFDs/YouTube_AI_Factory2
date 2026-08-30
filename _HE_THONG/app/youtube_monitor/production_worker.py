@@ -13,7 +13,14 @@ from threading import Event, Lock, Thread
 from typing import Any
 
 from .database import Database
-from .shorts import ShortPlan, ShortsPlanError, build_short_timeline, is_vertical, profile_size
+from .shorts import (
+    DEFAULT_SHORT_PROFILE,
+    ShortPlan,
+    ShortsPlanError,
+    build_short_timeline,
+    is_vertical,
+    profile_size,
+)
 from .ffmpeg_renderer import generate_local_visual_draft, media_duration_seconds, render_timeline_with_ffmpeg
 from .premiere_export import build_premiere_export_package
 from .project_layout import ensure_project_layout
@@ -849,30 +856,48 @@ def run_short_render_job(
     artifact_root: Path,
     ffmpeg_binary: str = "ffmpeg",
 ) -> str:
-    """Render the vertical short a project already has a plan for.
+    """Render a vertical short, whichever of the two kinds this project has.
 
-    Deliberately FFmpeg-only: the short is a re-cut of segments that have
-    already been produced and reviewed, so there is nothing here for a
-    generation provider to do.
+    A short can be a re-cut of the finished long video - segments it has
+    already produced, picked and reordered by a plan - or a video written for
+    its own sake, which arrives as a second script with a storyboard and a
+    voice of its own. The first needs a plan to know which scenes to use; the
+    second is simply its own timeline, and asking it for a plan would refuse
+    to render a video that is already complete.
+
+    Deliberately FFmpeg-only either way: every asset already exists, so there
+    is nothing here for a generation provider to do.
     """
     project, script, timeline = _context(database, job)
     project_id = int(project["id"])
     # A short is usually the first thing rendered, not the last, so it cannot
     # rely on the long video's render having measured the source already.
     timeline = _autocover_source_marks(database, project, script, timeline, ffmpeg_binary)
-    record = database.get_project_short(project_id)
-    if not record:
-        raise ProductionJobError("Chưa có kế hoạch short cho dự án này")
-    plan = ShortPlan.from_dict(dict(record.get("plan") or {}))
-    try:
-        short_timeline = build_short_timeline(timeline, plan)
-    except ShortsPlanError as exc:
-        raise ProductionJobError(str(exc)) from exc
+
+    standalone = str((script or {}).get("variant") or "long") == "short"
+    if standalone:
+        short_timeline = timeline
+        profile = str(
+            (database.get_project_render_settings(project_id) or {}).get("output_profile") or ""
+        )
+        if not is_vertical(profile):
+            profile = DEFAULT_SHORT_PROFILE
+    else:
+        record = database.get_project_short(project_id)
+        if not record:
+            raise ProductionJobError("Chưa có kế hoạch short cho dự án này")
+        plan = ShortPlan.from_dict(dict(record.get("plan") or {}))
+        try:
+            short_timeline = build_short_timeline(timeline, plan)
+        except ShortsPlanError as exc:
+            raise ProductionJobError(str(exc)) from exc
+        profile = plan.profile
+
     layout = ensure_project_layout(artifact_root, project_id)
     work_dir = layout["work"] / "render_short"
     work_dir.mkdir(parents=True, exist_ok=True)
-    output_path = layout["exports"] / "final_short.mp4"
-    width, height = profile_size(plan.profile)
+    output_path = layout["exports"] / ("short.mp4" if standalone else "final_short.mp4")
+    width, height = profile_size(profile)
     render_settings = database.get_project_render_settings(project_id)
     music_path = Path(str(render_settings.get("music_file_path") or ""))
     rendered = render_timeline_with_ffmpeg(
@@ -885,9 +910,12 @@ def run_short_render_job(
         background_music=music_path if music_path.is_file() else None,
         music_volume=float(render_settings.get("music_volume") or 0.12),
         transition=str(render_settings.get("transition_style") or "fade"),
-        fit="cover" if is_vertical(plan.profile) else "pad",
+        fit="cover" if is_vertical(profile) else "pad",
     )
-    database.save_project_short_output(project_id, rendered)
+    if not standalone:
+        # save_project_short_output belongs to the re-cut plan's record; a
+        # standalone short has no plan row to write an output path into.
+        database.save_project_short_output(project_id, rendered)
     return rendered
 
 

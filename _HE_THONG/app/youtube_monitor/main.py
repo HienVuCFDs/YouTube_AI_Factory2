@@ -69,6 +69,16 @@ from .source_links import (
     is_http_url,
     probe_url as probe_source_link,
 )
+from .short_script import (
+    DEFAULT_SHORT_SCRIPT_SECONDS,
+    MAX_SHORT_SCRIPT_SECONDS,
+    MIN_SHORT_SCRIPT_SECONDS,
+    RESULT_SCHEMA as SHORT_SCRIPT_SCHEMA,
+    ShortScriptError,
+    build_short_script,
+    estimated_seconds as estimated_short_seconds,
+    set_script_writer as short_script_set_writer,
+)
 from .shorts import (
     MAX_SHORT_SECONDS,
     ShortPlan,
@@ -606,6 +616,10 @@ class CreateProductionJobRequest(BaseModel):
     force: bool = False
     confirmed: bool = False
     segment_id: int | None = Field(default=None, ge=1)
+    # Which of the project's two videos this job is for. The long one unless
+    # asked, so every caller written before the standalone short keeps
+    # meaning what it meant.
+    variant: Literal["long", "short"] = "long"
 
 
 class CreatePublicationRequest(BaseModel):
@@ -5536,9 +5550,15 @@ def queue_project_job(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    script = database.get_latest_project_script(project_id)
+    script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not script:
-        raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Dự án chưa có kịch bản bản short — hãy viết nó ở mục Video ngắn."
+                if payload.variant == "short" else "Project chưa có kịch bản"
+            ),
+        )
     if not database.list_project_timeline(project_id, script_id=int(script["id"])):
         raise HTTPException(status_code=400, detail="Project chưa có timeline")
 
@@ -7529,6 +7549,100 @@ def _write_short_plan(request: dict[str, Any]) -> dict[str, Any]:
 
 
 shorts_set_plan_builder(_write_short_plan)
+
+
+def _write_short_script(request: dict[str, Any]) -> dict[str, Any]:
+    """Write a standalone short - its own hook, its own ending."""
+    return _call_orchestrator_json(
+        (
+            "Ban viet kich ban cho MOT video ngan doc (Short/Reels/TikTok), doc trong "
+            f"khoang {request.get('seconds', 45)} giay. "
+            f"Toan bo loi doc KHONG duoc vuot qua {request.get('word_budget', 144)} tu. "
+            "Day KHONG phai ban rut gon cua video dai: no la mot video rieng, co mo dau, "
+            "dien bien va ket thuc tron ven trong thoi luong do. "
+            "'hook' la cau dau tien, phai chan nguoi xem lai ngay giay dau - noi thang vao "
+            "dieu bat thuong nhat, khong dan nhap, khong chao hoi. "
+            "'main_content' la loi doc lien mach, cau ngan, khong tieu de muc, khong ky hieu. "
+            "'cta' la mot cau ket ngan. Viet bang cung ngon ngu voi kich ban dai."
+        ),
+        json.dumps(request, ensure_ascii=False)[:60000],
+        SHORT_SCRIPT_SCHEMA,
+        stage="script",
+    )
+
+
+short_script_set_writer(_write_short_script)
+
+
+class ShortScriptRequest(BaseModel):
+    seconds: int = Field(default=DEFAULT_SHORT_SCRIPT_SECONDS, ge=MIN_SHORT_SCRIPT_SECONDS, le=MAX_SHORT_SCRIPT_SECONDS)
+    direction: str = Field(default="", max_length=4000)
+    use_model: bool = True
+
+
+@app.get("/api/projects/{project_id}/short-script")
+def get_project_short_script(project_id: int) -> dict[str, Any]:
+    """The project's standalone short, if one has been written."""
+    script = database.get_latest_project_script(project_id, variant="short")
+    timeline = (
+        database.list_project_timeline(project_id, script_id=int(script["id"]))
+        if script else []
+    )
+    return {
+        "script": script,
+        "timeline": timeline,
+        "estimated_seconds": estimated_short_seconds(script) if script else 0,
+    }
+
+
+@app.post("/api/projects/{project_id}/short-script")
+def write_project_short_script(project_id: int, payload: ShortScriptRequest) -> dict[str, Any]:
+    """Write the short as its own video, then give it its own storyboard.
+
+    It is stored as a second script for the project, so everything downstream
+    - shots, timeline, voice, clips, render - works on it unchanged, keyed by
+    its script_id. Nothing it does touches the long video's script or its
+    storyboard, which is what makes the two buildable side by side.
+    """
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    long_script = database.get_latest_project_script(project_id)
+    if not long_script:
+        raise HTTPException(
+            status_code=400,
+            detail="Hãy viết kịch bản video dài trước — bản short lấy cùng tư liệu từ đó.",
+        )
+    try:
+        draft = build_short_script(
+            bundle["project"], long_script,
+            seconds=payload.seconds, direction=payload.direction, use_model=payload.use_model,
+        )
+    except ShortScriptError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _api_error(exc) from exc
+
+    script = database.create_project_script(project_id, **draft, variant="short")
+    if not script:
+        raise HTTPException(status_code=404, detail="Không lưu được kịch bản short")
+    shots = database.create_project_shots(
+        project_id, int(script["id"]),
+        build_shot_plan(bundle["project"], script), force=True,
+    )
+    timeline = database.create_project_timeline(
+        project_id, int(script["id"]),
+        build_timeline(bundle["project"], script, shots or []), force=True,
+    )
+    _write_project_document(project_id, "kich-ban-short.md", script_to_markdown(script, bundle["project"]))
+    return {
+        "status": "saved",
+        "script": script,
+        "shots": shots or [],
+        "timeline": timeline or [],
+        "estimated_seconds": estimated_short_seconds(script),
+        "next_step": "Tạo giọng đọc cho bản short, cắt cảnh, rồi dựng video ngắn.",
+    }
 
 
 class ShortPlanRequest(BaseModel):

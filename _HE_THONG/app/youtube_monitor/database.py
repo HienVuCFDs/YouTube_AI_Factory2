@@ -698,6 +698,11 @@ class Database:
             self._ensure_column(connection, "production_projects", "gflow_profile", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_publications", "thumbnail_path", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "subtitle_path", "TEXT NOT NULL DEFAULT ''")
+            # A short written for its own sake, rather than cut out of the long
+            # video afterwards, is a second script for the same project. Its
+            # timeline, voice and clips then hang off its script_id exactly as
+            # the long one's do, and nothing in the pipeline needs to know.
+            self._ensure_column(connection, "project_scripts", "variant", "TEXT NOT NULL DEFAULT 'long'")
             # Orchestrator's verdict on a finished scene: what it actually saw
             # in the file, whether that matches the scene, and how many times
             # a poor result has already been regenerated (so a scene the model
@@ -1736,11 +1741,17 @@ class Database:
         main_content: str = "",
         cta: str = "",
         status: str = "draft",
+        variant: str = "long",
     ) -> dict[str, Any] | None:
         if not self.get_production_project(project_id):
             return None
         now = utc_now()
         with self._connect() as connection:
+            # One counter for every script of the project, short or long: the
+            # table declares UNIQUE(project_id, version), and numbering per
+            # variant would collide on the short's first version. Rebuilding
+            # the table to relax that constraint is not worth it - a version
+            # is an ordering, and the variant already says which video it is.
             row = connection.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM project_scripts WHERE project_id = ?",
                 (project_id,),
@@ -1750,8 +1761,8 @@ class Database:
                 """
                 INSERT INTO project_scripts (
                     project_id, version, script_title, hook, intro, main_content,
-                    cta, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cta, status, created_at, updated_at, variant
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -1764,6 +1775,7 @@ class Database:
                     status,
                     now,
                     now,
+                    variant,
                 ),
             )
             connection.execute(
@@ -1781,28 +1793,45 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def get_latest_project_script(self, project_id: int) -> dict[str, Any] | None:
+    def get_latest_project_script(
+        self, project_id: int, variant: str = "long"
+    ) -> dict[str, Any] | None:
+        """The newest script of one kind - the long video's unless asked.
+
+        Defaulting to the long one matters: every caller that predates the
+        short variant asks this question without naming a kind, and a short
+        answering them would put the wrong words into the storyboard and the
+        voiceover - the failure this project has already been through once.
+        """
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM project_scripts
-                WHERE project_id = ?
+                WHERE project_id = ? AND variant = ?
                 ORDER BY version DESC, id DESC
                 LIMIT 1
                 """,
-                (project_id,),
+                (project_id, variant),
             ).fetchone()
         return dict(row) if row else None
 
-    def list_project_scripts(self, project_id: int) -> list[dict[str, Any]]:
+    def list_project_scripts(
+        self, project_id: int, variant: str | None = "long"
+    ) -> list[dict[str, Any]]:
+        """Script versions of one kind; pass variant=None for every kind."""
+        clauses = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        if variant is not None:
+            clauses.append("variant = ?")
+            params.append(variant)
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM project_scripts
-                WHERE project_id = ?
+                WHERE {' AND '.join(clauses)}
                 ORDER BY version DESC, id DESC
                 """,
-                (project_id,),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
