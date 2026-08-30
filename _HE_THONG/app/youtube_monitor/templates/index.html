@@ -3207,7 +3207,7 @@
     if (button) button.disabled = true;
     setMessage('Đang cắt cảnh theo lời thoại...');
     try {
-      const result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue`, {method: 'POST'});
+      const result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue?force=true`, {method: 'POST'});
       const minutes = Math.round((result.total_duration_seconds || 0) / 60);
       const missing = result.turns_without_timing || 0;
       setMessage(

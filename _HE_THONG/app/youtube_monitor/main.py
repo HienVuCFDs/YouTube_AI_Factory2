@@ -4405,6 +4405,7 @@ def _condense_transcript(segments: list[dict[str, Any]], block_seconds: float = 
 def build_timeline_from_dialogue(
     project_id: int,
     min_seconds: float = Query(default=1.2, ge=0.3, le=10.0),
+    force: bool = Query(default=False),
 ) -> dict[str, Any]:
     """Cut the timeline on the source's own dialogue turns.
 
@@ -4423,6 +4424,25 @@ def build_timeline_from_dialogue(
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
 
+    # This replaces every scene, so anything attached to the current ones is
+    # gone. A confirm in the page is not enough: a browser left open still
+    # shows the old wording, and one user lost a twenty-minute voiceover to
+    # it three times. Refusing here protects the work whatever page asks.
+    if not force:
+        attached = [
+            item
+            for item in database.list_project_timeline(project_id, script_id=int(script["id"]))
+            if str(item.get("audio_path") or "").strip()
+        ]
+        if attached:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(attached)} cảnh đã có giọng đọc. Cắt lại theo lời thoại sẽ thay toàn bộ "
+                    "timeline và mất số giọng đó, đồng thời lời thoại quay về transcript của video "
+                    "gốc thay vì kịch bản bạn đã viết. Nếu thực sự muốn, gọi lại với force=true."
+                ),
+            )
     analysis = database.get_video_analysis(
         str(project.get("youtube_video_id") or ""), analysis_type="reference"
     )

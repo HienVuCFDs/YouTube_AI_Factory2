@@ -323,6 +323,59 @@ class DialogueCutWarnsWhatItDestroysTests(unittest.TestCase):
         self.assertIn("if (!confirm(warning)) return;", self.page)
 
 
+class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
+    """A confirm in the page cannot protect a browser left open on old code.
+
+    Cutting by dialogue replaces every scene. One user lost the same
+    twenty-minute voiceover to it three times, because their page still
+    showed the previous, vaguer wording. The server refuses now.
+    """
+
+    def _timeline(self, voiced: int):
+        return [
+            {"id": i, "segment_index": i, "audio_path": "C:/x/v.mp3" if i <= voiced else ""}
+            for i in range(1, 4)
+        ]
+
+    def _call(self, voiced: int, force: bool = False):
+        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}):
+            with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 9}):
+                with mock.patch.object(main.database, "list_project_timeline", return_value=self._timeline(voiced)):
+                    with mock.patch.object(main.database, "get_video_analysis", return_value=None):
+                        return main.build_timeline_from_dialogue(1, force=force)
+
+    def test_it_refuses_when_scenes_already_carry_voice(self) -> None:
+        with self.assertRaises(main.HTTPException) as ctx:
+            self._call(voiced=2)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("2 cảnh đã có giọng đọc", ctx.exception.detail)
+
+    def test_it_says_the_words_revert_to_the_transcript(self) -> None:
+        with self.assertRaises(main.HTTPException) as ctx:
+            self._call(voiced=1)
+        self.assertIn("transcript", ctx.exception.detail)
+
+    def test_force_gets_past_it(self) -> None:
+        """Forced, it fails later for want of a transcript - not on the guard."""
+        with self.assertRaises(main.HTTPException) as ctx:
+            self._call(voiced=2, force=True)
+        self.assertNotEqual(ctx.exception.status_code, 409)
+
+    def test_a_timeline_with_no_voice_is_not_blocked(self) -> None:
+        with self.assertRaises(main.HTTPException) as ctx:
+            self._call(voiced=0)
+        self.assertNotEqual(ctx.exception.status_code, 409)
+
+    def test_the_page_confirms_before_it_forces(self) -> None:
+        page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        confirm_at = page.index("if (!confirm(warning)) return;")
+        call_at = page.index("timeline/from-dialogue?force=true")
+        self.assertLess(confirm_at, call_at)
+
+
 class ShortJobIsAcceptedByTheApiTests(unittest.TestCase):
     """The worker knew the job type; the request model did not."""
 
