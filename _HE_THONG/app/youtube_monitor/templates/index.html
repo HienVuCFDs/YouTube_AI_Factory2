@@ -134,6 +134,25 @@
     .automation-task { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.62); }
     .automation-task-role { color: var(--cyan); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
     .automation-task-meta { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .orchestration-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .orchestration-kpi { padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(14,18,25,.82); }
+    .orchestration-kpi label { display: block; color: var(--muted); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+    .orchestration-kpi strong { display: block; margin-top: 5px; color: var(--text); font-size: 17px; }
+    .pipeline-flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 18px; margin-top: 10px; }
+    .pipeline-stage { position: relative; min-height: 72px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(21,26,34,.62); }
+    .pipeline-stage:not(:last-child)::after { content: '→'; position: absolute; right: -15px; top: 24px; color: var(--muted); }
+    .pipeline-stage.completed { border-color: rgba(34,197,94,.38); background: rgba(34,197,94,.07); }
+    .pipeline-stage.running, .pipeline-stage.review_required { border-color: rgba(245,158,11,.45); background: rgba(245,158,11,.07); }
+    .pipeline-stage.failed { border-color: rgba(239,68,68,.5); background: rgba(239,68,68,.08); }
+    .pipeline-stage-name { color: var(--cyan); font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+    .pipeline-stage-state { margin-top: 8px; color: var(--text); font-size: 11px; font-weight: 650; }
+    .pipeline-stage-agent { margin-top: 4px; color: var(--muted); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .media-board { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .media-board-head, .media-scene-row { display: grid; grid-template-columns: 58px minmax(180px, 1.7fr) minmax(130px, 1fr) 90px 90px 90px; gap: 8px; align-items: center; padding: 8px 10px; }
+    .media-board-head { color: var(--muted); background: rgba(9,11,16,.75); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+    .media-scene-row { border-top: 1px solid rgba(255,255,255,.05); color: var(--text); font-size: 10.5px; }
+    .media-scene-copy { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .render-job-strip { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
     .tool-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .tool-status-card { min-height: 78px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.72); }
     .tool-status-card.ready { border-color: rgba(34,197,94,.24); }
@@ -387,7 +406,7 @@
     .video-link { grid-template-columns: 104px minmax(190px, 1fr); min-width: 355px; }
     .empty { font-size: 14px; }
     @keyframes pulse { 50% { opacity: .3; } }
-    @media (max-width: 1100px) { .sidebar { width: 200px; flex-basis: 200px; } .split { grid-template-columns: 1fr; } .workflow-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tool-status-grid, .integration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .studio-grid, .studio-result-columns, .automation-grid { grid-template-columns: 1fr; } .studio-summary-grid { grid-template-columns: 1fr; } .studio-chat-row { grid-template-columns: 1fr; } }
+    @media (max-width: 1100px) { .sidebar { width: 200px; flex-basis: 200px; } .split { grid-template-columns: 1fr; } .workflow-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tool-status-grid, .integration-grid, .orchestration-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pipeline-flow { grid-template-columns: 1fr; gap: 7px; } .pipeline-stage:not(:last-child)::after { display: none; } .media-board-head { display: none; } .media-scene-row { grid-template-columns: 48px minmax(150px, 1fr) 110px 70px 70px 70px; overflow-x: auto; } .studio-grid, .studio-result-columns, .automation-grid { grid-template-columns: 1fr; } .studio-summary-grid { grid-template-columns: 1fr; } .studio-chat-row { grid-template-columns: 1fr; } }
     @media (max-width: 800px) { .sidebar { display: none; } .topbar { padding: 0 16px; } .content { padding: 18px 16px; } .metrics { grid-template-columns: repeat(2, 1fr); } .page-head { align-items: flex-start; flex-direction: column; } .register-grid, .integration-grid { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .metrics { grid-template-columns: 1fr 1fr; gap: 8px; } .metric { padding: 12px; } .metric-value { font-size: 22px; } .top-actions .status-pill:first-child { display: none; } .analysis-grid, .analysis-columns, .transcript-grid { grid-template-columns: 1fr; } }
   </style>
@@ -401,6 +420,7 @@
     <nav class="nav" aria-label="Khu vực làm việc">
       <div class="nav-label">Làm việc</div>
       <button class="nav-item active" data-workspace-nav="dashboard" onclick="setWorkspace('dashboard')"><span class="nav-icon">◉</span> Tạo video</button>
+      <button class="nav-item" data-workspace-nav="orchestration" onclick="setWorkspace('orchestration')"><span class="nav-icon">⇄</span> Điều phối AI</button>
       <button class="nav-item" data-workspace-nav="source" onclick="setWorkspace('source')"><span class="nav-icon">▣</span> Video tham khảo</button>
       <button class="nav-item" data-workspace-nav="production" onclick="setWorkspace('production')"><span class="nav-icon">✎</span> Dự án</button>
       <button class="nav-item" data-workspace-nav="managed" onclick="setWorkspace('managed')"><span class="nav-icon">◎</span> Kênh xuất bản</button>
@@ -625,6 +645,20 @@
         <div id="integrationBody" class="panel-body"><div class="empty">Đang tải cấu hình AI...</div></div>
       </section>
 
+      <section id="automationCommandCenter" class="panel workspace-panel" style="margin-bottom:14px">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">◎</span> TRUNG TÂM ĐIỀU PHỐI</div><div class="panel-sub">Tổng quan mọi chuỗi tự động và các quyết định đang chờ bạn. Chỉ bước duyệt cuối cần con người.</div></div><button class="btn small ghost" type="button" onclick="loadOrchestrationWorkspace()">Làm mới</button></div>
+        <div class="panel-body">
+          <div id="automationGlobalMetrics" class="orchestration-kpis">
+            <div class="orchestration-kpi"><label>Chuỗi đã tạo</label><strong>—</strong></div>
+            <div class="orchestration-kpi"><label>Task đang chạy</label><strong>—</strong></div>
+            <div class="orchestration-kpi"><label>Chờ phê duyệt</label><strong>—</strong></div>
+            <div class="orchestration-kpi"><label>Provider dùng được</label><strong>—</strong></div>
+          </div>
+          <div class="panel-sub" style="margin-top:14px">HỘP THƯ PHÊ DUYỆT</div>
+          <div id="automationInboxBody" class="automation-status"><div class="empty">Đang tải các quyết định chờ duyệt...</div></div>
+        </div>
+      </section>
+
       <section id="automationPipeline" class="panel workspace-panel" style="margin-bottom:14px">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">&#8644;</span> AUTO PIPELINE ĐA AI</div><div class="panel-sub">Một yêu cầu cấp cao được bàn giao lần lượt cho Research, Script, Director, Media và QC Agent; mỗi output do một AI khác nghiệm thu.</div></div><span id="automationStateTag" class="tag cyan">SẴN SÀNG</span></div>
         <div class="panel-body">
@@ -642,8 +676,13 @@
             </div>
           </div>
           <div id="automationSummary" class="secondary-text" style="margin-top:8px">Chưa có pipeline đang theo dõi.</div>
+          <div id="automationStageFlow" class="pipeline-flow"></div>
           <div id="automationApprovals" class="automation-status"></div>
           <div id="automationStatus" class="automation-status"></div>
+          <div class="panel-sub" style="margin-top:14px">MEDIA THEO CẢNH</div>
+          <div id="automationMediaSummary" class="secondary-text" style="margin-top:5px">Chưa có timeline.</div>
+          <div id="automationMediaBoard" class="media-board"><div class="empty">Pipeline chưa tạo cảnh.</div></div>
+          <div id="automationRenderJobs" class="render-job-strip"></div>
           <div class="trace-grid">
             <div class="trace-box"><h4>Sự kiện hệ thống</h4><div id="automationEvents" class="trace-scroll"><div class="empty">Chưa có sự kiện.</div></div></div>
             <div class="trace-box"><h4>Bàn giao giữa các AI (A2A)</h4><div id="automationMessages" class="trace-scroll"><div class="empty">Chưa có bàn giao.</div></div></div>
@@ -782,7 +821,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [], automationProjectId: null, automationStatus: null };
+  const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [], workspace: 'dashboard', automationProjectId: null, automationStatus: null, automationProjects: [], automationApprovals: [], providerCatalog: [] };
   const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const number = (value) => value == null ? '—' : Number(value).toLocaleString('vi-VN');
   const date = (value) => value ? new Date(value).toLocaleString('vi-VN', {dateStyle:'short', timeStyle:'short'}) : '—';
@@ -948,15 +987,21 @@
       description: 'Nơi lưu các WorkFlow. Chọn một WF thì tab Tạo video sẽ áp dụng đúng WF đó.',
       panels: ['workflowsPanel'],
     },
+    orchestration: {
+      label: 'Điều phối AI', eyebrow: 'AI ORCHESTRATION', title: 'Điều phối, nghiệm thu và phục hồi',
+      description: 'Giao một mục tiêu cấp cao, theo dõi AI thực hiện/nghiệm thu chéo, xử lý điểm dừng và duyệt kết quả cuối.',
+      panels: ['automationCommandCenter', 'automationPipeline', 'orchestratorSettings', 'providerCatalogPanel', 'automationPolicyPanel'],
+    },
     settings: {
       label: 'Cài đặt', eyebrow: 'HỆ THỐNG', title: 'Công cụ, model và kết nối',
       description: 'Kết nối Codex, GPU, Whisper, TTS, FFmpeg và các AI cloud khi cần.',
-      panels: ['automationPipeline', 'orchestratorSettings', 'providerCatalogPanel', 'automationPolicyPanel', 'toolStatusPanel', 'modelCatalogPanel', 'integrations'],
+      panels: ['toolStatusPanel', 'modelCatalogPanel', 'integrations', 'providerCatalogPanel'],
     },
   };
 
   function setWorkspace(name, persist = true) {
     const workspace = workspaces[name] || workspaces.dashboard;
+    state.workspace = workspaces[name] ? name : 'dashboard';
     document.querySelectorAll('.workspace-panel').forEach((panel) => {
       panel.hidden = !workspace.panels.includes(panel.id);
     });
@@ -971,12 +1016,102 @@
       try { localStorage.setItem('ytFactory.workspace', name); } catch (_) {}
       saveStudioSession();
     }
+    if (state.workspace === 'orchestration') void loadOrchestrationWorkspace();
+    if (state.workspace === 'settings') void loadProviderCatalog();
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
 
   const AUTOMATION_ROLE_LABELS = {
     research: 'Research', script: 'Script', director: 'Director', media: 'Media', qc: 'QC',
   };
+
+  const AUTOMATION_STATUS_LABELS = {
+    queued: 'Đang chờ', running: 'Đang làm', review_required: 'Chờ AI nghiệm thu',
+    completed: 'Đã đạt', failed: 'Thất bại', cancelled: 'Đã huỷ', not_started: 'Chưa giao',
+  };
+
+  function automationUsageText(usage = []) {
+    if (!usage.length) return 'chưa phát sinh lượt provider';
+    const providers = new Map((state.providerCatalog || []).map((item) => [item.key, item]));
+    const groups = {api: {count: 0, cost: 0}, subscription: {count: 0, cost: 0}, local: {count: 0, cost: 0}, unknown: {count: 0, cost: 0}};
+    usage.forEach((item) => {
+      const mode = providers.get(item.provider)?.billing_mode || 'unknown';
+      const group = groups[mode] || groups.unknown;
+      group.count += 1;
+      group.cost += Math.max(Number(item.actual_cost || 0), Number(item.estimated_cost || 0));
+    });
+    const parts = [];
+    if (groups.api.count) parts.push(`API trả phí: ${groups.api.count} lượt · dự chi $${groups.api.cost.toFixed(2)}`);
+    if (groups.subscription.count) parts.push(`gói đã đăng ký: ${groups.subscription.count} lượt · không tính phí phát sinh`);
+    if (groups.local.count) parts.push(`local: ${groups.local.count} lượt · không tính phí phát sinh`);
+    if (groups.unknown.count) parts.push(`chưa phân loại: ${groups.unknown.count} lượt`);
+    return parts.join(' · ');
+  }
+
+  function renderAutomationStageFlow(data) {
+    const target = $('automationStageFlow');
+    if (!target) return;
+    const tasks = data?.agent_tasks || [];
+    target.innerHTML = Object.entries(AUTOMATION_ROLE_LABELS).map(([role, label]) => {
+      const task = tasks.find((item) => item.role === role);
+      const status = task?.status || 'not_started';
+      const execution = task?.output?._execution || {};
+      const executor = execution.executor || task?.assigned_agent || 'chờ điều phối';
+      const reviewer = execution.reviewer || task?.reviewer_agent || '';
+      return `<div class="pipeline-stage ${esc(status)}">
+        <div class="pipeline-stage-name">${esc(label)}</div>
+        <div class="pipeline-stage-state">${esc(AUTOMATION_STATUS_LABELS[status] || status)}</div>
+        <div class="pipeline-stage-agent">${esc(executor)}${reviewer ? ` → ${esc(reviewer)}` : ''}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderAutomationMedia(data) {
+    const board = $('automationMediaBoard');
+    const summary = $('automationMediaSummary');
+    const renders = $('automationRenderJobs');
+    if (!board || !summary || !renders) return;
+    const timeline = [...(data?.timeline || [])].sort((a, b) => Number(a.segment_index) - Number(b.segment_index));
+    const latestJobs = new Map();
+    (data?.scene_jobs || []).forEach((job) => {
+      const key = Number(job.timeline_segment_id);
+      if (!latestJobs.has(key)) latestJobs.set(key, job);
+    });
+    const visualReady = timeline.filter((item) => String(item.visual_path || '').trim()).length;
+    const voiceReady = timeline.filter((item) => String(item.audio_path || '').trim()).length;
+    const subtitleReady = timeline.filter((item) => String(item.subtitle_path || item.subtitle_text || '').trim()).length;
+    const qcPassed = timeline.filter((item) => ['pass', 'approved'].includes(String(latestJobs.get(Number(item.id))?.review_status || ''))).length;
+    summary.textContent = timeline.length
+      ? `${timeline.length} cảnh · visual ${visualReady}/${timeline.length} · voice ${voiceReady}/${timeline.length} · subtitle ${subtitleReady}/${timeline.length} · QC cảnh ${qcPassed}/${timeline.length}`
+      : 'Chưa có timeline. Director/Media Agent sẽ tạo bảng này khi pipeline đến bước dựng cảnh.';
+    if (!timeline.length) {
+      board.innerHTML = '<div class="empty">Pipeline chưa tạo cảnh.</div>';
+    } else {
+      const kindLabels = {image: 'Ảnh', gif: 'GIF', video: 'Video'};
+      board.innerHTML = `<div class="media-board-head"><span>Cảnh</span><span>Nội dung</span><span>Provider / media</span><span>Asset</span><span>Voice</span><span>QC</span></div>` + timeline.map((item) => {
+        const job = latestJobs.get(Number(item.id));
+        const kind = kindLabels[job?.job_kind] || item.asset_type || 'chưa chọn';
+        const jobState = job?.status || (item.visual_path ? 'completed' : 'not_started');
+        const statusClass = jobState === 'completed' ? 'green' : jobState === 'failed' ? 'red' : ['running', 'queued', 'waiting'].includes(jobState) ? 'orange' : 'cyan';
+        const review = String(job?.review_status || '');
+        const reviewClass = ['pass', 'approved'].includes(review) ? 'green' : review === 'fail' ? 'red' : 'cyan';
+        const reviewText = review ? `${review}${job?.review_score ? ` ${job.review_score}/10` : ''}` : 'chưa chấm';
+        return `<div class="media-scene-row">
+          <b>#${esc(item.segment_index)}</b>
+          <span class="media-scene-copy" title="${esc(item.visual_prompt || item.voice_text || '')}">${esc(item.visual_prompt || item.voice_text || 'Chưa có mô tả')}</span>
+          <span>${esc(job?.provider || '—')}<br><span class="tag ${statusClass}">${esc(kind)} · ${esc(AUTOMATION_STATUS_LABELS[jobState] || jobState)}</span></span>
+          <span class="tag ${item.visual_path ? 'green' : 'orange'}">${item.visual_path ? 'ĐÃ GẮN' : 'THIẾU'}</span>
+          <span class="tag ${item.audio_path ? 'green' : 'orange'}">${item.audio_path ? 'CÓ' : 'THIẾU'}</span>
+          <span class="tag ${reviewClass}">${esc(reviewText)}</span>
+        </div>`;
+      }).join('');
+    }
+    const jobs = data?.production_jobs || [];
+    renders.innerHTML = jobs.slice(0, 12).map((job) => {
+      const statusClass = job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : ['running', 'queued'].includes(job.status) ? 'orange' : 'cyan';
+      return `<span class="tag ${statusClass}">${esc(job.job_type)} · ${esc(job.provider)} · ${esc(job.status)}</span>`;
+    }).join('') || '<span class="secondary-text">Chưa có job voice/render.</span>';
+  }
 
   function renderAutomationStatus(data) {
     const target = $('automationStatus');
@@ -989,10 +1124,9 @@
     const failed = tasks.filter((task) => task.status === 'failed');
     const qc = [...tasks].reverse().find((task) => task.role === 'qc' && task.status === 'completed');
     const ready = Boolean(qc?.output?.ready_for_render);
-    const estimated = (data.provider_usage || []).reduce((total, item) => total + Number(item.estimated_cost || 0), 0);
     tag.className = `tag ${failed.length ? 'red' : (active.length || waitingReview.length) ? 'orange' : ready ? 'green' : 'cyan'}`;
     tag.textContent = failed.length ? 'CÓ TASK LỖI' : active.length ? `${active.length} ĐANG CHẠY` : waitingReview.length ? `${waitingReview.length} CHỜ AI NGHIỆM THU` : ready ? 'QC ĐÃ DUYỆT' : tasks.length ? 'PIPELINE ĐÃ DỪNG' : 'ĐANG KHỞI TẠO';
-    summary.innerHTML = `Dự án <b>#${esc(data.project?.id)}</b> · ${esc(data.project?.title || '')} · ${tasks.length} task · ${data.agent_messages?.length || 0} message A2A · chi phí ước tính ${estimated.toFixed(2)} USD
+    summary.innerHTML = `Dự án <b>#${esc(data.project?.id)}</b> · ${esc(data.project?.title || '')} · ${tasks.length} task · ${data.agent_messages?.length || 0} message A2A · ${esc(automationUsageText(data.provider_usage || []))}
       <button class="btn small ghost" style="margin-left:8px" onclick="setWorkspace('production'); openProjectDetail(${Number(data.project?.id || 0)})">Mở dự án</button>`;
     target.innerHTML = tasks.map((task) => {
       const execution = task.output?._execution || {};
@@ -1007,6 +1141,8 @@
         <span class="tag ${statusClass}">${esc(task.status)}</span>
       </div>`;
     }).join('') || '<div class="empty">Orchestrator đang tạo Research task đầu tiên...</div>';
+    renderAutomationStageFlow(data);
+    renderAutomationMedia(data);
   }
 
   // A pending approval is not a notice: `_automation_pause_active()` refuses to
@@ -1067,9 +1203,54 @@
     }).join('');
   }
 
+  function renderAutomationInbox(approvals) {
+    const target = $('automationInboxBody');
+    if (!target) return;
+    if (!approvals.length) {
+      target.innerHTML = '<div class="empty">Không có quyết định nào đang chờ. Các AI có thể tiếp tục làm việc.</div>';
+      return;
+    }
+    target.innerHTML = approvals.map((approval) => {
+      const kind = String(approval.approval_type || '');
+      const blocking = BLOCKING_APPROVALS.includes(kind);
+      const label = APPROVAL_LABELS[kind] || kind;
+      const project = approval.project || {};
+      return `<div class="approval-card ${blocking ? 'blocking' : ''}">
+        <div class="approval-head">
+          <span class="tag ${blocking ? 'red' : 'orange'}">${esc(label)}</span>
+          <span class="approval-title">#${esc(approval.project_id)} · ${esc(project.title || approval.title || '')}</span>
+          <button class="btn small ghost" type="button" onclick="openAutomationProject(${Number(approval.project_id)})">Mở pipeline</button>
+        </div>
+        <div class="approval-detail">${esc(approvalDetailText(approval) || approval.title || '')}</div>
+        <div class="approval-actions">
+          <input id="inboxApprovalNote${approval.id}" type="text" placeholder="Ghi chú cho AI (bắt buộc khi yêu cầu sửa)" />
+          <select id="inboxApprovalRole${approval.id}" aria-label="Chạy lại từ vai">
+            <option value="media">Chạy lại từ Media</option><option value="director">Chạy lại từ Director</option>
+            <option value="script">Chạy lại từ Script</option><option value="research">Chạy lại từ Research</option><option value="qc">Chạy lại từ QC</option>
+          </select>
+          <button class="btn small primary" type="button" onclick="decideApproval(${approval.id}, 'approved')">Duyệt</button>
+          <button class="btn small" type="button" onclick="decideApproval(${approval.id}, 'changes_requested')">Yêu cầu sửa</button>
+          <button class="btn small ghost" type="button" onclick="decideApproval(${approval.id}, 'dismissed')">Bỏ qua</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  async function loadAutomationInbox() {
+    const target = $('automationInboxBody');
+    try {
+      const data = await api('/api/automation/approvals?status=pending');
+      state.automationApprovals = data.approvals || [];
+      renderAutomationInbox(state.automationApprovals);
+      renderAutomationGlobalMetrics();
+    } catch (error) {
+      if (target) target.innerHTML = `<div class="empty">Không tải được hộp thư: ${esc(error.message)}</div>`;
+    }
+  }
+
   async function decideApproval(approvalId, decision) {
-    const note = $(`approvalNote${approvalId}`)?.value?.trim() || '';
-    const resumeRole = $(`approvalRole${approvalId}`)?.value || 'media';
+    const note = ($(`approvalNote${approvalId}`)?.value || $(`inboxApprovalNote${approvalId}`)?.value || '').trim();
+    const resumeRole = $(`approvalRole${approvalId}`)?.value || $(`inboxApprovalRole${approvalId}`)?.value || 'media';
     if (decision === 'changes_requested' && !note) {
       setMessage('Hãy ghi rõ cần sửa gì trước khi giao lại cho AI.', 'error');
       return;
@@ -1080,7 +1261,8 @@
         body: JSON.stringify({decision, note, resume_role: resumeRole}),
       });
       setMessage('Đã ghi quyết định. Pipeline được mở lại.', 'success');
-      await loadAutomationStatus();
+      await Promise.all([loadAutomationInbox(), loadAutomationProjectList()]);
+      if (state.automationProjectId) await loadAutomationStatus();
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
@@ -1105,7 +1287,8 @@
     if (!target) return;
     try {
       const data = await api('/api/providers/catalog');
-      const rows = (data.providers || []).map((item) => {
+      state.providerCatalog = data.providers || [];
+      const rows = state.providerCatalog.map((item) => {
         const runtime = item.runtime || {};
         const ok = runtime.available !== false;
         const why = PROVIDER_BLOCK_REASONS[runtime.reason] || runtime.reason || '';
@@ -1119,6 +1302,8 @@
         </div>`;
       });
       target.innerHTML = rows.join('') || '<div class="empty">Chưa đăng ký provider nào.</div>';
+      renderAutomationGlobalMetrics();
+      if (state.automationStatus) renderAutomationStatus(state.automationStatus);
     } catch (error) {
       target.innerHTML = `<div class="empty">Không tải được danh mục: ${esc(error.message)}</div>`;
     }
@@ -1152,16 +1337,46 @@
     if (!picker) return;
     try {
       const data = await api('/api/automation/projects');
+      state.automationProjects = data.projects || [];
       const current = String(state.automationProjectId || '');
-      const options = (data.projects || []).map((entry) => {
+      const options = state.automationProjects.map((entry) => {
         const project = entry.project || entry;
         const tasks = entry.agent_tasks || entry.tasks || [];
-        const done = tasks.filter((task) => task.status === 'completed').length;
-        const label = `#${project.id} · ${String(project.title || '').slice(0, 40)}${tasks.length ? ` · ${done}/${tasks.length} task` : ''}`;
+        const counts = entry.task_counts || {};
+        const done = tasks.length ? tasks.filter((task) => task.status === 'completed').length : Number(counts.completed || 0);
+        const total = tasks.length || Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+        const label = `#${project.id} · ${String(project.title || '').slice(0, 40)}${total ? ` · ${done}/${total} task` : ''}${entry.pending_approvals ? ` · ${entry.pending_approvals} chờ duyệt` : ''}`;
         return `<option value="${project.id}"${String(project.id) === current ? ' selected' : ''}>${esc(label)}</option>`;
       });
       picker.innerHTML = '<option value="">Mở lại chuỗi đã chạy...</option>' + options.join('');
+      renderAutomationGlobalMetrics();
     } catch (_) { /* the picker is a convenience; its failure must not break the panel */ }
+  }
+
+  function renderAutomationGlobalMetrics() {
+    const target = $('automationGlobalMetrics');
+    if (!target) return;
+    const projects = state.automationProjects || [];
+    const active = projects.reduce((total, entry) => {
+      const counts = entry.task_counts || {};
+      return total + Number(counts.queued || 0) + Number(counts.running || 0) + Number(counts.review_required || 0);
+    }, 0);
+    const approvals = (state.automationApprovals || []).length;
+    const readyProviders = (state.providerCatalog || []).filter((item) => item.runtime?.available !== false).length;
+    const providerTotal = (state.providerCatalog || []).length;
+    target.innerHTML = `
+      <div class="orchestration-kpi"><label>Chuỗi đã tạo</label><strong>${number(projects.length)}</strong></div>
+      <div class="orchestration-kpi"><label>Task đang chạy/chờ AI</label><strong>${number(active)}</strong></div>
+      <div class="orchestration-kpi"><label>Chờ bạn phê duyệt</label><strong>${number(approvals)}</strong></div>
+      <div class="orchestration-kpi"><label>Provider dùng được</label><strong>${number(readyProviders)}/${number(providerTotal)}</strong></div>`;
+  }
+
+  async function loadOrchestrationWorkspace() {
+    await Promise.all([
+      loadAutomationProjectList(), loadAutomationInbox(), loadProviderCatalog(),
+      loadAutomationPolicy(), loadOrchestratorSettings(),
+    ]);
+    if (state.automationProjectId) await loadAutomationStatus(true);
   }
 
   async function openAutomationProject(projectId) {
@@ -5464,6 +5679,9 @@ Chạy các bước này?`)) return;
       await Promise.all([loadChannels(), loadManagedChannels()]);
       await Promise.all([loadVideos(), loadProjects()]);
       await loadJobs();
+      if (state.workspace === 'orchestration') {
+        await Promise.all([loadAutomationProjectList(), loadAutomationInbox(), loadProviderCatalog()]);
+      }
       if (state.automationProjectId) await loadAutomationStatus(true);
     } catch (error) { setMessage(error.message, 'error'); }
   }

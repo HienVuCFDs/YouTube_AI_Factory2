@@ -46,6 +46,12 @@ class MainApiTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertIn("whisper_device", body)
 
+    def test_runtime_shutdown_guard_is_armed_for_this_lifespan(self) -> None:
+        """A previous TestClient shutdown must not disable this one's cleanup."""
+        from youtube_monitor import main
+
+        self.assertFalse(main._runtime_workers_stopped)
+
     def test_projects_list_answers_with_a_list(self) -> None:
         """The whole suite shares one temp database, so this cannot assume it
         is empty: whether a project exists here depends only on which test

@@ -343,6 +343,15 @@ browser_lease_monitor = BrowserLeaseMonitor()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # TestClient and desktop relaunches can enter the same app lifespan more
+    # than once in a process.  The shutdown guard belongs to one lifespan,
+    # not to the whole Python process; leaving it set meant every later
+    # lifespan restarted the workers but skipped stopping them.  Those daemon
+    # threads then touched a temporary SQLite database after it had been
+    # deleted.  Re-arm the guard before starting a new worker generation.
+    global _runtime_workers_stopped
+    with _runtime_stop_lock:
+        _runtime_workers_stopped = False
     database.initialize()
     metadata_queue.start()
     transcript_queue.start()
@@ -6464,7 +6473,7 @@ _AGENT_QC_SCHEMA = {
     "type": "object",
     "properties": {
         "approved": {"type": "boolean"},
-        "score": {"type": "integer"},
+        "score": {"type": "integer", "minimum": 0, "maximum": 10},
         "issues": {"type": "array", "items": {"type": "string"}},
         "note": {"type": "string"},
     },
@@ -6474,7 +6483,7 @@ _AGENT_REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
         "approved": {"type": "boolean"},
-        "score": {"type": "integer"},
+        "score": {"type": "integer", "minimum": 0, "maximum": 10},
         "note": {"type": "string"},
         "issues": {"type": "array", "items": {"type": "string"}},
     },
@@ -6496,6 +6505,25 @@ def _call_specific_agent_json(
     if agent not in calls:
         raise LlmError(f"Agent không được hỗ trợ: {agent}")
     return calls[agent](system_prompt, user_prompt, schema)
+
+
+def _latest_scene_jobs_by_segment(scene_jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the newest attempt for each timeline segment without erasing history.
+
+    A failed scene remains useful audit evidence, but it must stop blocking QC
+    after a newer replacement has passed. Database callers normally return
+    newest-first; comparing ids keeps this helper correct for injected/test
+    data in any order.
+    """
+    latest: dict[int, dict[str, Any]] = {}
+    for job in scene_jobs:
+        segment_id = int(job.get("timeline_segment_id") or 0)
+        if not segment_id:
+            continue
+        current = latest.get(segment_id)
+        if current is None or int(job.get("id") or 0) > int(current.get("id") or 0):
+            latest[segment_id] = job
+    return list(latest.values())
 
 
 def _provider_runtime_states() -> dict[str, dict[str, Any]]:
@@ -7067,6 +7095,7 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         script = database.get_latest_project_script(project_id)
         timeline = database.list_project_timeline(project_id, script_id=int(script["id"]) if script else None)
         scene_jobs = database.list_scene_generation_jobs(project_id, limit=500)
+        latest_scene_jobs = _latest_scene_jobs_by_segment(scene_jobs)
         project_jobs = database.list_project_jobs(project_id, limit=100)
         active = [job for job in [*scene_jobs, *project_jobs] if job.get("status") in {"waiting", "queued", "running"}]
         # The measurable checks the manual Quality Check panel already runs.
@@ -7099,12 +7128,32 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             if issue.startswith(("Thiếu cảnh hình ảnh", "Thiếu voice", "Voice có khoảng lặng"))
         ]
         failed_reviews = [
-            job for job in scene_jobs if str(job.get("review_status") or "") == "fail"
+            job for job in latest_scene_jobs if str(job.get("review_status") or "") == "fail"
         ]
-        if failed_reviews:
-            issues.append(f"{len(failed_reviews)} cảnh bị AI chấm trượt")
+        for job in sorted(failed_reviews, key=lambda item: int(item.get("segment_index") or 0)):
+            scene_label = int(job.get("segment_index") or 0) or int(job.get("timeline_segment_id") or 0)
+            score = int(job.get("review_score") or 0)
+            issues.append(
+                f"Cảnh {scene_label} (job #{int(job.get('id') or 0)}) bị AI chấm {score}/10 — cần tạo lại"
+            )
         if active:
-            issues.append(f"Còn {len(active)} job đang xử lý")
+            active_ids = ", ".join(
+                f"#{int(job.get('id') or 0)}:{job.get('status')}" for job in active[:12]
+            )
+            issues.append(f"Còn {len(active)} job đang xử lý ({active_ids})")
+        timeline_snapshot = [
+            {
+                "segment_id": int(segment.get("id") or 0),
+                "scene": int(segment.get("segment_index") or 0),
+                "duration_seconds": int(segment.get("duration_seconds") or 0),
+                "has_visual": bool(str(segment.get("visual_path") or "").strip()),
+                "has_voice": bool(str(segment.get("audio_path") or "").strip()),
+                "has_subtitle": bool(
+                    str(segment.get("subtitle_path") or segment.get("subtitle_text") or "").strip()
+                ),
+            }
+            for segment in timeline
+        ]
         result = _call_specific_agent_json(
             agent,
             (
@@ -7116,6 +7165,10 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
                     "project_id": project_id,
                     "issues_detected": issues,
                     "scene_count": len(timeline),
+                    "total_duration_seconds": sum(
+                        int(segment.get("duration_seconds") or 0) for segment in timeline
+                    ),
+                    "timeline": timeline_snapshot,
                     "quality_checks": checks,
                 },
                 ensure_ascii=False,

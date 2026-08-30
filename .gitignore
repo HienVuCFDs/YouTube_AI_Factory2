@@ -5,6 +5,8 @@ _HE_THONG/data/*.db-*
 _HE_THONG/data/*.sqlite*
 _HE_THONG/data/*.log
 _HE_THONG/data/logs/
+# Server output captured when the app is launched from a wrapper script
+_HE_THONG/app/*.log
 _HE_THONG/data/oauth_token.json
 _HE_THONG/data/backups/
 

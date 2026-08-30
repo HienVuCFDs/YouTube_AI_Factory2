@@ -97,6 +97,31 @@ def test_auto_pipeline_distinguishes_waiting_for_cross_review(page: str) -> None
     assert "task.status === 'review_required'" in page
 
 
+def test_orchestration_has_its_own_workspace(page: str) -> None:
+    """Operations must not be buried among API keys and local tools."""
+    assert 'data-workspace-nav="orchestration"' in page
+    workspace = page[page.index("orchestration: {"):page.index("settings: {", page.index("orchestration: {"))]
+    assert "automationCommandCenter" in workspace
+    assert "automationPipeline" in workspace
+    assert "orchestratorSettings" in workspace
+    assert "automationPolicyPanel" in workspace
+
+
+def test_orchestration_exposes_approval_media_and_cost_state(page: str) -> None:
+    assert 'id="automationInboxBody"' in page
+    assert 'id="automationStageFlow"' in page
+    assert 'id="automationMediaBoard"' in page
+    assert "API trả phí:" in page
+    assert "không tính phí phát sinh" in page
+
+
+def test_orchestration_loads_existing_runs_not_only_local_storage(page: str) -> None:
+    assert "async function loadAutomationProjectList()" in page
+    assert "state.automationProjects = data.projects || []" in page
+    assert "async function loadAutomationInbox()" in page
+    assert "/api/automation/approvals?status=pending" in page
+
+
 def test_usage_limit_banner_can_allow_a_safe_retry(page: str) -> None:
     assert "Cho thử lại" in page
     assert "/api/usage-limits/${encodeURIComponent(provider)}/clear" in page

@@ -37,6 +37,25 @@ class MediaSchemaTests(unittest.TestCase):
             {"real_world", "data_graphics", "illustration"},
         )
 
+    def test_qc_scores_are_explicitly_on_a_ten_point_scale(self) -> None:
+        for schema in (main._AGENT_QC_SCHEMA, main._AGENT_REVIEW_SCHEMA):
+            score = schema["properties"]["score"]
+            self.assertEqual(score["minimum"], 0)
+            self.assertEqual(score["maximum"], 10)
+
+    def test_qc_only_judges_the_latest_attempt_for_each_scene(self) -> None:
+        jobs = [
+            {"id": 8, "timeline_segment_id": 10, "review_status": "pass"},
+            {"id": 7, "timeline_segment_id": 10, "review_status": "fail"},
+            {"id": 6, "timeline_segment_id": 11, "review_status": "fail"},
+        ]
+        latest = main._latest_scene_jobs_by_segment(jobs)
+        self.assertEqual({int(item["id"]) for item in latest}, {8, 6})
+        self.assertEqual(
+            [int(item["id"]) for item in latest if item["review_status"] == "fail"],
+            [6],
+        )
+
 
 class MediaRoutingByTreatmentTests(unittest.TestCase):
     def _run_media(self, scenes: list[dict], timeline: list[dict]) -> dict:
