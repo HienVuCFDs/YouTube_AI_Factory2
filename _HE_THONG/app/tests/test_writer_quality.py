@@ -56,3 +56,39 @@ class WriterQualityTests(unittest.TestCase):
         }
         # 172 words is 95.5% of the 180-word target for one minute.
         validate_voiceover_plan(content, 60)
+
+class ScriptLengthWarningReachesTheUserTests(unittest.TestCase):
+    """The writer's output is measured against the requested length already.
+
+    A reup script came back half the length of the 9.6 minute source, which
+    became a 4.6 minute video — found only after a voiceover and a render,
+    because the warning was computed, returned, and never displayed.
+    """
+
+    def setUp(self) -> None:
+        from pathlib import Path
+
+        self.page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+
+    def test_the_page_has_somewhere_to_show_them(self) -> None:
+        self.assertIn('id="studioWriterWarnings"', self.page)
+
+    def test_the_writer_response_is_checked_for_them(self) -> None:
+        self.assertIn("reportScriptLengthWarnings(response);", self.page)
+        self.assertIn("quality_warnings", self.page)
+
+    def test_it_explains_what_governs_the_length(self) -> None:
+        self.assertIn("số cảnh của storyboard bằng số đoạn trong kịch bản", self.page)
+
+    def test_a_short_script_is_still_reported_by_the_validator(self) -> None:
+        from youtube_monitor.writer import validate_voiceover_plan
+
+        content = {"scene_blueprints": [
+            {"narration": "mot cau rat ngan", "duration_seconds": 5},
+        ]}
+        warnings = validate_voiceover_plan(content, target_duration_seconds=575)
+        self.assertTrue(warnings)
+        self.assertTrue(any("575" in w for w in warnings), warnings)

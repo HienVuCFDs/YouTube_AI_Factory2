@@ -544,6 +544,7 @@
         <div id="studioStep4" class="studio-step" data-studio-step="4" hidden>
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
+          <div id="studioWriterWarnings" class="integration-todo" style="margin-top:8px" hidden></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(4)">← Giọng đọc</button><span data-wf="content"><button id="studioGenerateStoryboardButton" class="btn primary" disabled>Tạo lại storyboard</button><select id="studioSceneRatioSelect" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select></span><button class="btn primary" onclick="setStudioStep(6)">Tiếp tục dựng →</button></div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px;gap:6px;flex-wrap:wrap"><input id="studioOrchestrateIntent" type="text" style="flex:1;min-width:260px" placeholder="Giao việc cho AI điều phối, ví dụ: chuẩn bị dựng video này" /><button id="studioOrchestrateButton" class="btn">Hỏi AI điều phối</button></div><div id="studioOrchestratePlan" class="hint" data-wf="content" style="margin-top:6px"></div><div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneImageProviderSelect" aria-label="Loại ảnh AI"><option value="auto_parallel">Nhiều AI song song (Flow + ChatGPT + Gemini)</option><option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · tạo ảnh theo gói</option><option value="gemini_web_image">Gemini (web) · gói đăng ký</option><option value="chatgpt_web_image">ChatGPT (web) · gói đăng ký</option><option value="gemini_image">Google Gemini · API</option><option value="openai_image">OpenAI GPT Image · API</option></select><button id="studioGenerateImagesButton" class="btn primary" disabled>Tạo ảnh AI cho các cảnh</button></div>
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioMotionPolicySelect" aria-label="Chính sách chuyển động"><option value="balanced">Cân bằng · để AI chọn ảnh/GIF/video</option><option value="gif_only">Không tốn tín dụng · thay video bằng GIF</option></select><button id="studioPlanVisualsButton" class="btn" disabled>Phân tích loại hình từng cảnh</button></div><div id="studioVisualPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioDownloadSourceButton" class="btn primary">1. Tải video nguồn về máy</button><button id="studioCutByDialogueButton" class="btn primary">2. Cắt cảnh theo lời thoại</button><button id="studioCutSourceScenesButton" class="btn primary">3. Xuất clip từ video gốc</button><button id="studioPlanSourceCuesButton" class="btn ghost">Chọn lại đoạn hình (tuỳ chọn)</button></div><div class="studio-model-note" data-wf="reup" style="margin-top:6px" hidden><b>1.</b> Tải file gốc về máy → <b>2.</b> Dựng timeline theo từng lượt thoại (mỗi cảnh một câu, lấy đúng mốc giây câu đó được nói) → <b>3.</b> FFmpeg cắt clip câm từ file gốc theo các mốc đó.<br>Quy trình này <b>không gọi AI tạo ảnh hay tạo video</b>, nên không tốn tín dụng.</div><div id="studioSourceCuePlan" class="studio-result" style="margin-top:6px"></div><div id="studioSceneImageHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Tạo storyboard trước. Ảnh sẽ được tạo cho mỗi cảnh chưa có hình; FFmpeg tạo chuyển động nhẹ khi dựng video.</div>
@@ -1420,6 +1421,17 @@
     const hasVoice = Boolean(String(segment.audio_path || '').trim());
     return `<span class="have-badge ${hasVisual ? 'on' : 'off'}" title="${hasVisual ? esc(segment.visual_path) : 'Chưa có hình'}">${hasVisual ? '◉' : '○'} hình</span>`
       + `<span class="have-badge ${hasVoice ? 'on' : 'off'}" title="${hasVoice ? esc(segment.audio_path) : 'Chưa có giọng đọc'}">${hasVoice ? '◉' : '○'} tiếng</span>`;
+  }
+
+  function reportScriptLengthWarnings(writerResponse) {
+    const box = $('studioWriterWarnings');
+    const warnings = (writerResponse?.result || writerResponse)?.quality_warnings || [];
+    if (!box) return;
+    if (!warnings.length) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML = '<b>Kịch bản chưa đạt thời lượng mong muốn</b><br>'
+      + warnings.map((line) => `· ${esc(line)}`).join('<br>')
+      + '<br><span class="secondary-text">Sửa kịch bản dài thêm trước khi tạo giọng — số cảnh của storyboard bằng số đoạn trong kịch bản, và độ dài video bằng độ dài lời đọc.</span>';
   }
 
   async function planProjectShort() {
@@ -3646,6 +3658,11 @@
       if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
       const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? flow.script_mode : ($('studioRemakeModeSelect')?.value || flow.script_mode || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: flow.uses_web_research === false ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
       state.studioWriter = response;
+      // The writer is told how long the video should be and its output is
+      // already measured against that, but the answer went nowhere. A script
+      // half the length of its source then quietly became a video half the
+      // length, discovered only after a voiceover and a render.
+      reportScriptLengthWarnings(response);
       setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
       const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});
       state.studioProjectId = projectResponse.project?.id || projectResponse.id || null;
