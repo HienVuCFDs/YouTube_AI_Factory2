@@ -551,6 +551,7 @@
           <div class="studio-actions" data-wf="content" style="margin-top:8px"><select id="studioSceneVideoProviderSelect" aria-label="Loại video AI"><option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="stock_footage">Kho footage mở · Archive.org + NASA · miễn phí</option><option value="motion_graphics">Motion graphics · biểu đồ/số liệu/tiêu đề động · miễn phí</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo · API</option></select><button id="studioGenerateVideosButton" class="btn primary" disabled>Tạo video AI từ ảnh</button></div>
           <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
+          <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><select id="studioCleanupPosition" aria-label="Vị trí vết cần che"><option value="bottom_center">Phụ đề cháy sẵn · dưới giữa</option><option value="top_center">Chữ trên · trên giữa</option><option value="top_right">Logo · trên phải</option><option value="top_left">Logo · trên trái</option><option value="bottom_right">Watermark · dưới phải</option><option value="bottom_left">Watermark · dưới trái</option></select><select id="studioCleanupMethod" aria-label="Cách che"><option value="blur">Làm mờ</option><option value="crop">Cắt bỏ (chỉ dùng được ở mép)</option></select><button class="btn" type="button" onclick="applyTimelineCleanup(false)">Che cho mọi cảnh</button><button class="btn ghost" type="button" onclick="applyTimelineCleanup(true)">Bỏ che</button></div><div id="studioCleanupState" class="studio-model-note" style="margin-top:6px">Vết của video gốc — phụ đề cháy sẵn, logo kênh — nằm cùng một chỗ trên mọi clip cắt ra, nên đánh dấu một lần là áp cho tất cả. Không đánh dấu thì render giữ nguyên chúng.</div>
         </div>
         <div id="studioStep5" class="studio-step" data-studio-step="5" hidden>
           <p class="studio-step-note">Chọn một model/giọng cho toàn bộ video. App sẽ lưu lựa chọn này vào project để các đoạn voice dùng cùng một cấu hình, tránh bị đổi giọng giữa chừng.</p>
@@ -1432,6 +1433,43 @@
     box.innerHTML = '<b>Kịch bản chưa đạt thời lượng mong muốn</b><br>'
       + warnings.map((line) => `· ${esc(line)}`).join('<br>')
       + '<br><span class="secondary-text">Sửa kịch bản dài thêm trước khi tạo giọng — số cảnh của storyboard bằng số đoạn trong kịch bản, và độ dài video bằng độ dài lời đọc.</span>';
+  }
+
+  async function applyTimelineCleanup(clear) {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
+    const position = $('studioCleanupPosition')?.value || 'bottom_center';
+    const method = $('studioCleanupMethod')?.value || 'blur';
+    try {
+      const result = await api(`/api/projects/${projectId}/timeline/cleanups`, {
+        method: 'POST',
+        body: JSON.stringify({position, method, clear: Boolean(clear)}),
+      });
+      renderCleanupState(result.cleanups, result.segments);
+      setMessage(
+        clear
+          ? `Đã bỏ che trên ${result.segments} cảnh.`
+          : `Đã đánh dấu che ${result.segments} cảnh. Render lại để áp dụng.`,
+        'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  const CLEANUP_POSITION_LABELS = {
+    bottom_center: 'dưới giữa', top_center: 'trên giữa', top_right: 'trên phải',
+    top_left: 'trên trái', bottom_right: 'dưới phải', bottom_left: 'dưới trái', center: 'giữa khung',
+  };
+
+  function renderCleanupState(cleanups, segments) {
+    const box = $('studioCleanupState');
+    if (!box) return;
+    const list = cleanups || [];
+    if (!list.length) {
+      box.innerHTML = '<b>Chưa che gì.</b> Video render sẽ giữ nguyên phụ đề và logo của bản gốc.';
+      return;
+    }
+    box.innerHTML = list.map((item) =>
+      `Đang che <b>${esc(CLEANUP_POSITION_LABELS[item.position] || item.position)}</b> bằng ${item.method === 'crop' ? 'cắt bỏ' : 'làm mờ'}`
+    ).join(' · ') + (segments ? ` — áp cho ${segments} cảnh. Cần render lại để thấy kết quả.` : '');
   }
 
   async function planProjectShort() {

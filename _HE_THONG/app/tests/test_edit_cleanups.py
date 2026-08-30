@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from youtube_monitor.ffmpeg_renderer import _cleanup_filters, _compose_video_graph
+import unittest
 
 FRAME = (1280, 720)
 AFTER = ["scale=1280:720:force_original_aspect_ratio=decrease", "format=yuv420p"]
@@ -191,3 +192,96 @@ def test_an_unreadable_clip_falls_back_to_the_output_size(monkeypatch, tmp_path)
     )
 
     assert ffmpeg_renderer._mark_frame_size(clip, "ffmpeg", 1280, 720) == (1280, 720)
+
+
+class CleanupIsSetForTheWholeSourceTests(unittest.TestCase):
+    """A logo or burned-in subtitle belongs to the source, not to a scene.
+
+    It sits in the same place on every clip cut from that film, so marking it
+    per scene meant marking the same rectangle dozens of times — which is why
+    nobody did, and why it survived into every render.
+    """
+
+    def _database(self, directory: str):
+        from youtube_monitor.database import Database
+        from pathlib import Path
+
+        database = Database(Path(directory) / "cleanup.db")
+        database.upsert_channel({
+            "youtube_channel_id": "UC000000000000000000000E",
+            "channel_url": "https://www.youtube.com/channel/UC000000000000000000000E",
+            "title": "c", "uploads_playlist_id": "UU000000000000000000000E",
+        })
+        database.upsert_video({
+            "youtube_video_id": "video-cleanup-1",
+            "youtube_channel_id": "UC000000000000000000000E",
+            "video_url": "https://www.youtube.com/watch?v=video-cleanup-1",
+            "title": "t", "metadata_hash": "h", "raw_payload": {},
+        })
+        project = database.create_production_project("video-cleanup-1")
+        script = database.create_project_script(project["id"], script_title="s")
+        database.create_project_timeline(project["id"], script["id"], [
+            {"segment_index": i, "voice_text": "a", "subtitle_text": "a",
+             "visual_prompt": "p", "duration_seconds": 5}
+            for i in range(1, 4)
+        ])
+        return database, int(project["id"]), int(script["id"])
+
+    def test_one_call_marks_every_scene(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, script_id = self._database(directory)
+            changed = database.set_timeline_cleanups(
+                project_id, [{"position": "bottom_center", "method": "blur"}], script_id=script_id
+            )
+            self.assertEqual(changed, 3)
+            for segment in database.list_project_timeline(project_id, script_id=script_id):
+                self.assertIn("bottom_center", segment["edit_cleanups"])
+
+    def test_clearing_puts_every_scene_back(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, script_id = self._database(directory)
+            database.set_timeline_cleanups(project_id, [{"position": "bottom_center", "method": "blur"}])
+            database.set_timeline_cleanups(project_id, [])
+            for segment in database.list_project_timeline(project_id, script_id=script_id):
+                self.assertEqual(segment["edit_cleanups"], "[]")
+
+    def test_it_leaves_the_scene_own_transition_alone(self) -> None:
+        """Only the cleanup list is this call's business."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project_id, script_id = self._database(directory)
+            segments = database.list_project_timeline(project_id, script_id=script_id)
+            database.save_segment_edit(int(segments[0]["id"]), "cut", "zoom-in", note="giu lai")
+            database.set_timeline_cleanups(project_id, [{"position": "top_right", "method": "blur"}])
+            again = database.get_project_timeline_segment(int(segments[0]["id"]))
+            self.assertEqual(again["edit_transition"], "cut")
+            self.assertEqual(again["edit_effect"], "zoom-in")
+
+
+class CleanupIsReachableFromTheStoryboardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from pathlib import Path
+
+        self.page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+
+    def test_the_storyboard_can_mark_and_unmark_it(self) -> None:
+        self.assertIn('id="studioCleanupPosition"', self.page)
+        self.assertIn("applyTimelineCleanup(false)", self.page)
+        self.assertIn("applyTimelineCleanup(true)", self.page)
+
+    def test_it_says_what_happens_when_nothing_is_marked(self) -> None:
+        self.assertIn("render sẽ giữ nguyên phụ đề và logo", self.page)
+
+    def test_the_endpoint_exists(self) -> None:
+        from youtube_monitor.main import app
+
+        paths = {getattr(route, "path", "") for route in app.routes}
+        self.assertIn("/api/projects/{project_id}/timeline/cleanups", paths)

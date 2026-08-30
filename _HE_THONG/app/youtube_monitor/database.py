@@ -3908,6 +3908,36 @@ class Database:
             )
         return self.get_scene_generation_job(job_id)
 
+    def set_timeline_cleanups(
+        self,
+        project_id: int,
+        cleanups: list[dict[str, Any]],
+        script_id: int | None = None,
+    ) -> int:
+        """Mark what has to come off the picture, for every scene at once.
+
+        A logo or a burned-in subtitle belongs to the source, not to a scene,
+        so it sits in the same place on every clip cut from that film. Setting
+        it per scene made the user mark the same rectangle dozens of times, so
+        in practice nobody set it at all and it survived into the render.
+
+        Only the cleanup list is touched: the transition, effect and trims a
+        scene already carries are its own.
+        """
+        clauses = ["project_id = ?"]
+        params: list[Any] = [int(project_id)]
+        if script_id is not None:
+            clauses.append("script_id = ?")
+            params.append(int(script_id))
+        payload = json.dumps(cleanups or [], ensure_ascii=False)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE project_timeline_segments SET edit_cleanups = ?, updated_at = ? "
+                f"WHERE {' AND '.join(clauses)}",
+                [payload, utc_now(), *params],
+            )
+            return int(cursor.rowcount or 0)
+
     def save_segment_edit(
         self,
         segment_id: int,

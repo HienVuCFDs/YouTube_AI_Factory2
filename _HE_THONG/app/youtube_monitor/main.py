@@ -7563,6 +7563,35 @@ def plan_project_short(project_id: int, payload: ShortPlanRequest) -> dict[str, 
     return {"short": record, "duration_seconds": seconds, "scene_count": len(plan.segment_ids)}
 
 
+class TimelineCleanupRequest(BaseModel):
+    position: Literal[
+        "top_left", "top_right", "top_center",
+        "bottom_left", "bottom_right", "bottom_center", "center",
+    ] = "bottom_center"
+    method: Literal["blur", "crop"] = "blur"
+    clear: bool = False
+
+
+@app.post("/api/projects/{project_id}/timeline/cleanups")
+def set_timeline_cleanups(project_id: int, payload: TimelineCleanupRequest) -> dict[str, Any]:
+    """Cover the source's own subtitles or logo on every scene at once."""
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id)
+    cleanups: list[dict[str, Any]] = (
+        [] if payload.clear else [{"position": payload.position, "method": payload.method}]
+    )
+    changed = database.set_timeline_cleanups(
+        project_id, cleanups, script_id=int(script["id"]) if script else None
+    )
+    return {
+        "status": "cleared" if payload.clear else "saved",
+        "segments": changed,
+        "cleanups": cleanups,
+    }
+
+
 @app.get("/api/projects/{project_id}/short")
 def get_project_short(project_id: int) -> dict[str, Any]:
     record = database.get_project_short(project_id)
