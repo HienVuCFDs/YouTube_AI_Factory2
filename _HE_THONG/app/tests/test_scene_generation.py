@@ -254,6 +254,37 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertIsNone(video_job["reference_asset_id"])
             self.assertEqual(video_job["timeline_segment_id"], segment["id"])
 
+    def test_batch_can_target_the_standalone_short_timeline(self):
+        """Content Shorts must generate their own vertical scenes, not long ones."""
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, long_segment = self._project_with_timeline(directory)
+            short_script = database.create_project_script(
+                project["id"], script_title="Standalone Short", variant="short"
+            )
+            short_timeline = database.create_project_timeline(
+                project["id"], short_script["id"],
+                [{
+                    "segment_index": 1,
+                    "voice_text": "Short narration",
+                    "subtitle_text": "Short narration",
+                    "visual_prompt": "A vertical close-up for a short video",
+                    "duration_seconds": 5,
+                }],
+            )
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_image", variant="short", ratio="720:1280", confirmed=True,
+            )
+            with patch.object(main_module, "database", database):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+            self.assertEqual(result["variant"], "short")
+            self.assertEqual(result["queued_count"], 1)
+            self.assertEqual(result["jobs"][0]["timeline_segment_id"], short_timeline[0]["id"])
+            self.assertNotEqual(result["jobs"][0]["timeline_segment_id"], long_segment["id"])
+            self.assertEqual(result["jobs"][0]["ratio"], "720:1280")
+
     def test_batch_video_skips_scene_the_plan_wants_as_a_still(self):
         """A still scene must not be dragged through the video pipeline.
 

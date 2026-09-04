@@ -14,6 +14,7 @@ import threading
 import tempfile
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .analysis_queue import AnalysisQueue
@@ -34,6 +35,7 @@ from .database import Database
 from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
+from .ffmpeg_renderer import video_frame_size
 from . import operations, usage_limits, workflows
 from . import languages
 from .fidelity_guard import unsourced_details
@@ -80,6 +82,8 @@ from .short_script import (
     set_script_writer as short_script_set_writer,
 )
 from .shorts import (
+    frame_matches_profile,
+    profile_label,
     MAX_SHORT_SECONDS,
     ShortPlan,
     ShortsPlanError,
@@ -128,6 +132,10 @@ from .settings import (
 )
 from .script_builder import build_script_draft, script_to_markdown
 from .burned_in_marks import MarkDetectionError, detect_burned_in_marks
+from .ffmpeg_renderer import resolve_ffmpeg
+from .source_visuals import SourceVisualError, prepare_source_visuals
+from .media_probe import MediaProbeError, describe, probe_media, reject_reason
+from .reuse_check import measure_reuse, rule_findings, rule_verdict
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
 from .transcriber import (
@@ -420,10 +428,11 @@ class ChannelGroupRequest(BaseModel):
 class ManagedChannelRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     channel_url: str = Field(min_length=1, max_length=500)
+    platform: Literal["youtube", "tiktok", "facebook", "instagram"] = "youtube"
     youtube_channel_id: str = Field(default="", max_length=200)
     group_name: str = Field(default="", max_length=100)
     workflow_reference_channel_id: str = Field(default="", max_length=200)
-    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] = "youtube_landscape"
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] = "youtube_landscape"
     language: str = Field(default="vi", max_length=20)
     default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
     default_voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
@@ -444,10 +453,11 @@ class ManagedChannelRequest(BaseModel):
 class ManagedChannelUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     channel_url: str | None = Field(default=None, min_length=1, max_length=500)
+    platform: Literal["youtube", "tiktok", "facebook", "instagram"] | None = None
     youtube_channel_id: str | None = Field(default=None, max_length=200)
     group_name: str | None = Field(default=None, max_length=100)
     workflow_reference_channel_id: str | None = Field(default=None, max_length=200)
-    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] | None = None
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] | None = None
     language: str | None = Field(default=None, max_length=20)
     default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] | None = None
     default_voice_model: str | None = Field(default=None, min_length=1, max_length=120)
@@ -573,6 +583,9 @@ class ReorderShotsRequest(BaseModel):
 
 class GenerateTimelineRequest(BaseModel):
     force: bool = False
+    # The standalone Short has its own script and storyboard. Keep the
+    # existing default, while allowing this endpoint to build its timeline.
+    variant: Literal["long", "short"] = "long"
 
 
 class UpdateTimelineRequest(BaseModel):
@@ -590,7 +603,7 @@ class RenderSettingsRequest(BaseModel):
     music_asset_id: int | None = Field(default=None, ge=1)
     music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
     transition_style: Literal["none", "fade"] = "fade"
-    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"] = "youtube_landscape"
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] = "youtube_landscape"
     voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
     voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
     voice_rate: Literal["-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"] = "+0%"
@@ -622,8 +635,23 @@ class CreateProductionJobRequest(BaseModel):
     variant: Literal["long", "short"] = "long"
 
 
+class ScriptDraftRequest(BaseModel):
+    """Create the long script and, optionally, a standalone Short from one brief."""
+
+    create_standalone_short: bool = False
+    short_seconds: int = Field(
+        default=DEFAULT_SHORT_SCRIPT_SECONDS,
+        ge=MIN_SHORT_SCRIPT_SECONDS,
+        le=MAX_SHORT_SCRIPT_SECONDS,
+    )
+    short_direction: str = Field(default="", max_length=4000)
+
+
 class CreatePublicationRequest(BaseModel):
     managed_channel_id: int | None = Field(default=None, ge=1)
+    platform: Literal["youtube", "tiktok", "facebook", "instagram"] | None = None
+    output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] | None = None
+    video_variant: Literal["long", "short"] = "long"
     thumbnail_asset_id: int | None = Field(default=None, ge=1)
     title: str = Field(default="", max_length=100)
     description: str = Field(default="", max_length=5000)
@@ -681,6 +709,9 @@ SceneProvider = str
 
 class BatchSceneGenerationRequest(BaseModel):
     provider: SceneProvider = "gemini_image"
+    # A batch must name the timeline it reads: long video and standalone Short
+    # have separate scripts and scene rows.
+    variant: Literal["long", "short"] = "long"
     # Spreading a batch over several providers is what makes it run in
     # parallel: the extension already handles concurrent jobs, but every
     # scene going to the same site queues behind one tab.
@@ -750,8 +781,11 @@ def _write_project_document(project_id: int, filename: str, content: str) -> Pat
 
 def _current_final_video_path(project_id: int, script_id: int | None = None) -> Path | None:
     """Return final.mp4 only when it was rendered from the current script."""
-    script = database.get_latest_project_script(project_id)
-    active_script_id = int(script_id or (script or {}).get("id") or 0)
+    active_script_id = int(
+        script_id
+        or (database.get_latest_project_script(project_id) or {}).get("id")
+        or 0
+    )
     if not active_script_id:
         return None
     final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
@@ -869,6 +903,20 @@ def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]
     }
 
 
+def _source_media_kind(path: Path) -> str:
+    """What was actually downloaded, so the workflow can refuse the wrong one.
+
+    A link can hand back a podcast episode or a music track as readily as a
+    film, and the reup workflow cuts pictures out of whatever it is given.
+    Recording the kind here is what lets the app say "this has no picture"
+    instead of failing inside FFmpeg several steps later.
+    """
+    try:
+        return str(probe_media(Path(path), FFMPEG_BINARY).get("kind") or "")
+    except (MediaProbeError, OSError):
+        return ""
+
+
 @app.post("/api/videos/import-link")
 def import_video_from_link(payload: ImportVideoLinkRequest) -> dict[str, Any]:
     """Import a source video from a link on any supported platform."""
@@ -895,6 +943,7 @@ def add_managed_channel(payload: ManagedChannelRequest) -> dict[str, Any]:
         channel = database.create_managed_channel(
             name=payload.name,
             channel_url=payload.channel_url,
+            platform=payload.platform,
             youtube_channel_id=payload.youtube_channel_id,
             group_name=payload.group_name,
             workflow_reference_channel_id=payload.workflow_reference_channel_id,
@@ -1008,6 +1057,26 @@ def stream_project_final_video(project_id: int) -> FileResponse:
     return FileResponse(final_path, media_type="video/mp4")
 
 
+@app.get("/api/projects/{project_id}/short-video")
+def stream_project_short_video(project_id: int) -> FileResponse:
+    """Serve only the completed render that belongs to the standalone Short."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id, variant="short")
+    if not script:
+        raise HTTPException(status_code=404, detail="Dự án chưa có kịch bản short riêng")
+    for job in database.list_project_jobs(project_id, limit=100):
+        if (
+            int(job.get("script_id") or 0) == int(script["id"])
+            and job.get("job_type") == "render_short"
+            and job.get("status") == "completed"
+        ):
+            path = Path(str(job.get("output_path") or ""))
+            if path.is_file():
+                return FileResponse(path, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Short riêng chưa được dựng xong")
+
+
 @app.get("/api/projects/{project_id}/handoff")
 def get_project_handoff(
     project_id: int,
@@ -1039,8 +1108,73 @@ def list_project_scripts(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_scripts(project_id)
 
 
+def _short_direction_from_bundle(bundle: dict[str, Any], direction: str = "") -> str:
+    """Keep the standalone Short anchored to the same creative brief."""
+    if direction.strip():
+        return direction.strip()
+    writer = dict(bundle.get("writer_content") or {})
+    result = dict(writer.get("result") or writer)
+    return str(
+        result.get("creative_direction")
+        or result.get("new_story_concept")
+        or ""
+    ).strip()[:4000]
+
+
+def _create_standalone_short(
+    project_id: int,
+    bundle: dict[str, Any],
+    long_script: dict[str, Any],
+    *,
+    seconds: int = DEFAULT_SHORT_SCRIPT_SECONDS,
+    direction: str = "",
+    use_model: bool = True,
+) -> dict[str, Any]:
+    """Create the Short's script, shots and timeline beside the long video's.
+
+    This is called during script creation, not after the long render. Both
+    videos therefore start from the same creative brief while keeping their
+    own script IDs and downstream production assets.
+    """
+    draft = build_short_script(
+        bundle["project"],
+        long_script,
+        seconds=seconds,
+        direction=_short_direction_from_bundle(bundle, direction),
+        use_model=use_model,
+    )
+    script = database.create_project_script(project_id, **draft, variant="short")
+    if not script:
+        raise ShortScriptError("Không lưu được kịch bản short")
+    shots = database.create_project_shots(
+        project_id,
+        int(script["id"]),
+        build_shot_plan(bundle["project"], script),
+        force=True,
+    )
+    timeline = database.create_project_timeline(
+        project_id,
+        int(script["id"]),
+        build_timeline(bundle["project"], script, shots or []),
+        force=True,
+    )
+    if shots is None or timeline is None:
+        raise ShortScriptError("Không tạo được storyboard hoặc timeline cho bản short")
+    _write_project_document(project_id, "kich-ban-short.md", script_to_markdown(script, bundle["project"]))
+    return {
+        "script": script,
+        "shots": shots,
+        "timeline": timeline,
+        "estimated_seconds": estimated_short_seconds(script),
+    }
+
+
 @app.post("/api/projects/{project_id}/script/draft")
-def create_project_script_draft(project_id: int) -> dict[str, Any]:
+def create_project_script_draft(
+    project_id: int,
+    payload: ScriptDraftRequest = ScriptDraftRequest(),
+) -> dict[str, Any]:
+    """Save both scripts at the writing step, before either video is built."""
     bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
     if not bundle:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
@@ -1049,7 +1183,28 @@ def create_project_script_draft(project_id: int) -> dict[str, Any]:
     if not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     _write_project_document(project_id, "kich-ban.md", script_to_markdown(script, bundle["project"]))
-    return {"status": "saved", "script": script}
+    short: dict[str, Any] | None = None
+    short_error = ""
+    if payload.create_standalone_short:
+        try:
+            short = _create_standalone_short(
+                project_id,
+                bundle,
+                script,
+                seconds=payload.short_seconds,
+                direction=payload.short_direction,
+            )
+        except Exception as exc:
+            # The long script is still usable if its companion Short cannot be
+            # planned. Return the failure explicitly so the UI never claims it
+            # was written when it was not.
+            short_error = str(exc)
+    return {
+        "status": "saved",
+        "script": script,
+        "short": short,
+        "short_error": short_error,
+    }
 
 
 @app.post("/api/projects/{project_id}/director-draft")
@@ -1272,6 +1427,24 @@ def generate_project_shots(
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo shot list")
     writer_analysis = database.get_video_analysis(str(project["youtube_video_id"]), analysis_type="writer")
     writer_content = writer_analysis.get("result") if writer_analysis else None
+    existing = database.list_project_shots(project_id, script_id=int(script["id"]))
+    # Editing a script in place leaves its old storyboard attached to the same
+    # script ID.  Reusing it would make the voice job read yesterday's words.
+    # Never silently regenerate (it can discard reviewed media); tell callers
+    # exactly when they need to explicitly rebuild instead.
+    script_updated = str(script.get("updated_at") or "")
+    storyboard_stale = bool(
+        existing
+        and script_updated
+        and script_updated > max(str(item.get("updated_at") or "") for item in existing)
+    )
+    if storyboard_stale and not payload.force:
+        return {
+            "status": "stale",
+            "script_id": script["id"],
+            "stale": True,
+            "shots": existing,
+        }
     planned = build_shot_plan(project, script, writer_content=writer_content)
     shots = database.create_project_shots(
         project_id,
@@ -1282,7 +1455,7 @@ def generate_project_shots(
     if shots is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
-    return {"status": "saved", "script_id": script["id"], "shots": shots}
+    return {"status": "saved", "script_id": script["id"], "stale": False, "shots": shots}
 
 
 @app.patch("/api/shots/{shot_id}")
@@ -1410,13 +1583,14 @@ def generate_project_timeline(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    script = database.get_latest_project_script(project_id)
+    script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo timeline")
     shots = database.list_project_shots(project_id, script_id=int(script["id"]))
     if not shots:
         raise HTTPException(status_code=400, detail="Project chưa có shot list để tạo timeline")
-    previous_count = len(database.list_project_timeline(project_id, script_id=int(script["id"])))
+    previous_timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    previous_count = len(previous_timeline)
     planned = build_timeline(project, script, shots)
     timeline = database.create_project_timeline(
         project_id,
@@ -1426,21 +1600,140 @@ def generate_project_timeline(
     )
     if timeline is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
-    _write_project_document(project_id, "timeline.md", timeline_to_markdown(project, script, timeline))
+    document_name = "timeline-short.md" if payload.variant == "short" else "timeline.md"
+    _write_project_document(project_id, document_name, timeline_to_markdown(project, script, timeline))
     # Without `force` an existing timeline is returned untouched, so pressing
     # the button after rewriting the script looked like it had worked while
     # the old scenes stayed. Say which happened, and whether the timeline
     # still matches the shot list it should have been built from.
     rebuilt = bool(payload.force) or previous_count == 0
-    stale = not rebuilt and len(timeline) != len(shots)
+    newest_shot_update = max((str(item.get("updated_at") or "") for item in shots), default="")
+    newest_timeline_update = max((str(item.get("updated_at") or "") for item in previous_timeline), default="")
+    stale = not rebuilt and (
+        len(timeline) != len(shots)
+        or bool(newest_shot_update and newest_timeline_update and newest_shot_update > newest_timeline_update)
+    )
     return {
         "status": "saved",
         "script_id": script["id"],
+        "variant": payload.variant,
         "rebuilt": rebuilt,
         "stale": stale,
         "shot_count": len(shots),
         "total_duration_seconds": sum(int(item["duration_seconds"]) for item in timeline),
         "timeline": timeline,
+    }
+
+
+@app.get("/api/projects/{project_id}/timeline/{segment_id}/waveform")
+def timeline_segment_waveform(project_id: int, segment_id: int) -> Response:
+    """A picture of the scene's audio, so silence and clipping are visible.
+
+    Reviewing a voiceover by pressing play on every scene in turn is how a
+    dead scene or a truncated line gets missed. The shape of the audio shows
+    both at a glance, which is what a review pass actually needs.
+    """
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment or int(segment.get("project_id") or 0) != project_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    audio = Path(str(segment.get("audio_path") or ""))
+    if not audio.is_file():
+        raise HTTPException(status_code=404, detail="Cảnh này chưa có giọng đọc")
+    executable = resolve_ffmpeg(FFMPEG_BINARY)
+    if not executable:
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY})")
+    try:
+        result = subprocess.run(
+            [
+                executable, "-v", "error", "-i", str(audio),
+                "-filter_complex",
+                "aformat=channel_layouts=mono,compand,showwavespic=s=640x80:colors=#f59e0b",
+                "-frames:v", "1", "-f", "image2", "-c:v", "png", "-",
+            ],
+            capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=500, detail=f"Không vẽ được dạng sóng: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise HTTPException(status_code=500, detail="FFmpeg không vẽ được dạng sóng cho cảnh này")
+    return Response(content=result.stdout, media_type="image/png")
+
+
+class SegmentCutRequest(BaseModel):
+    """Where in the source this scene's picture is taken from."""
+
+    # -1 is how the column says "never set"; refusing it made a scene
+    # impossible to put back the way it was found.
+    source_start_seconds: float | None = Field(default=None, ge=-1, le=86_400)
+    edit_trim_head: float | None = Field(default=None, ge=0, le=600)
+    edit_trim_tail: float | None = Field(default=None, ge=0, le=600)
+    recut: bool = True
+
+
+@app.patch("/api/timeline/{segment_id}/cut")
+def update_timeline_segment_cut(segment_id: int, payload: SegmentCutRequest) -> dict[str, Any]:
+    """Move a scene's cut point and, by default, re-cut just that clip.
+
+    Saving the number alone would leave the storyboard showing the old
+    picture, so the change could only be judged after a full render - which
+    is exactly the review this is meant to make possible beforehand.
+    """
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    project_id = int(segment.get("project_id") or 0)
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+
+    if payload.source_start_seconds is not None:
+        database.save_segment_source_cue(
+            segment_id,
+            float(payload.source_start_seconds),
+            str(segment.get("source_cue_reason") or "Chỉnh tay ở storyboard"),
+        )
+    if payload.edit_trim_head is not None or payload.edit_trim_tail is not None:
+        database.save_segment_edit(
+            segment_id,
+            str(segment.get("edit_transition") or ""),
+            str(segment.get("edit_effect") or ""),
+            str(segment.get("edit_note") or ""),
+            trim_head_seconds=float(
+                payload.edit_trim_head
+                if payload.edit_trim_head is not None
+                else segment.get("edit_trim_head") or 0
+            ),
+            trim_tail_seconds=float(
+                payload.edit_trim_tail
+                if payload.edit_trim_tail is not None
+                else segment.get("edit_trim_tail") or 0
+            ),
+            cleanups=json.loads(str(segment.get("edit_cleanups") or "[]") or "[]"),
+        )
+
+    recut_error = ""
+    if payload.recut:
+        video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+        source_path = Path(str(video.get("local_media_path") or ""))
+        if not source_path.is_file():
+            recut_error = "Chưa có video nguồn trên máy để cắt lại cảnh này."
+        else:
+            fresh = database.get_project_timeline_segment(segment_id) or segment
+            try:
+                prepare_source_visuals(
+                    [fresh],
+                    source_path,
+                    ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "source_clips",
+                    description=str(video.get("description") or ""),
+                    ffmpeg_binary=FFMPEG_BINARY,
+                )
+            except SourceVisualError as exc:
+                recut_error = str(exc)
+
+    return {
+        "status": "saved",
+        "segment": database.get_project_timeline_segment(segment_id),
+        "recut_error": recut_error,
     }
 
 
@@ -1846,8 +2139,9 @@ def upload_local_source(
     Until now a project could only start from a video the app had discovered
     on YouTube, which left no way to work on footage the user already had.
     The uploaded file is registered as an ordinary video row carrying
-    local_media_path, so transcription, analysis and - for the reup workflow -
-    cutting scenes out of it all work without a download step.
+    local_media_path, so transcription and analysis work without a download
+    step. A video can also be cut into source scenes by the reup workflow;
+    an audio-only upload is deliberately kept out of that visual-cut path.
     """
     filename = Path(file.filename or "").name
     extension = Path(filename).suffix.lower()
@@ -1884,8 +2178,19 @@ def upload_local_source(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="File rỗng")
 
+    # A permitted suffix is only a first-pass guard. Probe the bytes before
+    # registering a source so renamed or corrupt files cannot create projects
+    # which fail later in analysis or rendering.
+    duration = media_duration_seconds(target, FFMPEG_BINARY)
+    if not duration:
+        target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Không đọc được file media hợp lệ. Hãy kiểm tra lại file video/audio.",
+        )
+
+    media_kind = "audio" if extension in _ASSET_EXTENSIONS["audio"] else "video"
     _ensure_local_upload_channel()
-    duration = media_duration_seconds(target, FFMPEG_BINARY) or 0
     database.upsert_video({
         "youtube_video_id": video_id,
         "youtube_channel_id": LOCAL_UPLOAD_CHANNEL_ID,
@@ -1894,16 +2199,21 @@ def upload_local_source(
         "description": f"Tệp tải lên từ máy: {filename}",
         "duration_seconds": int(duration),
         "metadata_hash": digest.hexdigest(),
-        "raw_payload": {"uploaded_filename": filename, "file_size": total},
+        "raw_payload": {
+            "uploaded_filename": filename,
+            "file_size": total,
+            "media_kind": media_kind,
+        },
     })
     # upsert_video does not write local_media_path - the column was added later
     # for downloads - so the file is registered the same way a download is.
-    database.mark_video_downloaded(video_id, str(target))
+    database.mark_video_downloaded(video_id, str(target), _source_media_kind(target))
     return {
         "status": "uploaded",
         "video": database.get_video(video_id),
         "file_size": total,
         "duration_seconds": int(duration),
+        "media_kind": media_kind,
     }
 
 
@@ -2084,6 +2394,43 @@ def upload_project_asset(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Không thể lưu file local: {exc}") from exc
 
+    checksum = digest.hexdigest()
+
+    # The same file uploaded twice is the commonest way an assets folder
+    # fills up, and the second copy is indistinguishable from the first
+    # except by name. Matching on content rather than filename catches it.
+    duplicate = next(
+        (
+            item for item in database.list_project_assets(project_id)
+            if str(item.get("sha256") or "") == checksum
+            and Path(str(item.get("file_path") or "")).is_file()
+        ),
+        None,
+    )
+    if duplicate:
+        target.unlink(missing_ok=True)
+        return {
+            "status": "duplicate",
+            "asset": duplicate,
+            "detail": f"File này đã có sẵn trong dự án: {duplicate.get('original_name') or ''}",
+        }
+
+    # An extension is a promise. A .mp4 that is really an .m4a, or a download
+    # that stopped halfway, passes every suffix check and then fails inside a
+    # render with an error nobody can act on. Reading the actual streams turns
+    # that into one refusal at the point it can still be fixed.
+    media: dict[str, Any] = {}
+    if asset_type in {"video", "audio", "image"}:
+        try:
+            media = probe_media(target, FFMPEG_BINARY)
+        except MediaProbeError:
+            media = {}
+        if media:
+            reason = reject_reason(media, asset_type)
+            if reason:
+                target.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=reason)
+
     asset = database.create_project_asset(
         project_id,
         asset_type,
@@ -2091,12 +2438,17 @@ def upload_project_asset(
         str(target),
         mime_type=file.content_type or mimetypes.guess_type(filename)[0] or "",
         file_size=total,
-        sha256=digest.hexdigest(),
+        sha256=checksum,
     )
     if not asset:
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    return {"status": "uploaded", "asset": asset}
+    return {
+        "status": "uploaded",
+        "asset": asset,
+        "media": media,
+        "detail": describe(media) if media else "",
+    }
 
 
 class ImportLocalAssetRequest(BaseModel):
@@ -3933,7 +4285,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         _require_scene_provider_config(payload.reference_image_provider)
         _enforce_provider_billing_policy(payload.reference_image_provider, project_id)
     project = database.get_production_project(project_id)
-    script = database.get_latest_project_script(project_id)
+    script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
@@ -4122,6 +4474,7 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         "queued_count": len(queued),
         "preparation_count": len(preparation_jobs),
         "total_segments": len(timeline),
+        "variant": payload.variant,
         "motion_as_gif": payload.motion_as_gif,
         "limit": payload.limit,
         "by_provider": by_provider,
@@ -4460,18 +4813,24 @@ def build_timeline_from_dialogue(
     # shows the old wording, and one user lost a twenty-minute voiceover to
     # it three times. Refusing here protects the work whatever page asks.
     if not force:
-        attached = [
-            item
-            for item in database.list_project_timeline(project_id, script_id=int(script["id"]))
-            if str(item.get("audio_path") or "").strip()
-        ]
-        if attached:
+        existing = database.list_project_timeline(project_id, script_id=int(script["id"]))
+        attached = [item for item in existing if str(item.get("audio_path") or "").strip()]
+        # Losing a voiceover is not the only damage, and it was the only one
+        # this guard used to look for. Cutting by dialogue fills every scene
+        # with the SOURCE's transcript, so a project whose script was written
+        # in another language silently ends up narrating the original - in the
+        # original language, transcription errors and all - with nothing said
+        # about it. That happens whether or not any voice was attached.
+        if existing:
+            losses = [f"{len(existing)} cảnh hiện có sẽ bị thay hết"]
+            if attached:
+                losses.append(f"{len(attached)} cảnh đã có giọng đọc sẽ mất")
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"{len(attached)} cảnh đã có giọng đọc. Cắt lại theo lời thoại sẽ thay toàn bộ "
-                    "timeline và mất số giọng đó, đồng thời lời thoại quay về transcript của video "
-                    "gốc thay vì kịch bản bạn đã viết. Nếu thực sự muốn, gọi lại với force=true."
+                    f"{'; '.join(losses)}. Cắt theo lời thoại lấy lời từ transcript của video gốc, "
+                    "không phải từ kịch bản bạn đã viết — sau đó phải bấm “Dịch lời bình” mới "
+                    "chuyển được sang ngôn ngữ xuất bản. Nếu vẫn muốn, chạy lại với force=true."
                 ),
             )
     analysis = database.get_video_analysis(
@@ -5605,6 +5964,20 @@ def queue_project_job(
         raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng trong môi trường local")
     if provider in {"ffmpeg", "ffmpeg_command"} and not FFMPEG_RENDER_COMMAND:
         raise HTTPException(status_code=400, detail="Chưa cấu hình FFMPEG_RENDER_COMMAND trong .env")
+    if payload.job_type == "source_visuals" and provider not in {"dry_run", "preview", "mock"}:
+        # Refused before the job is created, so an audio-only project never
+        # collects a queue of jobs that cannot succeed.
+        source_kind = str(
+            (database.get_video(str(project.get("youtube_video_id") or "")) or {}).get("media_kind") or ""
+        ).strip().lower()
+        if source_kind and source_kind != "video":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Nguồn của dự án này chỉ có tiếng, không có hình — không cắt cảnh được. "
+                    "Hãy dùng luồng lời bình: tạo giọng đọc rồi gắn hình của bạn cho từng cảnh."
+                ),
+            )
     if payload.job_type == "source_visuals" and provider not in {"dry_run", "preview", "mock"} and not ffmpeg_available(FFMPEG_BINARY):
         raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
     if provider == "ffmpeg_builtin" and not ffmpeg_available(FFMPEG_BINARY):
@@ -5671,6 +6044,87 @@ def _publication_payload(project: dict[str, Any], script: dict[str, Any], payloa
     }
 
 
+def _publication_video_path(project_id: int, variant: str) -> tuple[dict[str, Any], Path]:
+    """Return the approved script and its rendered file for this destination."""
+    script = database.get_latest_project_script(project_id, variant=variant)
+    if not script or script.get("status") != "approved":
+        label = "Short" if variant == "short" else "Kịch bản"
+        raise HTTPException(status_code=400, detail=f"{label} chưa được duyệt; hãy duyệt trước khi xuất bản")
+    if variant == "long":
+        return script, ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    for job in database.list_project_jobs(project_id, limit=100):
+        if (
+            int(job.get("script_id") or 0) == int(script["id"])
+            and job.get("job_type") == "render_short"
+            and job.get("status") == "completed"
+        ):
+            path = Path(str(job.get("output_path") or ""))
+            if path.is_file():
+                return script, path
+    raise HTTPException(status_code=400, detail="Short chưa được dựng xong; hãy dựng Short trước khi xuất bản")
+
+
+def _build_manual_publication_package(
+    publication: dict[str, Any],
+    channel: dict[str, Any] | None,
+) -> Path:
+    """Create a self-contained handoff zip for platforms without an API link."""
+    source = Path(str(publication.get("local_file_path") or "")).expanduser()
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy MP4 của gói đăng")
+    project_id = int(publication["project_id"])
+    platform = str(publication.get("platform") or "manual").strip().lower()
+    package_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "manual_publish"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    archive = package_dir / f"publication-{int(publication['id'])}-{platform}.zip"
+    tags = [str(item).lstrip("#").strip() for item in (publication.get("tags") or []) if str(item).strip()]
+    hashtags = " ".join(f"#{item}" for item in tags)
+    destination = {
+        "platform": platform,
+        "channel_name": str((channel or {}).get("name") or ""),
+        "channel_url": str((channel or {}).get("channel_url") or ""),
+        "output_profile": str(publication.get("output_profile") or ""),
+        "video_variant": str(publication.get("video_variant") or "long"),
+        "scheduled_at": publication.get("scheduled_at"),
+    }
+    caption = "\n".join((
+        str(publication.get("title") or "").strip(),
+        "",
+        str(publication.get("description") or "").strip(),
+        "",
+        hashtags,
+    )).strip() + "\n"
+    instructions = "\n".join((
+        f"Nền tảng: {platform}",
+        f"Kênh đích: {destination['channel_name'] or '(chưa đặt tên)'}",
+        f"Định dạng: {destination['output_profile']}",
+        f"Loại video: {destination['video_variant']}",
+        "",
+        "1. Tải file video MP4 trong gói lên đúng kênh đích.",
+        "2. Sao chép tiêu đề, mô tả và hashtag từ caption.txt.",
+        "3. Dùng thumbnail trong gói nếu nền tảng cho phép.",
+        "4. Kiểm tra lại quyền riêng tư và lịch đăng trước khi xác nhận.",
+    )) + "\n"
+    thumbnail = Path(str(publication.get("thumbnail_path") or "")).expanduser()
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
+            package.write(source, arcname=f"video{source.suffix.lower() or '.mp4'}")
+            package.writestr("caption.txt", caption)
+            package.writestr("metadata.json", json.dumps({
+                "publication_id": int(publication["id"]),
+                "title": publication.get("title") or "",
+                "description": publication.get("description") or "",
+                "tags": tags,
+                "destination": destination,
+            }, ensure_ascii=False, indent=2))
+            package.writestr("README.txt", instructions)
+            if thumbnail.is_file():
+                package.write(thumbnail, arcname=f"thumbnail{thumbnail.suffix.lower()}")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Không tạo được gói đăng: {exc}") from exc
+    return archive
+
+
 @app.get("/api/publisher/status")
 def publisher_status() -> dict[str, Any]:
     return publisher_worker.status()
@@ -5684,6 +6138,27 @@ def publisher_queue(project_id: int | None = Query(default=None, ge=1)) -> dict[
     }
 
 
+@app.get("/api/publications/{publication_id}/manual-package")
+def download_manual_publication_package(publication_id: int) -> FileResponse:
+    """Download the MP4 and final copy for a ready-to-post social destination."""
+    publication = database.get_project_publication(publication_id)
+    if not publication:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    platform = str(publication.get("platform") or "youtube").strip().lower()
+    if platform == "youtube":
+        raise HTTPException(status_code=400, detail="YouTube dùng hàng đợi upload, không cần gói đăng thủ công")
+    if publication.get("status") not in {"ready_manual", "completed"}:
+        raise HTTPException(status_code=409, detail="Gói chỉ sẵn sàng sau khi publication được chuẩn bị")
+    channel_id = publication.get("managed_channel_id")
+    channel = database.get_managed_channel(int(channel_id)) if channel_id else None
+    archive = _build_manual_publication_package(publication, channel)
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename=f"{platform}-publication-{publication_id}.zip",
+    )
+
+
 @app.post("/api/projects/{project_id}/publish")
 def queue_project_publication(
     project_id: int,
@@ -5694,12 +6169,21 @@ def queue_project_publication(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    script = database.get_latest_project_script(project_id)
-    if not script or script.get("status") != "approved":
-        raise HTTPException(status_code=400, detail="Kích bản chưa được duyệt; hãy duyệt trước khi đưa vào Publisher")
-    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
+    # A standalone Short owns a separate approved script and output file.
+    script, final_path = _publication_video_path(project_id, payload.video_variant)
     if not final_path.is_file():
         raise HTTPException(status_code=400, detail="Project chưa có final.mp4; hãy render và Quality Check trước")
+
+    managed_id = payload.managed_channel_id or project.get("managed_channel_id")
+    channel = database.get_managed_channel(int(managed_id)) if managed_id else None
+    if managed_id and not channel:
+        raise HTTPException(status_code=400, detail="Selected publication channel does not exist")
+    platform = payload.platform or str((channel or {}).get("platform") or "youtube")
+    if channel and payload.platform and platform != str(channel.get("platform") or "youtube"):
+        raise HTTPException(status_code=400, detail="Selected channel belongs to another platform")
+    output_profile = payload.output_profile or str((channel or {}).get("output_profile") or "")
+    if not output_profile:
+        output_profile = "youtube_shorts" if payload.video_variant == "short" else "youtube_landscape"
 
     selected_thumbnail = next(
         (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
@@ -5719,9 +6203,28 @@ def queue_project_publication(
             raise HTTPException(status_code=400, detail="Thumbnail YouTube phải là JPG hoặc PNG")
         thumbnail_path = str(thumbnail_file)
 
+    # The destination decides the shape. A 16:9 master sent as a Reel is not
+    # a Reel - YouTube files it as an ordinary video and the vertical feeds
+    # letterbox it into a stamp - and nothing downstream would have caught it:
+    # the quality report checks resolution and codec, never aspect. Publishing
+    # is the last point where it can still be stopped.
+    measured = video_frame_size(final_path, FFMPEG_BINARY)
+    if measured and not frame_matches_profile(measured[0], measured[1], output_profile):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Video đang là {measured[0]}x{measured[1]}, không đúng khổ "
+                f"{output_profile} ({profile_label(output_profile)}). "
+                "Hãy dựng lại đúng định dạng đầu ra trước khi đăng."
+            ),
+        )
+
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
     report = build_quality_report(timeline, str(final_path), FFMPEG_BINARY, thumbnail_path)
-    if report["status"] != "pass":
+    if report["status"] != "pass" and (
+        platform == "youtube"
+        or any(key != "has_thumbnail" for key, passed in report["checks"].items() if not passed)
+    ):
         failed = ", ".join(key for key, passed in report["checks"].items() if not passed)
         raise HTTPException(
             status_code=400,
@@ -5756,11 +6259,15 @@ def queue_project_publication(
             scheduled_at=scheduled_at,
             managed_channel_id=int(managed_id) if managed_id else None,
             thumbnail_path=thumbnail_path,
+            platform=platform,
+            output_profile=output_profile,
+            video_variant=payload.video_variant,
+            status="queued" if platform == "youtube" else "ready_manual",
         )
     except (ValueError, PublisherError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
-        "status": "queued",
+        "status": "queued" if platform == "youtube" else "ready_manual",
         "publication": publication,
         "publisher": publisher_worker.status(),
     }
@@ -5771,7 +6278,7 @@ def cancel_publication(publication_id: int) -> dict[str, Any]:
     publication = database.get_project_publication(publication_id)
     if not publication:
         raise HTTPException(status_code=404, detail="Không tìm thấy publication")
-    if publication.get("status") != "queued":
+    if publication.get("status") not in {"queued", "ready_manual"}:
         raise HTTPException(status_code=400, detail="Chỉ có thể hủy publication đang xếp hàng")
     return {"status": "cancelled", "publication": database.finish_project_publication(publication_id, "cancelled")}
 
@@ -5784,7 +6291,113 @@ def retry_publication(publication_id: int) -> dict[str, Any]:
     if publication.get("status") not in {"error", "cancelled"}:
         raise HTTPException(status_code=400, detail="Chỉ có thể chạy lại publication lỗi hoặc đã hủy")
     retried = database.retry_project_publication(publication_id)
-    return {"status": "queued", "publication": retried, "publisher": publisher_worker.status()}
+    return {"status": str((retried or {}).get("status") or "queued"), "publication": retried, "publisher": publisher_worker.status()}
+
+
+_REUSE_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["low", "medium", "high"]},
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "policy": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "fix": {"type": "string"},
+                },
+                "required": ["severity", "policy", "detail", "fix"],
+            },
+        },
+    },
+    "required": ["verdict", "summary", "findings"],
+}
+
+
+class CopyrightCheckRequest(BaseModel):
+    video_variant: Literal["long", "short"] = "long"
+    use_model: bool = True
+    publish_title: str = Field(default="", max_length=300)
+
+
+@app.post("/api/projects/{project_id}/copyright-check")
+def check_project_copyright(
+    project_id: int,
+    payload: CopyrightCheckRequest = CopyrightCheckRequest(),
+) -> dict[str, Any]:
+    """Weigh what is left of the source against the platform's reuse policy.
+
+    Measured first, judged second. The numbers - how many seconds of picture
+    came straight from the source, whether its audio came with them, whether
+    the narration is its transcript in other words - decide most of this on
+    their own, and a model asked without them could only guess.
+    """
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id, variant=payload.video_variant)
+    if not script:
+        raise HTTPException(status_code=400, detail="Dự án chưa có kịch bản cho bản này")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not timeline:
+        raise HTTPException(status_code=400, detail="Dự án chưa có timeline để kiểm tra")
+
+    source_video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    transcript = database.get_transcript(str(project.get("youtube_video_id") or "")) or {}
+    settings_row = database.get_project_render_settings(project_id) or {}
+    facts = measure_reuse(
+        timeline,
+        source_video=source_video,
+        # content_text, not text: reading the wrong key made the narration
+        # comparison silently vacuous, reporting 0% overlap for everything.
+        transcript_text=str(transcript.get("content_text") or ""),
+        publish_title=payload.publish_title or str(script.get("script_title") or ""),
+        publish_language=str(settings_row.get("publish_language") or ""),
+        ffmpeg_binary=FFMPEG_BINARY,
+    )
+    findings = rule_findings(facts)
+    verdict = rule_verdict(findings)
+
+    model_review: dict[str, Any] = {}
+    if payload.use_model:
+        try:
+            model_review = _call_orchestrator_json(
+                (
+                    "Ban la nguoi soat chinh sach cua kenh YouTube. Duoc cung cap SO DO thuc te cua "
+                    "mot video lam lai tu video cua nguoi khac, hay danh gia rui ro theo chinh sach "
+                    "'noi dung dung lai' (reused content), ban quyen va Content ID cua YouTube.\n"
+                    "Khong bia them so lieu: chi dua tren so da do. Neu so lieu chua du de ket luan "
+                    "mot diem nao, hay noi ro la chua du.\n"
+                    "'verdict': 'high' neu co kha nang bi tu choi kiem tien hoac go, 'medium' neu can "
+                    "sua truoc khi dang, 'low' neu dang duoc.\n"
+                    "Moi 'findings' phai neu ro dieu khoan lien quan va cach sua cu the. "
+                    "Viet bang tieng Viet."
+                ),
+                json.dumps(facts, ensure_ascii=False),
+                _REUSE_REVIEW_SCHEMA,
+                stage="quality",
+            )
+        except Exception as exc:  # noqa: BLE001 - the measured verdict still stands
+            model_review = {"error": str(exc)[:300]}
+
+    # The model may raise the verdict but never lower it: the measurements are
+    # facts about the files, and a reassuring answer cannot make reused
+    # footage stop being reused footage.
+    order = {"low": 0, "medium": 1, "high": 2}
+    model_verdict = str(model_review.get("verdict") or "")
+    if order.get(model_verdict, -1) > order[verdict]:
+        verdict = model_verdict
+
+    return {
+        "verdict": verdict,
+        "facts": facts,
+        "findings": findings,
+        "model_review": model_review,
+        "checked_variant": payload.video_variant,
+    }
 
 
 @app.get("/api/projects/{project_id}/quality-check")
@@ -6108,7 +6721,7 @@ def download_video_for_editing(
         )
     except Exception as exc:
         raise _api_error(exc) from exc
-    database.mark_video_downloaded(video_id, str(path))
+    database.mark_video_downloaded(video_id, str(path), _source_media_kind(path))
     return {"video_id": video_id, "status": "downloaded", "path": str(path), "media_type": media_type}
 
 
@@ -6143,7 +6756,7 @@ async def download_video_with_cookie_file(
         raise _api_error(exc) from exc
     finally:
         temporary_path.unlink(missing_ok=True)
-    database.mark_video_downloaded(video_id, str(path))
+    database.mark_video_downloaded(video_id, str(path), _source_media_kind(path))
     return {"video_id": video_id, "status": "downloaded", "path": str(path), "media_type": media_type}
 
 
@@ -7580,6 +8193,67 @@ class ShortScriptRequest(BaseModel):
     use_model: bool = True
 
 
+def _short_lane_progress(project_id: int) -> dict[str, Any]:
+    """Where the short's own production has got to, step by step.
+
+    The lane mirrors the long video's, so it needs the same thing the long
+    wizard has: which steps are done. Derived from what is actually on disk
+    and in the timeline rather than from a status column, because a status
+    column is what goes stale when a job is re-run.
+    """
+    script = database.get_latest_project_script(project_id, variant="short")
+    if not script:
+        return {
+            "script": None, "shots": [], "timeline": [], "estimated_seconds": 0,
+            "steps": {"script": False, "voice": False, "visuals": False, "render": False},
+            "scenes": 0, "voiced": 0, "with_visuals": 0, "output_path": "",
+        }
+    # The shots too, not only the timeline: a storyboard card is a shot joined
+    # to its segment, so without them the short could only be shown as a list
+    # of lines - no picture, no player, no per-scene controls - which is not
+    # the storyboard the rest of the app has.
+    shots = database.list_project_shots(project_id, script_id=int(script["id"]))
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    voiced = sum(1 for item in timeline if str(item.get("audio_path") or "").strip())
+    with_visuals = sum(1 for item in timeline if str(item.get("visual_path") or "").strip())
+    output_path = ""
+    for job in database.list_project_jobs(project_id, limit=100):
+        if (
+            int(job.get("script_id") or 0) == int(script["id"])
+            and job.get("job_type") == "render_short"
+            and job.get("status") == "completed"
+            and Path(str(job.get("output_path") or "")).is_file()
+        ):
+            output_path = str(job.get("output_path") or "")
+            break
+    return {
+        "script": script,
+        "shots": shots,
+        "timeline": timeline,
+        "estimated_seconds": estimated_short_seconds(script),
+        "scenes": len(timeline),
+        "voiced": voiced,
+        "with_visuals": with_visuals,
+        "output_path": output_path,
+        "steps": {
+            "script": bool(timeline),
+            # Every scene, not any: a lane that says "done" with half its
+            # scenes silent is how a short gets rendered with gaps in it.
+            "voice": bool(timeline) and voiced == len(timeline),
+            "visuals": bool(timeline) and with_visuals == len(timeline),
+            "render": bool(output_path),
+        },
+    }
+
+
+@app.get("/api/projects/{project_id}/short-lane")
+def get_project_short_lane(project_id: int) -> dict[str, Any]:
+    """The short lane's own progress, for its own wizard."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return _short_lane_progress(project_id)
+
+
 @app.get("/api/projects/{project_id}/short-script")
 def get_project_short_script(project_id: int) -> dict[str, Any]:
     """The project's standalone short, if one has been written."""
@@ -7597,50 +8271,33 @@ def get_project_short_script(project_id: int) -> dict[str, Any]:
 
 @app.post("/api/projects/{project_id}/short-script")
 def write_project_short_script(project_id: int, payload: ShortScriptRequest) -> dict[str, Any]:
-    """Write the short as its own video, then give it its own storyboard.
-
-    It is stored as a second script for the project, so everything downstream
-    - shots, timeline, voice, clips, render - works on it unchanged, keyed by
-    its script_id. Nothing it does touches the long video's script or its
-    storyboard, which is what makes the two buildable side by side.
-    """
+    """Rewrite a standalone Short after the initial script-pair was created."""
     bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
     if not bundle:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    long_script = database.get_latest_project_script(project_id)
-    if not long_script:
-        raise HTTPException(
-            status_code=400,
-            detail="Hãy viết kịch bản video dài trước — bản short lấy cùng tư liệu từ đó.",
-        )
+    # The short is written from the brief, not from the long video, so it does
+    # not have to wait for one. Requiring the long script first made the two a
+    # single queue wearing the name of a parallel one: nothing about a short
+    # written for its own sake depends on the long video existing, and a
+    # project may only ever want the short.
+    brief = database.get_latest_project_script(project_id) or build_script_draft(bundle)
     try:
-        draft = build_short_script(
-            bundle["project"], long_script,
-            seconds=payload.seconds, direction=payload.direction, use_model=payload.use_model,
+        short = _create_standalone_short(
+            project_id,
+            bundle,
+            brief,
+            seconds=payload.seconds,
+            direction=payload.direction,
+            use_model=payload.use_model,
         )
     except ShortScriptError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise _api_error(exc) from exc
 
-    script = database.create_project_script(project_id, **draft, variant="short")
-    if not script:
-        raise HTTPException(status_code=404, detail="Không lưu được kịch bản short")
-    shots = database.create_project_shots(
-        project_id, int(script["id"]),
-        build_shot_plan(bundle["project"], script), force=True,
-    )
-    timeline = database.create_project_timeline(
-        project_id, int(script["id"]),
-        build_timeline(bundle["project"], script, shots or []), force=True,
-    )
-    _write_project_document(project_id, "kich-ban-short.md", script_to_markdown(script, bundle["project"]))
     return {
         "status": "saved",
-        "script": script,
-        "shots": shots or [],
-        "timeline": timeline or [],
-        "estimated_seconds": estimated_short_seconds(script),
+        **short,
         "next_step": "Tạo giọng đọc cho bản short, cắt cảnh, rồi dựng video ngắn.",
     }
 

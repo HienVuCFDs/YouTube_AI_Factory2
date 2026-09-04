@@ -33,6 +33,23 @@ def test_every_workflow_specific_row_is_tagged(page: str) -> None:
     assert tagged == {"content", "reup"}
 
 
+def test_short_flow_is_visible_even_during_a_live_server_update(page: str) -> None:
+    """The HTML reloads before a non-reload uvicorn process imports new WF files."""
+    assert "const SHORT_FLOW_FALLBACKS" in page
+    assert "function withVisibleShortFlow(flow)" in page
+    assert "WORKFLOWS[flow.key] = withVisibleShortFlow(flow)" in page
+    assert "Kịch bản + Short" in page
+    assert "Lời bình + Short" in page
+
+
+def test_content_short_uses_its_own_ai_visual_batch(page: str) -> None:
+    """A Content Short has no source footage to cut; it needs vertical AI art."""
+    assert "async function generateShortSceneImages()" in page
+    assert "runStudioSceneBatch(provider, false, null, 'short')" in page
+    assert "variant === 'short' ? '720:1280'" in page
+    assert "state.studioWorkflow !== 'reup'" in page
+
+
 def test_the_image_and_video_controls_belong_to_content_only(page: str) -> None:
     """These queue AI generation, which the reup workflow never does."""
     for control in ("studioSceneImageProviderSelect", "studioMotionPolicySelect",

@@ -414,6 +414,15 @@ def _usable_clip_window(
     return head, keep
 
 
+def video_frame_size(path: Path, binary: str = "ffmpeg") -> tuple[int, int] | None:
+    """The real pixel size of a rendered file, or None if it cannot be read."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    width, height = _mark_frame_size(path, binary, 0, 0)
+    return (width, height) if width > 0 and height > 0 else None
+
+
 def _mark_frame_size(
     visual: Path,
     executable: str,

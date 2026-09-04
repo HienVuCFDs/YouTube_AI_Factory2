@@ -28,6 +28,7 @@ from .quality_check import build_quality_report, quality_report_markdown
 from .openmontage_adapter import OpenMontageAdapter
 from .settings import GPU_DEVICE_INDEX, GPU_ONLY
 from .burned_in_marks import MarkDetectionError, detect_burned_in_marks
+from .media_probe import MediaProbeError, probe_media
 from .shot_planner import is_section_heading
 from .source_visuals import SourceVisualError, prepare_source_visuals
 from .timeline_builder import timeline_to_manifest
@@ -597,6 +598,23 @@ def run_source_visuals_job(
             "Chưa có video nguồn trên máy. Hãy bấm ‘Tải video nguồn’ trong thư viện, "
             "sau đó chạy ‘Chuẩn bị cảnh nguồn’."
         )
+    # A source with no picture cannot have scenes cut out of it. The app
+    # accepts audio sources - a podcast, a recording - and the rest of this
+    # pipeline would happily hand FFmpeg a file with no video stream and fail
+    # deep inside the cut, with an error about stream mapping.
+    kind = str((video or {}).get("media_kind") or "").strip().lower()
+    if not kind:
+        try:
+            kind = str(probe_media(source_path, ffmpeg_binary).get("kind") or "")
+        except (MediaProbeError, OSError):
+            kind = ""
+        if kind:
+            database.set_video_media_kind(str(project["youtube_video_id"]), kind)
+    if kind and kind != "video":
+        raise ProductionJobError(
+            "Nguồn của dự án này không có hình (chỉ có tiếng), nên không cắt cảnh được. "
+            "Hãy dùng luồng lời bình / podcast: tạo giọng đọc rồi ghép hình do bạn cung cấp."
+        )
     try:
         cuts = prepare_source_visuals(
             timeline,
@@ -612,6 +630,14 @@ def run_source_visuals_job(
             cut["segment_id"],
             visual_path=cut["visual_path"],
             duration_seconds=cut["duration_seconds"],
+        )
+        # Persist the actual cut point, not merely the planner's suggestion.
+        # The Short review cards use this to make the source-video edit
+        # inspectable before the final vertical render.
+        database.save_segment_source_cue(
+            int(cut["segment_id"]),
+            float(cut.get("source_start_seconds") or 0),
+            "Cắt từ video nguồn theo thời lượng voiceover",
         )
     # The status column names one thing, so with the voiceover running
     # alongside this job neither can tell from its own stale read what a
@@ -994,6 +1020,11 @@ class ProductionWorker:
         voxcpm_prompt_text: str = "",
         language: str = "vi",
         openmontage_adapter: OpenMontageAdapter | None = None,
+        # Two lanes, so two threads: a project's long video and its short are
+        # separate scripts and can be produced at the same time. More than
+        # that buys nothing - the render is GPU-bound and the encoders would
+        # only queue behind each other.
+        worker_threads: int = 2,
     ):
         self.database = database
         self.artifact_root = Path(artifact_root)
@@ -1012,31 +1043,51 @@ class ProductionWorker:
         self.voxcpm_prompt_text = voxcpm_prompt_text
         self.language = language
         self.openmontage_adapter = openmontage_adapter
+        self.worker_threads = max(1, int(worker_threads))
         self._jobs: Queue[int | None] = Queue()
         self._stop = Event()
         self._lock = Lock()
         self._paused = False
-        self._thread: Thread | None = None
+        self._threads: list[Thread] = []
+        # Which scripts are being worked on right now. A project's long video
+        # and its short are separate scripts with separate timeline rows, so
+        # they can be produced at the same time; two jobs on the SAME script
+        # cannot, and never could - running the voiceover and the scene cut
+        # together is what once left this app with pictures and no sound,
+        # each job overwriting rows the other had just written.
+        self._busy_scripts: set[int] = set()
+
+    @property
+    def _thread(self) -> Thread | None:
+        """The first live worker, for callers that only ask whether one runs."""
+        return next((thread for thread in self._threads if thread.is_alive()), None)
 
     def start(self) -> None:
         with self._lock:
-            if self._thread and self._thread.is_alive():
+            if any(thread.is_alive() for thread in self._threads):
                 return
             self._stop.clear()
             self._paused = False
+            self._busy_scripts.clear()
             self.database.requeue_interrupted_project_jobs()
             for job_id in self.database.list_queued_project_job_ids():
                 self._jobs.put(job_id)
-            self._thread = Thread(target=self._run, name="production-worker", daemon=True)
-            self._thread.start()
+            self._threads = [
+                Thread(target=self._run, name=f"production-worker-{index}", daemon=True)
+                for index in range(max(1, int(self.worker_threads)))
+            ]
+            for thread in self._threads:
+                thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        self._jobs.put(None)
-        thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout=5)
-        self._thread = None
+        threads = list(self._threads)
+        for _ in threads:
+            self._jobs.put(None)
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=5)
+        self._threads = []
 
     def enqueue(
         self,
@@ -1091,9 +1142,38 @@ class ProductionWorker:
                     self._stop.wait(timeout=0.25)
                 if self._stop.is_set():
                     continue
-                self._process(job_id)
+                script_id = self._claim_script(job_id)
+                if script_id is None:
+                    # Another lane holds this script. Put the job back and let
+                    # a free thread take something else; the wait keeps this
+                    # from spinning when the queue holds only blocked work.
+                    self._jobs.put(job_id)
+                    self._stop.wait(timeout=0.25)
+                    continue
+                try:
+                    self._process(job_id)
+                finally:
+                    with self._lock:
+                        self._busy_scripts.discard(script_id)
             finally:
                 self._jobs.task_done()
+
+    def _claim_script(self, job_id: int) -> int | None:
+        """Take the right to work on this job's script, or report it taken.
+
+        Read before claiming the job itself: claiming marks it running, and a
+        job that has to go back on the queue must not have been marked.
+        """
+        job = self.database.get_project_job(job_id)
+        if not job:
+            # Nothing to reserve; let _process deal with the missing job.
+            return -1
+        script_id = int(job.get("script_id") or 0)
+        with self._lock:
+            if script_id in self._busy_scripts:
+                return None
+            self._busy_scripts.add(script_id)
+        return script_id
 
     def _process(self, job_id: int) -> None:
         job = self.database.claim_project_job(job_id)

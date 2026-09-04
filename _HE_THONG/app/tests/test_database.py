@@ -446,6 +446,29 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(applied["voice_model"], "en-US-GuyNeural")
             self.assertEqual(applied["transition_style"], "fade")
 
+    def test_publication_keeps_platform_profile_and_manual_delivery_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "test.db")
+            source_channel = "UC1234567890123456789012"
+            database.upsert_channel({"youtube_channel_id": source_channel, "channel_url": "https://youtube.com/channel/test", "uploads_playlist_id": "UU1234567890123456789012"})
+            database.upsert_video({"youtube_video_id": "video-publish-facebook", "youtube_channel_id": source_channel, "video_url": "https://youtube.com/watch?v=video-publish-facebook", "metadata_hash": "publish-facebook", "raw_payload": {}})
+            destination = database.create_managed_channel(
+                "Facebook Reels chính", "https://facebook.com/my-page",
+                platform="facebook", output_profile="facebook_reels",
+            )
+            project = database.create_production_project("video-publish-facebook", managed_channel_id=destination["id"])
+            publication = database.create_project_publication(
+                project["id"], "F:/exports/reel.mp4", "Bản Reel",
+                managed_channel_id=destination["id"], platform="facebook",
+                output_profile="facebook_reels", video_variant="short", status="ready_manual",
+            )
+
+            self.assertEqual(destination["platform"], "facebook")
+            self.assertEqual(publication["platform"], "facebook")
+            self.assertEqual(publication["output_profile"], "facebook_reels")
+            self.assertEqual(publication["video_variant"], "short")
+            self.assertEqual(publication["status"], "ready_manual")
+
     def test_sqlite_backup_is_a_readable_consistent_database(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

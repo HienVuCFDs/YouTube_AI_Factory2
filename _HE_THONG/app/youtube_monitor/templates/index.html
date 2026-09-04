@@ -343,6 +343,62 @@
     .studio-checklist { display: grid; gap: 8px; margin-top: 12px; }
     .studio-check { display: flex; gap: 9px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(21,26,34,.7); color: #c4ccd7; font-size: 12px; }
     .studio-check b { color: var(--green); }
+    .studio-short-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px;
+      background: var(--surface-2); }
+    .studio-short-strip-label { font-size: 11px; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--accent); }
+    .studio-short-strip-note { font-size: 11px; color: var(--muted); margin-left: auto; }
+    .publish-dialog { width: min(680px, 94vw); border: 1px solid var(--line);
+      border-radius: 12px; background: var(--surface); color: var(--text); padding: 0; }
+    .publish-dialog::backdrop { background: rgba(3, 7, 18, .72); }
+    .publish-dialog-head { display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .publish-dialog-body { padding: 14px 16px; max-height: 66vh; overflow-y: auto; }
+    .publish-dialog-foot { display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
+    .publish-target { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; margin-bottom: 7px; }
+    .publish-target.is-blocked { opacity: .55; }
+    .publish-target label { display: flex; align-items: center; gap: 7px; font-size: 13px;
+      min-width: 128px; text-transform: none; letter-spacing: 0; }
+    .storyboard-wave { display: block; width: 100%; height: auto; margin: 6px 0 4px;
+      border-radius: 6px; background: rgba(255,255,255,.03); }
+    .risk-badge { display: inline-block; padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 800; letter-spacing: .06em; }
+    .risk-badge.risk-low { background: rgba(34,197,94,.16); color: var(--green); }
+    .risk-badge.risk-medium { background: rgba(245,158,11,.16); color: var(--accent); }
+    .risk-badge.risk-high { background: rgba(240,82,82,.16); color: var(--red); }
+    .risk-finding { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin-top: 8px; }
+    .risk-finding.sev-high { border-left-color: var(--red); }
+    .risk-finding.sev-medium { border-left-color: var(--accent); }
+    .studio-thumb { padding: 0; border: 2px solid var(--line); border-radius: 8px;
+      overflow: hidden; background: var(--surface-2); line-height: 0; cursor: pointer; }
+    .studio-thumb img { width: 168px; height: 94px; object-fit: cover; display: block; }
+    .studio-thumb.is-selected { border-color: var(--green); }
+    .studio-lane-split { display: grid; gap: 18px; }
+    .studio-lane-split.is-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .studio-lane-split.is-split > .studio-lane-pane[data-lane="short"] {
+      border-left: 1px solid var(--line); padding-left: 18px; }
+    @media (max-width: 1180px) {
+      .studio-lane-split.is-split { grid-template-columns: minmax(0, 1fr); }
+      .studio-lane-split.is-split > .studio-lane-pane[data-lane="short"] {
+        border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 16px; }
+    }
+    .studio-lane-head { display: none; font-size: 11px; font-weight: 800;
+      letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+      margin-bottom: 12px; }
+    .studio-lane-split.is-split .studio-lane-head { display: block; }
+    .studio-lane-split.is-split .studio-lane-pane[data-lane="short"] .studio-lane-head {
+      color: var(--accent); }
+    .studio-steps { display: flex; gap: 6px; flex-wrap: wrap; }
+    .studio-step-chip { display: flex; align-items: center; gap: 7px; padding: 7px 12px;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+      font-size: 12px; color: var(--muted); }
+    .studio-step-chip b { font-size: 10px; letter-spacing: .1em; color: var(--muted); }
+    .studio-step-chip.is-done { border-color: rgba(34,197,94,.45); color: var(--text);
+      background: rgba(34,197,94,.10); }
+    .studio-step-chip.is-done b { color: var(--green); }
     .studio-step-note { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .studio-progress { margin: 10px 17px 0; padding: 9px 11px; border: 1px solid rgba(34,211,238,.28); border-radius: 7px; background: rgba(34,211,238,.06); }
     .studio-progress.error { border-color: rgba(240,82,82,.35); background: rgba(240,82,82,.07); }
@@ -524,15 +580,17 @@
           <div id="studioAnalysisResult" class="studio-result"><div class="studio-empty">Chưa có kết quả phân tích.</div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(1)">← Chọn lại video</button><button id="studioToScriptButton" class="btn primary" onclick="setStudioStep(3)">Tiếp tục viết kịch bản →</button></div>
         </div>
-        <div id="studioStep3" class="studio-step" data-studio-step="3" hidden>
+        <div id="studioStep3" class="studio-step" data-studio-step="3" hidden><div class="studio-lane-split" data-lane-step="studioStep3"><div class="studio-lane-pane" data-lane-step="studioStep3" data-lane="long"><div class="studio-lane-head">Video dài</div>
           <div class="studio-grid">
             <div class="studio-field"><label for="studioWriterProviderSelect">Model viết kịch bản</label><select id="studioWriterProviderSelect"><option value="codex_cli">Codex CLI</option></select></div><div class="studio-field"><label for="studioScriptLanguage">Ngôn ngữ kịch bản</label><select id="studioScriptLanguage"><option value="vi" selected>Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option><option value="es">Tiếng Tây Ban Nha</option><option value="fr">Tiếng Pháp</option></select></div>
             <div class="studio-field"><label for="studioTargetDurationSeconds">Thời lượng video mục tiêu</label><input id="studioTargetDurationSeconds" type="text" inputmode="text" maxlength="40" placeholder="Ví dụ: 00:12:00, 12:00, 12 phút" /><div id="studioDurationHint" class="studio-model-note">Nhập giờ : phút : giây, phút : giây, hoặc chữ. Ví dụ: 01:12:30 · 12:00 · 12 phút 30 giây.</div></div>
+            <div class="studio-field"><label for="studioCreateStandaloneShort" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0"><input id="studioCreateStandaloneShort" type="checkbox" checked onchange="syncStudioLaneTabs()"> Tạo Short riêng cùng lúc</label><select id="studioInitialShortSeconds" aria-label="Độ dài Short riêng"><option value="30">30 giây</option><option value="45" selected>45 giây</option><option value="60">60 giây</option></select><div class="studio-model-note">Bật lựa chọn này thì AI viết kèm Short ngay khi viết kịch bản, và từ bước Kịch bản trở đi mỗi bước sẽ có thêm tab Short với storyboard, giọng đọc và bản dựng riêng.</div></div>
           </div>
-          <div class="studio-field" style="margin-top:10px"><label for="studioScriptInstructionInput">Yêu cầu cho kịch bản &amp; lời dẫn</label><textarea id="studioScriptInstructionInput" placeholder="Ví dụ: Video 90 giây. Kể rõ từng tình huống theo thứ tự, lời dẫn dễ nghe và có nguyên nhân–kết quả. Nhân vật chính là mèo; giọng ấm áp, kết thúc có bài học về lòng tốt."></textarea><div class="studio-model-note">Yêu cầu này điều khiển câu chuyện, độ chi tiết lời dẫn, phong cách kể và thời lượng. Bạn vẫn có thể chat để chỉnh tiếp sau khi AI viết.</div></div>
+          <div id="studioShortWorkflowNote" class="studio-model-note" style="margin-top:10px">Luồng Short sẽ đi cùng Kịch bản, Giọng đọc và Xưởng dựng của workflow đang chọn.</div>
+          <div class="studio-field" style="margin-top:10px"><label for="studioScriptInstructionInput">Yêu cầu cho kịch bản &amp; lời dẫn</label><textarea id="studioScriptInstructionInput" placeholder="Ví dụ: Video 90 giây. Kể rõ từng tình huống theo thứ tự, lời dẫn dễ nghe và có nguyên nhân–kết quả. Nhân vật chính là mèo; giọng ấm áp, kết thúc có bài học về lòng tốt."></textarea><div class="studio-model-note">Yêu cầu này luôn áp dụng cho video dài và cũng áp dụng cho Short nếu bạn bật lựa chọn ở trên. Bạn vẫn có thể chat để chỉnh tiếp sau khi AI viết.</div></div>
           <label class="studio-model-note" data-wf="content" style="display:flex;align-items:center;gap:8px;margin-top:9px;text-transform:none;letter-spacing:0"><input id="studioFolkloreResearchEnabled" type="checkbox" checked> Tìm gợi ý web cho truyện cổ tích/“sự tích”; chỉ dùng để chọn mô-típ, AI vẫn viết câu chuyện hoàn toàn mới.</label>
           <div class="studio-empty" style="padding:10px;margin-top:10px">AI giữ đúng format, chủ đề và giọng trình bày của video tham chiếu; thay ví dụ, tình huống và hình minh họa để tạo video mới. Video kiến thức sẽ không bị đổi thành truyện kể.</div>
-          <div class="studio-actions"><button id="studioWriteButton" class="btn primary" disabled>Viết kịch bản bằng AI</button></div>
+          <div class="studio-actions"><button id="studioWriteButton" class="btn primary" disabled>Viết kịch bản theo lựa chọn</button></div>
           <div id="studioScriptResult" class="studio-result"><div class="studio-empty">Chưa có kịch bản. Chọn model rồi bấm “Viết kịch bản bằng AI”.</div></div>
           <div id="studioChatBox" class="studio-chat" hidden>
             <div class="panel-title"><span class="mark">✦</span> Chat chỉnh sửa kịch bản</div>
@@ -540,8 +598,8 @@
             <div class="studio-chat-row"><textarea id="studioChatMessage" placeholder="Nhập yêu cầu chỉnh sửa..."></textarea><div class="studio-field"><label for="studioChatProviderSelect">Model chỉnh sửa</label><select id="studioChatProviderSelect"><option value="codex_cli">Codex CLI</option></select></div><button id="studioChatButton" class="btn primary">Gửi yêu cầu</button></div>
           </div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(2)">← Xem lại phân tích</button><button id="studioToRenderButton" class="btn primary" onclick="setStudioStep(4)" disabled>Tiếp tục tạo giọng →</button></div>
-        </div>
-        <div id="studioStep4" class="studio-step" data-studio-step="4" hidden>
+        </div><div class="studio-lane-pane" data-lane-step="studioStep3" data-lane="short" hidden><div class="studio-lane-head">Short</div><div class="studio-option-card"><b>Kịch bản Short</b><div class="studio-model-note" style="margin-top:4px">Viết từ cùng tư liệu nguồn, hook và kết riêng, gói trong số giây của một Short. Không cắt ra từ video dài.</div><div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><select id="studioShortScriptSeconds" aria-label="Độ dài Short"><option value="30">30 giây</option><option value="45" selected>45 giây</option><option value="60">60 giây</option></select><button class="btn primary" type="button" onclick="writeShortScript()">Viết lại kịch bản Short</button></div></div><div id="studioShortScriptView" class="studio-result" style="margin-top:10px"></div></div></div></div>
+        <div id="studioStep4" class="studio-step" data-studio-step="4" hidden><div class="studio-lane-split" data-lane-step="studioStep4"><div class="studio-lane-pane" data-lane-step="studioStep4" data-lane="long"><div class="studio-lane-head">Video dài</div>
           <p class="studio-step-note">Storyboard chia kịch bản thành các cảnh cụ thể. Bạn có thể tạo tự động rồi mở xưởng chi tiết để đổi prompt, thời lượng, asset hoặc thứ tự cảnh.</p>
           <div class="studio-summary-grid"><div class="studio-summary-card"><label>Project</label><strong id="studioProjectSummary">Chưa tạo</strong></div><div class="studio-summary-card"><label>Kịch bản</label><strong id="studioScriptSummary">Chưa có</strong></div><div class="studio-summary-card"><label>Số cảnh</label><strong id="studioShotSummary">Chưa tạo</strong></div></div>
           <div id="studioWriterWarnings" class="integration-todo" style="margin-top:8px" hidden></div>
@@ -552,8 +610,8 @@
           <div id="studioSceneVideoHint" class="studio-model-note" data-wf="content" style="margin-top:6px">Mỗi video bắt buộc dùng ảnh storyboard làm khung đầu. Cảnh chưa có ảnh sẽ được tạo ảnh trước rồi mới gửi sang video provider.</div>
           <div id="studioStoryboardResult" class="studio-result"><div class="studio-empty">Sau khi có kịch bản, hãy tạo storyboard để chia nội dung thành các cảnh.</div></div>
           <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><select id="studioCleanupPosition" aria-label="Vị trí vết cần che"><option value="bottom_center">Phụ đề cháy sẵn · dưới giữa</option><option value="top_center">Chữ trên · trên giữa</option><option value="top_right">Logo · trên phải</option><option value="top_left">Logo · trên trái</option><option value="bottom_right">Watermark · dưới phải</option><option value="bottom_left">Watermark · dưới trái</option></select><select id="studioCleanupMethod" aria-label="Cách che"><option value="blur">Làm mờ</option><option value="crop">Cắt bỏ (chỉ dùng được ở mép)</option></select><button class="btn" type="button" onclick="detectTimelineCleanup()">Dò tự động từ video gốc</button><button class="btn ghost" type="button" onclick="applyTimelineCleanup(false)">Che theo vị trí đã chọn</button><button class="btn ghost" type="button" onclick="applyTimelineCleanup(true)">Bỏ che</button></div><div id="studioCleanupState" class="studio-model-note" style="margin-top:6px">Vết của video gốc — phụ đề cháy sẵn, logo kênh — nằm cùng một chỗ trên mọi clip cắt ra, nên đánh dấu một lần là áp cho tất cả. Nếu bạn không đánh dấu gì, lúc render app sẽ tự đo trên video gốc và che phần nó tìm được.</div>
-        </div>
-        <div id="studioStep5" class="studio-step" data-studio-step="5" hidden>
+        </div><div class="studio-lane-pane" data-lane-step="studioStep4" data-lane="short" hidden><div class="studio-lane-head">Short</div><div class="studio-option-card"><b>Storyboard Short</b><div class="studio-model-note" style="margin-top:4px">Các cảnh của riêng Short, dựng từ kịch bản Short. Không dùng chung cảnh với video dài.</div><div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn" type="button" onclick="queueShortVariantJob('voiceover')">Tạo giọng đọc Short</button><button class="btn" type="button" onclick="cutShortSourceScenes()">Cắt cảnh từ video gốc</button><button class="btn" type="button" onclick="playWholeShortVoice()">▶ Nghe toàn bộ Short</button><button class="btn ghost" type="button" onclick="stopWholeShortVoice()">■ Dừng</button><button class="btn ghost" type="button" onclick="loadShortLane()">↻ Làm mới</button></div></div><div id="studioShortPlayAllState" class="studio-model-note" style="margin-top:6px"></div><div id="studioShortStoryboard" class="studio-result" style="margin-top:10px"></div></div></div></div>
+        <div id="studioStep5" class="studio-step" data-studio-step="5" hidden><div class="studio-lane-split" data-lane-step="studioStep5"><div class="studio-lane-pane" data-lane-step="studioStep5" data-lane="long"><div class="studio-lane-head">Video dài</div>
           <p class="studio-step-note">Chọn một model/giọng cho toàn bộ video. App sẽ lưu lựa chọn này vào project để các đoạn voice dùng cùng một cấu hình, tránh bị đổi giọng giữa chừng.</p>
           <div class="studio-result-columns">
             <div class="studio-option-card">
@@ -570,31 +628,22 @@
             </div>
           </div>
           <div id="studioVoiceSummary" class="studio-checklist"><div class="studio-check"><b>→</b><span>Chưa lưu lựa chọn giọng và phụ đề cho project.</span></div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(3)">← Kịch bản</button><button id="studioSaveVoiceButton" class="btn primary">Lưu cấu hình</button><button id="studioGenerateVoiceoverButton" class="btn primary">Tạo giọng đọc cho các cảnh</button><button id="studioReviewVoiceButton" class="btn">AI nghe lại giọng đọc</button><button class="btn primary" onclick="setStudioStep(5)">Nghe trong storyboard →</button></div>
-        </div>
-        <div id="studioStep6" class="studio-step" data-studio-step="6" hidden>
+          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(3)">← Kịch bản</button><button id="studioSaveVoiceButton" class="btn primary">Lưu cấu hình</button><button id="studioGenerateVoiceoverButton" class="btn primary">Tạo giọng đọc video dài</button><button id="studioReviewVoiceButton" class="btn">AI nghe lại giọng đọc</button><button class="btn primary" onclick="setStudioStep(5)">Nghe trong storyboard →</button></div>
+        </div><div class="studio-lane-pane" data-lane-step="studioStep5" data-lane="short" hidden><div class="studio-lane-head">Short</div><div class="studio-option-card"><b>Giọng đọc Short</b><div class="studio-model-note" style="margin-top:4px">Dùng đúng model và giọng đã chọn ở pane Video dài, nhưng đọc lời của kịch bản Short.</div><div class="studio-actions" style="margin-top:8px"><button class="btn primary" type="button" onclick="queueShortVariantJob('voiceover')">Tạo giọng cho Short</button></div></div><div id="studioShortVoiceState" class="studio-result" style="margin-top:10px"></div></div></div></div>
+        <div id="studioStep6" class="studio-step" data-studio-step="6" hidden><div class="studio-lane-split" data-lane-step="studioStep6"><div class="studio-lane-pane" data-lane-step="studioStep6" data-lane="long"><div class="studio-lane-head">Video dài</div>
           <p class="studio-step-note">Xưởng dựng nằm ngay trong luồng này: tạo timeline, kiểm tra giọng đọc rồi dựng MP4. Bạn không cần mở màn hình nào khác.</p>
           <div class="studio-grid">
             <div class="studio-option-card"><div class="studio-field"><label for="studioRenderProviderSelect">Engine dựng</label><select id="studioRenderProviderSelect"><option value="ffmpeg_builtin">FFmpeg tích hợp · NVIDIA GPU / h264_nvenc</option><option value="openmontage_ffmpeg">OpenMontage · FFmpeg</option><option value="openmontage_remotion">OpenMontage · Remotion</option></select></div><div class="studio-model-note">Ở chế độ GPU-only, app tự dùng FFmpeg tích hợp với NVIDIA NVENC để tạo MP4.</div></div>
-            <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option></select></div></div>
+            <div class="studio-option-card"><div class="studio-field"><label for="studioOutputProfileSelect">Định dạng đầu ra</label><select id="studioOutputProfileSelect"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">YouTube Shorts · 9:16</option><option value="tiktok">TikTok · 9:16</option><option value="instagram_reels">Instagram Reels · 9:16</option><option value="facebook_reels">Facebook Reels · 9:16</option><option value="facebook_feed">Facebook Feed · 1:1</option></select></div></div>
           </div>
           <div id="studioRenderSummary" class="studio-summary-grid"><div class="studio-summary-card"><label>Timeline</label><strong>Chưa tạo</strong></div><div class="studio-summary-card"><label>Voice</label><strong>Chưa lưu</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>YouTube ngang</strong></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(5)">← Storyboard</button><button id="studioGenerateTimelineButton" class="btn primary" disabled>Tạo lại timeline</button><button id="studioQueueRenderButton" class="btn primary" disabled>2. Dựng video hoàn chỉnh</button></div>
-          <div class="studio-actions" style="margin-top:10px;gap:6px;flex-wrap:wrap">
-            <select id="studioShortProfile" aria-label="Khổ video ngắn">
-              <option value="youtube_shorts">YouTube Shorts · 9:16</option>
-              <option value="instagram_reels">Instagram Reels · 9:16</option>
-              <option value="tiktok">TikTok · 9:16</option>
-            </select>
-            <button id="studioPlanShortButton" class="btn" type="button" onclick="planProjectShort()">Lên kịch bản video ngắn</button>
-            <button id="studioRenderShortButton" class="btn" type="button" onclick="queueShortRender()">Dựng video ngắn</button>
-          </div>
-          <div id="studioShortSummary" class="studio-model-note" style="margin-top:6px">Video ngắn được cắt từ chính video dài này: chọn các cảnh đắt nhất, giữ nguyên thứ tự, tối đa 60 giây. Không tạo lại media nên không tốn credit.</div><div class="studio-option-card" style="margin-top:10px"><b>Bản short viết riêng</b><div class="studio-model-note" style="margin-top:4px">Không cắt lại từ video dài: viết hẳn một video ngắn khác, có hook riêng và kết riêng, dùng chung tư liệu. Nó có storyboard, giọng đọc và bản dựng riêng, không đụng gì tới video dài.</div><div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><select id="studioShortScriptSeconds" aria-label="Độ dài bản short"><option value="30">30 giây</option><option value="45" selected>45 giây</option><option value="60">60 giây</option></select><button class="btn" type="button" onclick="writeShortScript()">1. Viết kịch bản short</button><button class="btn" type="button" onclick="queueShortVariantJob('voiceover')">2. Tạo giọng</button><button class="btn" type="button" onclick="queueShortVariantJob('source_visuals')">3. Cắt cảnh</button><button class="btn primary" type="button" onclick="queueShortVariantJob('render_short')">4. Dựng</button></div><div id="studioShortScriptState" class="studio-model-note" style="margin-top:6px">Chưa viết bản short riêng.</div></div><div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioRenderReupButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
-        </div>
+          <div class="studio-actions" style="margin-top:8px"><button id="studioPlanEditButton" class="btn" disabled>Lập kế hoạch dựng</button><span class="hint">Chuyển cảnh và hiệu ứng từng cảnh — sửa được trước khi render.</span></div><div id="studioEditPlan" class="studio-result" style="margin-top:6px"></div><div class="studio-actions" data-wf="reup" style="margin-top:8px" hidden><button id="studioRenderReupButton" class="btn primary">Dựng MP4 từ cảnh gốc</button><span class="hint">Dùng FFmpeg/NVENC trên máy; không gọi dịch vụ ngoài.</span></div>
+        </div><div class="studio-lane-pane" data-lane-step="studioStep6" data-lane="short" hidden><div class="studio-lane-head">Short</div><div class="studio-option-card"><b>Dựng Short</b><div class="studio-model-note" style="margin-top:4px">Cắt cảnh cho Short rồi dựng MP4 dọc 9:16. Chạy song song với video dài — hai luồng không dùng chung timeline nên không ghi đè nhau.</div><div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn" type="button" onclick="queueShortVariantJob('source_visuals')">Tạo cảnh Short</button><button class="btn primary" type="button" onclick="queueShortVariantJob('render_short')">Dựng Short</button></div></div></div></div></div>
         <div id="studioStep7" class="studio-step" data-studio-step="7" hidden>
           <p class="studio-step-note">Video sau khi render sẽ nằm trong project. Bạn có thể xem lại, tải xuống hoặc chuyển sang lịch đăng của kênh đích.</p>
-          <div id="studioFinalResult" class="studio-result"><div class="studio-empty">Chưa có job render. Hãy quay lại bước 6 để dựng video.</div></div>
-          <div class="studio-checklist"><div class="studio-check"><b>✓</b><span>Kiểm tra hình ảnh, âm thanh, phụ đề và thời lượng trước khi đăng.</span></div><div class="studio-check"><b>→</b><span>Đăng tự động chỉ được bật sau khi kết nối YouTube OAuth trong Cài đặt.</span></div></div>
+          <div class="studio-lane-head" style="display:block">Video dài</div><div id="studioFinalResult" class="studio-result"><div class="studio-empty">Chưa có job render. Hãy quay lại bước 6 để dựng video.</div></div><div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap"><a id="studioFinalDownload" class="btn ghost" href="#" target="_blank" rel="noreferrer">Mở / tải MP4</a><button class="btn primary" type="button" onclick="openPublishDialog('long')">Đăng video dài</button></div><div id="studioShortFinal" style="margin-top:14px"></div>
+          <div id="studioCopyrightPanel" style="margin-top:12px"></div><div id="studioPublishPanel" style="margin-top:12px"></div><dialog id="publishDialog" class="publish-dialog"><form method="dialog" style="margin:0"><div class="publish-dialog-head"><b id="publishDialogTitle">Đăng video</b><button class="btn small ghost" value="cancel">Đóng</button></div><div id="publishDialogBody" class="publish-dialog-body"></div><div class="publish-dialog-foot"><span id="publishDialogNote" class="studio-model-note"></span><button type="button" class="btn primary" onclick="submitPublishDialog()">Đăng</button></div></form></dialog><div class="studio-checklist"><div class="studio-check"><b>✓</b><span>Kiểm tra hình ảnh, âm thanh, phụ đề và thời lượng trước khi đăng.</span></div><div class="studio-check"><b>→</b><span>Đăng tự động chỉ được bật sau khi kết nối YouTube OAuth trong Cài đặt.</span></div></div>
           <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(6)">← Xưởng dựng</button><button class="btn primary" onclick="setWorkspace('managed')">Sang xuất bản &amp; lịch đăng</button></div>
         </div>
       </section>
@@ -610,10 +659,11 @@
             <form id="managedChannelForm" class="managed-form">
               <input id="managedChannelId" type="hidden" />
               <div class="field"><label for="managedChannelName">Tên kênh trong app</label><input id="managedChannelName" required placeholder="Ví dụ: Kênh tài chính cá nhân" /></div>
-              <div class="field"><label for="managedChannelUrl">URL kênh YouTube</label><input id="managedChannelUrl" required placeholder="https://www.youtube.com/@tenkenh" /></div>
+              <div class="field"><label for="managedChannelPlatform">Nền tảng</label><select id="managedChannelPlatform"><option value="youtube">YouTube</option><option value="tiktok">TikTok</option><option value="facebook">Facebook</option><option value="instagram">Instagram</option></select></div>
+              <div class="field"><label for="managedChannelUrl">URL kênh / trang đích</label><input id="managedChannelUrl" required placeholder="https://www.youtube.com/@tenkenh" /></div>
               <div class="field"><label for="managedChannelGroup">Nhóm</label><input id="managedChannelGroup" placeholder="Ví dụ: Tài chính, Shorts" /></div>
               <div class="field"><label for="managedChannelWorkflow">Workflow tham khảo từ kênh đang theo dõi</label><select id="managedChannelWorkflow"><option value="">Chưa gắn workflow</option></select></div>
-              <div class="field"><label for="managedChannelProfile">Định dạng mặc định</label><select id="managedChannelProfile"><option value="youtube_landscape">YouTube ngang · 16:9</option><option value="youtube_shorts">Short dọc · 9:16</option><option value="instagram_reels">Reels dọc · 9:16</option><option value="tiktok">TikTok dọc · 9:16</option></select></div>
+              <div class="field"><label for="managedChannelProfile">Định dạng mặc định</label><select id="managedChannelProfile"><option value="youtube_landscape">YouTube video · 16:9</option><option value="youtube_shorts">YouTube Shorts · 9:16</option><option value="tiktok">TikTok · 9:16</option><option value="instagram_reels">Instagram Reels · 9:16</option><option value="facebook_reels">Facebook Reels · 9:16</option><option value="facebook_feed">Facebook Feed · 1:1</option></select></div>
               <div class="transcript-grid" style="grid-template-columns:1fr 1fr; margin-bottom:0">
                 <div class="field"><label for="managedChannelLanguage">Ngôn ngữ mặc định</label><select id="managedChannelLanguage"><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="th">ไทย</option><option value="pt-BR">Português (Brasil)</option><option value="es">Español</option></select></div>
                 <div class="field"><label for="managedChannelTransition">Chuyển cảnh</label><select id="managedChannelTransition"><option value="fade">Fade</option><option value="none">Không</option></select></div>
@@ -883,6 +933,8 @@
       creativeDirection: $('studioCreativeDirectionInput')?.value || '',
       scriptInstruction: $('studioScriptInstructionInput')?.value || '',
       targetDuration: $('studioTargetDurationSeconds')?.value || '',
+      createStandaloneShort: Boolean($('studioCreateStandaloneShort')?.checked),
+      standaloneShortSeconds: $('studioInitialShortSeconds')?.value || '',
       remakeMode: $('studioRemakeModeSelect')?.value || '',
       analysisLanguage: $('studioAnalysisLanguage')?.value || '',
       scriptLanguage: $('studioScriptLanguage')?.value || '',
@@ -913,6 +965,33 @@
   // nạp đúng file đó thay vì giữ một bản mô tả thứ hai — bản sao thứ hai chính
   // là cách WF Reup từng bị phân tích bằng quy tắc remake của WF Content.
   const WORKFLOWS = {};
+  // The page reloads before a non-reload server imports new workflow modules.
+  // Keep the companion Short visible in both workflows during that short gap.
+  const SHORT_FLOW_FALLBACKS = {
+    content: {
+      steps: {2: 'Kịch bản + Short', 3: 'Giọng đọc + Short', 5: 'Xưởng dựng + Short'},
+      summary: 'Luồng Short: tạo từ cùng brief ở bước Kịch bản, tạo giọng ở bước Giọng đọc, rồi tạo cảnh AI và dựng riêng ở Xưởng dựng.',
+      shortFlow: 'Short dùng cùng brief và cấu hình giọng với video dài; cảnh Short được tạo theo workflow AI của WF Content.',
+    },
+    reup: {
+      steps: {2: 'Lời bình + Short', 3: 'Giọng đọc + Short', 5: 'Xưởng dựng + Short'},
+      summary: 'Luồng Short: tạo từ cùng lời bình ở bước Kịch bản, tạo giọng ở bước Giọng đọc, rồi cắt cảnh nguồn và dựng riêng ở Xưởng dựng.',
+      shortFlow: 'Short giữ đúng nội dung nguồn của WF Reup, dùng cùng cấu hình giọng và cắt cảnh từ video nguồn thay vì tạo ảnh AI.',
+    },
+  };
+
+  function withVisibleShortFlow(flow) {
+    const fallback = SHORT_FLOW_FALLBACKS[flow?.key];
+    if (!fallback) return flow;
+    const steps = [...(flow.steps || [])];
+    Object.entries(fallback.steps).forEach(([index, label]) => {
+      const position = Number(index);
+      if (steps[position] && !steps[position].includes('Short')) steps[position] = label;
+    });
+    const notes = [...(flow.notes || [])];
+    if (!notes.some((note) => String(note).includes('Short'))) notes.push(fallback.summary);
+    return {...flow, steps, notes, short_flow: flow.short_flow || fallback.shortFlow};
+  }
 
   // Danh sách giọng trước đây được viết tay trong trang: 7 giọng, trong khi
   // Microsoft công bố 322. Hỏi thẳng edge-tts để không ai phải đoán.
@@ -938,7 +1017,7 @@
     try {
       const result = await api('/api/workflows');
       Object.keys(WORKFLOWS).forEach((key) => delete WORKFLOWS[key]);
-      (result.workflows || []).forEach((flow) => { WORKFLOWS[flow.key] = flow; });
+      (result.workflows || []).forEach((flow) => { WORKFLOWS[flow.key] = withVisibleShortFlow(flow); });
       if (!WORKFLOWS[state.studioWorkflow]) state.studioWorkflow = result.default || 'content';
       renderWorkflowsPanel();
       setStudioStep(state.studioStep || 1);
@@ -947,6 +1026,13 @@
 
   function currentWorkflow() {
     return WORKFLOWS[state.studioWorkflow] || Object.values(WORKFLOWS)[0] || {steps: [], label: ''};
+  }
+
+  function renderStudioShortWorkflowNote() {
+    const note = $('studioShortWorkflowNote');
+    if (!note) return;
+    const flow = currentWorkflow();
+    note.textContent = flow.short_flow || 'Luồng Short sẽ đi cùng Kịch bản, Giọng đọc và Xưởng dựng của workflow đang chọn.';
   }
 
   function setStudioWorkflow(key, jump = true) {
@@ -1454,6 +1540,182 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  // Short is a checkbox at the script step. Ticked, the AI writes it alongside
+  // the long script and every step from there splits into two columns - the
+  // long video on the left, the short beside it - so both are worked on in
+  // view of each other rather than by switching back and forth. Unticked,
+  // nothing about it shows: a project not making a short is not asked about one.
+  const SHORT_LANE_PANES = ['studioStep3', 'studioStep4', 'studioStep5', 'studioStep6'];
+
+  function shortLaneWanted() {
+    return Boolean($('studioCreateStandaloneShort')?.checked) || Boolean(state.shortLane?.script);
+  }
+
+  function syncStudioLaneTabs() {
+    const wanted = shortLaneWanted();
+    SHORT_LANE_PANES.forEach((stepId) => {
+      const split = document.querySelector(`.studio-lane-split[data-lane-step="${stepId}"]`);
+      if (split) split.classList.toggle('is-split', wanted);
+      const short = document.querySelector(
+        `.studio-lane-pane[data-lane-step="${stepId}"][data-lane="short"]`);
+      // Hidden rather than merely un-split: an unwanted short column must not
+      // stay on the page taking half the width off the long video.
+      if (short) short.hidden = !wanted;
+    });
+  }
+
+  const SHORT_LANE_STEPS = [
+    {key: 'script',  label: 'Kịch bản'},
+    {key: 'voice',   label: 'Giọng đọc'},
+    {key: 'visuals', label: 'Cảnh'},
+    {key: 'render',  label: 'Dựng'},
+  ];
+
+  // Read from the timeline rather than a status column, so a step that is
+  // re-run reports honestly instead of staying green from last time.
+  async function loadShortLane() {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) { state.shortLane = null; syncStudioLaneTabs(); return; }
+    try { renderShortLane(await api(`/api/projects/${projectId}/short-lane`)); }
+    catch (_) { syncStudioLaneTabs(); }
+  }
+
+  function shortStepStrip(lane) {
+    const steps = lane?.steps || {};
+    return '<div class="studio-steps">' + SHORT_LANE_STEPS.map((step, index) => {
+      const done = Boolean(steps[step.key]);
+      return `<div class="studio-step-chip${done ? ' is-done' : ''}">`
+        + `<b>${done ? '✓' : String(index + 1).padStart(2, '0')}</b>`
+        + `<span>${step.label}</span></div>`;
+    }).join('') + '</div>';
+  }
+
+  function renderShortLane(lane) {
+    state.shortLane = lane || null;
+    state.shortShots = lane?.shots || [];
+    syncStudioLaneTabs();
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    const script = lane?.script;
+    const scenes = lane?.scenes || 0;
+    const sourceAction = [...document.querySelectorAll('button')].find((button) =>
+      button.getAttribute('onclick')?.includes('cutShortSourceScenes()'));
+    const buildAction = [...document.querySelectorAll('button')].find((button) =>
+      button.getAttribute('onclick')?.includes("queueShortVariantJob('source_visuals')"));
+    const isReup = state.studioWorkflow === 'reup';
+    const readyToCut = Number(lane?.voiced || 0) === Number(scenes) && Number(scenes) > 0;
+    if (sourceAction) {
+      sourceAction.textContent = isReup
+        ? (readyToCut ? 'Cắt cảnh Short từ video nguồn' : 'Cắt cảnh Short · cần giọng trước')
+        : 'Tạo hình AI cho Short';
+      sourceAction.disabled = isReup ? !readyToCut : !Number(scenes);
+      sourceAction.title = isReup
+        ? (readyToCut ? 'Cắt clip nguồn đúng theo độ dài của từng đoạn giọng Short.' : 'Tạo đủ giọng trước để clip được cắt đúng thời lượng.')
+        : 'Tạo ảnh 9:16 theo storyboard riêng của Short.';
+    }
+    if (buildAction) {
+      buildAction.textContent = isReup
+        ? (readyToCut ? 'Cắt cảnh Short từ video nguồn' : 'Cắt cảnh Short · cần giọng trước')
+        : 'Tạo hình AI cho Short';
+      buildAction.disabled = isReup ? !readyToCut : !Number(scenes);
+      buildAction.title = isReup
+        ? 'Cắt clip nguồn đúng theo độ dài của từng đoạn giọng Short.'
+        : 'Tạo ảnh 9:16 theo storyboard riêng của Short.';
+    }
+
+    const scriptView = $('studioShortScriptView');
+    if (scriptView) {
+      scriptView.innerHTML = script
+        ? shortStepStrip(lane)
+          + `<h4 style="margin:10px 0 4px">${esc(script.script_title || 'Bản Short')}</h4>`
+          + `<div class="studio-model-note">Khoảng ${lane.estimated_seconds || 0} giây · ${scenes} cảnh</div>`
+          + `<p style="margin:8px 0 0"><b>Hook:</b> ${esc(script.hook || '')}</p>`
+          + `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(script.main_content || '')}</p>`
+          + (script.cta ? `<p style="margin:6px 0 0"><b>Kết:</b> ${esc(script.cta)}</p>` : '')
+        : '<div class="studio-empty">Chưa có kịch bản Short. Bấm “Viết lại kịch bản Short”, '
+          + 'hoặc bật “Tạo Short riêng cùng lúc” rồi viết kịch bản.</div>';
+    }
+
+    const storyboard = $('studioShortStoryboard');
+    if (storyboard) {
+      const shots = lane?.shots || [];
+      if (!shots.length) {
+        storyboard.innerHTML = '<div class="studio-empty">Chưa có storyboard Short — viết kịch bản Short trước.</div>';
+      } else {
+        storyboard.innerHTML = `<div id="studioShortStoryboardCards"></div>`;
+        // The same cards as the long video: picture, a player for the voice,
+        // and the per-scene controls.
+        renderStudioStoryboard(shots, lane.timeline || [], 'studioShortStoryboardCards');
+        storyboard.insertAdjacentHTML('afterbegin', shortStepStrip(lane));
+      }
+    }
+
+    const voiceState = $('studioShortVoiceState');
+    if (voiceState) {
+      voiceState.innerHTML = scenes
+        ? shortStepStrip(lane)
+          + `<div class="studio-model-note" style="margin-top:8px">Đã có giọng cho `
+          + `${lane.voiced || 0}/${scenes} cảnh của Short.</div>`
+        : '<div class="studio-empty">Chưa có cảnh nào để đọc.</div>';
+    }
+    renderShortVoiceReview(lane, projectId);
+
+    // Both finished videos sit on the publish step. The short's used to be
+    // shown back in the build step, so the last step listed one of the two
+    // videos the project had just made and offered no way to publish the other.
+    const output = $('studioShortFinal');
+    if (output) {
+      output.innerHTML = '<div class="studio-lane-head" style="display:block">Short</div>'
+        + (lane?.output_path
+          ? `<div class="studio-result"><video controls preload="metadata"`
+            + ` style="max-width:320px;border-radius:8px;background:#000"`
+            + ` src="/api/projects/${projectId}/short-video"></video>`
+            + `<div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">`
+            + `<a class="btn ghost" href="/api/projects/${projectId}/short-video" target="_blank" rel="noreferrer">Mở / tải MP4</a>`
+            + `<button class="btn primary" type="button" onclick="openPublishDialog('short')">Đăng Short</button>`
+            + `</div></div>`
+          : `<div class="studio-result"><div class="studio-empty">Chưa dựng Short. `
+            + `Hình ${lane?.with_visuals || 0}/${scenes} cảnh — quay lại Xưởng dựng để dựng.</div></div>`);
+    }
+  }
+
+  function stopShortVoiceSequence() {
+    const audio = state.shortVoiceSequence;
+    if (audio) { audio.pause(); audio.src = ''; }
+    state.shortVoiceSequence = null;
+  }
+
+  async function playShortVoiceSequence(projectId) {
+    const timeline = (state.shortLane?.timeline || []).filter((segment) => String(segment.audio_path || '').trim());
+    if (!timeline.length) return setMessage('Short chưa có file giọng để nghe.', 'error');
+    stopShortVoiceSequence();
+    let index = 0;
+    const playNext = async () => {
+      if (index >= timeline.length) { state.shortVoiceSequence = null; return; }
+      const segment = timeline[index++];
+      const audio = new Audio(`/api/projects/${projectId}/timeline/${segment.id}/audio-preview`);
+      state.shortVoiceSequence = audio;
+      audio.onended = () => { void playNext(); };
+      audio.onerror = () => { setMessage(`Không phát được giọng cảnh ${segment.segment_index}.`, 'error'); state.shortVoiceSequence = null; };
+      try { await audio.play(); }
+      catch (_) { setMessage('Trình duyệt chặn phát audio. Hãy bấm nghe từng cảnh.', 'error'); state.shortVoiceSequence = null; }
+    };
+    setMessage(`Đang phát liên tục ${timeline.length} đoạn giọng Short.`);
+    await playNext();
+  }
+
+  function renderShortVoiceReview(lane, projectId) {
+    const target = $('studioShortVoiceState');
+    const scenes = Number(lane?.scenes || 0);
+    if (!target || !scenes) return;
+    const voiced = Number(lane?.voiced || 0);
+    target.innerHTML = shortStepStrip(lane)
+      + `<div class="studio-model-note" style="margin-top:8px">Đã có giọng cho ${voiced}/${scenes} cảnh Short. Bạn có thể nghe từng cảnh tại Storyboard hoặc phát toàn bộ ở đây.</div>`
+      + `<div class="studio-actions" style="margin-top:8px;gap:6px"><button class="btn small primary" type="button" onclick="playShortVoiceSequence(${Number(projectId)})" ${voiced ? '' : 'disabled'}>▶ Nghe toàn bộ Short</button><button class="btn small ghost" type="button" onclick="stopShortVoiceSequence()">Dừng</button></div>`;
+  }
+
+  function renderShortScriptState(payload) { renderShortLane(payload); }
+  async function loadShortScriptState() { await loadShortLane(); }
+
   async function writeShortScript() {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
     if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
@@ -1478,6 +1740,13 @@
   async function queueShortVariantJob(jobType) {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
     if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
+    // Content Shorts are illustrated from their own vertical storyboard. Only
+    // the reup workflow has source footage to cut, so never send a Content
+    // Short through the source-video worker.
+    if (jobType === 'source_visuals' && state.studioWorkflow !== 'reup') {
+      await generateShortSceneImages();
+      return;
+    }
     const provider = jobType === 'voiceover'
       ? ($('studioVoiceProviderSelect')?.value || SHORT_JOB_PROVIDERS.voiceover)
       : SHORT_JOB_PROVIDERS[jobType];
@@ -1486,28 +1755,19 @@
         method: 'POST',
         body: JSON.stringify({job_type: jobType, provider, confirmed: true, variant: 'short'}),
       });
-      setMessage('Đã xếp hàng cho bản short riêng.', 'success');
+      setMessage('Đã xếp hàng cho luồng Short.', 'success');
       await loadProductionQueueStatus?.();
+      await loadShortLane();
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
-  function renderShortScriptState(payload) {
-    const box = $('studioShortScriptState');
-    if (!box) return;
-    const script = payload?.script;
-    if (!script) { box.textContent = 'Chưa viết bản short riêng.'; return; }
-    const scenes = (payload.timeline || []).length;
-    box.innerHTML = `<b>${esc(script.script_title || 'Bản short')}</b> — khoảng `
-      + `${payload.estimated_seconds || 0} giây, ${scenes} cảnh. `
-      + `Hook: ${esc(String(script.hook || '').slice(0, 120))}`;
+  async function generateShortSceneImages() {
+    const provider = $('studioSceneImageProviderSelect')?.value || 'flow_image';
+    await runStudioSceneBatch(provider, false, null, 'short');
+    await loadShortLane();
   }
 
-  async function loadShortScriptState() {
-    const projectId = Number(state.studioProjectId || state.projectId || 0);
-    if (!projectId) return;
-    try { renderShortScriptState(await api(`/api/projects/${projectId}/short-script`)); }
-    catch (_) { /* an unwritten short is not an error worth shouting about */ }
-  }
+
 
   async function detectTimelineCleanup() {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
@@ -1551,65 +1811,6 @@
       + ` bằng ${item.method === 'crop' ? 'cắt bỏ' : 'làm mờ'}`
       + (item.source === 'detected' ? ' (app tự dò từ video gốc)' : '')
     ).join(' · ') + (segments ? ` — áp cho ${segments} cảnh. Cần render lại để thấy kết quả.` : '');
-  }
-
-  async function planProjectShort() {
-    const projectId = Number(state.studioProjectId || state.projectId || 0);
-    if (!projectId) { setMessage('Hãy mở một dự án trước khi lên kịch bản video ngắn.', 'error'); return; }
-    const profile = $('studioShortProfile')?.value || 'youtube_shorts';
-    setMessage('Đang chọn cảnh và viết hook cho video ngắn...', '');
-    try {
-      const data = await api(`/api/projects/${projectId}/short/plan`, {
-        method: 'POST',
-        body: JSON.stringify({profile, use_model: true}),
-      });
-      renderShortSummary(data.short, data);
-      setMessage(`Đã lên kịch bản video ngắn: ${data.scene_count} cảnh, ${data.duration_seconds}s.`, 'success');
-    } catch (error) { setMessage(error.message, 'error'); }
-  }
-
-  async function queueShortRender() {
-    const projectId = Number(state.studioProjectId || state.projectId || 0);
-    if (!projectId) { setMessage('Hãy mở một dự án trước.', 'error'); return; }
-    // The render needs a plan to know which scenes to use. Making one here
-    // when there is none saves a job that could only fail.
-    let short = null;
-    try {
-      short = (await api(`/api/projects/${projectId}/short`))?.short || null;
-    } catch (_) { short = null; }
-    if (!short) {
-      setMessage('Chưa có kịch bản video ngắn — đang lên kế hoạch trước...', '');
-      try {
-        const planned = await api(`/api/projects/${projectId}/short/plan`, {
-          method: 'POST',
-          body: JSON.stringify({profile: $('studioShortProfile')?.value || 'youtube_shorts', use_model: true}),
-        });
-        renderShortSummary(planned.short, planned);
-      } catch (error) { setMessage(`Không lên được kịch bản video ngắn: ${error.message}`, 'error'); return; }
-    }
-    try {
-      // `confirmed` is a field of the request, not a query parameter, and the
-      // endpoint takes the project's latest script itself.
-      await api(`/api/projects/${projectId}/jobs`, {
-        method: 'POST',
-        body: JSON.stringify({job_type: 'render_short', provider: 'ffmpeg_builtin', confirmed: true}),
-      });
-      setMessage('Đã đưa video ngắn vào hàng đợi dựng.', 'success');
-      await loadProductionQueueStatus?.();
-    } catch (error) { setMessage(error.message, 'error'); }
-  }
-
-  function renderShortSummary(short, extra = {}) {
-    const box = $('studioShortSummary');
-    if (!box) return;
-    if (!short) { return; }
-    const plan = short.plan || {};
-    const scenes = (plan.segment_ids || []).length;
-    const seconds = Number(short.duration_seconds || extra.duration_seconds || 0);
-    const output = short.output_path ? ' · đã dựng xong' : '';
-    box.innerHTML = `<b>${esc(short.title || 'Video ngắn')}</b> — ${scenes} cảnh · ${seconds}s · ${esc(plan.profile || 'youtube_shorts')}${output}`
-      + (short.hook ? `<br>Hook: ${esc(short.hook)}` : '')
-      + (plan.reason ? `<br><span class="secondary-text">${esc(plan.reason)}</span>` : '');
   }
 
   async function loadAutomationStatus(quiet = false) {
@@ -2338,6 +2539,27 @@
     return state.videoCatalog.find((video) => video.youtube_video_id === state.studioVideoId) || null;
   }
 
+  function studioSourceIsAudio(video = studioSelectedVideo()) {
+    const source = String(video?.local_media_path || video?.video_url || '').split('?')[0].toLowerCase();
+    const extension = source.split('.').pop() || '';
+    return AUDIO_SOURCE_EXTENSIONS.has(extension);
+  }
+
+  function normalizeStudioWorkflowForSource() {
+    if (state.studioWorkflow !== 'reup' || !studioSourceIsAudio()) return false;
+    // Audio has useful speech/content for analysis, but no frames to cut into
+    // scenes. Apply this on restores as well as immediately after an upload.
+    state.studioWorkflow = 'content';
+    renderWorkflowsPanel();
+    if (state.studioProjectId) {
+      void api(`/api/projects/${state.studioProjectId}/workflow`, {
+        method: 'PATCH', body: JSON.stringify({workflow: 'content'}),
+      }).catch(() => {});
+    }
+    try { localStorage.setItem('ytFactory.workflow', 'content'); } catch (_) {}
+    return true;
+  }
+
   function populateStudioSourceChannelSelect() {
     const select = $('studioSourceChannelSelect');
     if (!select) return;
@@ -2389,10 +2611,12 @@
   }
 
   function setStudioStep(step) {
+    normalizeStudioWorkflowForSource();
     const next = Math.max(1, Math.min(7, Number(step) || 1));
     const flow = currentWorkflow();
     const labels = Object.fromEntries((flow.steps || []).map((label, index) => [index + 1, label.toUpperCase()]));
     state.studioStep = next;
+    renderStudioShortWorkflowNote();
     if (next === 3 && $('studioScriptInstructionInput') && !$('studioScriptInstructionInput').value.trim()) $('studioScriptInstructionInput').value = $('studioCreativeDirectionInput')?.value || '';
     if (next === 3 && $('studioTargetDurationSeconds') && !$('studioTargetDurationSeconds').value.trim()) {
       const sourceDuration = Number(studioSelectedVideo()?.duration_seconds || 0);
@@ -2401,6 +2625,10 @@
     // The original panels were created in storyboard/voice order. Keep their
     // stable DOM ids while presenting the human workflow as voice then storyboard.
     const visiblePanelStep = next === 4 ? 5 : next === 5 ? 4 : next;
+    // The publish step is reached after rendering, so the bundle loaded when
+    // the project was opened no longer describes it: without this the panel
+    // still says there is no video and offers nothing to publish.
+    if (next === 7 && state.studioProjectId) void refreshStudioPublish(state.studioProjectId);
     document.querySelectorAll('[data-studio-step]').forEach((panel) => { panel.hidden = Number(panel.dataset.studioStep) !== visiblePanelStep; });
     document.querySelectorAll('[data-studio-tab]').forEach((tab) => {
       const value = Number(tab.dataset.studioTab);
@@ -2727,6 +2955,7 @@
       // cu phai tra dung cac buoc ma no da duoc dung nen.
       const savedWorkflow = bundle.project?.workflow || existingProject.workflow;
       if (WORKFLOWS[savedWorkflow]) state.studioWorkflow = savedWorkflow;
+      normalizeStudioWorkflowForSource();
       if ((bundle.reference_analysis || bundle.metadata_analysis)?.result) {
         state.studioAnalysis = bundle.reference_analysis || bundle.metadata_analysis;
         state.studioReference = bundle.reference_analysis || null;
@@ -2737,9 +2966,15 @@
         state.studioWriter = bundle.writer_content || state.studioWriter;
         state.scriptId = bundle.latest_script.id || null;
         renderStudioScript(bundle.latest_script, state.studioWriter);
-        loadShortScriptState();
         nextStep = 3;
       }
+      // Outside that branch on purpose: the short is written from the source
+      // material, not from the long script, so a project can hold a short
+      // and no long script at all. Loading it only when a long script existed
+      // hid the whole lane in exactly that case.
+      loadShortLane();
+      syncStudioLaneTabs();
+      renderStudioPublish(bundle);
       if ((bundle.latest_shots || []).length) {
         state.shots = bundle.latest_shots || [];
         renderStudioStoryboard(bundle.latest_shots, bundle.latest_timeline || []);
@@ -2788,6 +3023,8 @@
       ['studioVoicePromptText', saved.voicePromptText],
     ];
     fields.forEach(([id, value]) => { if (value && $(id)) $(id).value = value; });
+    if (typeof saved.createStandaloneShort === 'boolean' && $('studioCreateStandaloneShort')) $('studioCreateStandaloneShort').checked = saved.createStandaloneShort;
+    if (saved.standaloneShortSeconds && $('studioInitialShortSeconds')) $('studioInitialShortSeconds').value = saved.standaloneShortSeconds;
     await selectStudioVideo(savedProject?.id || saved.projectId || null);
     const availableStep = state.studioStep;
     const savedStep = Number(saved.studioStep || 0);
@@ -2832,7 +3069,13 @@
       state.studioVideoId = video.youtube_video_id;
       await selectStudioVideo();
       const minutes = Math.round((data.duration_seconds || 0) / 60);
+      if (data.media_kind === 'audio' && state.studioWorkflow === 'reup') {
+        setStudioWorkflow('content', false);
+      }
       setUploadStatus(`Đã nhận "${file.name}"${minutes ? ` · khoảng ${minutes} phút` : ''}. Bấm “1. Phân tích tham chiếu” để AI đọc nội dung.`, 'success');
+      if (data.media_kind === 'audio') {
+        setUploadStatus(`Đã nạp audio "${file.name}". App sẽ dùng nội dung để phân tích/kịch bản; phần hình sẽ được tạo theo storyboard, không cắt từ audio.`, 'success');
+      }
     } catch (error) {
       setUploadStatus(`Tải lên thất bại: ${error.message}`, 'error');
     }
@@ -3009,8 +3252,23 @@
     if ($('studioScriptSummary')) $('studioScriptSummary').textContent = `v${script.version || '1'}`;
   }
 
-  function renderStudioStoryboard(shots = [], timeline = []) {
-    const result = $('studioStoryboardResult');
+  // The short's storyboard is the same thing as the long video's - shots
+  // joined to their segments - so it is drawn by the same code. Rendered as a
+  // plain list instead, it had no picture, no player to hear the voice and no
+  // per-scene controls, which is what made the short lane feel like a
+  // different, poorer app.
+  // A shot id is unique across the project, but the cached list was only ever
+  // the long video's - so every per-scene control on a short's card looked up
+  // a shot that was not there and did nothing at all.
+  function findStudioShot(shotId) {
+    const wanted = Number(shotId);
+    return (state.shots || []).find((item) => Number(item.id) === wanted)
+      || (state.shortShots || []).find((item) => Number(item.id) === wanted)
+      || null;
+  }
+
+  function renderStudioStoryboard(shots = [], timeline = [], containerId = 'studioStoryboardResult') {
+    const result = $(containerId);
     if (!result) return;
     if (!shots.length) {
       result.innerHTML = '<div class="studio-empty">Chưa có cảnh. Hãy tạo storyboard hoặc mở chỉnh sửa chi tiết để thêm cảnh.</div>';
@@ -3021,18 +3279,53 @@
       const preview = segment?.visual_path
         ? (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(segment.visual_path) ? `<img src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" alt="Cảnh ${shot.shot_index || index + 1}">` : `<video src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" controls muted preload="metadata"></video>`)
         : `<div class="storyboard-prompt">Chưa có video/ảnh thật. Hãy tạo cảnh AI hoặc gắn asset trước khi render.</div>`;
+      // The shape of the audio shows a dead scene or a line cut short at a
+      // glance; pressing play on every scene in turn is how those get missed.
       const audioPreview = segment?.audio_path
-        ? `<div class="storyboard-audio"><b>Nghe lời đọc</b><audio controls preload="metadata" src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/audio-preview"></audio></div>`
+        ? `<div class="storyboard-audio"><b>Nghe lời đọc</b>`
+          + `<img class="storyboard-wave" alt="Dạng sóng giọng đọc" loading="lazy"`
+          + ` src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/waveform"`
+          + ` onerror="this.remove()" />`
+          + `<audio controls preload="metadata" src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/audio-preview"></audio></div>`
         : `<div class="secondary-text" style="margin-top:8px">Chưa có giọng đọc cho cảnh này.</div>`;
+      // Where in the source this picture was taken from, editable before the
+      // render rather than discovered in it.
+      const cutControls = String(segment?.visual_path || '').includes('source_clips')
+        ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap">
+             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Cắt từ giây
+               <input id="studioCutStart-${segment.id}" type="number" min="0" step="0.5" style="width:88px"
+                 value="${Number(segment.source_start_seconds ?? -1) >= 0 ? Number(segment.source_start_seconds).toFixed(1) : ''}"
+                 placeholder="tự chọn" /></label>
+             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Bỏ đầu
+               <input id="studioTrimHead-${segment.id}" type="number" min="0" step="0.1" style="width:72px"
+                 value="${Number(segment.edit_trim_head || 0).toFixed(1)}" /></label>
+             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Bỏ cuối
+               <input id="studioTrimTail-${segment.id}" type="number" min="0" step="0.1" style="width:72px"
+                 value="${Number(segment.edit_trim_tail || 0).toFixed(1)}" /></label>
+             <button class="btn small" type="button" onclick="saveSegmentCut(${segment.id})">Cắt lại cảnh này</button>
+           </div>`
+        : '';
       const shotVisualPath = String(segment?.visual_path || '');
       const wantsVisual = String(shot.status || '') === 'needs_visual';
       return `
       <div class="storyboard-card"${wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
         <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1}</span>${shot.status ? shotStatusTag(shot.status) : ''}</div>
         <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
+        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${cutControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
       </div>`;
     }).join('')}</div>`;
+    result.querySelectorAll('.storyboard-card').forEach((card, index) => {
+      const shot = shots[index] || {};
+      const segment = timeline.find((item) => Number(item.shot_id) === Number(shot.id));
+      const sourceStart = Number(segment?.source_start_seconds);
+      if (!segment || !Number.isFinite(sourceStart) || sourceStart < 0) return;
+      const end = sourceStart + Number(segment.duration_seconds || 0);
+      const label = document.createElement('div');
+      label.className = 'secondary-text';
+      label.style.marginTop = '7px';
+      label.textContent = `Cắt từ video nguồn: ${formatStudioDuration(sourceStart)} → ${formatStudioDuration(end)}`;
+      card.querySelector('.storyboard-summary')?.after(label);
+    });
   }
 
   // Providers that use a browser sidecar + the caller's own logged-in
@@ -3355,12 +3648,33 @@
     if (button) button.disabled = true;
     setMessage('Đang cắt cảnh theo lời thoại...');
     try {
-      const result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue?force=true`, {method: 'POST'});
+      // Never force blindly. The server refuses when there is something to
+      // lose and says exactly what; forcing regardless made that refusal
+      // unreachable from the app, which is how a written English script came
+      // to be replaced by the source's Vietnamese transcript without a word.
+      let result;
+      try {
+        result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue`, {method: 'POST'});
+      } catch (error) {
+        if (!/cảnh hiện có sẽ bị thay|đã có giọng đọc/.test(error.message || '')) throw error;
+        if (!confirm(`${error.message}\n\nVẫn cắt lại theo lời thoại?`)) {
+          setMessage('Đã huỷ cắt theo lời thoại.', '');
+          if (button) button.disabled = false;
+          return;
+        }
+        result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue?force=true`, {method: 'POST'});
+      }
       const minutes = Math.round((result.total_duration_seconds || 0) / 60);
       const missing = result.turns_without_timing || 0;
+      const publishLanguage = String(state.studioProject?.render_settings?.publish_language
+        || $('studioScriptLanguage')?.value || '').toLowerCase();
+      // The scenes now hold the source's own words. Saying so here is the
+      // difference between a next step and a surprise at the voiceover.
+      const needsTranslation = publishLanguage && publishLanguage !== 'vi';
       setMessage(
         `Đã cắt ${result.segments} cảnh theo lời thoại (${result.speakers.length} người nói, ~${minutes} phút)`
-        + (missing ? ` · ${missing} lượt không có mốc giây, đã ước lượng.` : '.'),
+        + (missing ? ` · ${missing} lượt không có mốc giây, đã ước lượng.` : '.')
+        + (needsTranslation ? ' Lời trong storyboard đang là lời gốc — bấm “Dịch lời bình” trước khi tạo giọng.' : ''),
         missing ? 'error' : 'success');
       const bundle = await api(`/api/projects/${state.studioProjectId}`);
       renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
@@ -3471,7 +3785,7 @@
   }
 
   async function editStudioScene(shotId, segmentId) {
-    const shot = state.shots?.find((item) => Number(item.id) === Number(shotId));
+    const shot = findStudioShot(shotId);
     if (!shot) return setMessage('Không tìm thấy cảnh cần sửa.', 'error');
     const narration = prompt(`Lời AI đọc · Cảnh ${shot.shot_index || ''}`, shot.narration || '');
     if (narration === null) return;
@@ -3556,7 +3870,17 @@
       setStudioProgress(10, 'Đang lưu cấu hình giọng đọc...');
       await saveRenderSettings(state.studioProjectId);
       setStudioProgress(18, 'Đang chuẩn bị các cảnh và timeline từ kịch bản...');
-      await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      let shotsResult = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      if (shotsResult?.stale) {
+        const rebuild = confirm(
+          'Kịch bản đã thay đổi sau khi tạo storyboard. Tạo giọng từ kịch bản hiện tại cần dựng lại storyboard và timeline; các audio/hình đang gắn sẽ bị thay. Tiếp tục?'
+        );
+        if (!rebuild) {
+          setMessage('Đã dừng: storyboard hiện vẫn thuộc phiên bản kịch bản cũ, nên chưa tạo giọng.', 'error');
+          return;
+        }
+        shotsResult = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: true})});
+      }
       const timelineResult = await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
       // Without force an existing timeline comes back untouched. After a
       // script rewrite that means the old scenes stay and the voice is then
@@ -3605,7 +3929,7 @@
     finally { button.disabled = false; }
   }
 
-  async function runStudioSceneBatch(provider, isVeo, buttonId) {
+  async function runStudioSceneBatch(provider, isVeo, buttonId, variant = 'long') {
     if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
     const integrationKey = provider.startsWith('gemini_') ? 'google_gemini' : 'openai_gpt';
     const providerReady = isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === integrationKey)?.ready);
@@ -3622,15 +3946,18 @@
     setStudioProgress(5, `Đang tạo timeline trước khi gửi ${isVeo ? 'video' : 'ảnh'} sang ${sceneProviderLabel(provider)}...`);
     setMessage(`Đang tạo timeline và đưa các cảnh sang ${sceneProviderLabel(provider)}...`);
     try {
-      await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {
+        method: 'POST', body: JSON.stringify({force: false, variant}),
+      });
       setStudioProgress(15, 'Timeline đã sẵn sàng, đang xếp hàng tạo cảnh...');
-      const ratio = $('studioSceneRatioSelect')?.value || '1280:720';
+      const ratio = variant === 'short' ? '720:1280' : ($('studioSceneRatioSelect')?.value || '1280:720');
       const selectedImageProvider = $('studioSceneImageProviderSelect')?.value || 'flow_image';
       const referenceImageProvider = selectedImageProvider === 'auto_parallel' ? 'flow_image' : selectedImageProvider;
       const result = await api(`/api/projects/${state.studioProjectId}/scene-jobs/batch`, {
         method: 'POST', body: JSON.stringify({
           ...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio,
-          requires_reference_image: isVeo, reference_image_provider: referenceImageProvider, confirmed: true,
+          requires_reference_image: isVeo, reference_image_provider: referenceImageProvider,
+          variant, confirmed: true,
         }),
       });
       const jobs = result.jobs || [];
@@ -3642,7 +3969,7 @@
       state.studioSceneProgress = { total: jobs.length, finished: new Set(), failed: 0, providerLabel: sceneProviderLabel(provider) };
       setStudioProgress(15, `Đã xếp hàng 0/${jobs.length} cảnh AI...`);
       setMessage(`Đã gửi ${jobs.length} cảnh sang ${sceneProviderLabel(provider)}. Kết quả sẽ tự hiện trong storyboard.`, 'success');
-      jobs.forEach((job) => { if (job.id) void watchStudioSceneGenerationJob(job.id); });
+      jobs.forEach((job) => { if (job.id) void watchStudioSceneGenerationJob(job.id, variant); });
     } catch (error) { setStudioProgress(0, `Tạo ${isVeo ? 'video' : 'ảnh'} AI thất bại: ${error.message}`, 'error'); setMessage(`Không tạo được ${isVeo ? 'video' : 'ảnh'} AI: ${error.message}`, 'error'); }
     finally { updateStudioSceneGenerationAvailability(); }
   }
@@ -3657,7 +3984,7 @@
     await runStudioSceneBatch(provider, true, 'studioGenerateVideosButton');
   }
 
-  async function watchStudioSceneGenerationJob(jobId) {
+  async function watchStudioSceneGenerationJob(jobId, variant = 'long') {
     for (let attempt = 0; attempt < 300; attempt += 1) {
       try {
         const job = await api(`/api/scene-jobs/${jobId}`);
@@ -3671,8 +3998,12 @@
             const outcome = progress.failed ? ` · ${progress.failed} cảnh lỗi` : '';
             setStudioProgress(percent, `Đã xử lý ${completed}/${progress.total} cảnh ${progress.providerLabel || sceneProviderLabel(job.provider)}${outcome}.`, progress.failed ? 'error' : '');
           }
-          const bundle = await api(`/api/projects/${state.studioProjectId}`);
-          renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+          if (variant === 'short') {
+            await loadShortLane();
+          } else {
+            const bundle = await api(`/api/projects/${state.studioProjectId}`);
+            renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+          }
           if (job.status === 'error') setMessage(`Một cảnh AI thất bại: ${job.error || 'Lỗi không xác định'}`, 'error');
           return job;
         }
@@ -3812,12 +4143,27 @@
           method: 'PATCH', body: JSON.stringify({workflow: state.studioWorkflow}),
         }).catch(() => {});
       }
-      setStudioProgress(80, 'Đang tạo kịch bản có thể chỉnh sửa...');
-      const scriptResponse = await api(`/api/projects/${state.studioProjectId}/script/draft`, {method: 'POST'});
+      const createStandaloneShort = Boolean($('studioCreateStandaloneShort')?.checked);
+      const shortSeconds = Number($('studioInitialShortSeconds')?.value || 45);
+      setStudioProgress(80, createStandaloneShort ? 'Đang tạo kịch bản dài và Short riêng từ cùng brief...' : 'Đang tạo kịch bản dài...');
+      const scriptResponse = await api(`/api/projects/${state.studioProjectId}/script/draft`, {
+        method: 'POST',
+        body: JSON.stringify({
+          create_standalone_short: createStandaloneShort,
+          short_seconds: shortSeconds,
+          short_direction: prompt,
+        }),
+      });
       renderStudioScript(scriptResponse.script, response);
+      if (scriptResponse.short) renderShortScriptState(scriptResponse.short);
+      else if (scriptResponse.short_error) setMessage(`Kịch bản dài đã tạo, nhưng Short riêng chưa tạo được: ${scriptResponse.short_error}`, 'error');
       setStudioStep(3);
-      setStudioProgress(100, 'Kịch bản mới và blueprint cảnh đã hoàn tất.');
-      setMessage('Đã tạo câu chuyện mới, kịch bản và blueprint cảnh AI. Bạn có thể chỉnh tay hoặc gửi yêu cầu trong ô chat.', 'success');
+      setStudioProgress(100, scriptResponse.short ? 'Đã tạo kịch bản dài và Short riêng.' : 'Kịch bản dài đã tạo xong.');
+      if (scriptResponse.short) {
+        setMessage(`Đã tạo kịch bản dài và Short riêng ${scriptResponse.short.estimated_seconds || shortSeconds}s từ cùng brief.`, 'success');
+      } else if (!scriptResponse.short_error) {
+        setMessage('Đã tạo kịch bản dài. Bạn có thể bật tạo Short rồi viết lại kịch bản tại bước này nếu cần.', 'success');
+      }
       void Promise.all([loadSummary(), loadVideos(), loadProjects()]);
     } catch (error) { setStudioProgress(0, `Viết kịch bản thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
     finally { button.disabled = false; }
@@ -4102,6 +4448,7 @@
     $('managedChannelId').value = channel.id;
     $('managedChannelName').value = channel.name || '';
     $('managedChannelUrl').value = channel.channel_url || '';
+    $('managedChannelPlatform').value = channel.platform || 'youtube';
     $('managedChannelGroup').value = channel.group_name || '';
     $('managedChannelWorkflow').value = channel.workflow_reference_channel_id || '';
     $('managedChannelProfile').value = channel.output_profile || 'youtube_landscape';
@@ -4139,7 +4486,7 @@
     });
     body.innerHTML = [...groups.entries()].map(([group, channels]) => `<div class="managed-card"><div class="eyebrow">${esc(group)}</div>${channels.map((channel) => `
       <div class="managed-card" style="margin-top:8px;background:rgba(9,11,16,.38)">
-        <div class="managed-card-head"><div><div class="managed-card-title">${esc(channel.name)}</div><div class="managed-card-meta"><a href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.channel_url)}</a><br>Định dạng: ${esc(channel.output_profile)} · Ngôn ngữ: ${esc(channel.language || 'vi')}<br>Preset: ${esc(channel.default_voice_provider || 'edge_tts')} · ${esc(channel.default_voice_model || '')} · ${esc(channel.default_subtitle_provider || 'timeline_text')}<br>Workflow tham khảo: <b>${esc(channel.workflow_reference_title || workflowReferenceName(channel.workflow_reference_channel_id))}</b>${channel.notes ? `<br>Ghi chú: ${esc(channel.notes)}` : ''}</div></div><span class="tag ${channel.enabled ? 'green' : 'red'}">${channel.enabled ? 'ĐANG DÙNG' : 'TẠM TẮT'}</span></div>
+        <div class="managed-card-head"><div><div class="managed-card-title">${esc(channel.name)}</div><div class="managed-card-meta"><a href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.channel_url)}</a><br>Nền tảng: ${esc(channel.platform || 'youtube')} · Định dạng: ${esc(channel.output_profile)} · Ngôn ngữ: ${esc(channel.language || 'vi')}<br>Preset: ${esc(channel.default_voice_provider || 'edge_tts')} · ${esc(channel.default_voice_model || '')} · ${esc(channel.default_subtitle_provider || 'timeline_text')}<br>Workflow tham khảo: <b>${esc(channel.workflow_reference_title || workflowReferenceName(channel.workflow_reference_channel_id))}</b>${channel.notes ? `<br>Ghi chú: ${esc(channel.notes)}` : ''}</div></div><span class="tag ${channel.enabled ? 'green' : 'red'}">${channel.enabled ? 'ĐANG DÙNG' : 'TẠM TẮT'}</span></div>
         <div class="managed-card-actions"><button class="btn small ghost" onclick="editManagedChannel(${channel.id})">Chỉnh sửa</button><button class="btn small ${channel.enabled ? 'danger' : 'primary'}" onclick="toggleManagedChannel(${channel.id}, ${!channel.enabled})">${channel.enabled ? 'Tạm tắt' : 'Bật lại'}</button></div>
       </div>`).join('')}</div>`).join('');
   }
@@ -4159,6 +4506,7 @@
     const payload = {
       name: $('managedChannelName').value.trim(),
       channel_url: $('managedChannelUrl').value.trim(),
+      platform: $('managedChannelPlatform').value,
       group_name: $('managedChannelGroup').value.trim(),
       workflow_reference_channel_id: $('managedChannelWorkflow').value || '',
       output_profile: $('managedChannelProfile').value,
@@ -4390,7 +4738,7 @@
     const channelPresetAction = project.managed_channel_id
       ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px"><button class="btn small ghost" onclick="applyChannelPreset(${project.id})">Áp dụng preset kênh vào render</button><span class="secondary-text">${esc(renderSettings.output_profile)} · ${esc(renderSettings.voice_provider)} · ${esc(renderSettings.subtitle_provider)}</span></div>`
       : '';
-    const managedChannelOptions = `<option value="">Dùng kênh gắn với project</option>${state.managedChannels.map((channel) => `<option value="${channel.id}" ${Number(project.managed_channel_id) === Number(channel.id) ? 'selected' : ''}>${esc(channel.name)}${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`).join('')}`;
+    const managedChannelOptions = `<option value="">Dùng kênh gắn với project</option>${state.managedChannels.map((channel) => `<option value="${channel.id}" ${Number(project.managed_channel_id) === Number(channel.id) ? 'selected' : ''}>${esc(channel.name)} · ${esc(channel.platform || 'youtube')}${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`).join('')}`;
     const thumbnailOptions = `<option value="">Không đổi thumbnail</option>${assets.filter((asset) => asset.asset_type === 'image').map((asset) => `<option value="${asset.id}">${esc(asset.original_name || asset.file_path || `Asset #${asset.id}`)}</option>`).join('')}`;
     const voiceReferenceOptions = `<option value="">Không dùng voice reference</option>${assets.filter((asset) => asset.asset_type === 'audio').map((asset) => `<option value="${asset.id}" ${selectedVoiceReferenceAsset === Number(asset.id) ? 'selected' : ''}>${esc(asset.original_name || asset.file_path || `Audio #${asset.id}`)} · ${fileSize(asset.file_size)}</option>`).join('')}`;
     state.projectId = project.id;
@@ -4399,6 +4747,22 @@
     state.timeline = timeline;
     state.productionJobs = productionJobs;
     state.assets = assets;
+    const suggestedTitles = [...new Set([
+      ...(Array.isArray(writer?.new_titles) ? writer.new_titles : []),
+      script?.script_title || project.title || '',
+    ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 4);
+    const thumbnailBrief = [
+      `Khung hình chính: ${suggestedTitles[0] || project.title || 'nội dung video'}.`,
+      writer?.creative_direction || writer?.summary || script?.hook || '',
+      'Ưu tiên một chủ thể rõ ràng, tương phản cao, ít chữ, dễ đọc ở kích thước nhỏ; không dùng ảnh hay logo không có quyền sử dụng.',
+    ].filter(Boolean).join(' ');
+    state.publicationSuggestions = {
+      sourceVideoId: String(project.youtube_video_id || ''),
+      titles: suggestedTitles,
+      description: String(writer?.new_description || ''),
+      tags: Array.isArray(writer?.hashtags) ? writer.hashtags : [],
+      thumbnailBrief,
+    };
     saveStudioSession();
     const openaiImageIntegration = state.integrations.find((item) => item.key === 'openai_gpt');
     const openaiImageReady = Boolean(openaiImageIntegration?.ready);
@@ -4636,7 +5000,15 @@
     const adapterStatus = state.productionQueue?.voxcpm_runtime_ready ? 'VOXCPM2 GPU SẴN SÀNG' : state.productionQueue?.edge_tts_runtime_ready ? 'EDGE TTS SẴN SÀNG' : state.productionQueue?.pyvideotrans_runtime_ready ? 'PYVIDEOTRANS SẴN SÀNG' : 'TTS CHƯA SẴN SÀNG';
     const ffmpegStatus = state.productionQueue?.ffmpeg_builtin_available ? 'FFMPEG LOCAL SẴN SÀNG' : 'FFMPEG LOCAL KHÔNG TÌM THẤY';
     const publicationRows = publications.length ? publications.map((item) => `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">YouTube Publisher · ${esc(item.status)}</div><div class="job-meta">${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'queued' ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`).join('') : '<div class="empty">Chưa có publication nào.</div>';
-    const publisherActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>Publisher YouTube · chờ duyệt cuối</label><p class="panel-sub">Chỉ đưa video đã render vào hàng đợi. Nếu không chọn thời gian, app dùng lịch mặc định của kênh.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationChannel" aria-label="Kênh đăng">${managedChannelOptions}</select><select id="publicationThumbnail" aria-label="Thumbnail">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Đưa video vào Publisher</button><span class="secondary-text">${publications.length} publication</span></div><div style="margin-top:8px">${publicationRows}</div></div>`;
+    const publisherActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>Publisher YouTube · chờ duyệt cuối</label><p class="panel-sub">Chỉ đưa video đã render vào hàng đợi. Nếu không chọn thời gian, app dùng lịch mặc định của kênh.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationChannel" aria-label="Kênh đăng">${managedChannelOptions}</select><select id="publicationThumbnail" aria-label="Thumbnail">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Đưa video vào Publisher</button><span class="secondary-text">${publications.length} publication</span></div><div id="publisherWaiting" class="studio-model-note" style="margin-top:6px">${publisherWaitingNote(publications)}</div><div style="display:none"></div><div style="margin-top:8px">${publicationRows}</div></div>`;
+    const platformPublicationRows = publications.length ? publications.map((item) => {
+      const platform = String(item.platform || 'youtube').toUpperCase();
+      const variant = item.video_variant === 'short' ? 'Short' : 'Video dài';
+      const delivery = item.status === 'ready_manual' ? 'Sẵn sàng đăng thủ công' : item.status;
+      const videoUrl = item.video_variant === 'short' ? `/api/projects/${project.id}/short-video` : `/api/projects/${project.id}/final-video`;
+      return `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">${esc(platform)} · ${esc(variant)} · ${esc(delivery)}</div><div class="job-meta">${esc(item.output_profile || '')} · ${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'ready_manual' ? `<a class="btn small ghost" href="/api/publications/${item.id}/manual-package" target="_blank" rel="noreferrer">Tải gói đăng</a>` : ''}${['queued', 'ready_manual'].includes(item.status) ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`;
+    }).join('') : '<div class="empty">Chưa có lần xuất bản nào.</div>';
+    const platformPublishingActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>XUẤT BẢN ĐA NỀN TẢNG · chờ duyệt cuối</label><p class="panel-sub">Chọn đúng kênh đích, nền tảng, loại video và tỷ lệ. YouTube sẽ upload qua OAuth; TikTok, Facebook và Instagram tạo gói MP4/metadata sẵn sàng để đăng thủ công cho đến khi kết nối OAuth riêng.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationPlatform" aria-label="Nền tảng" onchange="syncPublicationTarget()"><option value="youtube">YouTube</option><option value="tiktok">TikTok</option><option value="facebook">Facebook</option><option value="instagram">Instagram</option></select><select id="publicationChannel" aria-label="Kênh đăng" onchange="syncPublicationTarget()">${managedChannelOptions}</select><select id="publicationVariant" aria-label="Loại video" onchange="syncPublicationTarget()"><option value="long">Video dài</option><option value="short">Short riêng</option></select><select id="publicationProfile" aria-label="Định dạng xuất bản"><option value="youtube_landscape">YouTube video · 16:9</option><option value="youtube_shorts">YouTube Shorts · 9:16</option><option value="tiktok">TikTok · 9:16</option><option value="instagram_reels">Instagram Reels · 9:16</option><option value="facebook_reels">Facebook Reels · 9:16</option><option value="facebook_feed">Facebook Feed · 1:1</option></select><select id="publicationThumbnail" aria-label="Thumbnail YouTube">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label></div><div class="studio-grid" style="margin-top:8px"><div class="studio-field"><label for="publicationTitle">Tiêu đề</label><input id="publicationTitle" value="${esc(script?.script_title || project.title || '')}" maxlength="100"></div><div class="studio-field"><label for="publicationTags">Hashtag / tag</label><input id="publicationTags" value="${esc((writer?.hashtags || []).join(', '))}" placeholder="ai, short, #video"></div></div><div class="studio-field" style="margin-top:8px"><label for="publicationDescription">Mô tả / caption</label><textarea id="publicationDescription" maxlength="5000">${esc(writer?.new_description || '')}</textarea></div><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Chuẩn bị / đăng video</button><span id="publicationTargetNote" class="secondary-text">YouTube: upload tự động khi OAuth đã kết nối.</span><span class="secondary-text">${publications.length} lần xuất bản</span></div><div style="margin-top:8px">${platformPublicationRows}</div></div>`;
     const directorAction = `
       <div class="analysis-item" style="margin-bottom:14px; border-color:rgba(34,197,94,.5); background:linear-gradient(120deg,rgba(34,197,94,.11),rgba(16,20,27,.9) 52%)">
         <label>AI ĐẠO DIỄN · DỰNG VIDEO TRỌN LUỒNG</label>
@@ -4736,7 +5108,7 @@
           <select id="renderMusicAsset" aria-label="Nhạc nền">${musicOptions}</select>
           <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Âm lượng <input id="renderMusicVolume" type="number" min="0" max="0.5" step="0.01" value="${esc(renderSettings.music_volume ?? 0.12)}" style="width:72px" /></label>
           <select id="renderTransitionStyle" aria-label="Chuyển cảnh"><option value="fade" ${renderSettings.transition_style === 'fade' ? 'selected' : ''}>Fade ngắn</option><option value="none" ${renderSettings.transition_style === 'none' ? 'selected' : ''}>Cắt thẳng</option></select>
-          <select id="renderOutputProfile" aria-label="Định dạng đầu ra"><option value="youtube_landscape" ${renderSettings.output_profile === 'youtube_landscape' ? 'selected' : ''}>YouTube ngang · 16:9</option><option value="youtube_shorts" ${renderSettings.output_profile === 'youtube_shorts' ? 'selected' : ''}>Short dọc · 9:16</option><option value="instagram_reels" ${renderSettings.output_profile === 'instagram_reels' ? 'selected' : ''}>Reels dọc · 9:16</option><option value="tiktok" ${renderSettings.output_profile === 'tiktok' ? 'selected' : ''}>TikTok dọc · 9:16</option></select>
+          <select id="renderOutputProfile" aria-label="Định dạng đầu ra"><option value="youtube_landscape" ${renderSettings.output_profile === 'youtube_landscape' ? 'selected' : ''}>YouTube video · 16:9</option><option value="youtube_shorts" ${renderSettings.output_profile === 'youtube_shorts' ? 'selected' : ''}>YouTube Shorts · 9:16</option><option value="tiktok" ${renderSettings.output_profile === 'tiktok' ? 'selected' : ''}>TikTok · 9:16</option><option value="instagram_reels" ${renderSettings.output_profile === 'instagram_reels' ? 'selected' : ''}>Instagram Reels · 9:16</option><option value="facebook_reels" ${renderSettings.output_profile === 'facebook_reels' ? 'selected' : ''}>Facebook Reels · 9:16</option><option value="facebook_feed" ${renderSettings.output_profile === 'facebook_feed' ? 'selected' : ''}>Facebook Feed · 1:1</option></select>
           <select id="renderVoiceProvider" aria-label="Model lồng tiếng"><option value="edge_tts" ${renderSettings.voice_provider === 'edge_tts' ? 'selected' : ''}>Edge TTS · cloud/online</option><option value="pyvideotrans" ${renderSettings.voice_provider === 'pyvideotrans' ? 'selected' : ''}>pyVideoTrans · local GPU</option><option value="voxcpm" ${renderSettings.voice_provider === 'voxcpm' ? 'selected' : ''}>VoxCPM2 · local GPU · đa ngôn ngữ</option></select>
           <select id="renderVoiceModel" aria-label="Giọng/model lồng tiếng">
             <option value="vi-VN-HoaiMyNeural" ${selectedVoiceModel === 'vi-VN-HoaiMyNeural' ? 'selected' : ''}>VI · Hoài My</option>
@@ -4788,10 +5160,12 @@
         <p class="panel-sub">Chọn provider và giọng ở trên trước khi chạy. VoxCPM2/pyVideoTrans là local GPU; Edge TTS là cloud/online. Render FFmpeg dùng NVENC GPU.</p>
         <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">${productionActions}</div>
         ${thumbnailPanel}
-        ${publisherActions}
+        ${platformPublishingActions}
         <div style="margin-top:8px">${productionJobRows}</div>
       </div>
       <div data-project-view="overview" class="analysis-item project-view-panel" style="margin-top:10px"><label>Ghi chú project</label><p class="panel-sub">${esc(project.notes || 'Chưa có ghi chú.')}</p></div>`;
+    syncPublicationTarget();
+    renderPublicationSuggestions(project.id);
     switchProjectView(state.projectView || 'overview');
     $('projectDetail').classList.add('open');
     $('projectDetail').scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -5039,6 +5413,7 @@ Chạy các bước này?`)) return;
   }
   const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
+  const AUDIO_SOURCE_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
   const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
@@ -5151,7 +5526,7 @@ Chạy các bước này?`)) return;
   async function generateStudioShotImage(shotId) {
     const projectId = state.studioProjectId;
     if (!projectId) return;
-    const shot = state.shots?.find((item) => Number(item.id) === Number(shotId));
+    const shot = findStudioShot(shotId);
     const promptText = (shot?.visual_prompt || '').trim();
     const provider = $(`studioShotImageProvider-${shotId}`)?.value || 'gemini_image';
     const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
@@ -5168,7 +5543,7 @@ Chạy các bước này?`)) return;
   async function generateStudioShotVideo(shotId) {
     const projectId = state.studioProjectId;
     if (!projectId) return;
-    const shot = state.shots?.find((item) => Number(item.id) === Number(shotId));
+    const shot = findStudioShot(shotId);
     const promptText = (shot?.visual_prompt || '').trim();
     const provider = $(`studioShotVideoProvider-${shotId}`)?.value || 'gflow_cli';
     const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
@@ -5572,18 +5947,565 @@ Chạy các bước này?`)) return;
     return queueProductionJob(projectId, 'render', provider, true);
   }
 
+  function renderPublicationSuggestions(projectId) {
+    const titleInput = $('publicationTitle');
+    const anchor = titleInput?.closest('.studio-grid');
+    if (!anchor || $('publicationSuggestions')) return;
+    const suggestion = state.publicationSuggestions || {};
+    const titles = Array.isArray(suggestion.titles) ? suggestion.titles : [];
+    const titleChoices = titles.length
+      ? titles.map((title, index) => `<button class="btn small ${index === 0 ? 'primary' : 'ghost'}" type="button" data-value="${esc(title)}" onclick="applyPublicationTitleSuggestion(this)">${esc(title)}</button>`).join('')
+      : '<span class="secondary-text">Chưa có gợi ý tiêu đề. Hãy tạo AI Writer từ bước kịch bản.</span>';
+    const metadataButton = suggestion.description || (suggestion.tags || []).length
+      ? `<button class="btn small ghost" type="button" data-description="${esc(suggestion.description || '')}" data-tags="${esc((suggestion.tags || []).join(', '))}" onclick="applyPublicationMetadataSuggestion(this)">Áp dụng mô tả &amp; hashtag AI</button>`
+      : '';
+    const thumbnailAction = suggestion.thumbnailBrief
+      ? `<div class="secondary-text" style="margin-top:6px">${esc(suggestion.thumbnailBrief)}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px"><button class="btn small ghost" type="button" data-brief="${esc(suggestion.thumbnailBrief)}" onclick="applyPublicationThumbnailBrief(this)">Dùng brief cho thumbnail</button><button class="btn small primary" type="button" data-brief="${esc(suggestion.thumbnailBrief)}" onclick="generatePublicationThumbnailFrames(${Number(projectId)}, this)">Tạo 3 phương án frame</button></div>`
+      : '<div class="secondary-text" style="margin-top:6px">Chưa có brief thumbnail. Tạo AI Writer để nhận đề xuất theo nội dung video.</div>';
+    anchor.insertAdjacentHTML('afterend', `<div id="publicationSuggestions" class="analysis-item" style="margin-top:8px;border-color:rgba(168,85,247,.42)"><label>ĐỀ XUẤT AI TRƯỚC KHI XUẤT BẢN</label><p class="panel-sub">Chọn một tiêu đề, áp dụng caption/hashtag và chuẩn bị brief thumbnail. Bạn vẫn có thể chỉnh lại mọi nội dung trước khi đăng.</p><div class="queue-controls" style="justify-content:flex-start;flex-wrap:wrap">${titleChoices}<button class="btn small ghost" type="button" onclick="generatePublicationAiSuggestions(${Number(projectId)})">Tạo / làm mới đề xuất AI</button></div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px">${metadataButton}</div><div style="margin-top:8px"><b style="font-size:12px">Đề xuất thumbnail</b>${thumbnailAction}</div></div>`);
+  }
+
+  function applyPublicationTitleSuggestion(button) {
+    const title = String(button?.dataset?.value || '');
+    const input = $('publicationTitle');
+    if (input && title) input.value = title;
+  }
+
+  function applyPublicationMetadataSuggestion(button) {
+    const description = String(button?.dataset?.description || '');
+    const tags = String(button?.dataset?.tags || '');
+    if ($('publicationDescription') && description) $('publicationDescription').value = description;
+    if ($('publicationTags') && tags) $('publicationTags').value = tags;
+    setMessage('Đã áp dụng mô tả và hashtag do AI đề xuất.', 'success');
+  }
+
+  function applyPublicationThumbnailBrief(button) {
+    const brief = String(button?.dataset?.brief || '');
+    if ($('thumbnailPrompt') && brief) $('thumbnailPrompt').value = brief;
+    setMessage('Đã đưa brief vào phần Thumbnail. Bạn có thể tạo phương án frame hoặc chỉnh brief trước.', 'success');
+  }
+
+  async function generatePublicationAiSuggestions(projectId) {
+    const videoId = String(state.publicationSuggestions?.sourceVideoId || '');
+    if (!videoId) return setMessage('Không tìm được video nguồn để tạo đề xuất.', 'error');
+    const selected = $('analysisProviderSelect')?.value || '';
+    const provider = ['anthropic_claude', 'openai_gpt', 'codex_cli', 'claude_code_cli', 'antigravity'].includes(selected) ? selected : null;
+    setMessage('AI đang tạo đề xuất tiêu đề, caption, hashtag và brief thumbnail...');
+    try {
+      await api(`/api/videos/${encodeURIComponent(videoId)}/writer`, {method: 'POST', body: JSON.stringify({provider})});
+      await refresh();
+      await openProjectDetail(projectId, 'export');
+      setMessage('Đã cập nhật đề xuất xuất bản bằng AI.', 'success');
+    } catch (error) { setMessage(`Không tạo được đề xuất AI: ${error.message}`, 'error'); }
+  }
+
+  async function generatePublicationThumbnailFrames(projectId, button) {
+    applyPublicationThumbnailBrief(button);
+    await generateProjectThumbnails(projectId);
+  }
+
+  const PUBLICATION_PLATFORM_DEFAULTS = {
+    youtube: {profile: 'youtube_landscape', note: 'YouTube: upload tự động khi OAuth đã kết nối.'},
+    tiktok: {profile: 'tiktok', note: 'TikTok: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+    facebook: {profile: 'facebook_reels', note: 'Facebook: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+    instagram: {profile: 'instagram_reels', note: 'Instagram: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+  };
+
+  function syncPublicationTarget() {
+    const platformSelect = $('publicationPlatform');
+    let platform = platformSelect?.value || 'youtube';
+    const channelId = Number($('publicationChannel')?.value || 0);
+    const variant = $('publicationVariant')?.value || 'long';
+    const channel = state.managedChannels.find((item) => Number(item.id) === channelId);
+    const profile = $('publicationProfile');
+    const note = $('publicationTargetNote');
+    if (channel?.platform && channel.platform !== platform) {
+      platform = channel.platform;
+      if (platformSelect) platformSelect.value = platform;
+    }
+    const defaults = PUBLICATION_PLATFORM_DEFAULTS[platform] || PUBLICATION_PLATFORM_DEFAULTS.youtube;
+    if (profile) profile.value = channel?.output_profile || (variant === 'short' && platform === 'youtube' ? 'youtube_shorts' : defaults.profile);
+    if (note) note.textContent = channel ? `${esc(channel.name)} · ${defaults.note}` : defaults.note;
+  }
+
+  const PUBLISHER_PLATFORM_LABELS = {
+    tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram',
+  };
+
+  // Only YouTube has an uploader. Rows for the other platforms sit as a
+  // ready-to-post package, which looks like a stuck queue unless it is named.
+  function publisherWaitingNote(publications) {
+    const waiting = {};
+    (publications || []).forEach((item) => {
+      if (item.status !== 'ready_manual') return;
+      const key = String(item.platform || '').toLowerCase();
+      if (!key || key === 'youtube') return;
+      waiting[key] = (waiting[key] || 0) + 1;
+    });
+    const parts = Object.entries(waiting)
+      .map(([key, count]) => `${PUBLISHER_PLATFORM_LABELS[key] || key}: ${count}`);
+    if (!parts.length) return 'Chỉ YouTube được đăng tự động; các nền tảng khác sẽ tạo gói để bạn tải lên tay.';
+    return `Chờ đăng thủ công — ${parts.join(' · ')}. App chưa nối API các nền tảng này, `
+      + 'nên chúng không bị đưa nhầm lên YouTube; bấm “Tải gói đăng” rồi đăng tay.';
+  }
+
+  // The publish controls existed but were built into a variable that was
+  // never inserted anywhere, so the app had no upload button at all: the last
+  // wizard step only offered a link across to the channel list, which has no
+  // upload button either. They belong on the step that says "Xuất bản".
+  const PUBLISH_PROFILE_LABELS = {
+    youtube_landscape: 'YouTube ngang · 16:9',
+    youtube_shorts: 'YouTube Shorts · 9:16',
+    instagram_reels: 'Instagram Reels · 9:16',
+    tiktok: 'TikTok · 9:16',
+    facebook_reels: 'Facebook Reels · 9:16',
+    facebook_feed: 'Facebook feed · 1:1',
+  };
+
+  async function cutShortSourceScenes() {
+    // The same control is intentionally workflow-aware: Reup cuts the local
+    // source; Content queues vertical AI visuals on the Short's own timeline.
+    await queueShortVariantJob('source_visuals');
+    await loadShortLane();
+  }
+
+  async function refreshStudioPublish(projectId) {
+    // openProjectDetail belongs to the other screen; from the wizard the panel
+    // has to reload itself or a queued publication stays invisible. The short
+    // lane comes with it, because the publish step now shows that video too.
+    try { renderStudioPublish(await api(`/api/projects/${projectId}`)); }
+    catch (_) { /* the message about the queued publication already landed */ }
+    await loadShortLane();
+  }
+
+  // Each video has its own publish flow. They are different files of
+  // different shapes going to different places - a 16:9 master cannot be a
+  // Reel, and a 9:16 short is not a YouTube video - so one shared form with a
+  // "which one" dropdown kept offering combinations that could not work.
+  const PUBLISH_TARGETS = [
+    {platform: 'youtube', label: 'YouTube', profiles: ['youtube_landscape', 'youtube_shorts']},
+    {platform: 'tiktok', label: 'TikTok', profiles: ['tiktok']},
+    {platform: 'facebook', label: 'Facebook', profiles: ['facebook_reels', 'facebook_feed']},
+    {platform: 'instagram', label: 'Instagram', profiles: ['instagram_reels']},
+  ];
+
+  // Which shapes each rendered file can honestly claim to be. The server
+  // measures the file and refuses a mismatch, so offering one here would only
+  // produce a 400 after the user had filled the whole form in.
+  //
+  // Derived rather than listed: writing the list out by hand had already lost
+  // Instagram from the short's destinations, which the server would have
+  // accepted perfectly well. facebook_feed is in neither because it is 1:1 -
+  // square fits neither the landscape master nor the vertical short.
+  const VERTICAL_PUBLISH_PROFILES = ['youtube_shorts', 'instagram_reels', 'tiktok', 'facebook_reels'];
+  const VARIANT_PROFILES = {
+    long: ['youtube_landscape'],
+    short: VERTICAL_PUBLISH_PROFILES,
+  };
+
+  function renderStudioPublish(bundle) {
+    const box = $('studioPublishPanel');
+    if (!box) return;
+    const project = bundle?.project || {};
+    if (!project.id) { box.innerHTML = ''; return; }
+    state.publishBundle = bundle;
+    renderCopyrightPanel();
+    syncFinalVideoLink(bundle);
+    const publications = bundle.publications || [];
+    const thumbnails = bundle.thumbnails || [];
+    const writer = (bundle.writer_content || {}).result || {};
+    // The writer already produced titles, a description and hashtags for this
+    // video. None of it used to reach here, so the form opened pre-filled with
+    // the SOURCE video's title - the one thing that must not be reused.
+    state.publishTitles = (writer.new_titles || []).map((item) => String(item || '').trim()).filter(Boolean);
+    state.publishDescription = String(writer.new_description || '');
+    state.publishHashtags = (writer.hashtags || []).join(', ');
+    const thumbGrid = thumbnails.length
+      ? thumbnails.map((item) => `<button type="button" class="studio-thumb${item.selected ? ' is-selected' : ''}"`
+          + ` onclick="selectStudioThumbnail(${item.id}, ${project.id})" title="Chọn ảnh này">`
+          + `<img src="/api/assets/${item.asset_id}/download" alt="thumbnail" /></button>`).join('')
+      : '<div class="studio-empty">Chưa có thumbnail. Bấm “Tạo thumbnail” để cắt từ video đã dựng.</div>';
+
+    box.innerHTML = `<div class="studio-option-card"><b>Thumbnail</b>
+      <div class="studio-model-note" style="margin-top:4px">Cắt từ chính video đã dựng. Bấm vào một ảnh để chọn làm thumbnail khi đăng.</div>
+      <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+        <select id="thumbnailVariants" aria-label="Số ảnh"><option value="3">3 ảnh</option><option value="5">5 ảnh</option></select>
+        <button class="btn" type="button" onclick="generateStudioThumbnails(${project.id})">Tạo thumbnail</button>
+      </div>
+      <div id="studioThumbnailGrid" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${thumbGrid}</div>
+    </div>
+    <div class="studio-option-card" style="margin-top:12px"><b>Các lần đăng</b>
+      <div class="studio-model-note" style="margin-top:6px">${publisherWaitingNote(publications)}</div>
+      <div style="margin-top:8px">${publications.length
+        ? publications.map((item) => publicationRow(item, project)).join('')
+        : '<div class="studio-empty">Chưa có lần đăng nào.</div>'}</div>
+    </div>`;
+  }
+
+  // The long video's link is static markup, so it needs filling in once the
+  // bundle says the file exists - otherwise it points at "#" and does nothing.
+  function syncFinalVideoLink(bundle) {
+    const link = $('studioFinalDownload');
+    if (!link) return;
+    const project = bundle?.project || {};
+    const available = Boolean(bundle?.final_video?.available);
+    link.href = available ? (bundle.final_video.url || `/api/projects/${project.id}/final-video`) : '#';
+    link.hidden = !available;
+  }
+
+  function publishChannelGroups() {
+    const names = (state.managedChannels || [])
+      .map((channel) => String(channel.group_name || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(names)).sort();
+  }
+
+  function publishChannelsFor(platform, group) {
+    return (state.managedChannels || []).filter((channel) => {
+      if (String(channel.platform || 'youtube').toLowerCase() !== platform) return false;
+      if (!group) return true;
+      return String(channel.group_name || '').trim() === group;
+    });
+  }
+
+  // A destination is a channel, not just a platform: an account has several,
+  // and they are grouped by topic. Offering the platform without saying which
+  // channel of it would have published to whichever one happened to be first.
+  function renderPublishTargets() {
+    const variant = state.publishVariant || 'long';
+    const isShort = variant === 'short';
+    const allowed = VARIANT_PROFILES[variant] || [];
+    const group = $('publishDialogGroup')?.value || '';
+    const container = $('publishTargetList');
+    if (!container) return;
+    container.innerHTML = PUBLISH_TARGETS.map((target) => {
+      const usable = target.profiles.filter((profile) => allowed.includes(profile));
+      const channels = publishChannelsFor(target.platform, group);
+      const wrongShape = !usable.length;
+      const noChannel = !channels.length;
+      const blocked = wrongShape || noChannel;
+      const options = (wrongShape ? target.profiles : usable)
+        .map((profile) => `<option value="${profile}">${esc(PUBLISH_PROFILE_LABELS[profile] || profile)}</option>`)
+        .join('');
+      const channelOptions = channels
+        .map((channel) => `<option value="${channel.id}">${esc(channel.name)}`
+          + `${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`)
+        .join('');
+      let note = '';
+      if (wrongShape) {
+        note = `Cần bản ${isShort ? '16:9' : 'dọc 9:16'} \u2014 dùng ${isShort ? 'video dài' : 'Short'} cho nền tảng này.`;
+      } else if (noChannel) {
+        note = group
+          ? `Chưa có kênh ${esc(target.label)} trong nhóm \u201c${esc(group)}\u201d.`
+          : `Chưa khai báo kênh ${esc(target.label)} trong Cài đặt.`;
+      } else if (target.platform !== 'youtube') {
+        note = 'Tạo gói để đăng tay';
+      }
+      return `<div class="publish-target${blocked ? ' is-blocked' : ''}">
+        <label><input type="checkbox" class="publish-target-check" data-platform="${target.platform}"
+          ${blocked ? 'disabled' : ''} ${!blocked && target.platform === 'youtube' ? 'checked' : ''} /> ${esc(target.label)}</label>
+        <select class="publish-target-channel" data-platform="${target.platform}" ${blocked ? 'disabled' : ''}
+          aria-label="Kênh ${esc(target.label)}">${channelOptions || '<option value="">\u2014</option>'}</select>
+        <select class="publish-target-profile" data-platform="${target.platform}" ${blocked ? 'disabled' : ''}
+          aria-label="Định dạng ${esc(target.label)}">${options}</select>
+        ${note ? `<span class="studio-model-note">${note}</span>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  async function saveSegmentCut(segmentId) {
+    const start = $(`studioCutStart-${segmentId}`)?.value;
+    const payload = {
+      source_start_seconds: String(start ?? '').trim() === '' ? -1 : Number(start),
+      edit_trim_head: Number($(`studioTrimHead-${segmentId}`)?.value || 0),
+      edit_trim_tail: Number($(`studioTrimTail-${segmentId}`)?.value || 0),
+      recut: true,
+    };
+    setMessage('Đang cắt lại cảnh này từ video gốc...', '');
+    try {
+      const result = await api(`/api/timeline/${segmentId}/cut`, {
+        method: 'PATCH', body: JSON.stringify(payload),
+      });
+      if (result.recut_error) { setMessage(result.recut_error, 'error'); return; }
+      setMessage('Đã cắt lại cảnh. Xem trước ngay bên trên.', 'success');
+      // Redraw both lanes: the segment belongs to one of them and the caller
+      // does not know which.
+      const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+      await loadShortLane();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  // Reviewing a short means hearing it end to end, not pressing play on each
+  // scene. The scenes are separate files, so they are queued rather than
+  // concatenated - no render, nothing written to disk.
+  function playWholeShortVoice() {
+    const lane = state.shortLane;
+    const projectId = Number(state.studioProjectId || 0);
+    const scenes = (lane?.timeline || []).filter((item) => String(item.audio_path || '').trim());
+    if (!projectId || !scenes.length) return setMessage('Chưa có giọng đọc nào để nghe.', 'error');
+    if (state.shortVoicePlayer) { state.shortVoicePlayer.pause(); state.shortVoicePlayer = null; }
+    let index = 0;
+    const player = new Audio();
+    state.shortVoicePlayer = player;
+    const box = $('studioShortPlayAllState');
+    const step = () => {
+      if (index >= scenes.length || state.shortVoicePlayer !== player) {
+        if (box) box.textContent = 'Đã nghe hết bản Short.';
+        state.shortVoicePlayer = null;
+        return;
+      }
+      const scene = scenes[index];
+      if (box) box.textContent = `Đang phát cảnh ${scene.segment_index}/${scenes.length}…`;
+      player.src = `/api/projects/${projectId}/timeline/${scene.id}/audio-preview`;
+      index += 1;
+      player.play().catch(() => { if (box) box.textContent = 'Trình duyệt chặn tự phát — bấm lại.'; });
+    };
+    player.addEventListener('ended', step);
+    player.addEventListener('error', step);
+    step();
+  }
+
+  function stopWholeShortVoice() {
+    if (state.shortVoicePlayer) { state.shortVoicePlayer.pause(); state.shortVoicePlayer = null; }
+    const box = $('studioShortPlayAllState');
+    if (box) box.textContent = 'Đã dừng.';
+  }
+
+  const RISK_LABELS = {low: 'RỦI RO THẤP', medium: 'CẦN XEM LẠI', high: 'RỦI RO CAO'};
+
+  // Publishing is the last point where any of this can still be changed, so
+  // the check sits here rather than earlier: before it, the numbers it rests
+  // on - how many seconds came from the source, whether the marks were
+  // covered - do not exist yet.
+  function renderCopyrightPanel() {
+    const box = $('studioCopyrightPanel');
+    if (!box) return;
+    const checks = state.copyrightChecks || {};
+    const rows = ['long', 'short'].map((variant) => {
+      const label = variant === 'short' ? 'Short' : 'Video dài';
+      const result = checks[variant];
+      if (!result) {
+        return `<div class="risk-finding"><b>${label}</b> — chưa kiểm tra.
+          <button class="btn small" type="button" onclick="runCopyrightCheck('${variant}')">Kiểm tra bản quyền</button></div>`;
+      }
+      const facts = result.facts || {};
+      const findings = (result.findings || []).concat(
+        (result.model_review?.findings || []).map((item) => ({...item, code: item.policy || 'policy'})));
+      return `<div class="risk-finding sev-${esc(result.verdict)}">
+        <b>${label}</b> <span class="risk-badge risk-${esc(result.verdict)}">${RISK_LABELS[result.verdict] || result.verdict}</span>
+        <button class="btn small ghost" type="button" onclick="runCopyrightCheck('${variant}')">Kiểm lại</button>
+        <div class="studio-model-note" style="margin-top:6px">
+          Hình từ video gốc ${Math.round((facts.source_share || 0) * 100)}% ·
+          lời trùng transcript ${Math.round((facts.narration_overlap || 0) * 100)}% ·
+          ${facts.carries_source_audio ? 'còn tiếng gốc' : 'đã bỏ tiếng gốc'} ·
+          che dấu ${(facts.source_scenes || 0) - (facts.scenes_with_marks_uncovered || 0)}/${facts.source_scenes || 0} cảnh
+        </div>
+        ${result.model_review?.summary ? `<div class="studio-model-note" style="margin-top:6px">${esc(result.model_review.summary)}</div>` : ''}
+        ${findings.map((item) => `<div class="risk-finding sev-${esc(item.severity)}">
+          ${esc(item.detail || '')}<br><small>→ ${esc(item.fix || '')}</small></div>`).join('')}
+      </div>`;
+    }).join('');
+    box.innerHTML = `<div class="studio-option-card"><b>Kiểm tra bản quyền &amp; chính sách</b>
+      <div class="studio-model-note" style="margin-top:4px">Đo phần còn lại của video gốc trong bản dựng — thời lượng hình đi mượn, tiếng gốc, dấu của kênh gốc, độ trùng lời — rồi đối chiếu chính sách nội dung dùng lại của YouTube.</div>
+      <div style="margin-top:10px">${rows}</div></div>`;
+  }
+
+  async function runCopyrightCheck(variant) {
+    const project = state.publishBundle?.project || {};
+    if (!project.id) return setMessage('Hãy mở một dự án trước.', 'error');
+    setMessage('Đang đo phần dùng lại từ video gốc...', '');
+    try {
+      const title = variant === 'short'
+        ? String(state.shortLane?.script?.script_title || '')
+        : String((state.publishTitles || [])[0] || '');
+      const result = await api(`/api/projects/${project.id}/copyright-check`, {
+        method: 'POST',
+        body: JSON.stringify({video_variant: variant, use_model: true, publish_title: title}),
+      });
+      state.copyrightChecks = {...(state.copyrightChecks || {}), [variant]: result};
+      renderCopyrightPanel();
+      setMessage(`Kết quả: ${RISK_LABELS[result.verdict] || result.verdict}.`,
+        result.verdict === 'high' ? 'error' : 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  function openPublishDialog(variant) {
+    const bundle = state.publishBundle;
+    const project = bundle?.project || {};
+    if (!project.id) return setMessage('Hãy mở một dự án trước.', 'error');
+    const isShort = variant === 'short';
+    if (isShort && !state.shortLane?.output_path) {
+      return setMessage('Chưa dựng xong Short để đăng.', 'error');
+    }
+    if (!isShort && !bundle?.final_video?.available) {
+      return setMessage('Chưa dựng xong video dài để đăng.', 'error');
+    }
+    state.publishVariant = variant;
+    const defaultTitle = isShort
+      ? String(state.shortLane?.script?.script_title || '')
+      : String((state.publishTitles || [])[0] || '');
+    const groups = publishChannelGroups();
+    const projectGroup = (state.managedChannels || [])
+      .find((channel) => Number(channel.id) === Number(project.managed_channel_id))?.group_name || '';
+
+    $('publishDialogTitle').textContent = isShort ? 'Đăng Short' : 'Đăng video dài';
+    $('publishDialogBody').innerHTML = `
+      <div class="studio-field"><label for="publishDialogGroup">Nhóm thẻ kênh</label>
+        <select id="publishDialogGroup" onchange="renderPublishTargets()">
+          <option value="">Tất cả nhóm</option>
+          ${groups.map((name) => `<option value="${esc(name)}" ${name === projectGroup ? 'selected' : ''}>${esc(name)}</option>`).join('')}
+        </select></div>
+      <b style="display:block;margin-top:12px;font-size:12px;letter-spacing:.06em;color:var(--muted)">NỀN TẢNG · KÊNH · ĐỊNH DẠNG</b>
+      <div id="publishTargetList" style="margin-top:8px"></div>
+      ${state.publishTitles?.length && !isShort ? `<div class="studio-field" style="margin-top:12px"><label for="publishDialogTitlePick">Tiêu đề AI gợi ý</label>
+        <select id="publishDialogTitlePick" onchange="useSuggestedTitle()"><option value="">\u2014 chọn một tiêu đề \u2014</option>
+        ${state.publishTitles.map((title) => `<option value="${esc(title)}">${esc(title)}</option>`).join('')}</select></div>` : ''}
+      <div class="studio-field" style="margin-top:8px"><label for="publishDialogTitleInput">Tiêu đề</label>
+        <input id="publishDialogTitleInput" type="text" maxlength="100" value="${esc(defaultTitle)}"
+          placeholder="Tiêu đề cho video này \u2014 không dùng lại tiêu đề video gốc" /></div>
+      <div class="studio-field" style="margin-top:8px"><label for="publishDialogDescription">Mô tả</label>
+        <textarea id="publishDialogDescription" rows="4">${esc(state.publishDescription || '')}</textarea></div>
+      <div class="studio-field" style="margin-top:8px"><label for="publishDialogTags">Hashtag / tag</label>
+        <input id="publishDialogTags" type="text" value="${esc(state.publishHashtags || '')}" /></div>
+      <div class="studio-grid" style="margin-top:8px">
+        <div class="studio-field"><label for="publishDialogPrivacy">Quyền riêng tư</label>
+          <select id="publishDialogPrivacy"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select></div>
+        <div class="studio-field"><label for="publishDialogSchedule">Đăng lúc</label>
+          <input id="publishDialogSchedule" type="datetime-local" /></div>
+      </div>`;
+    renderPublishTargets();
+    $('publishDialogNote').textContent = 'Chỉ YouTube đăng tự động; nền tảng khác tạo gói để bạn tải MP4 rồi đăng tay.';
+    $('publishDialog').showModal();
+  }
+
+  function useSuggestedTitle() {
+    const picked = $('publishDialogTitlePick')?.value || '';
+    if (picked && $('publishDialogTitleInput')) $('publishDialogTitleInput').value = picked;
+  }
+
+  async function submitPublishDialog() {
+    const project = state.publishBundle?.project || {};
+    const variant = state.publishVariant || 'long';
+    const chosen = Array.from(document.querySelectorAll('.publish-target-check'))
+      .filter((box) => box.checked)
+      .map((box) => ({
+        platform: box.dataset.platform,
+        profile: document.querySelector(`.publish-target-profile[data-platform="${box.dataset.platform}"]`)?.value || '',
+        channelId: Number(document.querySelector(
+          `.publish-target-channel[data-platform="${box.dataset.platform}"]`)?.value || 0) || null,
+      }));
+    if (!chosen.length) return setMessage('Hãy chọn ít nhất một nền tảng.', 'error');
+    // Not a block: it is the user's channel and their call. But an unchecked
+    // or high-risk video must not go out because nobody mentioned it.
+    const check = (state.copyrightChecks || {})[variant];
+    if (!check) {
+      if (!confirm('Chưa kiểm tra bản quyền cho bản này. Vẫn đăng?')) return;
+    } else if (check.verdict === 'high') {
+      const reasons = (check.findings || []).map((item) => `• ${item.detail}`).join('\n');
+      if (!confirm(`Kiểm tra bản quyền: RỦI RO CAO\n\n${reasons}\n\nVẫn đăng?`)) return;
+    }
+    const scheduled = $('publishDialogSchedule')?.value || '';
+    const payload = {
+      confirmed: true,
+
+      video_variant: variant,
+      title: $('publishDialogTitleInput')?.value || '',
+      description: $('publishDialogDescription')?.value || '',
+      tags: String($('publishDialogTags')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
+      privacy_status: $('publishDialogPrivacy')?.value || null,
+      scheduled_at: scheduled ? new Date(scheduled).toISOString() : null,
+    };
+    const done = [];
+    const failed = [];
+    for (const target of chosen) {
+      try {
+        await api(`/api/projects/${project.id}/publish`, {
+          method: 'POST',
+          body: JSON.stringify({
+            ...payload,
+            platform: target.platform,
+            output_profile: target.profile,
+            // Each destination carries its own channel: one publish can go to
+            // a YouTube channel and a TikTok account that are not the same
+            // account at all.
+            managed_channel_id: target.channelId,
+          }),
+        });
+        done.push(target.platform);
+      } catch (error) {
+        // One platform failing must not lose the ones that worked.
+        failed.push(`${target.platform}: ${error.message}`);
+      }
+    }
+    $('publishDialog').close();
+    if (done.length) setMessage(`Đã xếp hàng đăng: ${done.join(', ')}.`, failed.length ? '' : 'success');
+    if (failed.length) setMessage(failed.join(' · '), 'error');
+    await refreshStudioPublish(project.id);
+  }
+
+  async function generateStudioThumbnails(projectId) {
+    const variants = Number($('thumbnailVariants')?.value || 3);
+    setMessage('Đang cắt thumbnail từ video đã dựng...', '');
+    try {
+      await api(`/api/projects/${projectId}/thumbnails/generate`, {
+        method: 'POST',
+        body: JSON.stringify({variants, prompt: (state.publishTitles || [])[0] || ''}),
+      });
+      setMessage('Đã tạo thumbnail. Bấm vào một ảnh để chọn.', 'success');
+      await refreshStudioPublish(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function selectStudioThumbnail(thumbnailId, projectId) {
+    try {
+      await api(`/api/thumbnails/${thumbnailId}/select`, {method: 'POST'});
+      setMessage('Đã chọn thumbnail cho lần đăng này.', 'success');
+      await refreshStudioPublish(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  function publicationRow(item, project) {
+    const platform = item.platform || 'youtube';
+    const variant = item.video_variant === 'short' ? 'Short' : 'Video dài';
+    const delivery = item.status === 'ready_manual' ? 'Sẵn sàng đăng thủ công' : item.status;
+    const videoUrl = item.video_variant === 'short'
+      ? `/api/projects/${project.id}/short-video` : `/api/projects/${project.id}/final-video`;
+    return `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span>`
+      + `<div class="job-main"><div class="job-title">${esc(platform)} · ${esc(variant)} · ${esc(delivery)}</div>`
+      + `<div class="job-meta">${esc(item.output_profile || '')} · ${esc(item.scheduled_at || item.created_at || '')}`
+      + `${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>`
+      + `${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>`
+      + `${item.status === 'ready_manual' ? `<a class="btn small ghost" href="/api/publications/${item.id}/manual-package" target="_blank" rel="noreferrer">Tải gói đăng</a>` : ''}`
+      + `${['queued', 'ready_manual'].includes(item.status) ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}`
+      + `${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`;
+  }
+
   async function queueProjectPublication(projectId) {
-    if (!confirm('Đưa final.mp4 vào Publisher? Video chỉ được upload khi kịch bản đã duyệt và YouTube OAuth đã kết nối.')) return;
+    const platform = $('publicationPlatform')?.value || 'youtube';
+    const variant = $('publicationVariant')?.value || 'long';
+    const verb = platform === 'youtube' ? 'đưa vào hàng đợi upload YouTube' : 'chuẩn bị gói đăng thủ công';
+    if (!confirm(`${verb} cho ${variant === 'short' ? 'Short' : 'video dài'}?`)) return;
     try {
       const scheduledInput = $('publicationScheduledAt')?.value || '';
+      const tags = String($('publicationTags')?.value || '').split(',').map((item) => item.trim()).filter(Boolean);
       const response = await api(`/api/projects/${projectId}/publish`, {method: 'POST', body: JSON.stringify({
         confirmed: true,
         managed_channel_id: Number($('publicationChannel')?.value || 0) || null,
+        platform,
+        output_profile: $('publicationProfile')?.value || null,
+        video_variant: variant,
         thumbnail_asset_id: Number($('publicationThumbnail')?.value || 0) || null,
+        title: $('publicationTitle')?.value || '',
+        description: $('publicationDescription')?.value || '',
+        tags,
         privacy_status: $('publicationPrivacy')?.value || null,
         scheduled_at: scheduledInput ? new Date(scheduledInput).toISOString() : null,
       })});
-      setMessage(`Đã đưa publication #${response.publication?.id || ''} vào hàng đợi.`, 'success');
+      setMessage(response.status === 'ready_manual'
+        ? `Đã chuẩn bị gói ${platform} #${response.publication?.id || ''}; tải MP4 để đăng.`
+        : `Đã đưa publication #${response.publication?.id || ''} vào hàng đợi YouTube.`, 'success');
+      await refreshStudioPublish(projectId);
       await openProjectDetail(projectId);
     } catch (error) { setMessage(error.message, 'error'); }
   }
@@ -5881,6 +6803,10 @@ Chạy các bước này?`)) return;
       const bundle = await api(`/api/projects/${state.studioProjectId}`);
       state.timeline = bundle.latest_timeline || [];
       renderStudioStoryboard(bundle.latest_shots || [], state.timeline);
+      // The short is its own lane with its own jobs, and a finished one has
+      // to show there too - otherwise its steps stay grey after the work is
+      // actually done, which is what makes people re-run it.
+      await loadShortLane();
     } catch (_) { /* the poll must keep running even if one refresh fails */ }
   }
 
@@ -6397,7 +7323,7 @@ Chạy các bước này?`)) return;
   ['studioCreativeDirectionInput', 'studioScriptInstructionInput', 'studioTargetDurationSeconds', 'studioChatMessage'].forEach((id) => {
     $(id)?.addEventListener('input', saveStudioSession);
   });
-  ['studioRemakeModeSelect', 'studioManagedChannelSelect', 'studioWriterProviderSelect', 'studioVoiceRateSelect', 'studioVoiceReferenceAsset', 'studioVoicePromptText'].forEach((id) => {
+  ['studioRemakeModeSelect', 'studioManagedChannelSelect', 'studioWriterProviderSelect', 'studioCreateStandaloneShort', 'studioInitialShortSeconds', 'studioVoiceRateSelect', 'studioVoiceReferenceAsset', 'studioVoicePromptText'].forEach((id) => {
     $(id)?.addEventListener('change', saveStudioSession);
   });
   $('studioVoiceProviderSelect')?.addEventListener('change', () => {
@@ -6433,7 +7359,9 @@ Chạy các bước này?`)) return;
   restorePanel('videos');
   try { state.studioWorkflow = localStorage.getItem('ytFactory.workflow') || 'content'; } catch (_) {}
   void loadWorkflows();
-  try { setWorkspace(localStorage.getItem('ytFactory.workspace') || 'dashboard', false); } catch (_) { setWorkspace('dashboard', false); }
+  const savedWorkspace = localStorage.getItem('ytFactory.workspace') || 'dashboard';
+  const initialWorkspace = workspaces[savedWorkspace] ? savedWorkspace : 'dashboard';
+  try { setWorkspace(initialWorkspace, false); } catch (_) { setWorkspace('dashboard', false); }
   startBrowserLease();
   async function initializeApp() {
     const sessionBeforeRestore = savedStudioSession();

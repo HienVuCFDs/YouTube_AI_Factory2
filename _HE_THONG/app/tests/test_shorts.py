@@ -41,9 +41,13 @@ def _timeline(count: int = 4, seconds: float = 10.0) -> list[dict]:
 
 class ProfileTests(unittest.TestCase):
     def test_every_short_format_is_ten_eighty_by_nineteen_twenty(self) -> None:
-        for profile in ("youtube_shorts", "instagram_reels", "tiktok"):
+        for profile in ("youtube_shorts", "instagram_reels", "tiktok", "facebook_reels"):
             self.assertEqual(profile_size(profile), (1080, 1920))
             self.assertTrue(is_vertical(profile))
+
+    def test_facebook_feed_is_square(self) -> None:
+        self.assertEqual(profile_size("facebook_feed"), (1080, 1080))
+        self.assertFalse(is_vertical("facebook_feed"))
 
     def test_the_long_format_stays_landscape(self) -> None:
         self.assertEqual(profile_size("youtube_landscape"), (1920, 1080))
@@ -247,19 +251,19 @@ class ShortIsReachableFromThePageTests(unittest.TestCase):
             / "youtube_monitor" / "templates" / "index.html"
         ).read_text(encoding="utf-8")
 
-    def test_both_steps_have_a_button(self) -> None:
-        self.assertIn('id="studioPlanShortButton"', self.page)
-        self.assertIn('id="studioRenderShortButton"', self.page)
-        self.assertIn("planProjectShort()", self.page)
-        self.assertIn("queueShortRender()", self.page)
+    def test_short_controls_live_in_the_main_wizard_lane(self) -> None:
+        self.assertNotIn('id="studioPlanShortButton"', self.page)
+        self.assertNotIn('id="studioRenderShortButton"', self.page)
+        self.assertIn("queueShortVariantJob('voiceover')", self.page)
+        self.assertIn("queueShortVariantJob('render_short')", self.page)
 
-    def test_the_buttons_call_the_endpoints_that_exist(self) -> None:
-        self.assertIn("/short/plan", self.page)
+    def test_the_wizard_uses_the_standalone_short_lane(self) -> None:
+        self.assertIn("/short-lane", self.page)
+        self.assertIn("variant: 'short'", self.page)
         self.assertIn("'render_short'", self.page)
 
-    def test_every_vertical_profile_is_offered(self) -> None:
-        for profile in ("youtube_shorts", "instagram_reels", "tiktok"):
-            self.assertIn(f'<option value="{profile}">', self.page)
+    def test_the_short_visual_lane_is_vertical(self) -> None:
+        self.assertIn("variant === 'short' ? '720:1280'", self.page)
 
     def test_the_short_endpoints_are_registered(self) -> None:
         from youtube_monitor.main import app
@@ -274,8 +278,7 @@ if __name__ == "__main__":
 
 
 class ShortRenderIsQueuedCorrectlyTests(unittest.TestCase):
-    """The button sent confirmation as a query parameter, so every press came
-    back "job needs confirmed=true" and no short was ever rendered."""
+    """The lane sends the Short variant and confirmation in the request body."""
 
     def setUp(self) -> None:
         self.page = (
@@ -284,7 +287,9 @@ class ShortRenderIsQueuedCorrectlyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def test_confirmation_travels_in_the_body_where_the_model_reads_it(self) -> None:
-        self.assertIn("job_type: 'render_short', provider: 'ffmpeg_builtin', confirmed: true", self.page)
+        start = self.page.index("async function queueShortVariantJob")
+        body = self.page[start:start + 1800]
+        self.assertIn("job_type: jobType, provider, confirmed: true, variant: 'short'", body)
         self.assertNotIn("/jobs?confirmed=true", self.page)
 
     def test_the_request_carries_only_fields_the_model_declares(self) -> None:
@@ -293,12 +298,11 @@ class ShortRenderIsQueuedCorrectlyTests(unittest.TestCase):
         allowed = set(CreateProductionJobRequest.model_fields)
         self.assertIn("confirmed", allowed)
         self.assertNotIn("script_id", allowed)
-        start = self.page.index("async function queueShortRender")
-        body = self.page[start:start + 1600]
+        start = self.page.index("async function queueShortVariantJob")
+        body = self.page[start:start + 1800]
         self.assertNotIn("script_id", body)
 
-    def test_it_plans_the_short_when_none_exists_yet(self) -> None:
-        """Rendering without a plan could only ever fail in the worker."""
-        start = self.page.index("async function queueShortRender")
-        body = self.page[start:start + 1600]
-        self.assertIn("/short/plan", body)
+    def test_it_targets_the_short_script_explicitly(self) -> None:
+        start = self.page.index("async function queueShortVariantJob")
+        body = self.page[start:start + 1800]
+        self.assertIn("variant: 'short'", body)

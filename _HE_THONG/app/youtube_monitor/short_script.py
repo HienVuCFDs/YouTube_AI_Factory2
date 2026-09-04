@@ -36,7 +36,7 @@ DEFAULT_SHORT_SCRIPT_SECONDS = 45
 
 # What is left for the body once the hook and the sign-off have taken theirs.
 _HOOK_SHARE = 0.18
-_CTA_SHARE = 0.12
+_CTA_SHARE = 0.25
 
 ScriptWriter = Callable[[dict[str, Any]], dict[str, Any]]
 _writer: ScriptWriter | None = None
@@ -83,7 +83,9 @@ def _take_words(sentences: list[str], budget: int) -> str:
     used = 0
     for sentence in sentences:
         length = len(sentence.split())
-        if kept and used + length > budget:
+        # The first sentence used to be accepted unconditionally. That made
+        # an overlong model-generated hook bypass the hard time limit entirely.
+        if used + length > max(0, budget):
             break
         kept.append(sentence)
         used += length
@@ -104,7 +106,10 @@ def condense(script: dict[str, Any], seconds: float = DEFAULT_SHORT_SCRIPT_SECON
         for field in ("intro", "main_content")
     ).strip()
     if not hook and not body_source:
-        raise ShortScriptError("Kịch bản dài chưa có nội dung để rút thành short")
+        raise ShortScriptError(
+            "Chưa có tư liệu để viết bản short. Hãy phân tích video nguồn "
+            "hoặc viết kịch bản dài trước."
+        )
 
     hook_text = _take_words(_sentences(hook), max(6, int(budget * _HOOK_SHARE)))
     if not hook_text:
@@ -113,10 +118,10 @@ def condense(script: dict[str, Any], seconds: float = DEFAULT_SHORT_SCRIPT_SECON
     # 45-second short come out at 58, and the platform - not the app - is
     # what cuts it.
     cta = _take_words(_sentences(script.get("cta")), max(4, int(budget * _CTA_SHARE)))
-    remaining = max(10, budget - len(hook_text.split()) - len(cta.split()))
+    remaining = max(0, budget - len(hook_text.split()) - len(cta.split()))
     body = _take_words(_sentences(body_source), remaining)
     if not body:
-        body = hook_text
+        body = _take_words(_sentences(hook_text), remaining)
     return {
         "script_title": str(script.get("script_title") or "")[:200],
         "hook": hook_text,
@@ -140,7 +145,10 @@ def build_short_script(
 ) -> dict[str, Any]:
     """Write the short's own words, falling back to condensing if it cannot."""
     if not script:
-        raise ShortScriptError("Cần kịch bản dài của dự án trước khi viết bản short")
+        raise ShortScriptError(
+            "Chưa có tư liệu để viết bản short. Hãy phân tích video nguồn "
+            "hoặc viết kịch bản dài trước."
+        )
     budget = word_budget(seconds)
     if not use_model or _writer is None:
         return condense(script, seconds)
@@ -159,8 +167,11 @@ def build_short_script(
     }
     try:
         verdict = dict(_writer(request) or {})
-    except Exception as exc:
-        raise ShortScriptError(f"Không viết được kịch bản short: {exc}") from exc
+    except Exception:
+        # The standalone Short remains useful when its optional writer is
+        # offline. This is the same graceful degradation as an unavailable
+        # writer at startup, only after the request has begun.
+        return condense(script, seconds)
 
     body = _clean(verdict.get("main_content"), 6000)
     hook = _clean(verdict.get("hook"), 600)
@@ -172,9 +183,14 @@ def build_short_script(
     # runs long is the one failure mode that cannot be fixed later - the
     # platform cuts it. So the words are trimmed here, in whole sentences,
     # and every spoken part counts against the budget including the sign-off.
+    hook = _take_words(_sentences(hook), max(6, int(budget * _HOOK_SHARE)))
     cta = _take_words(_sentences(verdict.get("cta")), max(4, int(budget * _CTA_SHARE)))
     spent = len(hook.split()) + len(cta.split())
-    body = _take_words(_sentences(body), max(10, budget - spent))
+    body = _take_words(_sentences(body), max(0, budget - spent))
+    if not body:
+        # A malformed answer with no body should not produce a video whose
+        # only spoken line is a hook. Use the deterministic fallback instead.
+        return condense(script, seconds)
     return {
         "script_title": _clean(verdict.get("script_title") or script.get("script_title"), 200),
         "hook": hook,

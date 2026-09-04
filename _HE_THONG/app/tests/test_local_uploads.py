@@ -37,6 +37,16 @@ def _clip(path: Path, seconds: int = 2) -> Path:
     return path
 
 
+def _audio_clip(path: Path, seconds: int = 2) -> Path:
+    subprocess.run(
+        [str(FFMPEG), "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-c:a", "aac", str(path)],
+        check=True, capture_output=True,
+    )
+    return path
+
+
 def _image(path: Path, colour: str = "red") -> Path:
     subprocess.run(
         [str(FFMPEG), "-y", "-hide_banner", "-loglevel", "error",
@@ -60,6 +70,7 @@ def test_an_uploaded_video_becomes_a_usable_source(tmp_path: Path) -> None:
     assert video["media_status"] == "downloaded_for_editing"
     assert Path(video["local_media_path"]).is_file(), "file phai nam tren dia de con cat canh duoc"
     assert result["duration_seconds"] == 3, "thoi luong phai doc tu chinh file"
+    assert result["media_kind"] == "video"
 
 
 @pytest.mark.skipif(FFMPEG is None, reason="Can FFmpeg de tao file thu")
@@ -70,6 +81,17 @@ def test_the_title_falls_back_to_the_file_name(tmp_path: Path) -> None:
         result = upload_local_source(file=UploadFile(filename="Su tich trau cau.mp4", file=handle), title="")
 
     assert result["video"]["title"] == "Su tich trau cau"
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="Can FFmpeg de tao file thu")
+def test_an_uploaded_audio_is_identified_as_audio(tmp_path: Path) -> None:
+    recording = _audio_clip(tmp_path / "noi-dung.m4a", seconds=2)
+
+    with recording.open("rb") as handle:
+        result = upload_local_source(file=UploadFile(filename="noi-dung.m4a", file=handle), title="")
+
+    assert result["media_kind"] == "audio"
+    assert result["duration_seconds"] == 2
 
 
 def test_a_file_that_is_not_media_is_refused() -> None:
@@ -86,6 +108,17 @@ def test_an_empty_file_is_refused() -> None:
         upload_local_source(file=UploadFile(filename="rong.mp4", file=io.BytesIO(b"")), title="")
 
     assert caught.value.status_code == 400
+
+
+def test_a_renamed_non_media_file_is_refused_and_removed() -> None:
+    """The extension cannot turn arbitrary bytes into a usable source."""
+    before = set(Path(main.PRODUCTION_ARTIFACT_DIR).glob("_tai_len/*"))
+
+    with pytest.raises(HTTPException) as caught:
+        upload_local_source(file=_upload("khong-phai-video.mp4"), title="")
+
+    assert caught.value.status_code == 400
+    assert set(Path(main.PRODUCTION_ARTIFACT_DIR).glob("_tai_len/*")) == before
 
 
 def test_nothing_is_left_behind_when_the_upload_is_refused() -> None:

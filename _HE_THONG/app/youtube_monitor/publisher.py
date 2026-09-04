@@ -19,6 +19,12 @@ THUMBNAIL_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/thumbnails/se
 CHANNELS_ENDPOINT = "https://www.googleapis.com/youtube/v3/channels"
 
 
+# Only YouTube has an uploader. The publication table accepts tiktok,
+# facebook and instagram because a project may be planned for them, but
+# nothing here can deliver to those yet.
+SUPPORTED_PLATFORMS: tuple[str, ...] = ("youtube",)
+
+
 class PublisherError(RuntimeError):
     pass
 
@@ -125,6 +131,18 @@ class YouTubePublisher:
             raise PublisherError(f"Không kết nối được YouTube thumbnail API: {exc}") from exc
 
     def upload_video(self, publication: dict[str, Any]) -> dict[str, Any]:
+        # This uploader speaks to YouTube and nothing else. A publication
+        # carries the platform it was made for, and sending a TikTok or
+        # Facebook one here would publish it to the user's YouTube channel -
+        # a real video, on the wrong account, that they then have to go and
+        # delete. The queue filters these out; this refuses them outright, so
+        # a direct call cannot get past it either.
+        platform = str(publication.get("platform") or "youtube").strip().lower()
+        if platform not in SUPPORTED_PLATFORMS:
+            raise PublisherError(
+                f"Chưa hỗ trợ đăng lên {platform}; app mới chỉ nối được YouTube. "
+                "Bản đăng này được giữ lại, không bị đưa nhầm lên YouTube."
+            )
         path = Path(str(publication.get("local_file_path") or "")).expanduser()
         if not path.is_file():
             raise PublisherError(f"Không tìm thấy file video để upload: {path}")
@@ -179,7 +197,7 @@ class YouTubePublisher:
                         content=stream,
                     )
                 if upload.status_code >= 400:
-                    raise PublisherError(f"YouTube upload tháº¥t báº¡i: {upload.status_code} {upload.text[-1500:]}")
+                    raise PublisherError(f"YouTube upload thất bại: {upload.status_code} {upload.text[-1500:]}")
                 result = upload.json()
                 thumbnail_path = str(publication.get("thumbnail_path") or "").strip()
                 if thumbnail_path:
@@ -227,7 +245,9 @@ class PublisherWorker:
 
     def _process_due(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        for publication in self.database.list_due_project_publications(now, limit=3):
+        for publication in self.database.list_due_project_publications(
+            now, limit=3, platforms=SUPPORTED_PLATFORMS,
+        ):
             claimed = self.database.claim_project_publication(int(publication["id"]))
             if not claimed:
                 continue
@@ -253,4 +273,8 @@ class PublisherWorker:
             "last_run_at": self.last_run_at,
             "last_error": self.last_error,
             "queue": self.database.publication_status(),
+            # Named rather than hidden: a queue that never empties looks
+            # broken unless it says what it is waiting for.
+            "awaiting_platform": self.database.publications_awaiting_platform(SUPPORTED_PLATFORMS),
+            "supported_platforms": list(SUPPORTED_PLATFORMS),
         }

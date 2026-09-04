@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import unittest
+from pathlib import Path
+
 import pytest
 
 from youtube_monitor import workflows
@@ -31,6 +34,11 @@ def test_the_retelling_workflow_carries_the_faithful_writing_mode() -> None:
 def test_each_workflow_says_where_its_pictures_come_from() -> None:
     assert workflows.get("content").scene_asset_type == "ai_scene"
     assert workflows.get("reup").scene_asset_type == "source_clip"
+
+
+def test_each_workflow_explains_its_short_companion_flow() -> None:
+    for workflow in workflows.all_workflows():
+        assert str(workflow.extra.get("short_flow") or "").strip(), workflow.key
 
 
 def test_a_retelling_does_not_go_looking_for_motifs_to_invent_from() -> None:
@@ -64,6 +72,7 @@ def test_the_browser_is_served_the_same_definitions() -> None:
     for item in served["workflows"]:
         assert item["script_mode"] == workflows.get(item["key"]).script_mode
         assert item["steps"] == list(workflows.get(item["key"]).steps)
+        assert item["short_flow"] == workflows.get(item["key"]).extra["short_flow"]
 
 
 def test_a_project_stores_a_resolved_key(tmp_path) -> None:
@@ -89,3 +98,49 @@ def test_workflows_are_immutable() -> None:
     """Shared definitions that could be edited in place would drift apart."""
     with pytest.raises(Exception):
         workflows.get("reup").script_mode = "new_angle_same_topic"  # type: ignore[misc]
+
+
+class CuttingByDialogueAsksBeforeReplacingTheScriptTests(unittest.TestCase):
+    """It fills every scene with the SOURCE's transcript, not the script.
+
+    That is the reup path - cut at the source's spoken turns, then press
+    "Dịch lời bình" to move the narration into the publish language. Run
+    against a project whose script was already written in another language,
+    it silently threw those words away and left the storyboard narrating the
+    original, transcription errors and all.
+
+    The guard for this existed but only looked for an attached voiceover, and
+    the page called the endpoint with force=true every single time, so it
+    never had anything to refuse.
+    """
+
+    def setUp(self) -> None:
+        self.page = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.source = (
+            Path(__file__).resolve().parent.parent / "youtube_monitor" / "main.py"
+        ).read_text(encoding="utf-8")
+
+    def test_the_page_no_longer_forces_past_the_refusal(self) -> None:
+        self.assertEqual(self.source.count("from-dialogue"), self.source.count("from-dialogue"))
+        self.assertEqual(self.page.count("from-dialogue?force=true"), 1)
+        self.assertIn("timeline/from-dialogue`, {method: 'POST'}", self.page)
+
+    def test_the_user_is_asked_before_the_scenes_are_replaced(self) -> None:
+        self.assertIn("Vẫn cắt lại theo lời thoại?", self.page)
+
+    def test_the_guard_fires_on_scenes_not_only_on_voice(self) -> None:
+        """With no voice attached there was nothing to refuse, and the
+        written script was replaced without a word."""
+        self.assertIn("if existing:", self.source)
+        self.assertIn("cảnh hiện có sẽ bị thay hết", self.source)
+
+    def test_the_refusal_says_where_the_words_will_come_from(self) -> None:
+        self.assertIn("không phải từ kịch bản bạn đã viết", self.source)
+        self.assertIn("Dịch lời bình", self.source)
+
+    def test_the_next_step_is_named_once_the_cut_is_made(self) -> None:
+        """Otherwise the source language is discovered at the voiceover."""
+        self.assertIn("Lời trong storyboard đang là lời gốc", self.page)

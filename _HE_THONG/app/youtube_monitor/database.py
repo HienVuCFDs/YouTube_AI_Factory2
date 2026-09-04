@@ -80,6 +80,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
                     channel_url TEXT NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'youtube',
                     youtube_channel_id TEXT NOT NULL DEFAULT '',
                     group_name TEXT NOT NULL DEFAULT '',
                     workflow_reference_channel_id TEXT NOT NULL DEFAULT '',
@@ -349,6 +350,9 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL,
                     managed_channel_id INTEGER,
+                    platform TEXT NOT NULL DEFAULT 'youtube',
+                    output_profile TEXT NOT NULL DEFAULT 'youtube_landscape',
+                    video_variant TEXT NOT NULL DEFAULT 'long',
                     local_file_path TEXT NOT NULL,
                     thumbnail_path TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL DEFAULT '',
@@ -693,10 +697,17 @@ class Database:
                 """
             )
             self._ensure_column(connection, "videos", "local_media_path", "TEXT")
+            # What the downloaded file actually is. The reup workflow cuts
+            # pictures out of it, which is impossible for a podcast or a
+            # music file - and the app accepted both without noticing.
+            self._ensure_column(connection, "videos", "media_kind", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "production_projects", "managed_channel_id", "INTEGER")
             self._ensure_column(connection, "production_projects", "gflow_project_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "production_projects", "gflow_profile", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_publications", "thumbnail_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_publications", "platform", "TEXT NOT NULL DEFAULT 'youtube'")
+            self._ensure_column(connection, "project_publications", "output_profile", "TEXT NOT NULL DEFAULT 'youtube_landscape'")
+            self._ensure_column(connection, "project_publications", "video_variant", "TEXT NOT NULL DEFAULT 'long'")
             self._ensure_column(connection, "project_timeline_segments", "subtitle_path", "TEXT NOT NULL DEFAULT ''")
             # A short written for its own sake, rather than cut out of the long
             # video afterwards, is a second script for the same project. Its
@@ -795,6 +806,7 @@ class Database:
             # retried on every worker tick after its first cooldown.
             self._ensure_column(connection, "provider_usage_limits", "last_failure_at", "TEXT")
             for column, ddl in (
+                ("platform", "TEXT NOT NULL DEFAULT 'youtube'"),
                 ("schedule_enabled", "INTEGER NOT NULL DEFAULT 0"),
                 ("schedule_frequency", "TEXT NOT NULL DEFAULT 'weekly'"),
                 ("schedule_time", "TEXT NOT NULL DEFAULT '19:00'"),
@@ -890,9 +902,16 @@ class Database:
     @staticmethod
     def _validate_output_profile(value: str) -> str:
         profile = value.strip().lower()
-        if profile not in {"youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"}:
+        if profile not in {"youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"}:
             raise ValueError("Định dạng đầu ra không được hỗ trợ")
         return profile
+
+    @staticmethod
+    def _validate_platform(value: str) -> str:
+        platform = value.strip().lower()
+        if platform not in {"youtube", "tiktok", "facebook", "instagram"}:
+            raise ValueError("Nền tảng xuất bản không được hỗ trợ")
+        return platform
 
     def _validate_workflow_reference(self, channel_id: str) -> str:
         reference = channel_id.strip()
@@ -926,6 +945,7 @@ class Database:
         self,
         name: str,
         channel_url: str,
+        platform: str = "youtube",
         youtube_channel_id: str = "",
         group_name: str = "",
         workflow_reference_channel_id: str = "",
@@ -956,17 +976,18 @@ class Database:
                 cursor = connection.execute(
                     """
                     INSERT INTO managed_channels (
-                        name, channel_url, youtube_channel_id, group_name,
+                        name, channel_url, platform, youtube_channel_id, group_name,
                         workflow_reference_channel_id, output_profile, language,
                         default_voice_provider, default_voice_model, default_subtitle_provider,
                         default_subtitle_model, default_transition_style, notes, schedule_enabled, schedule_frequency, schedule_time,
                         schedule_timezone, schedule_days, default_privacy, auto_upload,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         clean_name,
                         clean_url,
+                        self._validate_platform(platform),
                         youtube_channel_id.strip(),
                         group_name.strip(),
                         reference,
@@ -999,6 +1020,7 @@ class Database:
         channel_id: int,
         name: str | None = None,
         channel_url: str | None = None,
+        platform: str | None = None,
         youtube_channel_id: str | None = None,
         group_name: str | None = None,
         workflow_reference_channel_id: str | None = None,
@@ -1025,6 +1047,7 @@ class Database:
         values = {
             "name": existing["name"] if name is None else name.strip(),
             "channel_url": existing["channel_url"] if channel_url is None else channel_url.strip(),
+            "platform": (existing.get("platform") or "youtube") if platform is None else self._validate_platform(platform),
             "youtube_channel_id": existing["youtube_channel_id"] if youtube_channel_id is None else youtube_channel_id.strip(),
             "group_name": existing["group_name"] if group_name is None else group_name.strip(),
             "workflow_reference_channel_id": existing["workflow_reference_channel_id"] if workflow_reference_channel_id is None else self._validate_workflow_reference(workflow_reference_channel_id),
@@ -1051,7 +1074,7 @@ class Database:
             connection.execute(
                 """
                 UPDATE managed_channels
-                SET name = ?, channel_url = ?, youtube_channel_id = ?, group_name = ?,
+                SET name = ?, channel_url = ?, platform = ?, youtube_channel_id = ?, group_name = ?,
                     workflow_reference_channel_id = ?, output_profile = ?, language = ?,
                     default_voice_provider = ?, default_voice_model = ?, default_subtitle_provider = ?,
                     default_subtitle_model = ?, default_transition_style = ?, notes = ?, enabled = ?, schedule_enabled = ?, schedule_frequency = ?,
@@ -1060,7 +1083,7 @@ class Database:
                 WHERE id = ?
                 """,
                 (
-                    values["name"], values["channel_url"], values["youtube_channel_id"],
+                    values["name"], values["channel_url"], values["platform"], values["youtube_channel_id"],
                     values["group_name"], values["workflow_reference_channel_id"],
                     values["output_profile"], values["language"], values["default_voice_provider"],
                     values["default_voice_model"], values["default_subtitle_provider"],
@@ -1362,19 +1385,34 @@ class Database:
         item.pop("raw_payload_json", None)
         return item
 
-    def mark_video_downloaded(self, video_id: str, file_path: str) -> None:
+    def mark_video_downloaded(
+        self, video_id: str, file_path: str, media_kind: str = ""
+    ) -> None:
+        """Record the downloaded file and, when known, what kind it is.
+
+        The kind decides which workflow can run at all: a source with no
+        picture cannot have scenes cut out of it, however willing the rest of
+        the pipeline is to try.
+        """
         with self._connect() as connection:
             connection.execute(
-                "UPDATE videos SET media_status = 'downloaded_for_editing', local_media_path = ? "
-                "WHERE youtube_video_id = ?",
-                (file_path, video_id),
+                "UPDATE videos SET media_status = 'downloaded_for_editing', local_media_path = ?, "
+                "media_kind = ? WHERE youtube_video_id = ?",
+                (file_path, str(media_kind or "").strip().lower(), video_id),
+            )
+
+    def set_video_media_kind(self, video_id: str, media_kind: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE videos SET media_kind = ? WHERE youtube_video_id = ?",
+                (str(media_kind or "").strip().lower(), video_id),
             )
 
     def mark_video_media_deleted(self, video_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE videos SET media_status = 'not_downloaded', local_media_path = NULL "
-                "WHERE youtube_video_id = ?",
+                "UPDATE videos SET media_status = 'not_downloaded', local_media_path = NULL, "
+                "media_kind = '' WHERE youtube_video_id = ?",
                 (video_id,),
             )
 
@@ -2628,25 +2666,40 @@ class Database:
         scheduled_at: str | None = None,
         managed_channel_id: int | None = None,
         thumbnail_path: str = "",
+        platform: str = "youtube",
+        output_profile: str = "youtube_landscape",
+        video_variant: str = "long",
+        status: str = "queued",
     ) -> dict[str, Any] | None:
         if not self.get_production_project(project_id):
             return None
         if managed_channel_id is not None and not self.get_managed_channel(int(managed_channel_id)):
             raise ValueError("Không tìm thấy kênh xuất bản đã chọn")
         privacy = self._validate_privacy(privacy_status)
+        clean_platform = self._validate_platform(platform)
+        profile = self._validate_output_profile(output_profile)
+        variant = video_variant.strip().lower()
+        if variant not in {"long", "short"}:
+            raise ValueError("Loại video xuất bản không được hỗ trợ")
+        if status not in {"queued", "ready_manual"}:
+            raise ValueError("Trạng thái publication không được hỗ trợ")
         now = utc_now()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO project_publications (
-                    project_id, managed_channel_id, local_file_path, thumbnail_path, title,
+                    project_id, managed_channel_id, platform, output_profile, video_variant,
+                    local_file_path, thumbnail_path, title,
                     description, tags_json, category_id, privacy_status,
                     scheduled_at, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
                     managed_channel_id,
+                    clean_platform,
+                    profile,
+                    variant,
                     local_file_path.strip(),
                     thumbnail_path.strip(),
                     title.strip(),
@@ -2655,6 +2708,7 @@ class Database:
                     str(category_id or "27").strip(),
                     privacy,
                     scheduled_at.strip() if scheduled_at else None,
+                    status,
                     now,
                     now,
                 ),
@@ -2697,17 +2751,36 @@ class Database:
             result.append(item)
         return result
 
-    def list_due_project_publications(self, now_iso: str, limit: int = 10) -> list[dict[str, Any]]:
+    def list_due_project_publications(
+        self,
+        now_iso: str,
+        limit: int = 10,
+        platforms: tuple[str, ...] = ("youtube",),
+    ) -> list[dict[str, Any]]:
+        """Publications due now that the app can actually deliver.
+
+        A publication records which platform it is for, but the only uploader
+        that exists is YouTube's. Without this filter the queue handed a
+        TikTok or Facebook publication straight to the YouTube uploader, which
+        does not check either - so the video was published, to the wrong
+        place, on the user's real channel. Held-back rows stay queued and are
+        counted by ``publications_awaiting_platform``.
+        """
+        allowed = tuple(str(item).strip().lower() for item in platforms if str(item).strip())
+        if not allowed:
+            return []
+        placeholders = ", ".join("?" for _ in allowed)
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM project_publications
                 WHERE status = 'queued'
+                  AND LOWER(platform) IN ({placeholders})
                   AND (scheduled_at IS NULL OR scheduled_at <= ?)
                 ORDER BY COALESCE(scheduled_at, created_at) ASC, id ASC
                 LIMIT ?
                 """,
-                (now_iso, max(1, min(int(limit), 50))),
+                (*allowed, now_iso, max(1, min(int(limit), 50))),
             ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -2721,14 +2794,18 @@ class Database:
 
     def retry_project_publication(self, publication_id: int) -> dict[str, Any] | None:
         """Requeue a failed/cancelled publication for immediate re-upload."""
+        existing = self.get_project_publication(publication_id)
+        if not existing or existing.get("status") not in {"error", "cancelled"}:
+            return None
+        retry_status = "queued" if str(existing.get("platform") or "youtube") == "youtube" else "ready_manual"
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE project_publications
-                SET status = 'queued', scheduled_at = NULL, error = '', updated_at = ?
+                SET status = ?, scheduled_at = NULL, error = '', updated_at = ?
                 WHERE id = ? AND status IN ('error', 'cancelled')
                 """,
-                (utc_now(), publication_id),
+                (retry_status, utc_now(), publication_id),
             )
             if cursor.rowcount != 1:
                 return None
@@ -2777,6 +2854,29 @@ class Database:
                 "SELECT status, COUNT(*) AS count FROM project_publications GROUP BY status"
             ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def publications_awaiting_platform(
+        self, supported: tuple[str, ...] = ("youtube",)
+    ) -> dict[str, int]:
+        """Queued publications for platforms this app cannot upload to yet.
+
+        They are not an error and not lost - they simply cannot be delivered,
+        and saying so is the difference between a queue that looks stuck and
+        one that explains itself.
+        """
+        allowed = tuple(str(item).strip().lower() for item in supported if str(item).strip())
+        placeholders = ", ".join("?" for _ in allowed) or "''"
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT LOWER(platform) AS platform, COUNT(*) AS count
+                FROM project_publications
+                WHERE status = 'queued' AND LOWER(platform) NOT IN ({placeholders})
+                GROUP BY LOWER(platform)
+                """,
+                allowed,
+            ).fetchall()
+        return {str(row["platform"]): int(row["count"]) for row in rows}
 
     def create_project_asset(
         self,
@@ -2984,7 +3084,7 @@ class Database:
         if style not in {"none", "fade"}:
             raise ValueError("Kiểu chuyển cảnh không được hỗ trợ")
         profile = output_profile.strip().lower()
-        if profile not in {"youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok"}:
+        if profile not in {"youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"}:
             raise ValueError("Định dạng đầu ra không được hỗ trợ")
         provider = voice_provider.strip().lower()
         if provider not in {"edge_tts", "pyvideotrans", "voxcpm"}:

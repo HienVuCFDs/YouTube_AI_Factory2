@@ -361,19 +361,50 @@ class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
             self._call(voiced=2, force=True)
         self.assertNotEqual(ctx.exception.status_code, 409)
 
-    def test_a_timeline_with_no_voice_is_not_blocked(self) -> None:
+    def test_it_refuses_even_when_no_voice_has_been_made_yet(self) -> None:
+        """This test used to assert the opposite, and it was wrong.
+
+        Losing a voiceover is not the only damage. Cutting by dialogue fills
+        every scene with the source's own transcript, so a project whose
+        script was written in another language ends up narrating the original
+        - in the original language, transcription errors included. With no
+        voice attached there was nothing for the guard to find, so that
+        happened in silence, and the finished storyboard read as Vietnamese
+        for an English script.
+        """
         with self.assertRaises(main.HTTPException) as ctx:
             self._call(voiced=0)
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("3 cảnh hiện có sẽ bị thay hết", ctx.exception.detail)
+
+    def test_an_empty_timeline_has_nothing_to_protect(self) -> None:
+        """The first cut on a fresh project must not need confirming."""
+        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}):
+            with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 9}):
+                with mock.patch.object(main.database, "list_project_timeline", return_value=[]):
+                    with mock.patch.object(main.database, "get_video_analysis", return_value=None):
+                        with self.assertRaises(main.HTTPException) as ctx:
+                            main.build_timeline_from_dialogue(1, force=False)
+
         self.assertNotEqual(ctx.exception.status_code, 409)
 
     def test_the_page_confirms_before_it_forces(self) -> None:
+        """And it asks with the server's words, not its own.
+
+        The page used to force on every call, so the refusal it was meant to
+        surface never reached anyone.
+        """
         page = (
             Path(__file__).resolve().parent.parent
             / "youtube_monitor" / "templates" / "index.html"
         ).read_text(encoding="utf-8")
-        confirm_at = page.index("if (!confirm(warning)) return;")
+
+        confirm_at = page.index("Vẫn cắt lại theo lời thoại?")
         call_at = page.index("timeline/from-dialogue?force=true")
+
         self.assertLess(confirm_at, call_at)
+        self.assertEqual(page.count("timeline/from-dialogue?force=true"), 1)
 
 
 class ShortJobIsAcceptedByTheApiTests(unittest.TestCase):

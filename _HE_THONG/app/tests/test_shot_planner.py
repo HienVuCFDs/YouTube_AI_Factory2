@@ -122,6 +122,16 @@ def test_the_page_refuses_to_voice_a_stale_timeline() -> None:
     assert "force: true" in page
 
 
+def test_voice_generation_refuses_an_outdated_storyboard_too() -> None:
+    """Editing a script in place must not voice the old storyboard."""
+    from youtube_monitor import main
+    import inspect
+
+    source = inspect.getsource(main.generate_project_shots)
+    assert '"stale"' in source
+    assert "storyboard_stale" in source
+
+
 def test_a_section_heading_is_not_something_to_read_aloud() -> None:
     """The writer lays a script out with headings, and every line became a
     scene. Half of one script was headings, so twenty-six of its fifty-five

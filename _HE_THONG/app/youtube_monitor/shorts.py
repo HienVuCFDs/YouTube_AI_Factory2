@@ -31,8 +31,10 @@ OUTPUT_PROFILE_SIZES: dict[str, tuple[int, int]] = {
     "youtube_shorts": (1080, 1920),
     "instagram_reels": (1080, 1920),
     "tiktok": (1080, 1920),
+    "facebook_reels": (1080, 1920),
+    "facebook_feed": (1080, 1080),
 }
-VERTICAL_PROFILES = frozenset({"youtube_shorts", "instagram_reels", "tiktok"})
+VERTICAL_PROFILES = frozenset({"youtube_shorts", "instagram_reels", "tiktok", "facebook_reels"})
 DEFAULT_SHORT_PROFILE = "youtube_shorts"
 
 # YouTube treats anything over 60s as a normal video, so a plan that runs
@@ -53,6 +55,34 @@ def set_plan_builder(callback: PlanBuilder | None) -> None:
     """
     global _plan_builder
     _plan_builder = callback
+
+
+# A 16:9 master published as a Reel is not a Reel: YouTube files it as an
+# ordinary video and the vertical feeds letterbox it into a stamp. The
+# rendered file has to be the shape the destination was chosen for, and only
+# the file itself can say whether it is.
+PROFILE_ASPECT_TOLERANCE = 0.06
+
+
+def profile_aspect(profile: str) -> float:
+    width, height = profile_size(profile)
+    return width / height if height else 0.0
+
+
+def frame_matches_profile(width: int, height: int, profile: str) -> bool:
+    """Whether a rendered frame is the shape this destination expects."""
+    if width <= 0 or height <= 0:
+        return True  # unreadable is not the same as wrong; do not block on it
+    wanted = profile_aspect(profile)
+    if not wanted:
+        return True
+    actual = width / height
+    return abs(actual - wanted) <= PROFILE_ASPECT_TOLERANCE * wanted
+
+
+def profile_label(profile: str) -> str:
+    width, height = profile_size(profile)
+    return f"{width}x{height}"
 
 
 def profile_size(profile: str) -> tuple[int, int]:
