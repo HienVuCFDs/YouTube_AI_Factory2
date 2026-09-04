@@ -375,10 +375,42 @@
     saveUiPreference(`channel-group.${groupId}`, open);
   }
 
+  // FastAPI's `detail` is whatever the endpoint put there: usually a
+  // sentence, sometimes an object - the publish gate answers with a list of
+  // reasons, because "not ready" is never one sentence. Handed straight to
+  // new Error(), an object stringifies to "[object Object]" and the reasons
+  // vanish at the exact moment they matter.
+  function apiErrorText(detail, status) {
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+      const lines = detail.map((item) => apiErrorText(item, status)).filter(Boolean);
+      if (lines.length) return lines.join(' · ');
+    }
+    if (detail && typeof detail === 'object') {
+      const head = String(detail.message || detail.msg || '').trim();
+      const reasons = (detail.blockers || detail.errors || [])
+        .map((item) => String(item?.detail || item?.label || item?.msg || '').trim())
+        .filter(Boolean);
+      const text = [head, ...reasons].filter(Boolean).join(' · ');
+      if (text) return text;
+      try { return JSON.stringify(detail); } catch (_) { /* fall through */ }
+    }
+    return `HTTP ${status}`;
+  }
+
+  function apiError(data, response) {
+    const error = new Error(apiErrorText(data?.detail, response.status));
+    // The structured answer travels with the message so a caller that knows
+    // how to render a checklist still can.
+    error.detail = data?.detail;
+    error.status = response.status;
+    return error;
+  }
+
   async function api(path, options = {}) {
     const response = await fetch(path, {headers: {'Content-Type': 'application/json'}, ...options});
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    if (!response.ok) throw apiError(data, response);
     return data;
   }
 
@@ -1337,7 +1369,7 @@
         const rate = $('studioVoiceRateSelect')?.value || '+0%';
         const response = await fetch(`/api/voice-previews/edge/${encodeURIComponent(choice)}?rate=${encodeURIComponent(rate)}`);
         const data = response.ok ? null : await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.detail || 'Không tạo được bản nghe thử.');
+        if (!response.ok) throw apiError(data, response);
         const url = URL.createObjectURL(await response.blob());
         const audio = new Audio(url);
         audio.addEventListener('ended', () => URL.revokeObjectURL(url), {once: true});

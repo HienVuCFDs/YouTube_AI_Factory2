@@ -32,7 +32,7 @@
       // FormData đặt Content-Type kèm boundary; helper api() ép JSON nên không dùng được.
       const response = await fetch('/api/uploads/source', {method: 'POST', body: form});
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      if (!response.ok) throw apiError(data, response);
       const video = data.video || {};
       await loadVideos();
       state.studioSourceChannelId = video.youtube_channel_id || '';
@@ -81,7 +81,7 @@
         const response = await fetch(`/api/projects/${state.studioProjectId}/assets/upload`, {method: 'POST', body: form});
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
-          throw new Error(data.detail || `HTTP ${response.status}`);
+          throw apiError(data, response);
         }
         done += 1;
       } catch (error) { failed.push(`${file.name}: ${error.message}`); }

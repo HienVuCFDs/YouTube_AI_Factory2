@@ -226,3 +226,162 @@ class OneVideoManyCaptionsTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("not the script's cta", source.replace("’", "'").lower())
+
+
+class AnApiRefusalIsReadableTests(unittest.TestCase):
+    """The gate answers with a list of reasons, not a sentence.
+
+    Handed straight to `new Error(...)`, that object stringifies to
+    "[object Object]" - which is what appeared where the reasons should have
+    been, at the exact moment they mattered.
+    """
+
+    def setUp(self) -> None:
+        self.page = studio_ui()
+
+    def test_nothing_throws_a_raw_detail_any_more(self) -> None:
+        self.assertNotIn("new Error(data.detail", self.page)
+
+    def test_there_is_one_place_that_renders_a_refusal(self) -> None:
+        self.assertIn("function apiErrorText(detail, status)", self.page)
+        self.assertIn("function apiError(data, response)", self.page)
+
+    def test_an_object_detail_is_unpacked_into_its_reasons(self) -> None:
+        body = self.page[self.page.index("function apiErrorText(detail, status)"):]
+        body = body[:body.index("\n  }")]
+
+        self.assertIn("detail.message", body)
+        self.assertIn("detail.blockers", body)
+
+    def test_the_structured_answer_still_reaches_the_caller(self) -> None:
+        """The dialog renders the checklist from it rather than the text."""
+        self.assertIn("error.detail = data?.detail;", self.page)
+
+
+class ChoosingAThumbnailFrameTests(unittest.TestCase):
+    """Fixed timestamps land on whatever the video happened to be doing."""
+
+    def test_a_dark_frame_scores_nothing_however_sharp_it_is(self) -> None:
+        import numpy as np
+
+        from youtube_monitor.thumbnail_generator import _score_frame
+
+        noisy_black = np.random.default_rng(1).uniform(0, 12, size=(90, 160)).astype(np.float32)
+
+        self.assertEqual(_score_frame(noisy_black), 0.0)
+
+    def test_a_blown_out_frame_scores_nothing_either(self) -> None:
+        import numpy as np
+
+        from youtube_monitor.thumbnail_generator import _score_frame
+
+        near_white = np.full((90, 160), 250.0, dtype=np.float32)
+
+        self.assertEqual(_score_frame(near_white), 0.0)
+
+    def test_a_sharp_frame_beats_a_blurred_one(self) -> None:
+        """The commonest bad thumbnail is a motion-blurred frame."""
+        import numpy as np
+
+        from youtube_monitor.thumbnail_generator import _score_frame
+
+        generator = np.random.default_rng(7)
+        sharp = generator.uniform(60, 190, size=(90, 160)).astype(np.float32)
+        blurred = np.repeat(np.repeat(sharp[::6, ::6], 6, axis=0), 6, axis=1).astype(np.float32)
+
+        self.assertGreater(_score_frame(sharp), _score_frame(blurred[:90, :160]))
+
+    def test_a_flat_frame_beats_nothing(self) -> None:
+        import numpy as np
+
+        from youtube_monitor.thumbnail_generator import _score_frame
+
+        flat = np.full((90, 160), 128.0, dtype=np.float32)
+        textured = np.random.default_rng(3).uniform(60, 190, size=(90, 160)).astype(np.float32)
+
+        self.assertGreater(_score_frame(textured), _score_frame(flat))
+
+
+class ThumbnailBriefTests(unittest.TestCase):
+    """A frame is what the camera did; a thumbnail is composed."""
+
+    def _built(self, **kwargs) -> str:
+        from youtube_monitor import thumbnail_prompt
+
+        return thumbnail_prompt.build(
+            {"hook": "Anh bỏ phố về rừng, dựng một căn hầm bằng tay không."},
+            {"title": "Ba mươi ngày"},
+            **kwargs,
+        )
+
+    def test_it_forbids_the_things_that_make_a_thumbnail_look_generated(self) -> None:
+        brief = self._built()
+
+        for banned in ("No text", "no logo", "no watermark", "no borders"):
+            with self.subTest(banned=banned):
+                self.assertIn(banned, brief)
+
+    def test_it_asks_for_a_composition_not_a_scene(self) -> None:
+        brief = self._built()
+
+        self.assertIn("One clear subject", brief)
+        self.assertIn("so a title can be placed there later", brief)
+
+    def test_a_short_is_briefed_vertically(self) -> None:
+        self.assertIn("Vertical 9:16", self._built(vertical=True))
+        self.assertIn("16:9", self._built(vertical=False))
+
+    def test_the_subject_comes_from_the_hook_not_the_title(self) -> None:
+        """A title is written to be read; a hook to be pictured."""
+        self.assertIn("dựng một căn hầm", self._built())
+
+    def test_each_variant_is_framed_differently(self) -> None:
+        """Three renders of one prompt is not a choice."""
+        from youtube_monitor import thumbnail_prompt
+
+        prompts = thumbnail_prompt.variant_prompts("BASE", 3)
+
+        self.assertEqual(len(prompts), 3)
+        self.assertEqual(len(set(prompts)), 3)
+
+    def test_it_refuses_when_there_is_nothing_to_picture(self) -> None:
+        from youtube_monitor import thumbnail_prompt
+
+        with self.assertRaises(ValueError):
+            thumbnail_prompt.build({}, {})
+
+    def test_a_failure_names_what_can_be_used_instead(self) -> None:
+        source = (
+            Path(__file__).resolve().parent.parent / "youtube_monitor" / "main.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("def _image_provider_advice", source)
+        self.assertIn("Có thể thử model khác", source)
+
+
+class PublishingNeedsSomewhereToPublishToTests(unittest.TestCase):
+    def test_an_unconfigured_youtube_account_stops_it(self) -> None:
+        from youtube_monitor import publish_gate
+
+        checks = publish_gate.evaluate(**_ready(youtube_configured=False))
+        account = next(item for item in checks if item["key"] == "youtube_account")
+
+        self.assertEqual(account["level"], publish_gate.BLOCK)
+        self.assertIn("client id/secret", account["detail"])
+
+    def test_configured_but_not_signed_in_stops_it_too(self) -> None:
+        from youtube_monitor import publish_gate
+
+        checks = publish_gate.evaluate(**_ready(youtube_connected=False))
+
+        self.assertEqual(
+            next(item for item in checks if item["key"] == "youtube_account")["level"],
+            publish_gate.BLOCK,
+        )
+
+    def test_a_manual_platform_is_not_asked_for_a_youtube_login(self) -> None:
+        from youtube_monitor import publish_gate
+
+        checks = publish_gate.evaluate(**_ready(platform="tiktok", youtube_configured=False))
+
+        self.assertNotIn("youtube_account", [item["key"] for item in checks])

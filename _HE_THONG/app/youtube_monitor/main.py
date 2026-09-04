@@ -141,6 +141,7 @@ from . import platform_copy
 from . import project_log
 from . import voice_library
 from . import thumbnail_prompt
+from .providers import EXECUTION_EXTERNAL_SIDECAR
 from . import oauth as youtube_oauth
 from .publisher import oauth_status
 from .reuse_check import measure_reuse, narration_overlap, rule_findings, rule_verdict
@@ -2705,10 +2706,42 @@ def _generate_ai_thumbnails(
         made.append(target)
 
     if not made:
+        # Naming the state of every provider, not only the one that failed:
+        # "generation failed" sends the user back to the same button, while
+        # "this key has no image quota, these two are ready" is something to
+        # act on. A picture cannot be drawn without a model that will draw it.
         raise SceneGenerationError(
-            "Không tạo được thumbnail AI nào. " + (" · ".join(failures) if failures else "")
+            "Không tạo được thumbnail AI nào.\n"
+            + ("Lỗi: " + " · ".join(failures) + "\n" if failures else "")
+            + _image_provider_advice(payload.provider)
         )
     return made
+
+
+def _image_provider_advice(attempted: str) -> str:
+    """What the user can actually switch to, given what is configured here."""
+    ready: list[str] = []
+    blocked: list[str] = []
+    for key in scene_provider_gateway.provider_keys(capability=SCENE_IMAGE):
+        descriptor = scene_provider_gateway.get(key).descriptor
+        if descriptor.execution_mode == EXECUTION_EXTERNAL_SIDECAR:
+            blocked.append(f"{key} (cần sidecar/trình duyệt đang chạy)")
+        elif key == "openai_image" and not OPENAI_API_KEY:
+            blocked.append(f"{key} (chưa có OPENAI_API_KEY)")
+        elif key == attempted:
+            continue
+        else:
+            ready.append(key)
+    parts = []
+    if ready:
+        parts.append("Có thể thử model khác: " + ", ".join(ready) + ".")
+    if blocked:
+        parts.append("Chưa dùng được: " + "; ".join(blocked) + ".")
+    parts.append(
+        "Hoặc dùng “Cắt khung từ video” — app sẽ chọn khung nét và đủ sáng nhất, "
+        "nhưng đó là khung phim chứ không phải ảnh bìa được dựng."
+    )
+    return " ".join(parts)
 
 
 @app.post("/api/projects/{project_id}/thumbnails/generate")
