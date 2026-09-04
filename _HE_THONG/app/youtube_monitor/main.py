@@ -135,6 +135,8 @@ from .burned_in_marks import MarkDetectionError, detect_burned_in_marks
 from .ffmpeg_renderer import resolve_ffmpeg
 from .source_visuals import SourceVisualError, prepare_source_visuals
 from .media_probe import MediaProbeError, describe, probe_media, reject_reason
+from . import publish_gate
+from . import platform_copy
 from .reuse_check import measure_reuse, rule_findings, rule_verdict
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
@@ -660,6 +662,13 @@ class CreatePublicationRequest(BaseModel):
     privacy_status: Literal["private", "unlisted", "public"] | None = None
     scheduled_at: str | None = Field(default=None, max_length=80)
     confirmed: bool = False
+    # The verdict the user has already been shown, so the gate need not
+    # re-measure the whole source on every publish.
+    reuse_verdict: str = Field(default="", max_length=16)
+    # A deliberate override, sent only after the page has listed what is
+    # missing. Default false: skipping the gate has to be a decision rather
+    # than the path of least resistance.
+    override_checklist: bool = False
 
 
 DirectorProvider = Literal["codex_cli", "openai_gpt", "anthropic_claude", "claude_code_cli", "antigravity"]
@@ -6044,6 +6053,141 @@ def _publication_payload(project: dict[str, Any], script: dict[str, Any], payloa
     }
 
 
+def _publish_checklist(
+    project_id: int,
+    variant: str,
+    *,
+    output_profile: str,
+    platform: str,
+    title: str = "",
+    description: str = "",
+    tags: list[str] | None = None,
+    reuse_verdict: str = "",
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Gather every fact that decides whether this video may go out.
+
+    Each of these was already knowable somewhere; none of them was gathered,
+    so each was discovered separately and usually after the upload.
+    """
+    project = database.get_production_project(project_id) or {}
+    script = database.get_latest_project_script(project_id, variant=variant)
+    timeline = (
+        database.list_project_timeline(project_id, script_id=int(script["id"]))
+        if script else []
+    )
+    try:
+        _, video_path = _publication_video_path(project_id, variant)
+    except HTTPException:
+        video_path = None
+    frame = video_frame_size(video_path, FFMPEG_BINARY) if video_path else None
+    selected = next(
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        None,
+    )
+    source_video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    checks = publish_gate.evaluate(
+        timeline=timeline,
+        script=script,
+        video_path=video_path,
+        frame_size=frame,
+        output_profile=output_profile,
+        title=title or str((script or {}).get("script_title") or ""),
+        description=description,
+        tags=tags or [],
+        thumbnail_path=str((selected or {}).get("file_path") or ""),
+        platform=platform,
+        reuse_verdict=reuse_verdict,
+        source_title=str(source_video.get("title") or ""),
+    )
+    return checks, {
+        "scene_count": len(timeline),
+        "frame_size": list(frame) if frame else [],
+        "video_path": str(video_path or ""),
+    }
+
+
+class PublishChecklistRequest(BaseModel):
+    video_variant: Literal["long", "short"] = "long"
+    platform: Literal["youtube", "tiktok", "facebook", "instagram"] = "youtube"
+    output_profile: Literal[
+        "youtube_landscape", "youtube_shorts", "instagram_reels",
+        "tiktok", "facebook_reels", "facebook_feed",
+    ] = "youtube_landscape"
+    title: str = Field(default="", max_length=300)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list)
+    reuse_verdict: str = Field(default="", max_length=16)
+
+
+class PlatformCopyRequest(BaseModel):
+    video_variant: Literal["long", "short"] = "long"
+    platforms: list[Literal["youtube", "tiktok", "facebook", "instagram"]] = Field(
+        default_factory=lambda: ["youtube", "tiktok", "facebook", "instagram"]
+    )
+    title: str = Field(default="", max_length=300)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/projects/{project_id}/platform-copy")
+def project_platform_copy(project_id: int, payload: PlatformCopyRequest) -> dict[str, Any]:
+    """One video's words, shaped for each place it is going.
+
+    Same substance everywhere; what changes is length, where the hashtags sit
+    and which call to action that platform actually has. Posting one caption
+    to all of them is why a reup lands on one and vanishes on the rest.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    script = database.get_latest_project_script(project_id, variant=payload.video_variant)
+    bundle_writer = (database.get_video_analysis(
+        str((database.get_production_project(project_id) or {}).get("youtube_video_id") or ""),
+        analysis_type="writer",
+    ) or {}).get("result", {})
+
+    title = payload.title or str((script or {}).get("script_title") or "")
+    description = payload.description or str(bundle_writer.get("new_description") or "")
+    tags = payload.tags or list(bundle_writer.get("hashtags") or [])
+    return {
+        "variants": platform_copy.build_all(
+            list(payload.platforms),
+            title=title,
+            description=description,
+            tags=tags,
+            # Not the script's cta: that is the closing line of the story
+            # ("Night settled over the forest..."), not a call to action.
+            # Each platform has its own, and they are not interchangeable.
+            cta="",
+            is_short=payload.video_variant == "short",
+        ),
+    }
+
+
+@app.post("/api/projects/{project_id}/publish-checklist")
+def project_publish_checklist(
+    project_id: int, payload: PublishChecklistRequest
+) -> dict[str, Any]:
+    """What is still missing before this video may be published."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    checks, facts = _publish_checklist(
+        project_id, payload.video_variant,
+        output_profile=payload.output_profile,
+        platform=payload.platform,
+        title=payload.title,
+        description=payload.description,
+        tags=payload.tags,
+        reuse_verdict=payload.reuse_verdict,
+    )
+    return {
+        "ready": publish_gate.is_ready(checks),
+        "checks": checks,
+        "blockers": publish_gate.blockers(checks),
+        "warnings": publish_gate.warnings(checks),
+        **facts,
+    }
+
+
 def _publication_video_path(project_id: int, variant: str) -> tuple[dict[str, Any], Path]:
     """Return the approved script and its rendered file for this destination."""
     script = database.get_latest_project_script(project_id, variant=variant)
@@ -6169,10 +6313,6 @@ def queue_project_publication(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    # A standalone Short owns a separate approved script and output file.
-    script, final_path = _publication_video_path(project_id, payload.video_variant)
-    if not final_path.is_file():
-        raise HTTPException(status_code=400, detail="Project chưa có final.mp4; hãy render và Quality Check trước")
 
     managed_id = payload.managed_channel_id or project.get("managed_channel_id")
     channel = database.get_managed_channel(int(managed_id)) if managed_id else None
@@ -6203,21 +6343,35 @@ def queue_project_publication(
             raise HTTPException(status_code=400, detail="Thumbnail YouTube phải là JPG hoặc PNG")
         thumbnail_path = str(thumbnail_file)
 
-    # The destination decides the shape. A 16:9 master sent as a Reel is not
-    # a Reel - YouTube files it as an ordinary video and the vertical feeds
-    # letterbox it into a stamp - and nothing downstream would have caught it:
-    # the quality report checks resolution and codec, never aspect. Publishing
-    # is the last point where it can still be stopped.
-    measured = video_frame_size(final_path, FFMPEG_BINARY)
-    if measured and not frame_matches_profile(measured[0], measured[1], output_profile):
+    # Publishing is the one step that cannot be taken back, so every
+    # precondition is checked together here rather than being discovered one
+    # at a time after the upload. The shape of the file is only one of them.
+    checks, _ = _publish_checklist(
+        project_id,
+        payload.video_variant,
+        output_profile=output_profile,
+        platform=platform,
+        title=payload.title,
+        description=payload.description,
+        tags=list(payload.tags or []),
+        reuse_verdict=payload.reuse_verdict,
+    )
+    stopped = publish_gate.blockers(checks)
+    if stopped and not payload.override_checklist:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Video đang là {measured[0]}x{measured[1]}, không đúng khổ "
-                f"{output_profile} ({profile_label(output_profile)}). "
-                "Hãy dựng lại đúng định dạng đầu ra trước khi đăng."
-            ),
+            detail={
+                "message": "Chưa đủ điều kiện để đăng.",
+                "blockers": stopped,
+                "checks": checks,
+            },
         )
+
+    # Only now, once the whole list has been reported, do the individual
+    # guards run - they would otherwise fire first and hide the rest.
+    script, final_path = _publication_video_path(project_id, payload.video_variant)
+    if not final_path.is_file():
+        raise HTTPException(status_code=400, detail="Project chưa có final.mp4; hãy render và Quality Check trước")
 
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
     report = build_quality_report(timeline, str(final_path), FFMPEG_BINARY, thumbnail_path)

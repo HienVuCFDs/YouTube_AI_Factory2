@@ -162,12 +162,49 @@ class TheFileMustBeTheShapeTheDestinationWantsTests(unittest.TestCase):
 
 class ThePublishEndpointAppliesTheCheckTests(unittest.TestCase):
     def test_publishing_refuses_a_file_of_the_wrong_shape(self) -> None:
-        source = (
-            Path(__file__).resolve().parent.parent / "youtube_monitor" / "main.py"
-        ).read_text(encoding="utf-8")
+        """The check moved into the publish gate, which covers every
+        precondition rather than this one alone - but it still blocks."""
+        from youtube_monitor import publish_gate
 
-        self.assertIn("frame_matches_profile(measured[0], measured[1], output_profile)", source)
-        self.assertIn("không đúng khổ", source)
+        checks = publish_gate.evaluate(
+            timeline=[{"audio_path": "a", "visual_path": "b"}],
+            script={"status": "approved"},
+            video_path=None,
+            frame_size=(1920, 1080),
+            output_profile="youtube_shorts",
+            title="Tiêu đề riêng",
+            description="mô tả",
+            tags=["a"],
+            thumbnail_path="",
+            platform="youtube",
+            reuse_verdict="low",
+        )
+        aspect = next(item for item in checks if item["key"] == "aspect")
+
+        self.assertEqual(aspect["level"], publish_gate.BLOCK)
+        self.assertIn("không đúng khổ", aspect["detail"])
+
+    def test_the_right_shape_passes_that_same_check(self) -> None:
+        from youtube_monitor import publish_gate
+
+        checks = publish_gate.evaluate(
+            timeline=[{"audio_path": "a", "visual_path": "b"}],
+            script={"status": "approved"},
+            video_path=None,
+            frame_size=(1080, 1920),
+            output_profile="youtube_shorts",
+            title="Tiêu đề riêng",
+            description="mô tả",
+            tags=["a"],
+            thumbnail_path="",
+            platform="youtube",
+            reuse_verdict="low",
+        )
+
+        self.assertEqual(
+            next(item for item in checks if item["key"] == "aspect")["level"],
+            publish_gate.PASS,
+        )
 
 
 class ThePanelSaysWhyAQueuedPostIsWaitingTests(unittest.TestCase):

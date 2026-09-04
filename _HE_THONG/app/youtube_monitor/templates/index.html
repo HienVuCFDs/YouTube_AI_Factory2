@@ -6358,6 +6358,12 @@ Chạy các bước này?`)) return;
         </select></div>
       <b style="display:block;margin-top:12px;font-size:12px;letter-spacing:.06em;color:var(--muted)">NỀN TẢNG · KÊNH · ĐỊNH DẠNG</b>
       <div id="publishTargetList" style="margin-top:8px"></div>
+      <div class="studio-actions" style="margin-top:10px;gap:6px;flex-wrap:wrap">
+        <button class="btn small" type="button" onclick="loadPublishChecklist()">Kiểm tra điều kiện đăng</button>
+        <button class="btn small ghost" type="button" onclick="loadPlatformCopy()">Soạn caption riêng từng nền tảng</button>
+      </div>
+      <div id="publishChecklistBox" style="margin-top:8px"></div>
+      <div id="publishCopyBox" style="margin-top:8px"></div>
       ${state.publishTitles?.length && !isShort ? `<div class="studio-field" style="margin-top:12px"><label for="publishDialogTitlePick">Tiêu đề AI gợi ý</label>
         <select id="publishDialogTitlePick" onchange="useSuggestedTitle()"><option value="">\u2014 chọn một tiêu đề \u2014</option>
         ${state.publishTitles.map((title) => `<option value="${esc(title)}">${esc(title)}</option>`).join('')}</select></div>` : ''}
@@ -6382,6 +6388,84 @@ Chạy các bước này?`)) return;
   function useSuggestedTitle() {
     const picked = $('publishDialogTitlePick')?.value || '';
     if (picked && $('publishDialogTitleInput')) $('publishDialogTitleInput').value = picked;
+  }
+
+  const CHECK_MARKS = {pass: '✓', warn: '!', block: '✕'};
+
+  // Every one of these was already knowable somewhere, and each was found
+  // separately - usually after the upload. Gathering them means one answer
+  // to "is this ready" instead of one refusal per attempt.
+  async function loadPublishChecklist() {
+    const project = state.publishBundle?.project || {};
+    const variant = state.publishVariant || 'long';
+    const first = document.querySelector('.publish-target-check:checked');
+    const platform = first?.dataset.platform || 'youtube';
+    const profile = document.querySelector(
+      `.publish-target-profile[data-platform="${platform}"]`)?.value || 'youtube_landscape';
+    const box = $('publishChecklistBox');
+    if (box) box.innerHTML = '<div class="studio-model-note">Đang kiểm tra…</div>';
+    try {
+      const result = await api(`/api/projects/${project.id}/publish-checklist`, {
+        method: 'POST',
+        body: JSON.stringify({
+          video_variant: variant, platform, output_profile: profile,
+          title: $('publishDialogTitleInput')?.value || '',
+          description: $('publishDialogDescription')?.value || '',
+          tags: String($('publishDialogTags')?.value || '').split(',').map((i) => i.trim()).filter(Boolean),
+          reuse_verdict: (state.copyrightChecks || {})[variant]?.verdict || '',
+        }),
+      });
+      state.publishChecklist = result;
+      renderPublishChecklist(result);
+    } catch (error) {
+      if (box) box.innerHTML = `<div class="error-text">${esc(error.message)}</div>`;
+    }
+  }
+
+  function renderPublishChecklist(result) {
+    const box = $('publishChecklistBox');
+    if (!box) return;
+    box.innerHTML = `<div class="risk-finding sev-${result.ready ? 'low' : 'high'}">
+      <b>${result.ready ? 'Đủ điều kiện đăng' : 'Chưa đủ điều kiện đăng'}</b>
+      ${(result.checks || []).map((item) => `<div class="studio-check">
+        <b>${CHECK_MARKS[item.level] || '·'}</b><span>${esc(item.label)}
+        ${item.detail ? `<br><small>${esc(item.detail)}</small>` : ''}
+        ${item.level !== 'pass' && item.fix ? `<br><small>→ ${esc(item.fix)}</small>` : ''}</span></div>`).join('')}
+    </div>`;
+  }
+
+  // Same substance everywhere, different shape: a YouTube description is read
+  // in search, a TikTok caption is read over the video while it plays.
+  async function loadPlatformCopy() {
+    const project = state.publishBundle?.project || {};
+    const chosen = Array.from(document.querySelectorAll('.publish-target-check:checked'))
+      .map((box) => box.dataset.platform);
+    const box = $('publishCopyBox');
+    if (!chosen.length) { if (box) box.innerHTML = '<div class="studio-model-note">Hãy chọn nền tảng trước.</div>'; return; }
+    try {
+      const result = await api(`/api/projects/${project.id}/platform-copy`, {
+        method: 'POST',
+        body: JSON.stringify({
+          video_variant: state.publishVariant || 'long',
+          platforms: chosen,
+          title: $('publishDialogTitleInput')?.value || '',
+          description: $('publishDialogDescription')?.value || '',
+          tags: String($('publishDialogTags')?.value || '').split(',').map((i) => i.trim()).filter(Boolean),
+        }),
+      });
+      state.platformCopy = result.variants || {};
+      if (box) {
+        box.innerHTML = Object.entries(state.platformCopy).map(([platform, copy]) => `
+          <div class="risk-finding"><b>${esc(platform)}</b>
+            <div class="studio-field" style="margin-top:6px"><label>Tiêu đề (${copy.title.length}/${copy.limits.title})</label>
+              <input id="publishCopyTitle-${platform}" type="text" value="${esc(copy.title)}" /></div>
+            <div class="studio-field" style="margin-top:6px"><label>Caption</label>
+              <textarea id="publishCopyDesc-${platform}" rows="3">${esc(copy.description)}</textarea></div>
+          </div>`).join('');
+      }
+    } catch (error) {
+      if (box) box.innerHTML = `<div class="error-text">${esc(error.message)}</div>`;
+    }
   }
 
   async function submitPublishDialog() {
@@ -6415,6 +6499,7 @@ Chạy các bước này?`)) return;
       tags: String($('publishDialogTags')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
       privacy_status: $('publishDialogPrivacy')?.value || null,
       scheduled_at: scheduled ? new Date(scheduled).toISOString() : null,
+      reuse_verdict: (state.copyrightChecks || {})[variant]?.verdict || '',
     };
     const done = [];
     const failed = [];
@@ -6424,6 +6509,11 @@ Chạy các bước này?`)) return;
           method: 'POST',
           body: JSON.stringify({
             ...payload,
+            // Per-platform copy when it has been prepared: the same caption
+            // everywhere is why a reup lands on one feed and vanishes on the rest.
+            title: $(`publishCopyTitle-${target.platform}`)?.value || payload.title,
+            description: $(`publishCopyDesc-${target.platform}`)?.value || payload.description,
+            tags: (state.platformCopy || {})[target.platform]?.tags || payload.tags,
             platform: target.platform,
             output_profile: target.profile,
             // Each destination carries its own channel: one publish can go to
@@ -6434,8 +6524,17 @@ Chạy các bước này?`)) return;
         });
         done.push(target.platform);
       } catch (error) {
-        // One platform failing must not lose the ones that worked.
-        failed.push(`${target.platform}: ${error.message}`);
+        // One platform failing must not lose the ones that worked. A gate
+        // refusal carries the whole list, so it is shown as a list.
+        let message = error.message;
+        try {
+          const parsed = JSON.parse(message);
+          if (parsed?.blockers) {
+            renderPublishChecklist({ready: false, checks: parsed.checks || parsed.blockers});
+            message = `${parsed.message} ${parsed.blockers.map((item) => item.label).join(', ')}`;
+          }
+        } catch (_) { /* an ordinary error message, not a checklist */ }
+        failed.push(`${target.platform}: ${message}`);
       }
     }
     $('publishDialog').close();
