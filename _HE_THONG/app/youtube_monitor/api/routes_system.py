@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from .. import settings
@@ -76,6 +76,25 @@ class SaveIntegrationRequest(BaseModel):
 @router.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     return HTMLResponse(template_path.read_text(encoding="utf-8"))
+
+
+# The page is one document split into ordered files rather than one very long
+# one. Served by name from a fixed directory: a path is refused unless it
+# resolves to a real file directly inside it, so a crafted name cannot reach
+# anything else on disk.
+_STATIC_DIR = template_path.parent.parent / "static"
+_STATIC_TYPES = {".css": "text/css", ".js": "text/javascript"}
+
+
+@router.get("/static/{filename}", include_in_schema=False)
+def studio_static_file(filename: str) -> FileResponse:
+    target = (_STATIC_DIR / filename).resolve()
+    if target.parent != _STATIC_DIR.resolve() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy file")
+    media_type = _STATIC_TYPES.get(target.suffix.lower())
+    if not media_type:
+        raise HTTPException(status_code=404, detail="Không phục vụ loại file này")
+    return FileResponse(target, media_type=media_type)
 
 
 @router.post("/api/browser/heartbeat")

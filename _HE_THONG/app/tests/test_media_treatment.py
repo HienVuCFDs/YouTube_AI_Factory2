@@ -15,13 +15,12 @@ from unittest import mock
 import pytest
 
 from youtube_monitor import main
-
-PAGE = Path(__file__).resolve().parent.parent / "youtube_monitor" / "templates" / "index.html"
+from tests.ui_source import studio_ui
 
 
 @pytest.fixture(scope="module")
 def page() -> str:
-    return PAGE.read_text(encoding="utf-8")
+    return studio_ui()
 
 
 class MediaSchemaTests(unittest.TestCase):
@@ -233,10 +232,7 @@ class ConnectionsPanelIsGroupedTests(unittest.TestCase):
             self.assertIsInstance(item["ready"], bool, item["key"])
 
     def test_the_page_folds_groups_and_names_what_is_outstanding(self) -> None:
-        page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        page = studio_ui()
         self.assertIn("renderIntegrationGroups", page)
         self.assertIn("INTEGRATION_GROUPS", page)
         self.assertIn("integration-todo", page)

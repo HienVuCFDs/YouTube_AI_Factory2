@@ -22,6 +22,7 @@ from youtube_monitor.shorts import (
     profile_size,
     set_plan_builder,
 )
+from tests.ui_source import studio_ui
 
 
 def _timeline(count: int = 4, seconds: float = 10.0) -> list[dict]:
@@ -246,10 +247,7 @@ class ShortIsReachableFromThePageTests(unittest.TestCase):
     """A feature with no control is the defect this project keeps finding."""
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_short_controls_live_in_the_main_wizard_lane(self) -> None:
         self.assertNotIn('id="studioPlanShortButton"', self.page)
@@ -281,10 +279,7 @@ class ShortRenderIsQueuedCorrectlyTests(unittest.TestCase):
     """The lane sends the Short variant and confirmation in the request body."""
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_confirmation_travels_in_the_body_where_the_model_reads_it(self) -> None:
         start = self.page.index("async function queueShortVariantJob")

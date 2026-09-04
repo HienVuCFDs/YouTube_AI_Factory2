@@ -4,6 +4,7 @@ import unittest
 
 from youtube_monitor.folklore_research import source_animal
 from youtube_monitor.writer import WriterError, parse_duration_text, resolve_target_duration_seconds, validate_voiceover_plan
+from tests.ui_source import studio_ui
 
 
 class WriterQualityTests(unittest.TestCase):
@@ -68,10 +69,7 @@ class ScriptLengthWarningReachesTheUserTests(unittest.TestCase):
     def setUp(self) -> None:
         from pathlib import Path
 
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_page_has_somewhere_to_show_them(self) -> None:
         self.assertIn('id="studioWriterWarnings"', self.page)

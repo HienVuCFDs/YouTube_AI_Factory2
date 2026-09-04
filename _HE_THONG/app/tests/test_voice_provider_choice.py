@@ -8,13 +8,12 @@ from pathlib import Path
 import pytest
 
 from youtube_monitor.main import database
-
-PAGE = Path(__file__).resolve().parent.parent / "youtube_monitor" / "templates" / "index.html"
+from tests.ui_source import studio_ui
 
 
 @pytest.fixture(scope="module")
 def page() -> str:
-    return PAGE.read_text(encoding="utf-8")
+    return studio_ui()
 
 
 def test_changing_the_provider_writes_the_choice_down(page: str) -> None:

@@ -22,6 +22,7 @@ from youtube_monitor.publisher import (
     YouTubePublisher,
 )
 from youtube_monitor.shorts import frame_matches_profile, profile_label
+from tests.ui_source import studio_ui
 
 
 class TheQueueOnlyOffersWhatItCanDeliverTests(unittest.TestCase):
@@ -209,10 +210,7 @@ class ThePublishEndpointAppliesTheCheckTests(unittest.TestCase):
 
 class ThePanelSaysWhyAQueuedPostIsWaitingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_it_names_the_platforms_that_cannot_be_posted_automatically(self) -> None:
         self.assertIn("publisherWaitingNote", self.page)
@@ -242,10 +240,7 @@ class ThereIsSomewhereToActuallyPressUploadTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_publish_panel_lives_on_the_publish_step(self) -> None:
         import re
@@ -296,10 +291,7 @@ class BothFinishedVideosLiveOnThePublishStepTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def _step_of(self, needle: str) -> str | None:
         import re
@@ -346,10 +338,7 @@ class ThePageJavascriptParsesTests(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node không có trên máy chạy test")
-        page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        page = studio_ui()
         blocks = re.findall(r"<script[^>]*>(.*?)</script>", page, re.S)
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "page.js"
@@ -372,10 +361,7 @@ class ThePublishFormIsFilledFromThisVideoNotTheSourceTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_title_field_is_seeded_from_the_writers_suggestions(self) -> None:
         self.assertIn("state.publishTitles = (writer.new_titles || [])", self.page)
@@ -420,10 +406,7 @@ class EachVideoHasItsOwnPublishFlowTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_each_finished_video_has_its_own_publish_button(self) -> None:
         self.assertIn("openPublishDialog('long')", self.page)
@@ -495,10 +478,7 @@ class EveryDestinationNamesItsChannelTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_dialog_picks_a_channel_group_first(self) -> None:
         self.assertIn('id="publishDialogGroup"', self.page)

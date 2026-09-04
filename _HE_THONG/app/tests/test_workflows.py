@@ -10,6 +10,7 @@ import pytest
 from youtube_monitor import workflows
 from youtube_monitor.main import database, list_workflows
 from youtube_monitor.writer import FAITHFUL_RETELL_MODE
+from tests.ui_source import studio_ui
 
 
 def test_every_workflow_is_reachable_by_its_key() -> None:
@@ -115,10 +116,7 @@ class CuttingByDialogueAsksBeforeReplacingTheScriptTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
         self.source = (
             Path(__file__).resolve().parent.parent / "youtube_monitor" / "main.py"
         ).read_text(encoding="utf-8")

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.ui_source import studio_ui
 from youtube_monitor import platform_copy, publish_gate
 
 
@@ -125,7 +126,7 @@ class TheGateIsEnforcedAndReachableTests(unittest.TestCase):
     def setUp(self) -> None:
         root = Path(__file__).resolve().parent.parent
         self.source = (root / "youtube_monitor" / "main.py").read_text(encoding="utf-8")
-        self.page = (root / "youtube_monitor" / "templates" / "index.html").read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_endpoint_exists(self) -> None:
         from youtube_monitor.main import app

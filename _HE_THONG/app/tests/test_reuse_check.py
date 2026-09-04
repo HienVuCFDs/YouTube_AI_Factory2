@@ -20,6 +20,7 @@ from youtube_monitor.reuse_check import (
     rule_findings,
     rule_verdict,
 )
+from tests.ui_source import studio_ui
 
 
 SOURCE = {"title": "Cabin in the woods", "duration_seconds": 700, "license": ""}
@@ -179,10 +180,7 @@ class WhatTheNumbersAlreadySayTests(unittest.TestCase):
 
 class TheCheckIsReachableBeforePublishingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_endpoint_exists(self) -> None:
         from youtube_monitor.main import app

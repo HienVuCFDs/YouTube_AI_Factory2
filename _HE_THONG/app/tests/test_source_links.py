@@ -25,6 +25,7 @@ from youtube_monitor.source_links import (
     probe_url,
     video_id_for,
 )
+from tests.ui_source import studio_ui
 
 _INFO = {
     "id": "BV1xx411c7mD",
@@ -182,10 +183,7 @@ class RoutingTests(unittest.TestCase):
 
 class ReachableFromThePageTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_source_picker_offers_a_plain_link(self) -> None:
         self.assertIn('<option value="link">', self.page)

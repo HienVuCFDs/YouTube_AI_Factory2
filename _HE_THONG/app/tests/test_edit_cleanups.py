@@ -6,6 +6,7 @@ import pytest
 
 from youtube_monitor.ffmpeg_renderer import _cleanup_filters, _compose_video_graph
 import unittest
+from tests.ui_source import studio_ui
 
 FRAME = (1280, 720)
 AFTER = ["scale=1280:720:force_original_aspect_ratio=decrease", "format=yuv420p"]
@@ -267,10 +268,7 @@ class CleanupIsReachableFromTheStoryboardTests(unittest.TestCase):
     def setUp(self) -> None:
         from pathlib import Path
 
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_storyboard_can_mark_and_unmark_it(self) -> None:
         self.assertIn('id="studioCleanupPosition"', self.page)

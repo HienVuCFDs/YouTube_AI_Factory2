@@ -29,6 +29,7 @@ from youtube_monitor.short_script import (
     set_script_writer,
     word_budget,
 )
+from tests.ui_source import studio_markup, studio_ui
 
 
 LONG_SCRIPT = {
@@ -275,10 +276,7 @@ class TheShortsPanelIsReachableTests(unittest.TestCase):
     def setUp(self) -> None:
         from pathlib import Path
 
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_studio_can_write_and_build_it(self) -> None:
         self.assertIn("writeShortScript()", self.page)
@@ -391,7 +389,9 @@ class TheShortsPanelIsReachableTests(unittest.TestCase):
                     self.errors.append(tag)
 
         parser = Balance()
-        parser.feed(self.page)
+        # The markup alone: the script modules are code, not tags, and
+        # feeding them to an HTML parser proves nothing about the document.
+        parser.feed(studio_markup())
 
         self.assertEqual(parser.errors, [], "mismatched tags")
         self.assertEqual(parser.stack, [], "unclosed tags")
@@ -460,10 +460,7 @@ class TheShortStoryboardIsTheSameStoryboardTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_short_draws_its_cards_with_the_long_videos_renderer(self) -> None:
         self.assertIn(

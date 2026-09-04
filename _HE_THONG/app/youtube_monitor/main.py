@@ -137,6 +137,7 @@ from .source_visuals import SourceVisualError, prepare_source_visuals
 from .media_probe import MediaProbeError, describe, probe_media, reject_reason
 from . import publish_gate
 from . import platform_copy
+from . import project_log
 from .reuse_check import measure_reuse, rule_findings, rule_verdict
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
@@ -6127,6 +6128,28 @@ class PlatformCopyRequest(BaseModel):
     title: str = Field(default="", max_length=300)
     description: str = Field(default="", max_length=5000)
     tags: list[str] = Field(default_factory=list)
+
+
+@app.get("/api/projects/{project_id}/log")
+def project_operations_log(project_id: int) -> dict[str, Any]:
+    """Everything that happened to this project, in order.
+
+    Assembled from rows that already existed - jobs, scripts, publications,
+    the cost ledger - rather than stored separately, which is also why it is
+    still there after the app is reopened.
+    """
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    log = project_log.build(
+        project=project,
+        source_video=database.get_video(str(project.get("youtube_video_id") or "")),
+        scripts=database.list_project_scripts(project_id, variant=None),
+        jobs=database.list_project_jobs(project_id, limit=400),
+        publications=database.list_project_publications(project_id=project_id),
+        cost_usd=database.project_provider_cost(project_id),
+    )
+    return {**log, "stage_status": project_log.stage_status(log)}
 
 
 @app.post("/api/projects/{project_id}/platform-copy")

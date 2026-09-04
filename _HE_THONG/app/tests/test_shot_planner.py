@@ -1,6 +1,7 @@
 import unittest
 
 from youtube_monitor.shot_planner import build_shot_plan, shots_to_markdown
+from tests.ui_source import studio_ui
 
 
 class ShotPlannerTests(unittest.TestCase):
@@ -114,10 +115,7 @@ def test_the_timeline_endpoint_says_whether_it_rebuilt() -> None:
 def test_the_page_refuses_to_voice_a_stale_timeline() -> None:
     from pathlib import Path
 
-    page = (
-        Path(__file__).resolve().parent.parent
-        / "youtube_monitor" / "templates" / "index.html"
-    ).read_text(encoding="utf-8")
+    page = studio_ui()
     assert "timelineResult?.stale" in page
     assert "force: true" in page
 
@@ -199,9 +197,6 @@ def test_a_timeline_of_nothing_but_headings_is_refused() -> None:
 def test_the_storyboard_keeps_its_timeline_when_shots_are_regenerated() -> None:
     from pathlib import Path
 
-    page = (
-        Path(__file__).resolve().parent.parent
-        / "youtube_monitor" / "templates" / "index.html"
-    ).read_text(encoding="utf-8")
+    page = studio_ui()
     assert "renderStudioStoryboard(shots, state.timeline);" in page
     assert "renderStudioStoryboard(shots, []);" not in page

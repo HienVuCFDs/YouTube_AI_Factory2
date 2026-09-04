@@ -1,0 +1,1733 @@
+// library.js - video library, filters, analysis
+//
+// Part of one page split into ordered files. These are classic
+// scripts sharing a single global scope and running in document
+// order, so this is a move rather than a rewrite: the files
+// concatenated in order are byte for byte the block they came from,
+// which is what the test asserts.
+  function populateVideoFilters() {
+    const groupSelect = $('videoGroupFilter');
+    const channelSelect = $('videoChannelFilter');
+    if (!groupSelect || !channelSelect) return;
+    const previousGroup = state.videoGroupFilter || groupSelect.value || '';
+    const groups = [...new Set(state.channels.map(channelGroupName))].sort((left, right) => left.localeCompare(right, 'vi'));
+    groupSelect.innerHTML = '<option value="">Tất cả nhóm</option>' + groups.map((group) => `<option value="${esc(group)}">${esc(group)}</option>`).join('');
+    state.videoGroupFilter = groups.includes(previousGroup) ? previousGroup : '';
+    groupSelect.value = state.videoGroupFilter;
+
+    const channels = state.channels.filter((channel) => !state.videoGroupFilter || channelGroupName(channel) === state.videoGroupFilter);
+    const previousChannel = state.videoChannelFilter || channelSelect.value || '';
+    channelSelect.innerHTML = '<option value="">Tất cả kênh</option>' + channels.map((channel) => `<option value="${esc(channel.youtube_channel_id)}">${esc(channel.title || channel.youtube_channel_id)}</option>`).join('');
+    state.videoChannelFilter = channels.some((channel) => channel.youtube_channel_id === previousChannel) ? previousChannel : '';
+    channelSelect.value = state.videoChannelFilter;
+  }
+
+  function renderVideos() {
+    const group = state.videoGroupFilter;
+    const channelId = state.videoChannelFilter;
+    state.videos = state.videoCatalog.filter((video) => {
+      const channel = state.channels.find((item) => item.youtube_channel_id === video.youtube_channel_id);
+      return (!group || channelGroupName(channel) === group) && (!channelId || video.youtube_channel_id === channelId);
+    });
+    const isFiltered = Boolean(group || channelId);
+    $('videoCountLabel').textContent = isFiltered ? `${state.videos.length}/${state.videoCatalog.length} BẢN GHI` : `${state.videos.length} BẢN GHI`;
+    $('videoFilterStatus').textContent = isFiltered ? `Đang lọc · ${state.videos.length} video` : `Tổng ${state.videoCatalog.length} video`;
+    $('videosBody').innerHTML = state.videos.length ? state.videos.map((video) => `
+      <tr>
+        <td><input type="checkbox" class="video-select" ${state.selectedVideoIds.has(video.youtube_video_id) ? 'checked' : ''} onchange="toggleVideoSelection('${esc(video.youtube_video_id)}', this.checked)" /></td>
+        <td class="video-cell"><a class="video-link" href="${esc(video.video_url)}" target="_blank" rel="noreferrer"><img class="thumb" src="${esc(video.thumbnail_url)}" alt=""><span><span class="video-title">${esc(video.title || video.youtube_video_id)}</span><span class="secondary-text">${esc(video.youtube_video_id)}</span></span></a></td>
+        <td><span class="primary-text">${esc(channelName(video.youtube_channel_id))}</span><div class="secondary-text">${esc(video.youtube_channel_id)}</div></td>
+        <td class="secondary-text">${date(video.published_at)}</td>
+        <td class="secondary-text">${number(video.view_count)}</td>
+        <td>${analysisTag(video)}<div class="secondary-text">${esc(video.analysis_provider || '—')}</div><div class="secondary-text">${transcriptTag(video)}</div></td>
+        <td><div class="video-actions"><button class="btn small primary" onclick="startStudioFromVideo('${esc(video.youtube_video_id)}')">Dựng lại video →</button><button class="btn small ${video.analysis_status === 'completed' ? 'ghost' : 'primary'}" onclick="analyzeVideo('${esc(video.youtube_video_id)}')">${video.analysis_status === 'completed' ? 'Phân tích lại' : 'Phân tích'}</button><button class="btn small ghost" onclick="openTranscript('${esc(video.youtube_video_id)}')">Transcript</button><button class="btn small ghost" onclick="autoTranscribeVideo('${esc(video.youtube_video_id)}')">Whisper</button><button class="btn small ${video.has_writer_content ? 'ghost' : 'primary'}" onclick="generateWriterContent('${esc(video.youtube_video_id)}')">AI Writer</button><button class="btn small ghost" onclick="createProductionProject('${esc(video.youtube_video_id)}')">Dự án chi tiết</button>${video.media_status === 'downloaded_for_editing' ? `<button class="btn small danger" onclick="deleteDownloadedVideo('${esc(video.youtube_video_id)}')" title="${esc(video.local_media_path || '')}">Xoá file đã tải</button>` : `<div class="dropdown"><button class="btn small ghost" onclick="toggleDownloadMenu(event, '${esc(video.youtube_video_id)}')">Tải video ▾</button><div class="dropdown-menu" id="downloadMenu-${esc(video.youtube_video_id)}"><button class="btn small ghost" onclick="downloadVideoForEditing('${esc(video.youtube_video_id)}', 'video')">Tải video (mp4)</button><button class="btn small ghost" onclick="downloadVideoForEditing('${esc(video.youtube_video_id)}', 'audio')">Tải audio (mp3)</button></div></div>`}</div></td>
+      </tr>`).join('') : '<tr><td colspan="7" class="empty">Không có video phù hợp với bộ lọc.</td></tr>';
+    updateBatchToolbar();
+    populateStudioVideoSelect();
+  }
+
+  function applyVideoFilters() {
+    state.videoGroupFilter = $('videoGroupFilter').value;
+    state.videoChannelFilter = '';
+    populateVideoFilters();
+    renderVideos();
+  }
+
+  function applyVideoChannelFilter() {
+    state.videoChannelFilter = $('videoChannelFilter').value;
+    renderVideos();
+  }
+
+  function clearVideoFilters() {
+    state.videoGroupFilter = '';
+    state.videoChannelFilter = '';
+    populateVideoFilters();
+    renderVideos();
+  }
+
+  function workflowReferenceName(channelId) {
+    const item = state.workflowReferences.find((channel) => channel.youtube_channel_id === channelId);
+    return item?.title || channelId || 'Chưa gắn workflow';
+  }
+
+  function populateManagedWorkflowSelect(select, includeEmpty = true) {
+    if (!select) return;
+    const selected = select.value;
+    const empty = includeEmpty ? '<option value="">Chưa gắn workflow</option>' : '';
+    select.innerHTML = empty + state.workflowReferences.map((channel) => `<option value="${esc(channel.youtube_channel_id)}">${esc(channel.title || channel.youtube_channel_id)}${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`).join('');
+    if (state.workflowReferences.some((channel) => channel.youtube_channel_id === selected)) select.value = selected;
+  }
+
+  function populateStudioManagedChannelSelect() {
+    const select = $('studioManagedChannelSelect');
+    if (!select) return;
+    const selected = select.value;
+    select.innerHTML = '<option value="">Chưa chọn kênh của tôi</option>' + state.managedChannels.map((channel) => `<option value="${channel.id}">${esc(channel.name)}${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`).join('');
+    if (state.managedChannels.some((channel) => String(channel.id) === selected)) select.value = selected;
+    renderStudioManagedSummary();
+  }
+
+  function renderStudioManagedSummary() {
+    const summary = $('studioWorkflowSummary');
+    if (!summary) return;
+    const channel = state.managedChannels.find((item) => String(item.id) === String($('studioManagedChannelSelect')?.value || ''));
+    if (!channel) {
+      summary.textContent = 'Chọn kênh của tôi để áp dụng workflow đã gắn.';
+      return;
+    }
+    summary.innerHTML = `<b>${esc(channel.name)}</b> · ${esc(channel.output_profile)}<br><span>Workflow tham khảo: ${esc(channel.workflow_reference_title || workflowReferenceName(channel.workflow_reference_channel_id))}</span>`;
+  }
+
+  function resetManagedChannelForm() {
+    $('managedChannelForm')?.reset();
+    if ($('managedChannelId')) $('managedChannelId').value = '';
+    if ($('managedChannelMessage')) $('managedChannelMessage').textContent = '';
+    populateManagedWorkflowSelect($('managedChannelWorkflow'));
+  }
+
+  function editManagedChannel(channelId) {
+    const channel = state.managedChannels.find((item) => Number(item.id) === Number(channelId));
+    if (!channel) return;
+    $('managedChannelId').value = channel.id;
+    $('managedChannelName').value = channel.name || '';
+    $('managedChannelUrl').value = channel.channel_url || '';
+    $('managedChannelPlatform').value = channel.platform || 'youtube';
+    $('managedChannelGroup').value = channel.group_name || '';
+    $('managedChannelWorkflow').value = channel.workflow_reference_channel_id || '';
+    $('managedChannelProfile').value = channel.output_profile || 'youtube_landscape';
+    $('managedChannelLanguage').value = channel.language || 'vi';
+    $('managedChannelTransition').value = channel.default_transition_style || 'fade';
+    $('managedChannelVoiceProvider').value = channel.default_voice_provider || 'edge_tts';
+    $('managedChannelVoiceModel').value = channel.default_voice_model || 'vi-VN-HoaiMyNeural';
+    $('managedChannelSubtitleProvider').value = channel.default_subtitle_provider || 'timeline_text';
+    $('managedChannelSubtitleModel').value = channel.default_subtitle_model || 'timeline';
+    $('managedChannelNotes').value = channel.notes || '';
+    $('managedScheduleEnabled').checked = Boolean(channel.schedule_enabled);
+    $('managedScheduleFrequency').value = channel.schedule_frequency || 'weekly';
+    $('managedScheduleTime').value = channel.schedule_time || '19:00';
+    $('managedScheduleTimezone').value = channel.schedule_timezone || 'Asia/Bangkok';
+    $('managedScheduleDays').value = channel.schedule_days || 'mon';
+    $('managedDefaultPrivacy').value = channel.default_privacy || 'private';
+    $('managedAutoUpload').checked = Boolean(channel.auto_upload);
+    $('managedChannelMessage').textContent = `Đang chỉnh sửa ${channel.name}.`;
+    $('managedChannelName').focus();
+  }
+
+  function renderManagedChannels() {
+    const body = $('managedChannelsBody');
+    if (!body) return;
+    $('managedChannelCountLabel').textContent = `${state.managedChannels.length} KÊNH`;
+    if (!state.managedChannels.length) {
+      body.innerHTML = '<div class="empty">Chưa có kênh của tôi. Hãy thêm kênh ở biểu mẫu bên trái.</div>';
+      return;
+    }
+    const groups = new Map();
+    state.managedChannels.forEach((channel) => {
+      const group = String(channel.group_name || '').trim() || 'Chưa gắn nhóm';
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(channel);
+    });
+    body.innerHTML = [...groups.entries()].map(([group, channels]) => `<div class="managed-card"><div class="eyebrow">${esc(group)}</div>${channels.map((channel) => `
+      <div class="managed-card" style="margin-top:8px;background:rgba(9,11,16,.38)">
+        <div class="managed-card-head"><div><div class="managed-card-title">${esc(channel.name)}</div><div class="managed-card-meta"><a href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.channel_url)}</a><br>Nền tảng: ${esc(channel.platform || 'youtube')} · Định dạng: ${esc(channel.output_profile)} · Ngôn ngữ: ${esc(channel.language || 'vi')}<br>Preset: ${esc(channel.default_voice_provider || 'edge_tts')} · ${esc(channel.default_voice_model || '')} · ${esc(channel.default_subtitle_provider || 'timeline_text')}<br>Workflow tham khảo: <b>${esc(channel.workflow_reference_title || workflowReferenceName(channel.workflow_reference_channel_id))}</b>${channel.notes ? `<br>Ghi chú: ${esc(channel.notes)}` : ''}</div></div><span class="tag ${channel.enabled ? 'green' : 'red'}">${channel.enabled ? 'ĐANG DÙNG' : 'TẠM TẮT'}</span></div>
+        <div class="managed-card-actions"><button class="btn small ghost" onclick="editManagedChannel(${channel.id})">Chỉnh sửa</button><button class="btn small ${channel.enabled ? 'danger' : 'primary'}" onclick="toggleManagedChannel(${channel.id}, ${!channel.enabled})">${channel.enabled ? 'Tạm tắt' : 'Bật lại'}</button></div>
+      </div>`).join('')}</div>`).join('');
+  }
+
+  async function loadManagedChannels() {
+    const [managed, references] = await Promise.all([api('/api/managed-channels'), api('/api/workflow-reference-channels')]);
+    state.managedChannels = managed;
+    state.workflowReferences = references;
+    populateManagedWorkflowSelect($('managedChannelWorkflow'));
+    populateStudioManagedChannelSelect();
+    renderManagedChannels();
+  }
+
+  async function saveManagedChannel(event) {
+    event.preventDefault();
+    const id = $('managedChannelId').value;
+    const payload = {
+      name: $('managedChannelName').value.trim(),
+      channel_url: $('managedChannelUrl').value.trim(),
+      platform: $('managedChannelPlatform').value,
+      group_name: $('managedChannelGroup').value.trim(),
+      workflow_reference_channel_id: $('managedChannelWorkflow').value || '',
+      output_profile: $('managedChannelProfile').value,
+      language: $('managedChannelLanguage').value,
+      default_transition_style: $('managedChannelTransition').value,
+      default_voice_provider: $('managedChannelVoiceProvider').value,
+      default_voice_model: $('managedChannelVoiceModel').value.trim(),
+      default_subtitle_provider: $('managedChannelSubtitleProvider').value,
+      default_subtitle_model: $('managedChannelSubtitleModel').value.trim(),
+      notes: $('managedChannelNotes').value.trim(),
+      schedule_enabled: $('managedScheduleEnabled').checked,
+      schedule_frequency: $('managedScheduleFrequency').value,
+      schedule_time: $('managedScheduleTime').value,
+      schedule_timezone: $('managedScheduleTimezone').value,
+      schedule_days: $('managedScheduleDays').value.trim(),
+      default_privacy: $('managedDefaultPrivacy').value,
+      auto_upload: $('managedAutoUpload').checked,
+    };
+    const message = $('managedChannelMessage');
+    try {
+      const response = await api(id ? `/api/managed-channels/${id}` : '/api/managed-channels', {method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload)});
+      message.textContent = id ? 'Đã cập nhật kênh.' : 'Đã thêm kênh của tôi.';
+      message.className = 'message success';
+      resetManagedChannelForm();
+      await loadManagedChannels();
+      setMessage(`Đã lưu ${response.channel.name}.`, 'success');
+    } catch (error) {
+      message.textContent = error.message;
+      message.className = 'message error';
+    }
+  }
+
+  async function toggleManagedChannel(channelId, enabled) {
+    try {
+      await api(`/api/managed-channels/${channelId}`, {method: 'PATCH', body: JSON.stringify({enabled})});
+      await loadManagedChannels();
+      setMessage(enabled ? 'Đã bật kênh xuất bản.' : 'Đã tạm tắt kênh xuất bản.', 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function loadChannels() {
+    state.channels = await api('/api/channels');
+    $('channelCountLabel').textContent = `${state.channels.length} NGUỒN`;
+    populateChannelSelect($('analysisChannelSelect'));
+    populateChannelSelect($('transcriptChannelSelect'));
+    populateStudioSourceChannelSelect();
+    populateVideoFilters();
+    if (!state.channels.length) {
+      $('channelsBody').innerHTML = '<tr><td colspan="4" class="empty">Chưa có kênh nào được đăng ký.</td></tr>';
+      return;
+    }
+    const groups = new Map();
+    state.channels.forEach((channel) => {
+      const group = String(channel.group_name || '').trim() || 'Chưa gắn nhãn';
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(channel);
+    });
+    const groupedRows = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, 'vi')).map(([group, channels], index) => {
+      const groupId = `channelGroup-${index}`;
+      const open = uiPreference(`channel-group.${groupId}`, true);
+      const channelRows = channels.map((channel) => `
+        <tr class="group-channel-row${open ? '' : ' is-collapsed'}" data-channel-group="${groupId}">
+          <td class="channel-cell"><a class="primary-text" href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.title || channel.youtube_channel_id)}</a><div class="secondary-text">${esc(channel.youtube_channel_id)}</div></td>
+          <td>${channel.tracking_enabled ? statusTag(channel.sync_status) : '<span class="tag red">ĐÃ TẠM DỪNG</span>'}</td>
+          <td class="secondary-text">${date(channel.last_sync_at)}</td>
+          <td><div class="channel-actions"><button class="btn small ghost" onclick="editChannelGroup('${esc(channel.youtube_channel_id)}')">Nhãn</button><button class="btn small ghost" onclick="syncChannel('${esc(channel.youtube_channel_id)}')">Đồng bộ</button><button class="btn small ${channel.tracking_enabled ? 'danger' : ''}" onclick="toggleChannel('${esc(channel.youtube_channel_id)}', ${!channel.tracking_enabled})">${channel.tracking_enabled ? 'Tạm dừng' : 'Tiếp tục'}</button></div></td>
+        </tr>`).join('');
+      return `<tr class="group-tab-row"><td colspan="4"><button id="${groupId}Toggle" class="group-tab" type="button" onclick="toggleChannelGroup('${groupId}')" aria-expanded="${open}"><span class="group-tab-main"><span class="group-tab-chevron">${open ? '⌃' : '⌄'}</span><span class="group-tab-label">${esc(group)}</span></span><span class="tag cyan">${channels.length} KÊNH</span></button></td></tr>${channelRows}`;
+    }).join('');
+    $('channelsBody').innerHTML = groupedRows;
+  }
+
+  async function loadVideos() {
+    state.videoCatalog = await api('/api/videos?limit=500');
+    renderVideos();
+  }
+
+  function projectStatusOptions(current) {
+    const options = [
+      ['draft', 'Bản nháp'],
+      ['script', 'Đang viết'],
+      ['review', 'Chờ duyệt'],
+      ['approved', 'Đã duyệt'],
+      ['archived', 'Lưu trữ'],
+    ];
+    return options.map(([value, label]) => `<option value="${value}" ${value === current ? 'selected' : ''}>${label}</option>`).join('');
+  }
+
+  async function loadProjects() {
+    state.projects = await api('/api/projects?limit=50');
+    const activeProjects = state.projects.filter((project) => !Number(project.is_published) && project.status !== 'archived');
+    const publishedProjects = state.projects.filter((project) => Number(project.is_published));
+    const archivedProjects = state.projects.filter((project) => !Number(project.is_published) && project.status === 'archived');
+    const projectRows = (projects, emptyText) => projects.length ? projects.map((project) => {
+      const publication = project.publication_status || '';
+      const publicationLabel = publication === 'published' ? 'Đã xuất bản' : publication === 'queued' ? 'Đã xếp lịch đăng' : publication === 'publishing' ? 'Đang xuất bản' : publication === 'failed' ? 'Đăng lỗi' : '';
+      const publicationClass = publication === 'published' ? 'cyan' : publication === 'failed' ? 'orange' : '';
+      return `
+      <div class="job-row">
+        <span class="job-dot ${project.status === 'approved' ? 'completed' : project.status === 'review' ? 'running' : ''}"></span>
+        <div class="job-main">
+          <div class="job-title">${esc(project.title || project.source_title || project.youtube_video_id)}</div>
+          <div class="job-meta">${esc(channelName(project.youtube_channel_id))} · ${esc(project.youtube_video_id)} · ${date(project.updated_at)}</div>
+          <div class="secondary-text">${project.has_transcript ? 'Có transcript' : 'Chưa có transcript'} · ${project.has_writer_content ? 'Có AI Writer' : 'Chưa có AI Writer'}${project.project_published_at ? ` · Đăng ${date(project.project_published_at)}` : ''}${project.notes ? ` · ${esc(project.notes)}` : ''}</div>
+        </div>
+        ${projectStatusTag(project.status)}
+        ${publicationLabel ? `<span class="tag ${publicationClass}">${publicationLabel}</span>` : ''}
+        <div class="queue-controls">
+          <select aria-label="Trạng thái dự án" onchange="updateProjectStatus(${project.id}, this.value)">${projectStatusOptions(project.status)}</select>
+          <button class="btn small primary" onclick="resumeStudioProject(${project.id})">Tiếp tục tạo video</button>
+          <button class="btn small ghost" onclick="editProjectNotes(${project.id})">Ghi chú</button>
+          <button class="btn small ghost" onclick="generateWriterContent('${esc(project.youtube_video_id)}')">AI Writer</button>
+          <a class="btn small ghost" href="${esc(project.video_url)}" target="_blank" rel="noreferrer">Mở video</a>
+        </div>
+      </div>`;
+    }).join('') : `<div class="empty">${emptyText}</div>`;
+    $('projectCountLabel').textContent = `${activeProjects.length} ĐANG LÀM · ${publishedProjects.length} ĐÃ XUẤT BẢN`;
+    $('projectsBody').innerHTML = `
+      <div class="project-list-section"><div class="project-list-heading"><strong>ĐANG LÀM</strong><span class="tag">${activeProjects.length} DỰ ÁN</span></div>${projectRows(activeProjects, 'Chưa có dự án đang làm.')}</div>
+      <div class="project-list-section"><div class="project-list-heading"><strong>ĐÃ XUẤT BẢN</strong><span class="tag cyan">${publishedProjects.length} VIDEO</span></div>${projectRows(publishedProjects, 'Chưa có video đã xuất bản.')}</div>
+      ${archivedProjects.length ? `<div class="project-list-section"><div class="project-list-heading"><strong>LƯU TRỮ</strong><span class="tag">${archivedProjects.length}</span></div>${projectRows(archivedProjects, '')}</div>` : ''}`;
+  }
+
+  async function createProductionProject(videoId) {
+    setMessage(`Đang tạo dự án sản xuất cho ${videoId}...`);
+    try {
+      await api(`/api/videos/${encodeURIComponent(videoId)}/project`, {method: 'POST', body: JSON.stringify({})});
+      setMessage('Đã đưa video vào xưởng dự án.', 'success');
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function startStudioFromVideo(videoId) {
+    const video = state.videoCatalog.find((item) => item.youtube_video_id === videoId);
+    if (!video) return setMessage('Không tìm thấy video đã chọn trong thư viện.', 'error');
+    setWorkspace('dashboard');
+    setStudioStep(1);
+    state.studioSourceChannelId = video.youtube_channel_id || '';
+    populateStudioSourceChannelSelect();
+    populateStudioVideoSelect();
+    const select = $('studioVideoSelect');
+    if (select) select.value = videoId;
+    await selectStudioVideo();
+    setMessage(`Đã chọn “${video.title || videoId}”. Bây giờ chỉ cần bấm “1. Phân tích tham chiếu”.`, 'success');
+  }
+
+  async function updateProjectStatus(projectId, status) {
+    try {
+      await api(`/api/projects/${projectId}`, {method: 'PATCH', body: JSON.stringify({status})});
+      setMessage('Đã cập nhật trạng thái dự án.', 'success');
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function editProjectNotes(projectId) {
+    const project = state.projects.find((item) => item.id === projectId);
+    const notes = prompt('Ghi chú cho dự án sản xuất:', project?.notes || '');
+    if (notes === null) return;
+    try {
+      await api(`/api/projects/${projectId}`, {method: 'PATCH', body: JSON.stringify({notes})});
+      setMessage('Đã lưu ghi chú dự án.', 'success');
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function openProjectDetail(projectId, initialView = 'overview') {
+    setWorkspace('production');
+    try {
+      const bundle = await api(`/api/projects/${projectId}`);
+      // Mỗi lần mở xưởng, luôn bắt đầu ở trang có nội dung; tránh giữ tab cũ rỗng sau khi dữ liệu thay đổi.
+      state.projectView = ['overview', 'editor', 'assets', 'export'].includes(initialView) ? initialView : 'overview';
+      renderProjectDetail(bundle);
+    } catch (error) {
+      $('projectTitle').textContent = `Không mở được dự án #${projectId}`;
+      $('projectBody').innerHTML = `<div class="empty">Không tải được chi tiết dự án: ${esc(error.message || 'Lỗi không xác định.')}<div class="studio-actions" style="margin-top:12px"><button class="btn primary" onclick="openProjectDetail(${Number(projectId)})">Thử lại</button></div></div>`;
+      $('projectDetail').classList.add('open');
+      setMessage(error.message, 'error');
+    }
+  }
+
+  function switchProjectView(view) {
+    const allowed = new Set(['overview', 'editor', 'assets', 'export']);
+    state.projectView = allowed.has(view) ? view : 'overview';
+    document.querySelectorAll('[data-project-view]').forEach((panel) => {
+      panel.hidden = panel.dataset.projectView !== state.projectView;
+    });
+    document.querySelectorAll('[data-project-tab]').forEach((tab) => {
+      const active = tab.dataset.projectTab === state.projectView;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    saveStudioSession();
+  }
+
+  function selectedVoiceProvider() {
+    return $('renderVoiceProvider')?.value || 'edge_tts';
+  }
+
+  async function queueSelectedVoiceover(projectId, jobType = 'voiceover') {
+    const provider = selectedVoiceProvider();
+    await saveRenderSettings(projectId);
+    return queueProductionJob(projectId, jobType, provider, true);
+  }
+
+  function renderProjectDetail(bundle) {
+    const project = bundle.project || {};
+    const video = bundle.source_video || {};
+    const transcript = bundle.latest_transcript;
+    const script = bundle.latest_script;
+    const shots = bundle.latest_shots || [];
+    const timeline = bundle.latest_timeline || [];
+    const finalVideo = bundle.final_video || {};
+      const productionJobs = bundle.production_jobs || [];
+      const productionJobEvents = bundle.production_job_events || {};
+      const publications = bundle.publications || [];
+      const thumbnails = bundle.thumbnails || [];
+    const assets = bundle.project_assets || [];
+    const renderSettings = bundle.render_settings || {music_asset_id: null, music_volume: 0.12, transition_style: 'fade', output_profile: 'youtube_landscape', voice_provider: 'edge_tts', voice_model: 'vi-VN-HoaiMyNeural', voice_reference_asset_id: null, voice_prompt_text: '', subtitle_provider: 'timeline_text', subtitle_model: 'timeline', publish_language: 'vi'};
+    const selectedVoiceModel = String(renderSettings.voice_model || 'vi-VN-HoaiMyNeural');
+    const selectedVoiceReferenceAsset = Number(renderSettings.voice_reference_asset_id || 0);
+    const selectedSubtitleModel = String(renderSettings.subtitle_model || 'timeline');
+    const sceneGenerationJobs = bundle.scene_generation_jobs || [];
+    const metadata = bundle.metadata_analysis?.result || null;
+    const writer = bundle.writer_content?.result || null;
+    const readiness = bundle.readiness || {};
+    const managedChannelSummary = project.managed_channel_name
+      ? `${project.managed_channel_name} · workflow: ${project.workflow_reference_title || 'chưa gắn'}`
+      : 'Chưa chọn kênh xuất bản';
+    const channelPresetAction = project.managed_channel_id
+      ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px"><button class="btn small ghost" onclick="applyChannelPreset(${project.id})">Áp dụng preset kênh vào render</button><span class="secondary-text">${esc(renderSettings.output_profile)} · ${esc(renderSettings.voice_provider)} · ${esc(renderSettings.subtitle_provider)}</span></div>`
+      : '';
+    const managedChannelOptions = `<option value="">Dùng kênh gắn với project</option>${state.managedChannels.map((channel) => `<option value="${channel.id}" ${Number(project.managed_channel_id) === Number(channel.id) ? 'selected' : ''}>${esc(channel.name)} · ${esc(channel.platform || 'youtube')}${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`).join('')}`;
+    const thumbnailOptions = `<option value="">Không đổi thumbnail</option>${assets.filter((asset) => asset.asset_type === 'image').map((asset) => `<option value="${asset.id}">${esc(asset.original_name || asset.file_path || `Asset #${asset.id}`)}</option>`).join('')}`;
+    const voiceReferenceOptions = `<option value="">Không dùng voice reference</option>${assets.filter((asset) => asset.asset_type === 'audio').map((asset) => `<option value="${asset.id}" ${selectedVoiceReferenceAsset === Number(asset.id) ? 'selected' : ''}>${esc(asset.original_name || asset.file_path || `Audio #${asset.id}`)} · ${fileSize(asset.file_size)}</option>`).join('')}`;
+    state.projectId = project.id;
+    state.scriptId = script?.id || null;
+    state.shots = shots;
+    state.timeline = timeline;
+    state.productionJobs = productionJobs;
+    state.assets = assets;
+    const suggestedTitles = [...new Set([
+      ...(Array.isArray(writer?.new_titles) ? writer.new_titles : []),
+      script?.script_title || project.title || '',
+    ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 4);
+    const thumbnailBrief = [
+      `Khung hình chính: ${suggestedTitles[0] || project.title || 'nội dung video'}.`,
+      writer?.creative_direction || writer?.summary || script?.hook || '',
+      'Ưu tiên một chủ thể rõ ràng, tương phản cao, ít chữ, dễ đọc ở kích thước nhỏ; không dùng ảnh hay logo không có quyền sử dụng.',
+    ].filter(Boolean).join(' ');
+    state.publicationSuggestions = {
+      sourceVideoId: String(project.youtube_video_id || ''),
+      titles: suggestedTitles,
+      description: String(writer?.new_description || ''),
+      tags: Array.isArray(writer?.hashtags) ? writer.hashtags : [],
+      thumbnailBrief,
+    };
+    saveStudioSession();
+    const openaiImageIntegration = state.integrations.find((item) => item.key === 'openai_gpt');
+    const openaiImageReady = Boolean(openaiImageIntegration?.ready);
+    const geminiIntegration = state.integrations.find((item) => item.key === 'google_gemini');
+    const geminiReady = Boolean(geminiIntegration?.ready);
+    $('projectTitle').textContent = `${project.title || video.title || project.id} · ${projectStatusTag(project.status).replace(/<[^>]*>/g, '')}`;
+    $('projectHandoffLink').href = `/api/projects/${project.id}/handoff`;
+    const nextActions = (bundle.next_actions || []).map((item) => `<li>${esc(item)}</li>`).join('') || '<li>Không có việc chờ xử lý.</li>';
+    const titles = writer?.new_titles?.length ? writer.new_titles.map((item) => `<li>${esc(item)}</li>`).join('') : '<li>Chưa có tiêu đề mới.</li>';
+    const outline = writer?.script_outline?.length ? writer.script_outline.map((item) => `<li>${esc(item)}</li>`).join('') : '<li>Chưa có dàn ý kịch bản.</li>';
+    const keywords = metadata?.keywords?.length ? metadata.keywords.map((item) => `<span class="keyword">${esc(item.keyword)} <small>×${esc(item.count)}</small></span>`).join('') : '<span class="secondary-text">Chưa có từ khóa metadata</span>';
+    const transcriptText = transcript?.content_text ? esc(transcript.content_text) : 'Chưa có transcript.';
+    const scriptTitle = script?.script_title || '';
+    const scriptHook = script?.hook || '';
+    const scriptIntro = script?.intro || '';
+    const scriptMain = script?.main_content || '';
+    const scriptCta = script?.cta || '';
+    const scriptActions = script ? `
+      <button class="btn small primary" onclick="saveCurrentScript()">Lưu kịch bản</button>
+      <button class="btn small ghost" onclick="setCurrentScriptReview()">Chuyển chờ duyệt</button>
+      <button class="btn small ghost" onclick="approveCurrentScript()">Duyệt</button>
+      <a class="btn small ghost" href="/api/scripts/${script.id}/markdown" target="_blank" rel="noreferrer">Xuất Markdown</a>` :
+      `<button class="btn small primary" onclick="createScriptDraft(${project.id})">Tạo bản nháp từ AI Writer</button>`;
+    const shotRows = shots.length ? shots.map((shot) => `
+      <div class="job-row" style="align-items:flex-start">
+        <span class="job-dot ${shot.status === 'done' ? 'completed' : shot.status === 'ready' ? 'running' : ''}"></span>
+        <div class="job-main">
+          <div class="job-title">Cảnh ${number(shot.shot_index)} · ${esc(shot.section)} · ${shotStatusTag(shot.status)}</div>
+          <div class="transcript-grid" style="grid-template-columns:1fr 1fr; margin-top:8px">
+            <div class="transcript-field"><label for="shotNarration-${shot.id}">Lời dẫn</label><textarea id="shotNarration-${shot.id}" class="transcript-editor" style="min-height:88px">${esc(shot.narration)}</textarea></div>
+            <div class="transcript-field"><label for="shotPrompt-${shot.id}">Visual/B-roll prompt</label><textarea id="shotPrompt-${shot.id}" class="transcript-editor" style="min-height:88px">${esc(shot.visual_prompt)}</textarea></div>
+          </div>
+          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px">
+            <select id="shotAsset-${shot.id}" aria-label="Loại asset">
+              <option value="talking_head" ${shot.asset_type === 'talking_head' ? 'selected' : ''}>Talking head</option>
+              <option value="broll" ${shot.asset_type === 'broll' ? 'selected' : ''}>B-roll</option>
+              <option value="generated_image" ${shot.asset_type === 'generated_image' ? 'selected' : ''}>Ảnh AI</option>
+              <option value="screen_recording" ${shot.asset_type === 'screen_recording' ? 'selected' : ''}>Quay màn hình</option>
+            </select>
+            <input id="shotDuration-${shot.id}" style="width:76px" type="number" min="1" max="3600" value="${esc(shot.duration_seconds)}" />
+            <select id="shotStatus-${shot.id}" aria-label="Trạng thái cảnh">
+              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="ready" ${shot.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
+              <option value="done" ${shot.status === 'done' ? 'selected' : ''}>Xong</option>
+            </select>
+            <button class="btn small ghost" onclick="saveShot(${shot.id})">Lưu cảnh</button>
+          </div>
+        </div>
+      </div>`).join('') : '<div class="empty">Chưa có shot list. Tạo shot list sau khi đã có kịch bản.</div>';
+    const storyboardRows = shots.length ? `<div class="storyboard-grid" aria-label="Storyboard">${shots.map((shot, shotPosition) => {
+      const segment = timeline.find((item) => Number(item.shot_id) === Number(shot.id)) || {};
+      const visualPath = String(segment.visual_path || '').trim();
+      const visualPreviewUrl = visualPath ? `/api/projects/${project.id}/timeline/${segment.id}/visual-preview` : '';
+      const visualPreview = visualPath
+        ? (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(visualPath) ? `<img src="${visualPreviewUrl}" alt="Storyboard cảnh ${esc(shot.shot_index)}">` : `<video src="${visualPreviewUrl}" controls muted preload="metadata"></video>`)
+        : `<div><div class="eyebrow">${esc(shot.asset_type || 'broll')}</div><div class="storyboard-prompt">${esc(shot.visual_prompt || 'Chưa có visual prompt. Hãy mô tả cảnh, chuyển động và nguồn asset.')}</div></div>`;
+      return `<article class="storyboard-card">
+        <div class="storyboard-card-head"><div class="storyboard-card-title">Cảnh ${number(shot.shot_index)} · ${esc(shot.section || 'main')}</div>${shotStatusTag(shot.status)}</div>
+        <div class="storyboard-media">${visualPreview}</div>
+        <div class="storyboard-body">
+          <div class="transcript-grid">
+            <div class="transcript-field"><label for="shotNarration-${shot.id}">Lời dẫn / voiceover</label><textarea id="shotNarration-${shot.id}" class="transcript-editor">${esc(shot.narration)}</textarea></div>
+            <div class="transcript-field"><label for="shotPrompt-${shot.id}">Hình ảnh / chuyển động / prompt</label><textarea id="shotPrompt-${shot.id}" class="transcript-editor">${esc(shot.visual_prompt)}</textarea></div>
+          </div>
+          <div class="storyboard-controls">
+            <select id="shotAsset-${shot.id}" aria-label="Loại asset">
+              <option value="talking_head" ${shot.asset_type === 'talking_head' ? 'selected' : ''}>Talking head</option>
+              <option value="broll" ${shot.asset_type === 'broll' ? 'selected' : ''}>B-roll</option>
+              <option value="generated_image" ${shot.asset_type === 'generated_image' ? 'selected' : ''}>Ảnh AI</option>
+              <option value="screen_recording" ${shot.asset_type === 'screen_recording' ? 'selected' : ''}>Quay màn hình</option>
+            </select>
+            <input id="shotDuration-${shot.id}" type="number" min="1" max="3600" value="${esc(shot.duration_seconds)}" title="Thời lượng (giây)">
+            <select id="shotStatus-${shot.id}" aria-label="Trạng thái cảnh">
+              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="ready" ${shot.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
+              <option value="done" ${shot.status === 'done' ? 'selected' : ''}>Xong</option>
+            </select>
+            <button class="btn small ghost" onclick="saveShot(${shot.id})">Lưu cảnh</button>
+          </div>
+          <div class="storyboard-summary"><span>${number(shot.duration_seconds)} giây</span><span>Timeline: ${segment.start_seconds == null ? 'chưa tạo' : `${segment.start_seconds}s–${segment.end_seconds}s`}</span>${visualPath ? `<span>${visualPath.includes('director_draft_visuals') ? 'Visual draft – cần thay' : 'Visual đã gắn'}</span>` : '<span>Chưa gắn visual thật</span>'}${segment.audio_path ? '<span>Đã có giọng đọc</span>' : ''}</div>
+          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap">
+            <input id="shotImageFile-${shot.id}" type="file" accept="image/*,video/*" style="max-width:180px" onchange="uploadShotImage(${project.id}, ${shot.id}, this)" aria-label="Tải ảnh/video cho cảnh" />
+            ${visualPath ? `<button class="btn small danger" type="button" onclick="deleteShotImage(${project.id}, ${segment.id})">Xóa ảnh/video</button>` : ''}
+            <select id="shotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select>
+            <select id="shotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select>
+            <button class="btn small primary" type="button" onclick="generateShotImage(${project.id}, ${shot.id})">Tạo ảnh AI cho cảnh</button>
+            <select id="shotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select>
+            <button class="btn small primary" type="button" onclick="generateShotVideo(${project.id}, ${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(visualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button>
+            <button class="btn small ghost" type="button" onclick="regenerateShotVoice(${project.id}, ${shot.id})">Tạo lại giọng đọc cảnh này</button>
+          </div>
+        </div>
+         <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><button class="btn small ghost" onclick="moveStoryboardShot(${project.id}, ${shot.id}, -1)" ${shotPosition === 0 ? 'disabled' : ''}>↑</button><button class="btn small ghost" onclick="moveStoryboardShot(${project.id}, ${shot.id}, 1)" ${shotPosition === shots.length - 1 ? 'disabled' : ''}>↓</button><button class="btn small ghost" onclick="duplicateStoryboardShot(${project.id}, ${shot.id})">Nhân bản</button><button class="btn small danger" onclick="deleteStoryboardShot(${project.id}, ${shot.id})">Xóa cảnh</button></div>
+       </article>`;
+    }).join('')}</div>` : '<div class="empty">Chưa có storyboard. Tạo shot list sau khi đã có kịch bản.</div>';
+    const shotActions = script ? `
+      <button class="btn small primary" onclick="createStoryboardShot(${project.id})">+ Thêm cảnh</button>
+      <button class="btn small ghost" onclick="generateShotList(${project.id}, ${shots.length ? 'false' : 'true'})">${shots.length ? 'Giữ shot list hiện tại' : 'Tạo shot list'}</button>
+      <button class="btn small ghost" onclick="regenerateShotList(${project.id})">Tạo lại shot list</button>
+      <a class="btn small ghost" href="/api/projects/${project.id}/shots/markdown" target="_blank" rel="noreferrer">Xuất shot Markdown</a>` :
+      '<span class="secondary-text">Cần có kịch bản trước khi tạo shot list.</span>';
+    const totalTimelineDuration = timeline.reduce((total, item) => total + Number(item.duration_seconds || 0), 0);
+    const timelineRows = timeline.length ? timeline.map((segment) => {
+      const sceneJob = sceneGenerationJobs.find((item) => Number(item.timeline_segment_id) === Number(segment.id));
+      const sceneJobActions = sceneJob
+        ? (sceneJob.status === 'queued' ? `<button class="btn small ghost" type="button" onclick="cancelSceneJob(${project.id}, ${sceneJob.id})">Hủy</button>`
+          : ['error', 'cancelled'].includes(sceneJob.status) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Chạy lại</button>`
+          : (sceneJob.status === 'running' && SUBSCRIPTION_SCENE_PROVIDERS.has(sceneJob.provider)) ? `<button class="btn small ghost" type="button" onclick="retrySceneJob(${project.id}, ${sceneJob.id})">Kẹt lâu? Chạy lại</button>`
+          : '')
+        : '';
+      const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''} ${sceneJobActions}` : 'Chưa tạo ảnh AI cho đoạn này.';
+      const sceneControls = `
+        <select id="sceneRatio-${segment.id}" aria-label="Tỷ lệ cảnh AI"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select>
+        <select id="sceneImageProvider-${segment.id}" aria-label="Engine tạo ảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select>
+        <button class="btn small primary" onclick="generateSceneImage(${project.id}, ${segment.id})">Tạo ảnh AI</button>
+        <select id="sceneVideoProvider-${segment.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select>
+        <button class="btn small primary" onclick="generateSceneVideo(${project.id}, ${segment.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(String(segment.visual_path || '')) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button>`;
+      return `
+      <div class="job-row" style="align-items:flex-start">
+        <span class="job-dot ${segment.status === 'done' || segment.status === 'ready' ? 'completed' : segment.status === 'voice_ready' || segment.status === 'asset_ready' ? 'running' : ''}"></span>${segmentHaveBadges(segment)}
+        <div class="job-main">
+          <div class="job-title">Đoạn ${number(segment.segment_index)} · ${esc(segment.section)} · ${segment.start_seconds}s–${segment.end_seconds}s · ${timelineStatusTag(segment.status)}</div>
+          <div class="transcript-grid" style="grid-template-columns:1fr 1fr; margin-top:8px">
+            <div class="transcript-field"><label for="timelineVoice-${segment.id}">Voiceover</label><textarea id="timelineVoice-${segment.id}" class="transcript-editor" style="min-height:88px">${esc(segment.voice_text)}</textarea></div>
+            <div class="transcript-field"><label for="timelinePrompt-${segment.id}">Visual prompt</label><textarea id="timelinePrompt-${segment.id}" class="transcript-editor" style="min-height:88px">${esc(segment.visual_prompt)}</textarea></div>
+          </div>
+          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap">
+            <input id="timelineDuration-${segment.id}" style="width:76px" type="number" min="1" max="3600" value="${esc(segment.duration_seconds)}" title="Thời lượng (giây)" />
+            <input id="timelineAudio-${segment.id}" style="min-width:180px" value="${esc(segment.audio_path)}" placeholder="Đường dẫn audio TTS" />
+            <input id="timelineVisual-${segment.id}" style="min-width:180px" value="${esc(segment.visual_path)}" placeholder="Đường dẫn video/ảnh" />
+            <select id="timelineAudioAsset-${segment.id}" onchange="attachTimelineAsset(${segment.id}, this.value)" aria-label="Gắn audio local">${assetOptions(assets, 'audio', segment.audio_path)}</select>
+            <select id="timelineVisualAsset-${segment.id}" onchange="attachTimelineAsset(${segment.id}, this.value)" aria-label="Gắn video hoặc ảnh local">${assetOptions(assets, ['video', 'image'], segment.visual_path)}</select>
+            <select id="timelineStatus-${segment.id}" aria-label="Trạng thái timeline">
+              <option value="planned" ${segment.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="voice_ready" ${segment.status === 'voice_ready' ? 'selected' : ''}>Đã có voice</option>
+              <option value="asset_ready" ${segment.status === 'asset_ready' ? 'selected' : ''}>Đã có asset</option>
+              <option value="ready" ${segment.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
+              <option value="done" ${segment.status === 'done' ? 'selected' : ''}>Xong</option>
+            </select>
+            <button class="btn small ghost" onclick="saveTimelineSegment(${segment.id})">Lưu đoạn</button>
+          </div>
+          <div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap">${sceneControls}</div>
+          <div class="secondary-text" style="margin-top:6px">AI tạo cảnh · ${sceneStatus}</div>
+        </div>
+      </div>`;
+    }).join('') : '<div class="empty">Chưa có timeline. Hãy tạo sau khi đã có shot list.</div>';
+    const batchSceneAction = timeline.length
+      ? `<select id="batchSceneRatio-${project.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="batchImageProvider-${project.id}" aria-label="Engine tạo tất cả ảnh"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select><button class="btn small primary" onclick="generateAllSceneImages(${project.id})">✦ Tạo tất cả ảnh AI</button><select id="batchVideoProvider-${project.id}" aria-label="Engine tạo tất cả video">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" onclick="generateAllSceneVideos(${project.id})">✦ Tạo tất cả video AI</button>`
+      : '';
+    const timelineActions = shots.length ? `
+      <button class="btn small primary" onclick="generateTimeline(${project.id}, ${timeline.length ? 'false' : 'true'})">${timeline.length ? 'Giữ timeline hiện tại' : 'Tạo timeline'}</button>
+      <button class="btn small ghost" onclick="regenerateTimeline(${project.id})">Tạo lại timeline</button>
+      ${batchSceneAction}
+      <a class="btn small ghost" href="/api/projects/${project.id}/timeline/manifest" target="_blank" rel="noreferrer">Xuất manifest JSON</a>
+      <a class="btn small ghost" href="/api/projects/${project.id}/timeline/markdown" target="_blank" rel="noreferrer">Xuất timeline Markdown</a>
+      <button class="btn small primary" onclick="exportPremiere(${project.id})">Xuất gói Premiere</button>` :
+      '<span class="secondary-text">Cần có shot list trước khi tạo timeline.</span>';
+    const assetRows = assets.length ? assets.map((asset) => `
+      <div class="job-row">
+        <span class="job-dot ${asset.analysis_status === 'completed' ? 'completed' : asset.analysis_status === 'running' ? 'running' : ''}"></span>
+        <div class="job-main">
+          <div class="job-title">${esc(asset.asset_type)} · ${esc(asset.original_name)} · ${fileSize(asset.file_size)}</div>
+          <div class="job-meta">${esc(asset.analysis_status)}${asset.has_transcript ? ' · Đã có transcript' : ''} · SHA-256 ${esc(String(asset.sha256 || '').slice(0, 12))}</div>
+          ${asset.analysis_error ? `<div class="error-text">${esc(asset.analysis_error)}</div>` : ''}
+        </div>
+        <div class="queue-controls" style="justify-content:flex-end">
+          <a class="btn small ghost" href="/api/assets/${asset.id}/download" target="_blank" rel="noreferrer">Mở file</a>
+          ${asset.asset_type === 'audio' || asset.asset_type === 'video' ? `<button class="btn small ghost" onclick="analyzeLocalAsset(${asset.id})">Whisper local</button>` : ''}
+        </div>
+      </div>`).join('') : '<div class="empty">Chưa có nguyên liệu local trong project.</div>';
+    const assetPanel = `
+      <div data-project-view="assets" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Thư viện nguyên liệu local · ${number(assets.length)} file</label>
+        <p class="panel-sub">Upload video, audio hoặc ảnh để phân tích cục bộ, gắn vào timeline và đóng gói sang Premiere.</p>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
+          <input id="assetUploadFile" type="file" accept="video/*,audio/*,image/*" />
+          <select id="assetUploadType" aria-label="Loại nguyên liệu"><option value="video">Video</option><option value="audio">Audio</option><option value="image">Ảnh</option></select>
+          <button class="btn small primary" onclick="uploadProjectAsset(${project.id})">Upload nguyên liệu</button>
+        </div>
+        <div style="margin-top:8px">${assetRows}</div>
+        </div>`;
+    const thumbnailCards = thumbnails.length ? thumbnails.map((thumbnail) => `
+      <article class="storyboard-card" style="max-width:320px">
+        <div class="storyboard-card-head"><div class="storyboard-card-title">${thumbnail.selected ? '✓ Đã chọn' : 'Phương án'}</div><span class="tag ${thumbnail.selected ? 'green' : 'orange'}">${esc(thumbnail.provider)}</span></div>
+        <div class="storyboard-media"><img src="/api/assets/${thumbnail.asset_id}/download" alt="${esc(thumbnail.original_name)}"></div>
+        <div class="storyboard-body"><div class="secondary-text">${esc(thumbnail.prompt || 'Frame từ video đã render')}</div><div class="secondary-text" style="margin-top:5px">${esc(thumbnail.model)}${thumbnail.seed == null ? '' : ` · seed ${esc(thumbnail.seed)}`}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:8px"><button class="btn small ${thumbnail.selected ? 'ghost' : 'primary'}" onclick="selectProjectThumbnail(${project.id}, ${thumbnail.id})" ${thumbnail.selected ? 'disabled' : ''}>${thumbnail.selected ? 'Đang dùng' : 'Chọn bản này'}</button></div></div>
+      </article>`).join('') : '<div class="empty">Chưa có thumbnail. Tạo từ video đã render rồi chọn một bản cuối.</div>';
+    const thumbnailPanel = `<div class="analysis-item" style="margin-top:12px"><label>Thumbnail · ${number(thumbnails.length)} phương án</label><p class="panel-sub">Tạo frame 16:9 từ video đã render, sau đó chọn một bản. Prompt, provider, model và seed được lưu cùng project.</p><div class="queue-controls" style="justify-content:flex-start;margin-top:8px;flex-wrap:wrap"><input id="thumbnailPrompt" value="${esc(script?.script_title || project.title || '')}" placeholder="Prompt/ghi chú thumbnail" aria-label="Prompt thumbnail"><button class="btn small primary" onclick="generateProjectThumbnails(${project.id})">Tạo 3 thumbnail local</button></div><div class="storyboard-grid" style="margin-top:10px">${thumbnailCards}</div></div>`;
+    const musicOptions = `<option value="">Không dùng nhạc nền</option>${assets.filter((asset) => asset.asset_type === 'audio').map((asset) => `<option value="${asset.id}" ${Number(renderSettings.music_asset_id) === Number(asset.id) ? 'selected' : ''}>${esc(asset.original_name)} · ${fileSize(asset.file_size)}</option>`).join('')}`;
+    const productionJobRows = productionJobs.length ? productionJobs.map((job) => `
+      <div class="job-row">
+        <span class="job-dot ${job.status === 'completed' ? 'completed' : job.status === 'running' ? 'running' : ''}"></span>
+        <div class="job-main">
+          <div class="job-title">${esc(job.job_type)} · ${esc(job.provider)} · ${productionJobStatusTag(job.status)}</div>
+          <div class="job-meta">${date(job.created_at)}${job.output_path ? ` · ${esc(job.output_path)}` : ''}</div>
+          ${job.error ? `<div class="error-text">${esc(job.error)}</div>` : ''}
+          ${(productionJobEvents[job.id] || []).length ? `<details style="margin-top:6px"><summary class="secondary-text">Nhật ký job (${number((productionJobEvents[job.id] || []).length)})</summary><div class="secondary-text" style="margin-top:5px">${(productionJobEvents[job.id] || []).map((event) => `<div>${date(event.created_at)} · ${esc(event.message)}</div>`).join('')}</div></details>` : ''}
+        </div>
+        ${job.status === 'queued' ? `<button class="btn small danger" onclick="cancelProductionJob(${project.id}, ${job.id})">Hủy</button>` : ''}
+        ${['error', 'cancelled'].includes(job.status) ? `<button class="btn small primary" onclick="retryProductionJob(${project.id}, ${job.id}, '${esc(job.job_type)}')">Chạy lại</button>` : ''}
+      </div>`).join('') : '<div class="empty">Chưa có production job.</div>';
+    const sourceMediaReady = video.media_status === 'downloaded_for_editing' && Boolean(video.local_media_path);
+    const sourceVisualAction = sourceMediaReady
+      ? `<button class="btn small ghost" onclick="queueProductionJob(${project.id}, 'source_visuals', 'source_video', true)">2. Cắt cảnh từ video nguồn</button>`
+      : `<button class="btn small ghost" onclick="downloadProjectSource(${project.id}, '${esc(video.youtube_video_id)}')">1. Tự động tải video nguồn</button>`;
+    const productionActions = timeline.length ? `
+      <button class="btn small primary" onclick="queueProductionJob(${project.id}, 'voiceover', 'dry_run')">Voiceover dry-run</button>
+      <button class="btn small primary" onclick="queueProductionJob(${project.id}, 'premiere_draft', 'dry_run')">Premiere draft dry-run</button>
+      <button class="btn small ghost" onclick="queueSelectedVoiceover(${project.id}, 'premiere_draft')">AI voiceover + Premiere theo lựa chọn</button>
+      <button class="btn small ghost" onclick="queueSelectedVoiceover(${project.id}, 'voiceover')">Tạo voice theo lựa chọn</button>
+      ${sourceVisualAction}
+      <button class="btn small primary" onclick="queueProductionJob(${project.id}, 'render', 'dry_run')">Render dry-run</button>
+      ${state.productionQueue?.gpu_only && state.productionQueue?.nvenc_available ? `<button class="btn small primary" onclick="queueProductionJob(${project.id}, 'render', 'ffmpeg_builtin', true)">Render FFmpeg · NVIDIA GPU</button>` : '<span class="tag orange">GPU/NVENC chưa sẵn sàng · render bị khóa</span>'}` :
+      '<span class="secondary-text">Cần có timeline trước khi chạy worker.</span>';
+    const quickProductionActions = timeline.length ? `
+      <button class="btn primary" onclick="queueSelectedVoiceover(${project.id}, 'voiceover')">1. Tạo giọng đọc</button>
+      ${state.productionQueue?.gpu_only && state.productionQueue?.nvenc_available ? `<button class="btn primary" onclick="queueProductionJob(${project.id}, 'render', 'ffmpeg_builtin', true)">2. Dựng MP4 bằng NVIDIA GPU</button>` : '<span class="tag orange">Chưa sẵn sàng render GPU</span>'}` :
+      '<span class="secondary-text">Cần có storyboard và timeline trước khi dựng video.</span>';
+    const renderQuickPanel = `
+      <div data-project-view="export" class="analysis-item project-view-panel" style="margin-top:14px;border-color:rgba(245,158,11,.42);background:linear-gradient(120deg,rgba(245,158,11,.09),rgba(16,20,27,.9) 55%)">
+        <label>2. DỰNG VIDEO · CHỈ DÙNG HAI NÚT NÀY</label>
+        <p class="panel-sub">Sau khi mỗi cảnh đã có ảnh/video, bấm tạo giọng đọc, chờ xong rồi bấm dựng MP4. Cài đặt chi tiết nằm bên dưới và không bắt buộc.</p>
+        <div class="queue-controls" style="justify-content:flex-start;margin-top:10px;flex-wrap:wrap">${quickProductionActions}</div>
+      </div>`;
+    const finalVideoPanel = finalVideo.available ? `
+      <div data-project-view="export" class="analysis-item project-view-panel" style="margin-top:14px;border-color:rgba(34,197,94,.5)">
+        <label>Video hoàn chỉnh · sẵn sàng</label>
+        <p class="panel-sub">Bản MP4 đã render xong. Xem lại trước khi chuyển sang Publisher.</p>
+        <video controls preload="metadata" style="display:block;width:100%;max-width:960px;margin-top:10px;border-radius:10px;background:#000" src="${esc(finalVideo.url || `/api/projects/${project.id}/final-video`)}"></video>
+        <div class="queue-controls" style="justify-content:flex-start;margin-top:10px"><a class="btn small primary" href="${esc(finalVideo.url || `/api/projects/${project.id}/final-video`)}" target="_blank" rel="noreferrer">Mở / tải MP4</a>${finalVideo.size_bytes ? `<span class="secondary-text">${fileSize(finalVideo.size_bytes)}</span>` : ''}</div>
+      </div>` : `
+      <div data-project-view="export" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Video hoàn chỉnh · chưa có</label>
+        <p class="panel-sub">Cần tạo timeline, gắn hình/video thật cho từng cảnh, sau đó bấm “Render FFmpeg · NVIDIA GPU”. App sẽ hiển thị MP4 tại đây khi job hoàn tất.</p>
+      </div>`;
+    const adapterStatus = state.productionQueue?.voxcpm_runtime_ready ? 'VOXCPM2 GPU SẴN SÀNG' : state.productionQueue?.edge_tts_runtime_ready ? 'EDGE TTS SẴN SÀNG' : state.productionQueue?.pyvideotrans_runtime_ready ? 'PYVIDEOTRANS SẴN SÀNG' : 'TTS CHƯA SẴN SÀNG';
+    const ffmpegStatus = state.productionQueue?.ffmpeg_builtin_available ? 'FFMPEG LOCAL SẴN SÀNG' : 'FFMPEG LOCAL KHÔNG TÌM THẤY';
+    const publicationRows = publications.length ? publications.map((item) => `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">YouTube Publisher · ${esc(item.status)}</div><div class="job-meta">${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'queued' ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`).join('') : '<div class="empty">Chưa có publication nào.</div>';
+    const publisherActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>Publisher YouTube · chờ duyệt cuối</label><p class="panel-sub">Chỉ đưa video đã render vào hàng đợi. Nếu không chọn thời gian, app dùng lịch mặc định của kênh.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationChannel" aria-label="Kênh đăng">${managedChannelOptions}</select><select id="publicationThumbnail" aria-label="Thumbnail">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Đưa video vào Publisher</button><span class="secondary-text">${publications.length} publication</span></div><div id="publisherWaiting" class="studio-model-note" style="margin-top:6px">${publisherWaitingNote(publications)}</div><div style="display:none"></div><div style="margin-top:8px">${publicationRows}</div></div>`;
+    const platformPublicationRows = publications.length ? publications.map((item) => {
+      const platform = String(item.platform || 'youtube').toUpperCase();
+      const variant = item.video_variant === 'short' ? 'Short' : 'Video dài';
+      const delivery = item.status === 'ready_manual' ? 'Sẵn sàng đăng thủ công' : item.status;
+      const videoUrl = item.video_variant === 'short' ? `/api/projects/${project.id}/short-video` : `/api/projects/${project.id}/final-video`;
+      return `<div class="job-row"><span class="job-dot ${item.status === 'completed' ? 'completed' : item.status === 'uploading' ? 'running' : ''}"></span><div class="job-main"><div class="job-title">${esc(platform)} · ${esc(variant)} · ${esc(delivery)}</div><div class="job-meta">${esc(item.output_profile || '')} · ${esc(item.scheduled_at || item.created_at || '')}${item.youtube_video_id ? ` · ${esc(item.youtube_video_id)}` : ''}</div>${item.error ? `<div class="error-text">${esc(item.error)}</div>` : ''}</div>${item.status === 'ready_manual' ? `<a class="btn small ghost" href="/api/publications/${item.id}/manual-package" target="_blank" rel="noreferrer">Tải gói đăng</a>` : ''}${['queued', 'ready_manual'].includes(item.status) ? `<button class="btn small danger" onclick="cancelPublication(${item.id}, ${project.id})">Hủy</button>` : ''}${['error', 'cancelled'].includes(item.status) ? `<button class="btn small ghost" onclick="retryPublication(${item.id}, ${project.id})">Chạy lại</button>` : ''}</div>`;
+    }).join('') : '<div class="empty">Chưa có lần xuất bản nào.</div>';
+    const platformPublishingActions = `<div class="analysis-item" style="margin-top:12px;border-color:rgba(34,211,238,.35)"><label>XUẤT BẢN ĐA NỀN TẢNG · chờ duyệt cuối</label><p class="panel-sub">Chọn đúng kênh đích, nền tảng, loại video và tỷ lệ. YouTube sẽ upload qua OAuth; TikTok, Facebook và Instagram tạo gói MP4/metadata sẵn sàng để đăng thủ công cho đến khi kết nối OAuth riêng.</p><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><select id="publicationPlatform" aria-label="Nền tảng" onchange="syncPublicationTarget()"><option value="youtube">YouTube</option><option value="tiktok">TikTok</option><option value="facebook">Facebook</option><option value="instagram">Instagram</option></select><select id="publicationChannel" aria-label="Kênh đăng" onchange="syncPublicationTarget()">${managedChannelOptions}</select><select id="publicationVariant" aria-label="Loại video" onchange="syncPublicationTarget()"><option value="long">Video dài</option><option value="short">Short riêng</option></select><select id="publicationProfile" aria-label="Định dạng xuất bản"><option value="youtube_landscape">YouTube video · 16:9</option><option value="youtube_shorts">YouTube Shorts · 9:16</option><option value="tiktok">TikTok · 9:16</option><option value="instagram_reels">Instagram Reels · 9:16</option><option value="facebook_reels">Facebook Reels · 9:16</option><option value="facebook_feed">Facebook Feed · 1:1</option></select><select id="publicationThumbnail" aria-label="Thumbnail YouTube">${thumbnailOptions}</select><select id="publicationPrivacy" aria-label="Quyền riêng tư"><option value="">Theo kênh</option><option value="private">Riêng tư</option><option value="unlisted">Không công khai</option><option value="public">Công khai</option></select><label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Đăng lúc <input id="publicationScheduledAt" type="datetime-local" /></label></div><div class="studio-grid" style="margin-top:8px"><div class="studio-field"><label for="publicationTitle">Tiêu đề</label><input id="publicationTitle" value="${esc(script?.script_title || project.title || '')}" maxlength="100"></div><div class="studio-field"><label for="publicationTags">Hashtag / tag</label><input id="publicationTags" value="${esc((writer?.hashtags || []).join(', '))}" placeholder="ai, short, #video"></div></div><div class="studio-field" style="margin-top:8px"><label for="publicationDescription">Mô tả / caption</label><textarea id="publicationDescription" maxlength="5000">${esc(writer?.new_description || '')}</textarea></div><div class="queue-controls" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap"><button class="btn small primary" onclick="queueProjectPublication(${project.id})">Chuẩn bị / đăng video</button><span id="publicationTargetNote" class="secondary-text">YouTube: upload tự động khi OAuth đã kết nối.</span><span class="secondary-text">${publications.length} lần xuất bản</span></div><div style="margin-top:8px">${platformPublicationRows}</div></div>`;
+    const directorAction = `
+      <div class="analysis-item" style="margin-bottom:14px; border-color:rgba(34,197,94,.5); background:linear-gradient(120deg,rgba(34,197,94,.11),rgba(16,20,27,.9) 52%)">
+        <label>AI ĐẠO DIỄN · DỰNG VIDEO TRỌN LUỒNG</label>
+        <p class="panel-sub">Nhập ý tưởng của bạn trước. Codex sẽ tạo câu chuyện và prompt cảnh mới dựa trên cấu trúc/phong cách tham chiếu. Sau đó cần tạo video AI hoặc gắn asset thật cho từng cảnh; app không render thẻ chữ thành bản xuất bản.</p>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
+          <button class="btn primary" onclick="runDirectorAuto(${project.id})">✦ AI Đạo diễn: tạo kịch bản &amp; storyboard</button>
+          <button class="btn ghost" onclick="showProjectQuality(${project.id})">Xem Quality Check</button>
+        </div>
+        <div class="secondary-text" style="margin-top:8px">Kịch bản: Codex đang đăng nhập · Voice: ${adapterStatus} · Render: ${ffmpegStatus}</div>
+      </div>`;
+    const autoDraftPanel = timeline.length ? `<div data-project-view="overview" class="project-view-panel">
+      ${directorAction}
+      <div class="analysis-item" style="margin-bottom:14px; border-color:rgba(245,158,11,.42); background:linear-gradient(120deg,rgba(245,158,11,.1),rgba(16,20,27,.9) 52%)">
+        <label>AI AUTO DRAFT · ĐIỀU KHIỂN TỰ ĐỘNG</label>
+        <p class="panel-sub">Các nút bên dưới dành cho khi bạn muốn chạy từng công đoạn hoặc xuất timeline sang Premiere để tinh chỉnh thủ công.</p>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
+          <button class="btn primary" onclick="queueSelectedVoiceover(${project.id}, 'premiere_draft')">▶ Tự động lồng tiếng + tạo gói Premiere</button>
+          <button class="btn ghost" onclick="exportPremiere(${project.id})">Xuất gói Premiere hiện tại</button>
+          <button class="btn ghost" onclick="queueProductionJob(${project.id}, 'premiere_draft', 'dry_run')">Chạy thử không lồng tiếng</button>
+        </div>
+        <div class="secondary-text" style="margin-top:8px">Voice: ${adapterStatus} · Render: ${ffmpegStatus} · Worker: ${state.productionQueue?.worker_running ? 'ĐANG CHẠY' : 'ĐÃ DỪNG'}</div>
+      </div>` : `<div data-project-view="overview" class="project-view-panel">
+      ${directorAction}
+      <div class="analysis-item" style="margin-bottom:14px">
+        <label>AI AUTO DRAFT · CHƯA SẴN SÀNG</label>
+        <p class="panel-sub">Bạn vẫn có thể bấm AI Đạo diễn ở trên để tự tạo script, shot list, timeline và dựng bản video đầu tiên.</p>
+      </div>`;
+    const projectGuide = `
+      <div data-project-view="overview" class="analysis-item project-view-panel" style="margin-bottom:14px;border-color:rgba(34,211,238,.45);background:linear-gradient(120deg,rgba(34,211,238,.1),rgba(16,20,27,.9) 55%)">
+        <label>BẮT ĐẦU TẠI ĐÂY · 3 VIỆC DỄ HIỂU</label>
+        <p class="panel-sub">Bạn không cần chỉnh các đường dẫn, timeline hay thông số kỹ thuật. Chỉ làm ba việc dưới đây theo thứ tự.</p>
+        <div class="analysis-list" style="margin:10px 0 0"><div><b>1. Nội dung & cảnh:</b> kiểm tra kịch bản và lời AI đọc ở từng cảnh. Hiện có <b>${number(shots.length)} cảnh</b>.</div><div><b>2. Dựng video:</b> chọn giọng, tạo voice và bấm render khi các cảnh đã có ảnh/video.</div><div><b>3. Xuất bản:</b> xem MP4 hoàn chỉnh rồi mới đưa vào YouTube.</div></div>
+        <div class="queue-controls" style="justify-content:flex-start;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="switchProjectView('editor')">1. Mở nội dung & cảnh</button><button class="btn ghost" onclick="switchProjectView('export')">2. Sang dựng & xuất video</button><button class="btn ghost" onclick="switchProjectView('assets')">Tệp của bạn (chỉ khi cần)</button></div>
+      </div>`;
+    $('projectBody').innerHTML = `
+      <div class="project-tabs" role="tablist" aria-label="Khu vực dự án">
+        <button class="project-tab" data-project-tab="overview" onclick="switchProjectView('overview')">Bắt đầu</button>
+        <button class="project-tab" data-project-tab="editor" onclick="switchProjectView('editor')">Nội dung &amp; cảnh</button>
+        <button class="project-tab" data-project-tab="export" onclick="switchProjectView('export')">Dựng &amp; xuất</button>
+        <button class="project-tab" data-project-tab="assets" onclick="switchProjectView('assets')">Tệp nâng cao</button>
+      </div>
+      ${projectGuide}
+      <details data-project-view="overview" class="analysis-item project-view-panel" style="margin-bottom:14px"><summary class="panel-sub" style="cursor:pointer"><b>AI Đạo diễn và công cụ tự động (nâng cao)</b> · chỉ dùng khi muốn làm lại toàn bộ</summary><div style="margin-top:12px">${autoDraftPanel}</div></details>
+      <div data-project-view="overview" class="analysis-grid project-view-panel">
+        <div class="analysis-item"><label>Trạng thái</label><strong>${projectStatusTag(project.status)}</strong></div>
+        <div class="analysis-item"><label>Transcript</label><strong>${readiness.has_transcript ? 'Đã có' : 'Chưa có'}</strong></div>
+        <div class="analysis-item"><label>AI Writer</label><strong>${readiness.has_writer_content ? 'Đã có' : 'Chưa có'}</strong></div>
+      </div>
+      <div data-project-view="overview" class="analysis-item project-view-panel" style="margin-top:10px"><label>Kênh xuất bản & workflow</label><strong>${esc(managedChannelSummary)}</strong>${channelPresetAction}</div>
+      <div data-project-view="overview" class="analysis-columns project-view-panel">
+        <div>
+          <div class="eyebrow">VIDEO NGUỒN</div>
+          <p class="panel-sub">${esc(video.title || project.title || '')}</p>
+          <div class="secondary-text">${esc(video.youtube_video_id || '')} · ${esc(channelName(video.youtube_channel_id))} · ${date(video.published_at)}</div>
+          <div class="eyebrow" style="margin-top:15px">CHECKLIST TIẾP THEO</div>
+          <ul class="analysis-list">${nextActions}</ul>
+          <div class="eyebrow" style="margin-top:15px">TỪ KHÓA METADATA</div>
+          <div class="keyword-list">${keywords}</div>
+        </div>
+        <div>
+          <div class="eyebrow">AI WRITER · TIÊU ĐỀ MỚI</div>
+          <ul class="analysis-list">${titles}</ul>
+          <div class="eyebrow" style="margin-top:15px">DÀN Ý KỊCH BẢN</div>
+          <ul class="analysis-list">${outline}</ul>
+        </div>
+      </div>
+      <div data-project-view="overview" class="analysis-item project-view-panel" style="margin-top:14px"><label>Transcript preview${transcript?.content_text_truncated ? ' · đã rút gọn' : ''}</label><p class="panel-sub" style="white-space:pre-wrap">${transcriptText}</p></div>
+      ${assetPanel}
+      <div data-project-view="editor" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Kịch bản sản xuất ${script ? `· v${script.version} · ${scriptStatusTag(script.status)}` : '· chưa có'}</label>
+        <div class="transcript-grid" style="margin-top:10px">
+          <div class="transcript-field"><label for="scriptTitleInput">Tiêu đề</label><input id="scriptTitleInput" value="${esc(scriptTitle)}" ${script ? '' : 'disabled'} /></div>
+          <div class="transcript-field"><label for="scriptStatusView">Trạng thái</label><input id="scriptStatusView" value="${esc(script?.status || 'missing')}" disabled /></div>
+          <div class="transcript-field"><label>Thao tác</label><div class="queue-controls" style="justify-content:flex-start">${scriptActions}</div></div>
+        </div>
+        <div class="transcript-field"><label for="scriptHookInput">Hook</label><textarea id="scriptHookInput" class="transcript-editor" style="min-height:80px" ${script ? '' : 'disabled'}>${esc(scriptHook)}</textarea></div>
+        <div class="transcript-field"><label for="scriptIntroInput">Intro</label><textarea id="scriptIntroInput" class="transcript-editor" style="min-height:100px" ${script ? '' : 'disabled'}>${esc(scriptIntro)}</textarea></div>
+        <div class="transcript-field"><label for="scriptMainInput">Nội dung chính</label><textarea id="scriptMainInput" class="transcript-editor" style="min-height:220px" ${script ? '' : 'disabled'}>${esc(scriptMain)}</textarea></div>
+        <div class="transcript-field"><label for="scriptCtaInput">CTA</label><textarea id="scriptCtaInput" class="transcript-editor" style="min-height:80px" ${script ? '' : 'disabled'}>${esc(scriptCta)}</textarea></div>
+      </div>
+      <div data-project-view="editor" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Shot list / kế hoạch cảnh · ${number(shots.length)} cảnh</label>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px">${shotActions}</div>
+        <div style="margin-top:8px">${storyboardRows}</div>
+      </div>
+      ${renderQuickPanel}
+      <div data-project-view="export" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Voiceover + timeline dựng video · ${number(timeline.length)} đoạn · ${number(totalTimelineDuration)} giây</label>
+        <p class="panel-sub">Bạn chỉ cần dùng phần này khi muốn chỉnh từng đoạn thật sâu. Các nút tạo giọng và render đơn giản nằm ngay bên dưới.</p>
+        <details style="margin-top:10px"><summary class="secondary-text" style="cursor:pointer">Mở chỉnh sâu timeline từng đoạn</summary><div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">${timelineActions}</div><div style="margin-top:8px">${timelineRows}</div></details>
+      </div>
+      ${finalVideoPanel}
+      <div data-project-view="export" class="analysis-item project-view-panel" style="margin-top:14px">
+        <label>Thiết lập render tự động</label>
+        <p class="panel-sub">Chọn nhạc nền đã import, âm lượng nền và kiểu chuyển cảnh. Voice AI vẫn được ưu tiên lớn hơn nhạc.</p>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
+          <select id="renderMusicAsset" aria-label="Nhạc nền">${musicOptions}</select>
+          <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">Âm lượng <input id="renderMusicVolume" type="number" min="0" max="0.5" step="0.01" value="${esc(renderSettings.music_volume ?? 0.12)}" style="width:72px" /></label>
+          <select id="renderTransitionStyle" aria-label="Chuyển cảnh"><option value="fade" ${renderSettings.transition_style === 'fade' ? 'selected' : ''}>Fade ngắn</option><option value="none" ${renderSettings.transition_style === 'none' ? 'selected' : ''}>Cắt thẳng</option></select>
+          <select id="renderOutputProfile" aria-label="Định dạng đầu ra"><option value="youtube_landscape" ${renderSettings.output_profile === 'youtube_landscape' ? 'selected' : ''}>YouTube video · 16:9</option><option value="youtube_shorts" ${renderSettings.output_profile === 'youtube_shorts' ? 'selected' : ''}>YouTube Shorts · 9:16</option><option value="tiktok" ${renderSettings.output_profile === 'tiktok' ? 'selected' : ''}>TikTok · 9:16</option><option value="instagram_reels" ${renderSettings.output_profile === 'instagram_reels' ? 'selected' : ''}>Instagram Reels · 9:16</option><option value="facebook_reels" ${renderSettings.output_profile === 'facebook_reels' ? 'selected' : ''}>Facebook Reels · 9:16</option><option value="facebook_feed" ${renderSettings.output_profile === 'facebook_feed' ? 'selected' : ''}>Facebook Feed · 1:1</option></select>
+          <select id="renderVoiceProvider" aria-label="Model lồng tiếng"><option value="edge_tts" ${renderSettings.voice_provider === 'edge_tts' ? 'selected' : ''}>Edge TTS · cloud/online</option><option value="pyvideotrans" ${renderSettings.voice_provider === 'pyvideotrans' ? 'selected' : ''}>pyVideoTrans · local GPU</option><option value="voxcpm" ${renderSettings.voice_provider === 'voxcpm' ? 'selected' : ''}>VoxCPM2 · local GPU · đa ngôn ngữ</option></select>
+          <select id="renderVoiceModel" aria-label="Giọng/model lồng tiếng">
+            <option value="vi-VN-HoaiMyNeural" ${selectedVoiceModel === 'vi-VN-HoaiMyNeural' ? 'selected' : ''}>VI · Hoài My</option>
+            <option value="vi-VN-NamMinhNeural" ${selectedVoiceModel === 'vi-VN-NamMinhNeural' ? 'selected' : ''}>VI · Nam Minh</option>
+            <option value="en-US-AriaNeural" ${selectedVoiceModel === 'en-US-AriaNeural' ? 'selected' : ''}>EN · Aria</option>
+            <option value="en-US-GuyNeural" ${selectedVoiceModel === 'en-US-GuyNeural' ? 'selected' : ''}>EN · Guy</option>
+            <option value="th-TH-PremwadeeNeural" ${selectedVoiceModel === 'th-TH-PremwadeeNeural' ? 'selected' : ''}>TH · Premwadee</option>
+            <option value="pt-BR-FranciscaNeural" ${selectedVoiceModel === 'pt-BR-FranciscaNeural' ? 'selected' : ''}>PT-BR · Francisca</option>
+            <option value="pt-BR-AntonioNeural" ${selectedVoiceModel === 'pt-BR-AntonioNeural' ? 'selected' : ''}>PT-BR · Antonio</option>
+            <option value="voxcpm-default" ${selectedVoiceModel === 'voxcpm-default' ? 'selected' : ''}>VoxCPM2 · giọng mặc định</option>
+            <option value="design:Vietnamese female narrator, warm, clear and natural" ${selectedVoiceModel === 'design:Vietnamese female narrator, warm, clear and natural' ? 'selected' : ''}>VoxCPM2 · nữ thuyết minh ấm</option>
+            <option value="design:Vietnamese male narrator, deep, clear and confident" ${selectedVoiceModel === 'design:Vietnamese male narrator, deep, clear and confident' ? 'selected' : ''}>VoxCPM2 · nam thuyết minh chắc</option>
+          </select>
+          <select id="renderVoiceRate" aria-label="Tốc độ giọng đọc">
+            <option value="-25%" ${renderSettings.voice_rate === '-25%' ? 'selected' : ''}>Rất chậm · -25%</option>
+            <option value="-15%" ${renderSettings.voice_rate === '-15%' ? 'selected' : ''}>Chậm · -15%</option>
+            <option value="-8%" ${renderSettings.voice_rate === '-8%' ? 'selected' : ''}>Hơi chậm · -8%</option>
+            <option value="+0%" ${(renderSettings.voice_rate || '+0%') === '+0%' ? 'selected' : ''}>Bình thường · 0%</option>
+            <option value="+8%" ${renderSettings.voice_rate === '+8%' ? 'selected' : ''}>Hơi nhanh · +8%</option>
+            <option value="+15%" ${renderSettings.voice_rate === '+15%' ? 'selected' : ''}>Nhanh · +15%</option>
+            <option value="+25%" ${renderSettings.voice_rate === '+25%' ? 'selected' : ''}>Rất nhanh · +25%</option>
+          </select>
+          <select id="renderVoiceReferenceAsset" aria-label="Giọng mẫu VoxCPM">${voiceReferenceOptions}</select>
+          <input id="renderVoiceReferenceFile" type="file" accept="audio/*" aria-label="Upload file giọng mẫu" />
+          <button class="btn small ghost" onclick="uploadVoiceReferenceAudio(${project.id})">Upload giọng mẫu</button>
+          <input id="renderVoicePromptText" value="${esc(renderSettings.voice_prompt_text || '')}" placeholder="Mô tả giọng mẫu, ví dụ: giọng nam ấm, chậm, rõ" aria-label="Mô tả giọng mẫu" />
+          <select id="renderSubtitleProvider" aria-label="Nguồn phụ đề"><option value="timeline_text" ${renderSettings.subtitle_provider === 'timeline_text' ? 'selected' : ''}>Phụ đề từ timeline</option><option value="faster_whisper_local" ${renderSettings.subtitle_provider === 'faster_whisper_local' ? 'selected' : ''}>Faster-Whisper · local</option></select>
+          <select id="renderSubtitleModel" aria-label="Model phụ đề">
+            <option value="timeline" ${selectedSubtitleModel === 'timeline' ? 'selected' : ''}>Timeline text</option>
+            <option value="faster-whisper-small" ${selectedSubtitleModel === 'faster-whisper-small' ? 'selected' : ''}>Faster-Whisper small</option>
+            <option value="faster-whisper-medium" ${selectedSubtitleModel === 'faster-whisper-medium' ? 'selected' : ''}>Faster-Whisper medium</option>
+            <option value="faster-whisper-large-v3" ${selectedSubtitleModel === 'faster-whisper-large-v3' ? 'selected' : ''}>Faster-Whisper large-v3</option>
+          </select>
+          <select id="renderPublishLanguage" aria-label="Ngôn ngữ xuất bản"><option value="vi" ${renderSettings.publish_language === 'vi' ? 'selected' : ''}>Tiếng Việt</option><option value="en" ${renderSettings.publish_language === 'en' ? 'selected' : ''}>English</option><option value="th" ${renderSettings.publish_language === 'th' ? 'selected' : ''}>ภาษาไทย</option><option value="pt-BR" ${renderSettings.publish_language === 'pt-BR' ? 'selected' : ''}>Português (Brasil)</option><option value="es" ${renderSettings.publish_language === 'es' ? 'selected' : ''}>Español</option><option value="fr" ${renderSettings.publish_language === 'fr' ? 'selected' : ''}>Français</option><option value="de" ${renderSettings.publish_language === 'de' ? 'selected' : ''}>Deutsch</option><option value="ja" ${renderSettings.publish_language === 'ja' ? 'selected' : ''}>日本語</option><option value="ko" ${renderSettings.publish_language === 'ko' ? 'selected' : ''}>한국어</option><option value="zh-CN" ${renderSettings.publish_language === 'zh-CN' ? 'selected' : ''}>中文</option><option value="id" ${renderSettings.publish_language === 'id' ? 'selected' : ''}>Bahasa Indonesia</option></select>
+          <button class="btn small ghost" onclick="saveRenderSettings(${project.id})">Lưu thiết lập</button>
+        </div>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted)">OpenMontage runtime
+            <select id="openMontageRuntime" aria-label="OpenMontage runtime">
+              <option value="openmontage">Theo cấu hình local</option>
+              <option value="openmontage_ffmpeg">FFmpeg · cắt ghép video ổn định</option>
+              <option value="openmontage_remotion">Remotion · motion graphics / ảnh động</option>
+              <option value="openmontage_hyperframes">HyperFrames · HTML/CSS/GSAP</option>
+            </select>
+          </label>
+        </div>
+        <p class="secondary-text" style="margin-top:8px">VoxCPM2: chọn một file giọng mẫu sạch khoảng 10–20 giây và dùng lại cho mọi đoạn để khóa màu giọng. Nếu chưa có file mẫu, app dùng giọng mặc định và có thể thay đổi giữa các đoạn.</p>
+        <label>Production worker · voiceover / render</label>
+        <p class="panel-sub">Chọn provider và giọng ở trên trước khi chạy. VoxCPM2/pyVideoTrans là local GPU; Edge TTS là cloud/online. Render FFmpeg dùng NVENC GPU.</p>
+        <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">${productionActions}</div>
+        ${thumbnailPanel}
+        ${platformPublishingActions}
+        <div style="margin-top:8px">${productionJobRows}</div>
+      </div>
+      <div data-project-view="overview" class="analysis-item project-view-panel" style="margin-top:10px"><label>Ghi chú project</label><p class="panel-sub">${esc(project.notes || 'Chưa có ghi chú.')}</p></div>`;
+    syncPublicationTarget();
+    renderPublicationSuggestions(project.id);
+    switchProjectView(state.projectView || 'overview');
+    $('projectDetail').classList.add('open');
+    $('projectDetail').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  async function createScriptDraft(projectId) {
+    setMessage('Đang tạo bản nháp kịch bản từ AI Writer...');
+    try {
+      const response = await api(`/api/projects/${projectId}/script/draft`, {method: 'POST'});
+      state.scriptId = response.script.id;
+      setMessage(`Đã tạo kịch bản v${response.script.version}.`, 'success');
+      await openProjectDetail(projectId);
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function runDirectorAuto(projectId) {
+    const creativeDirection = prompt('Mô tả VIDEO MỚI bạn muốn tạo. Hãy nêu nhân vật, bối cảnh, diễn biến và thông điệp.\n\nVí dụ: Đổi câu chuyện thành chú mèo giao thư trong thành phố mưa; phong cách hoạt hình 3D ấm áp; cao trào là mèo cứu bưu kiện; kết thúc về lòng tốt.');
+    if (creativeDirection === null) return;
+    if (creativeDirection.trim().length < 12) return setMessage('Hãy nhập ý tưởng đủ rõ: nhân vật, bối cảnh và diễn biến chính.', 'error');
+    const targetDurationRaw = prompt('Thời lượng video mục tiêu (giây). Ví dụ: 90', '90');
+    if (targetDurationRaw === null) return;
+    const targetDuration = Number(targetDurationRaw);
+    if (!Number.isFinite(targetDuration) || targetDuration < 30 || targetDuration > 1800) return setMessage('Thời lượng cần nằm trong khoảng 30–1800 giây.', 'error');
+    setMessage('AI Đạo diễn đang tạo kịch bản mới và blueprint video AI cho từng cảnh...');
+    try {
+      const response = await api(`/api/projects/${projectId}/director-draft`, {
+        method: 'POST',
+        body: JSON.stringify({provider: 'codex_cli', creative_direction: creativeDirection.trim(), target_duration_seconds: Math.round(targetDuration), auto_produce: false}),
+      });
+      state.scriptId = response.script?.id || null;
+      setMessage('Đã tạo kịch bản và storyboard. Bước tiếp theo: tạo/duyệt video AI cho từng cảnh trong tab Dựng & duyệt.', 'success');
+      await openProjectDetail(projectId, 'editor');
+      await loadProjects();
+    } catch (error) { setMessage(`AI Đạo diễn chưa chạy được: ${error.message}`, 'error'); }
+  }
+
+  async function showProjectQuality(projectId) {
+    setMessage('Đang đọc Quality Check...');
+    try {
+      const report = await api(`/api/projects/${projectId}/quality-check`);
+      const failed = Object.entries(report.checks || {}).filter(([, ok]) => !ok).map(([name]) => name);
+      const label = report.status === 'pass' ? 'PASS' : 'CẦN KIỂM TRA';
+      setMessage(`Quality Check: ${label} · ${report.segments || 0} đoạn · voice ${report.audio_duration_seconds || 0}s${failed.length ? ` · cảnh báo: ${failed.join(', ')}` : ''}`, report.status === 'pass' ? 'success' : 'error');
+    } catch (error) { setMessage(`Không đọc được Quality Check: ${error.message}`, 'error'); }
+  }
+
+  async function generateProjectThumbnails(projectId) {
+    setMessage('Đang tách frame để tạo thumbnail...');
+    try {
+      const prompt = $('thumbnailPrompt')?.value || '';
+      const response = await api(`/api/projects/${projectId}/thumbnails/generate`, {
+        method: 'POST', body: JSON.stringify({prompt, variants: 3}),
+      });
+      setMessage(`Đã tạo ${response.thumbnails?.length || 0} thumbnail local. Hãy chọn một bản cuối.`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(`Không tạo được thumbnail: ${error.message}`, 'error'); }
+  }
+
+  async function selectProjectThumbnail(projectId, thumbnailId) {
+    try {
+      await api(`/api/thumbnails/${thumbnailId}/select`, {method: 'POST'});
+      setMessage('Đã chọn thumbnail cho project.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(`Không chọn được thumbnail: ${error.message}`, 'error'); }
+  }
+
+  function currentScriptPayload(status = null) {
+    const payload = {
+      script_title: $('scriptTitleInput').value,
+      hook: $('scriptHookInput').value,
+      intro: $('scriptIntroInput').value,
+      main_content: $('scriptMainInput').value,
+      cta: $('scriptCtaInput').value,
+    };
+    if (status) payload.status = status;
+    return payload;
+  }
+
+  async function saveCurrentScript(status = null) {
+    if (!state.scriptId) return;
+    setMessage('Đang lưu kịch bản...');
+    try {
+      const response = await api(`/api/scripts/${state.scriptId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(currentScriptPayload(status)),
+      });
+      setMessage(`Đã lưu kịch bản v${response.script.version}.`, 'success');
+      await openProjectDetail(response.script.project_id);
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function setCurrentScriptReview() {
+    await saveCurrentScript('review');
+  }
+
+  async function approveCurrentScript() {
+    if (!state.scriptId) return;
+    if (!confirm('Duyệt kịch bản này và đánh dấu project là đã duyệt?')) return;
+    setMessage('Đang duyệt kịch bản...');
+    try {
+      const response = await api(`/api/scripts/${state.scriptId}/approve`, {method: 'POST'});
+      setMessage('Đã duyệt kịch bản và project.', 'success');
+      await openProjectDetail(response.script.project_id);
+      await loadProjects();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateShotList(projectId, force = false) {
+    setMessage(force ? 'Đang tạo lại shot list...' : 'Đang tạo shot list...');
+    try {
+      const response = await api(`/api/projects/${projectId}/shots/generate`, {
+        method: 'POST',
+        body: JSON.stringify({force}),
+      });
+      setMessage(`Đã tạo ${response.shots.length} cảnh cho shot list.`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function regenerateShotList(projectId) {
+    if (!confirm('Tạo lại shot list sẽ thay thế các cảnh hiện tại của kịch bản mới nhất. Tiếp tục?')) return;
+    await generateShotList(projectId, true);
+  }
+
+  async function createStoryboardShot(projectId) {
+    setMessage('Đang thêm cảnh mới...');
+    try {
+      const response = await api(`/api/projects/${projectId}/shots`, {
+        method: 'POST',
+        body: JSON.stringify({section: 'main', asset_type: 'broll', duration_seconds: 8}),
+      });
+      setMessage(`Đã thêm cảnh ${response.shot.shot_index}. Hãy nhập lời dẫn và prompt rồi lưu.`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function duplicateStoryboardShot(projectId, shotId) {
+    setMessage(`Đang nhân bản cảnh ${shotId}...`);
+    try {
+      const response = await api(`/api/shots/${shotId}/duplicate`, {method: 'POST'});
+      setMessage(`Đã nhân bản thành cảnh ${response.shot.shot_index}. Hãy sửa nội dung trước khi dựng.`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function saveShot(shotId) {
+    setMessage(`Đang lưu cảnh ${shotId}...`);
+    try {
+      await api(`/api/shots/${shotId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          narration: $(`shotNarration-${shotId}`).value,
+          visual_prompt: $(`shotPrompt-${shotId}`).value,
+          asset_type: $(`shotAsset-${shotId}`).value,
+          duration_seconds: Number($(`shotDuration-${shotId}`).value),
+          status: $(`shotStatus-${shotId}`).value,
+        }),
+      });
+      setMessage('Đã lưu cảnh.', 'success');
+      if (state.projectId) await openProjectDetail(state.projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function moveStoryboardShot(projectId, shotId, direction) {
+    const current = state.shots || [];
+    const index = current.findIndex((shot) => Number(shot.id) === Number(shotId));
+    const nextIndex = index + Number(direction);
+    if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return;
+    const order = current.map((shot) => Number(shot.id));
+    [order[index], order[nextIndex]] = [order[nextIndex], order[index]];
+    try {
+      await api(`/api/projects/${projectId}/shots/reorder`, {method: 'POST', body: JSON.stringify({shot_ids: order})});
+      setMessage('Đã đổi thứ tự storyboard.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function deleteStoryboardShot(projectId, shotId) {
+    if (!confirm('Xóa cảnh này khỏi storyboard? Timeline liên quan sẽ cần được rà soát lại.')) return;
+    try {
+      await api(`/api/shots/${shotId}`, {method: 'DELETE'});
+      setMessage('Đã xóa cảnh khỏi storyboard.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  function sceneProviderLabel(provider) {
+    return {
+      antigravity_image: 'Antigravity', gflow_cli: 'Google Flow/Veo (gflow-cli)', gflow_image: 'Flow ảnh (gflow-cli)', flow_veo: 'Flow Extension (legacy)', meta_ai_video: 'Meta AI (Vibes)',
+      gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
+      gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)', flow_image: 'Flow (ảnh)', auto_parallel: 'nhiều AI song song',
+    }[provider] || provider || 'AI';
+  }
+
+
+  // Spreading a batch over several sites is what makes it run in parallel —
+  // the extension already runs jobs concurrently, but scenes sent to one site
+  // queue behind that site's single tab.
+  const PARALLEL_IMAGE_PROVIDERS = ['flow_image', 'chatgpt_web_image', 'gemini_web_image'];
+  const PARALLEL_VIDEO_PROVIDERS = ['gflow_cli'];
+  function batchProviderPayload(provider, isVeo) {
+    if (provider !== 'auto_parallel') return {provider};
+    return {providers: isVeo ? PARALLEL_VIDEO_PROVIDERS : PARALLEL_IMAGE_PROVIDERS};
+  }
+
+  // One place to hand the orchestrator an intent and see the steps it would
+  // run, rather than putting a CLI call behind every button. Costly steps
+  // only run after the plan has been shown and confirmed.
+  async function runStudioOrchestrate() {
+    const projectId = state.studioProjectId;
+    const intent = $('studioOrchestrateIntent')?.value?.trim();
+    const target = $('studioOrchestratePlan');
+    if (!projectId || !intent) return setMessage('Hãy chọn dự án và nhập việc cần giao.', 'error');
+    if (target) target.textContent = 'Đang hỏi AI điều phối...';
+    try {
+      const plan = await api(`/api/projects/${projectId}/orchestrate`, {
+        method: 'POST', body: JSON.stringify({intent, dry_run: true}),
+      });
+      const steps = (plan.steps || []).map((s, i) => `${i + 1}. ${s.action} — ${s.reason}`).join('\n');
+      if (target) target.textContent = `${plan.understanding}
+
+${steps}`;
+      if (!steps) return setMessage('AI điều phối không đề xuất bước nào.', 'success');
+      if (!confirm(`AI điều phối đề xuất:
+
+${steps}
+
+Chạy các bước này?`)) return;
+      if (target) target.textContent = 'Đang thực hiện...';
+      const done = await api(`/api/projects/${projectId}/orchestrate`, {
+        method: 'POST', body: JSON.stringify({intent, dry_run: false}),
+      });
+      if (target) {
+        target.textContent = (done.steps || [])
+          .map((s) => `${s.action}: ${s.result?.status || 'xong'}${s.result?.detail ? ` — ${s.result.detail}` : ''}`)
+          .join('\n');
+      }
+      setMessage('AI điều phối đã chạy xong các bước.', 'success');
+    } catch (error) {
+      if (target) target.textContent = '';
+      setMessage(`AI điều phối lỗi: ${error.message}`, 'error');
+    }
+  }
+  const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
+  const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
+  const AUDIO_SOURCE_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac']);
+  // Providers that need no API key, driven instead by the caller's own
+  // logged-in web/agent session (browser sidecar or Antigravity's agent).
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
+  // This list is used by single-scene controls. `auto_parallel` belongs only
+  // to batch generation; sending it to POST /scene-jobs is an invalid provider.
+  const IMAGE_PROVIDER_OPTIONS = '<option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
+  const VIDEO_PROVIDER_OPTIONS = '<option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo (API)</option>';
+
+  async function findReferenceImageAssetId(projectId, visualPath) {
+    if (!visualPath) return null;
+    const extension = visualPath.split('.').pop()?.toLowerCase() || '';
+    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    try {
+      const bundle = await api(`/api/projects/${projectId}`);
+      const match = (bundle.project_assets || []).find((asset) => asset.asset_type === 'image' && asset.file_path === visualPath);
+      return match ? match.id : null;
+    } catch { return null; }
+  }
+
+  async function ensureSegmentForShot(projectId, shotId) {
+    // force:false is a safe no-op if a timeline already exists — this only
+    // creates one the first time a shot-level action is used before the
+    // user has explicitly generated a timeline themselves.
+    await api(`/api/projects/${projectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+    const timeline = await api(`/api/projects/${projectId}/timeline`);
+    const segment = timeline.find((item) => Number(item.shot_id) === Number(shotId));
+    if (!segment) throw new Error('Không tạo được đoạn timeline tương ứng cho cảnh này.');
+    return segment;
+  }
+
+  async function uploadShotImage(projectId, shotId, inputEl) {
+    const file = inputEl?.files?.[0];
+    if (!file) return;
+    setMessage(`Đang tải ${file.name} lên...`);
+    try {
+      const segment = await ensureSegmentForShot(projectId, shotId);
+      const form = new FormData();
+      form.append('asset_type', file.type.startsWith('video') ? 'video' : 'image');
+      form.append('file', file);
+      const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      await api(`/api/timeline/${segment.id}/attach-asset`, {method: 'POST', body: JSON.stringify({asset_id: data.asset.id})});
+      setMessage('Đã gắn ảnh/video vào cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+    finally { if (inputEl) inputEl.value = ''; }
+  }
+
+  async function deleteShotImage(projectId, segmentId) {
+    if (!segmentId || !confirm('Xóa ảnh/video khỏi cảnh này?')) return;
+    try {
+      await api(`/api/timeline/${segmentId}`, {method: 'PATCH', body: JSON.stringify({visual_path: ''})});
+      setMessage('Đã xóa ảnh/video khỏi cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function createSceneJob(projectId, shotId, promptText, provider, ratio) {
+    if (promptText.length < 3) throw new Error('Hãy nhập mô tả hình ảnh/prompt cho cảnh này trước.');
+    const isVeo = VIDEO_SCENE_PROVIDERS.has(provider);
+    const usesSubscription = SUBSCRIPTION_SCENE_PROVIDERS.has(provider);
+    const segment = await ensureSegmentForShot(projectId, shotId);
+    const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, segment.visual_path) : null;
+    if (isVeo && !referenceAssetId) {
+      setMessage('Cảnh chưa có ảnh nguồn. Hãy tạo hoặc gắn ảnh cho cảnh trước khi tạo video.', 'error');
+      return null;
+    }
+    const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} cho cảnh này?${fromImageNote} ${usesSubscription ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
+    setMessage(`Đang đưa cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
+    const response = await api(`/api/projects/${projectId}/scene-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        timeline_segment_id: segment.id, provider, prompt: promptText,
+        duration_seconds: isVeo ? 8 : 5, ratio, confirmed: true,
+        reference_asset_id: referenceAssetId,
+        requires_reference_image: isVeo,
+      }),
+    });
+    setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào cảnh.', 'success');
+    return response;
+  }
+
+  async function generateShotImage(projectId, shotId) {
+    const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
+    const provider = $(`shotImageProvider-${shotId}`)?.value || 'gemini_image';
+    const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
+    try {
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateShotVideo(projectId, shotId) {
+    const promptText = $(`shotPrompt-${shotId}`)?.value?.trim() || '';
+    const provider = $(`shotVideoProvider-${shotId}`)?.value || 'gflow_cli';
+    const ratio = $(`shotSceneRatio-${shotId}`)?.value || '1280:720';
+    try {
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateStudioShotImage(shotId) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return;
+    const shot = findStudioShot(shotId);
+    const promptText = (shot?.visual_prompt || '').trim();
+    const provider = $(`studioShotImageProvider-${shotId}`)?.value || 'gemini_image';
+    const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
+    try {
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+      if (response.job?.id) void watchStudioShotSceneJob(response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateStudioShotVideo(shotId) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return;
+    const shot = findStudioShot(shotId);
+    const promptText = (shot?.visual_prompt || '').trim();
+    const provider = $(`studioShotVideoProvider-${shotId}`)?.value || 'gflow_cli';
+    const ratio = $(`studioShotSceneRatio-${shotId}`)?.value || '1280:720';
+    try {
+      const response = await createSceneJob(projectId, shotId, promptText, provider, ratio);
+      if (!response) return;
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+      if (response.job?.id) void watchStudioShotSceneJob(response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function watchStudioShotSceneJob(jobId) {
+    const projectId = state.studioProjectId;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      try {
+        const job = await api(`/api/scene-jobs/${jobId}`);
+        if (job.status === 'completed' || job.status === 'error') {
+          const bundle = await api(`/api/projects/${projectId}`);
+          state.shots = bundle.latest_shots || [];
+          renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+          setMessage(
+            job.status === 'completed' ? `Cảnh AI cho đoạn ${job.segment_index} đã tạo xong.` : `Tạo cảnh AI thất bại: ${job.error || 'Lỗi không xác định.'}`,
+            job.status === 'completed' ? 'success' : 'error',
+          );
+          return job;
+        }
+      } catch (error) { setMessage(`Không đọc được trạng thái tạo cảnh: ${error.message}`, 'error'); return null; }
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    setMessage('Tạo cảnh đang chạy lâu; hãy làm mới trang để kiểm tra trạng thái.', 'error');
+    return null;
+  }
+
+  async function createVoiceJob(projectId, shotId) {
+    if (!confirm('Tạo lại giọng đọc riêng cho cảnh này? Sẽ ghi đè audio hiện có của cảnh (nếu có).')) return false;
+    setMessage('Đang tạo lại giọng đọc cho cảnh này...');
+    const segment = await ensureSegmentForShot(projectId, shotId);
+    const renderSettings = await api(`/api/projects/${projectId}/render-settings`);
+    const provider = renderSettings?.voice_provider || 'edge_tts';
+    await api(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify({job_type: 'voiceover_segment', provider, confirmed: true, segment_id: segment.id}),
+    });
+    setMessage('Đã đưa việc tạo giọng đọc cho cảnh này vào hàng đợi.', 'success');
+    return true;
+  }
+
+  async function regenerateShotVoice(projectId, shotId) {
+    try {
+      const done = await createVoiceJob(projectId, shotId);
+      if (!done) return;
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function regenerateStudioShotVoice(shotId) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return;
+    try {
+      const done = await createVoiceJob(projectId, shotId);
+      if (!done) return;
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateTimeline(projectId, force = false) {
+    setMessage(force ? 'Đang tạo lại timeline...' : 'Đang tạo timeline...');
+    try {
+      const response = await api(`/api/projects/${projectId}/timeline/generate`, {
+        method: 'POST',
+        body: JSON.stringify({force}),
+      });
+      setMessage(`Đã tạo ${response.timeline.length} đoạn timeline (${response.total_duration_seconds} giây).`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function regenerateTimeline(projectId) {
+    if (!confirm('Tạo lại timeline sẽ thay thế các segment hiện tại của kịch bản mới nhất. Tiếp tục?')) return;
+    await generateTimeline(projectId, true);
+  }
+
+  async function saveTimelineSegment(segmentId) {
+    setMessage(`Đang lưu segment ${segmentId}...`);
+    try {
+      await api(`/api/timeline/${segmentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          voice_text: $(`timelineVoice-${segmentId}`).value,
+          subtitle_text: $(`timelineVoice-${segmentId}`).value,
+          visual_prompt: $(`timelinePrompt-${segmentId}`).value,
+          duration_seconds: Number($(`timelineDuration-${segmentId}`).value),
+          audio_path: $(`timelineAudio-${segmentId}`).value,
+          visual_path: $(`timelineVisual-${segmentId}`).value,
+          status: $(`timelineStatus-${segmentId}`).value,
+        }),
+      });
+      setMessage('Đã lưu segment timeline.', 'success');
+      if (state.projectId) await openProjectDetail(state.projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  // `quiet` is for saves the user did not ask for by name - persisting a
+  // dropdown the moment it changes. The save still has to happen, but
+  // announcing it twice per click buries the messages that matter.
+  async function saveRenderSettings(projectId, {quiet = false} = {}) {
+    if (!quiet) setMessage('Đang lưu thiết lập render...');
+    try {
+      const current = await api(`/api/projects/${projectId}/render-settings`);
+      const usingStudio = localStorage.getItem('ytFactory.workspace') === 'dashboard' && Boolean($('studioVoiceProviderSelect'));
+      const selected = (renderId, studioId, fallback = '') => {
+        const element = $(usingStudio ? studioId : renderId);
+        return element ? element.value : fallback;
+      };
+      const response = await api(`/api/projects/${projectId}/render-settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          music_asset_id: $('renderMusicAsset')?.value ? Number($('renderMusicAsset').value) : (current.music_asset_id || null),
+          music_volume: Number($('renderMusicVolume')?.value || current.music_volume || 0.12),
+          transition_style: $('renderTransitionStyle')?.value || current.transition_style || 'fade',
+          output_profile: selected('renderOutputProfile', 'studioOutputProfileSelect', current.output_profile || 'youtube_landscape'),
+          voice_provider: selected('renderVoiceProvider', 'studioVoiceProviderSelect', current.voice_provider || 'edge_tts'),
+          voice_model: selected('renderVoiceModel', 'studioVoiceModelSelect', current.voice_model || 'vi-VN-HoaiMyNeural'),
+          voice_rate: selected('renderVoiceRate', 'studioVoiceRateSelect', current.voice_rate || '+0%'),
+          // The hidden field holding the chosen sample is filled in by
+          // hydrateStudioVoiceSettings, which only runs once step 4 is open.
+          // Saving before that read an empty field as "no sample" and wiped
+          // the project's voice - so VoxCPM went back to inventing a new
+          // speaker per scene. An empty field with no options in it means
+          // "not loaded yet", not "cleared"; only a blank pick from a
+          // populated list clears the sample.
+          voice_reference_asset_id: (() => {
+            const element = $(usingStudio ? 'studioVoiceReferenceAsset' : 'renderVoiceReferenceAsset');
+            const stored = current.voice_reference_asset_id || null;
+            if (!element) return stored;
+            if (element.value) return Number(element.value);
+            return element.options && element.options.length > 1 ? null : stored;
+          })(),
+          voice_prompt_text: selected('renderVoicePromptText', 'studioVoicePromptText', current.voice_prompt_text || ''),
+          subtitle_provider: selected('renderSubtitleProvider', 'studioSubtitleProviderSelect', current.subtitle_provider || 'timeline_text'),
+          subtitle_model: selected('renderSubtitleModel', 'studioSubtitleModelSelect', current.subtitle_model || 'timeline'),
+          publish_language: selected('renderPublishLanguage', 'studioPublishLanguageSelect', current.publish_language || 'vi'),
+        }),
+      });
+      if (!quiet) setMessage('Đã lưu thiết lập nhạc nền và chuyển cảnh.', 'success');
+      if (response.settings && state.projectId && Number(state.projectId) === Number(projectId)) await openProjectDetail(state.projectId);
+    } catch (error) { setMessage(`Không lưu được thiết lập render: ${error.message}`, 'error'); }
+  }
+
+  async function createTimelineSceneJob(projectId, segmentId, promptText, provider, ratio, isVeo) {
+    if (promptText.length < 3) throw new Error('Hãy nhập visual prompt cho đoạn này trước.');
+    const referenceAssetId = isVeo ? await findReferenceImageAssetId(projectId, $(`timelineVisual-${segmentId}`)?.value || '') : null;
+    if (isVeo && !referenceAssetId) {
+      setMessage('Đoạn này chưa có ảnh nguồn. Hãy tạo hoặc gắn ảnh trước khi tạo video.', 'error');
+      return null;
+    }
+    const fromImageNote = referenceAssetId ? ' Cảnh đã có ảnh — sẽ tạo video từ ảnh đó (image-to-video).' : '';
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`Tạo ${isVeo ? 'video' : 'ảnh'} AI bằng ${sceneProviderLabel(provider)} từ prompt.${fromImageNote} ${SUBSCRIPTION_SCENE_PROVIDERS.has(provider) ? 'Dùng gói đã đăng nhập.' : 'Việc này dùng API cloud và có thể phát sinh chi phí.'} Tiếp tục?${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return null;
+    setMessage(`Đang đưa cảnh ${segmentId} vào hàng đợi ${sceneProviderLabel(provider)}...`);
+    const response = await api(`/api/projects/${projectId}/scene-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        timeline_segment_id: segmentId,
+        provider,
+        prompt: promptText,
+        duration_seconds: isVeo ? 8 : 5,
+        ratio,
+        reference_asset_id: referenceAssetId,
+        requires_reference_image: isVeo,
+        confirmed: true,
+      }),
+    });
+    setMessage('Đã đưa tác vụ tạo cảnh vào hàng đợi. Kết quả sẽ tự gắn vào timeline.', 'success');
+    return response;
+  }
+
+  async function generateSceneImage(projectId, segmentId) {
+    const prompt = $(`timelinePrompt-${segmentId}`)?.value?.trim() || '';
+    const provider = $(`sceneImageProvider-${segmentId}`)?.value || 'gemini_image';
+    const ratio = $(`sceneRatio-${segmentId}`)?.value || '1280:720';
+    try {
+      const response = await createTimelineSceneJob(projectId, segmentId, prompt, provider, ratio, false);
+      if (!response) return;
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function generateSceneVideo(projectId, segmentId) {
+    const prompt = $(`timelinePrompt-${segmentId}`)?.value?.trim() || '';
+    const provider = $(`sceneVideoProvider-${segmentId}`)?.value || 'gflow_cli';
+    const ratio = $(`sceneRatio-${segmentId}`)?.value || '1280:720';
+    try {
+      const response = await createTimelineSceneJob(projectId, segmentId, prompt, provider, ratio, true);
+      if (!response) return;
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function cancelSceneJob(projectId, jobId) {
+    try {
+      await api(`/api/scene-jobs/${jobId}/cancel`, {method: 'POST'});
+      setMessage('Đã hủy job tạo cảnh.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function retrySceneJob(projectId, jobId) {
+    try {
+      const response = await api(`/api/scene-jobs/${jobId}/retry`, {method: 'POST'});
+      setMessage('Đã đưa job vào hàng đợi lại.', 'success');
+      await openProjectDetail(projectId);
+      if (response.job?.id) void watchSceneGenerationJob(projectId, response.job.id);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function runTimelineSceneBatch(projectId, provider, ratio, isVeo) {
+    const sidecarWarning = await sidecarWarningText(provider);
+    if (!confirm(`${isVeo ? 'Tạo video từ ảnh storyboard' : 'Tạo ảnh AI'} bằng ${sceneProviderLabel(provider)} cho toàn bộ cảnh? ${isVeo ? 'Cảnh chưa có ảnh sẽ được tạo ảnh trước; video không chuyển ngầm sang text-to-video. ' : ''}Mỗi cảnh sẽ dùng API credits/gói đã đăng nhập.${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
+    setMessage(`Đang đưa các cảnh vào hàng đợi ${sceneProviderLabel(provider)}...`);
+    try {
+      const referenceImageProvider = $(`batchImageProvider-${projectId}`)?.value || 'flow_image';
+      const response = await api(`/api/projects/${projectId}/scene-jobs/batch`, {
+        method: 'POST', body: JSON.stringify({
+          ...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio,
+          requires_reference_image: isVeo, reference_image_provider: referenceImageProvider, confirmed: true,
+        }),
+      });
+      const jobs = response.jobs || [];
+      if (!jobs.length) return setMessage('Không có cảnh nào cần tạo thêm; hãy kiểm tra storyboard.', 'success');
+      setMessage(`Đã đưa ${jobs.length}/${response.total_segments || jobs.length} cảnh sang ${sceneProviderLabel(provider)}. Kết quả hoàn tất sẽ tự hiện trong storyboard.`, 'success');
+      await openProjectDetail(projectId, 'editor');
+      jobs.forEach((job) => { if (job.id) void watchSceneGenerationJob(projectId, job.id); });
+    } catch (error) { setMessage(`Không thể tạo hàng loạt cảnh AI: ${error.message}`, 'error'); }
+  }
+
+  async function generateAllSceneImages(projectId) {
+    const provider = $(`batchImageProvider-${projectId}`)?.value || 'gemini_image';
+    const ratio = $(`batchSceneRatio-${projectId}`)?.value || '1280:720';
+    await runTimelineSceneBatch(projectId, provider, ratio, false);
+  }
+
+  async function generateAllSceneVideos(projectId) {
+    const provider = $(`batchVideoProvider-${projectId}`)?.value || 'gflow_cli';
+    const ratio = $(`batchSceneRatio-${projectId}`)?.value || '1280:720';
+    await runTimelineSceneBatch(projectId, provider, ratio, true);
+  }
+
+  async function watchSceneGenerationJob(projectId, jobId) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      try {
+        const job = await api(`/api/scene-jobs/${jobId}`);
+        if (job.status === 'completed') {
+          setMessage(`Cảnh AI cho đoạn ${job.segment_index} đã tạo xong và được gắn vào timeline.`, 'success');
+          await openProjectDetail(projectId);
+          return job;
+        }
+        if (job.status === 'error') {
+          setMessage(`Tạo cảnh AI thất bại: ${job.error || 'Lỗi không xác định.'}`, 'error');
+          await openProjectDetail(projectId);
+          return job;
+        }
+        if (attempt % 3 === 0) setMessage(`${sceneProviderLabel(job.provider)} đang tạo cảnh... (${job.status})`);
+      } catch (error) {
+        setMessage(`Không đọc được trạng thái tạo cảnh: ${error.message}`, 'error');
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    setMessage('Tạo cảnh đang chạy lâu; hãy mở lại project để kiểm tra trạng thái.', 'error');
+    return null;
+  }
+
+  async function uploadProjectAsset(projectId) {
+    const fileInput = $('assetUploadFile');
+    const file = fileInput?.files?.[0];
+    if (!file) { setMessage('Hãy chọn một file video, audio hoặc ảnh trước.', 'error'); return; }
+    setMessage(`Đang upload ${file.name}...`);
+    try {
+      const form = new FormData();
+      form.append('asset_type', $('assetUploadType').value);
+      form.append('file', file);
+      const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      setMessage(`Đã import ${data.asset.original_name} vào project.`, 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function uploadVoiceReferenceAudio(projectId) {
+    const fileInput = $('renderVoiceReferenceFile');
+    const file = fileInput?.files?.[0];
+    if (!file) { setMessage('Hãy chọn file audio giọng mẫu trước.', 'error'); return; }
+    setMessage(`Đang upload giọng mẫu ${file.name}...`);
+    try {
+      const form = new FormData();
+      form.append('asset_type', 'audio');
+      form.append('file', file);
+      const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      await openProjectDetail(projectId);
+      if ($('renderVoiceReferenceAsset')) $('renderVoiceReferenceAsset').value = String(data.asset.id);
+      await saveRenderSettings(projectId);
+      setMessage(`Đã chọn ${data.asset.original_name} làm giọng mẫu VoxCPM2.`, 'success');
+    } catch (error) { setMessage(`Không upload được giọng mẫu: ${error.message}`, 'error'); }
+  }
+
+  async function uploadStudioVoiceReferenceAudio() {
+    const projectId = state.studioProjectId;
+    const file = $('studioVoiceReferenceFile')?.files?.[0];
+    if (!projectId) { setMessage('Hãy tạo project và kịch bản trước.', 'error'); return; }
+    if (!file) { setMessage('Hãy chọn file audio giọng mẫu trước.', 'error'); return; }
+    setStudioProgress(15, `Đang tải giọng mẫu ${file.name}...`);
+    try {
+      const form = new FormData();
+      form.append('asset_type', 'audio');
+      form.append('file', file);
+      const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      const voiceName = $('studioVoiceReferenceName')?.value.trim() || '';
+      if (voiceName) {
+        await api(`/api/assets/${data.asset.id}`, {method: 'PATCH', body: JSON.stringify({original_name: voiceName})});
+      }
+      await hydrateStudioVoiceSettings();
+      if ($('studioVoiceReferenceAsset')) $('studioVoiceReferenceAsset').value = String(data.asset.id);
+      await saveRenderSettings(projectId);
+      setStudioProgress(100, `Đã khóa giọng mẫu: ${data.asset.original_name}.`);
+      setMessage('Đã chọn giọng mẫu. VoxCPM sẽ dùng đúng file này cho mọi cảnh.', 'success');
+    } catch (error) {
+      setStudioProgress(0, `Không tải được giọng mẫu: ${error.message}`, 'error');
+      setMessage(`Không tải được giọng mẫu: ${error.message}`, 'error');
+    }
+  }
+
+  async function analyzeLocalAsset(assetId) {
+    if (!confirm('Whisper local sẽ đọc file audio/video này bằng CPU/GPU và lưu transcript vào project. Tiếp tục?')) return;
+    setMessage(`Đang phân tích asset ${assetId} bằng Whisper local...`);
+    try {
+      await api(`/api/assets/${assetId}/analyze`, {
+        method: 'POST',
+        body: JSON.stringify({confirmed: true, language: ''}),
+      });
+      setMessage('Đã phân tích asset và lưu transcript.', 'success');
+      if (state.projectId) await openProjectDetail(state.projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function attachTimelineAsset(segmentId, assetId) {
+    if (!assetId) return;
+    setMessage(`Đang gắn asset ${assetId} vào segment ${segmentId}...`);
+    try {
+      await api(`/api/timeline/${segmentId}/attach-asset`, {
+        method: 'POST',
+        body: JSON.stringify({asset_id: Number(assetId)}),
+      });
+      setMessage('Đã gắn asset vào timeline.', 'success');
+      if (state.projectId) await openProjectDetail(state.projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function downloadProjectSource(projectId, videoId) {
+    if (!confirm('Tự động tải video nguồn về máy để cắt các đoạn minh hoạ? App không dùng cookie hay tài khoản YouTube.')) return;
+    setMessage('Đang tải video nguồn về máy; thời gian phụ thuộc độ dài video và kết nối.');
+    try {
+      const result = await api(`/api/videos/${encodeURIComponent(videoId)}/download?media_type=video&confirmed=true`, {method: 'POST'});
+      setMessage(`Đã tải video nguồn: ${result.path}`, 'success');
+      await refresh();
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function downloadProjectSourceWithCookieFile(projectId, videoId, cookieFile) {
+    if (!cookieFile) return;
+    if (!confirm('Dùng cookies.txt này cho đúng một lần tải video nguồn? File chỉ được dùng trong thư mục tạm và bị xoá ngay sau khi tải.')) return;
+    setMessage('Đang tải video nguồn bằng cookies.txt tạm thời...');
+    try {
+      const form = new FormData();
+      form.append('cookie_file', cookieFile);
+      const response = await fetch(`/api/videos/${encodeURIComponent(videoId)}/download-with-cookie-file?media_type=video&confirmed=true`, {
+        method: 'POST', body: form,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      setMessage(`Đã tải video nguồn: ${result.path}`, 'success');
+      await refresh();
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function queueOpenMontage(projectId) {
+    const provider = $('openMontageRuntime')?.value || 'openmontage';
+    return queueProductionJob(projectId, 'render', provider, true);
+  }
+
+  function renderPublicationSuggestions(projectId) {
+    const titleInput = $('publicationTitle');
+    const anchor = titleInput?.closest('.studio-grid');
+    if (!anchor || $('publicationSuggestions')) return;
+    const suggestion = state.publicationSuggestions || {};
+    const titles = Array.isArray(suggestion.titles) ? suggestion.titles : [];
+    const titleChoices = titles.length
+      ? titles.map((title, index) => `<button class="btn small ${index === 0 ? 'primary' : 'ghost'}" type="button" data-value="${esc(title)}" onclick="applyPublicationTitleSuggestion(this)">${esc(title)}</button>`).join('')
+      : '<span class="secondary-text">Chưa có gợi ý tiêu đề. Hãy tạo AI Writer từ bước kịch bản.</span>';
+    const metadataButton = suggestion.description || (suggestion.tags || []).length
+      ? `<button class="btn small ghost" type="button" data-description="${esc(suggestion.description || '')}" data-tags="${esc((suggestion.tags || []).join(', '))}" onclick="applyPublicationMetadataSuggestion(this)">Áp dụng mô tả &amp; hashtag AI</button>`
+      : '';
+    const thumbnailAction = suggestion.thumbnailBrief
+      ? `<div class="secondary-text" style="margin-top:6px">${esc(suggestion.thumbnailBrief)}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px"><button class="btn small ghost" type="button" data-brief="${esc(suggestion.thumbnailBrief)}" onclick="applyPublicationThumbnailBrief(this)">Dùng brief cho thumbnail</button><button class="btn small primary" type="button" data-brief="${esc(suggestion.thumbnailBrief)}" onclick="generatePublicationThumbnailFrames(${Number(projectId)}, this)">Tạo 3 phương án frame</button></div>`
+      : '<div class="secondary-text" style="margin-top:6px">Chưa có brief thumbnail. Tạo AI Writer để nhận đề xuất theo nội dung video.</div>';
+    anchor.insertAdjacentHTML('afterend', `<div id="publicationSuggestions" class="analysis-item" style="margin-top:8px;border-color:rgba(168,85,247,.42)"><label>ĐỀ XUẤT AI TRƯỚC KHI XUẤT BẢN</label><p class="panel-sub">Chọn một tiêu đề, áp dụng caption/hashtag và chuẩn bị brief thumbnail. Bạn vẫn có thể chỉnh lại mọi nội dung trước khi đăng.</p><div class="queue-controls" style="justify-content:flex-start;flex-wrap:wrap">${titleChoices}<button class="btn small ghost" type="button" onclick="generatePublicationAiSuggestions(${Number(projectId)})">Tạo / làm mới đề xuất AI</button></div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px">${metadataButton}</div><div style="margin-top:8px"><b style="font-size:12px">Đề xuất thumbnail</b>${thumbnailAction}</div></div>`);
+  }
+
+  function applyPublicationTitleSuggestion(button) {
+    const title = String(button?.dataset?.value || '');
+    const input = $('publicationTitle');
+    if (input && title) input.value = title;
+  }
+
+  function applyPublicationMetadataSuggestion(button) {
+    const description = String(button?.dataset?.description || '');
+    const tags = String(button?.dataset?.tags || '');
+    if ($('publicationDescription') && description) $('publicationDescription').value = description;
+    if ($('publicationTags') && tags) $('publicationTags').value = tags;
+    setMessage('Đã áp dụng mô tả và hashtag do AI đề xuất.', 'success');
+  }
+
+  function applyPublicationThumbnailBrief(button) {
+    const brief = String(button?.dataset?.brief || '');
+    if ($('thumbnailPrompt') && brief) $('thumbnailPrompt').value = brief;
+    setMessage('Đã đưa brief vào phần Thumbnail. Bạn có thể tạo phương án frame hoặc chỉnh brief trước.', 'success');
+  }
+
+  async function generatePublicationAiSuggestions(projectId) {
+    const videoId = String(state.publicationSuggestions?.sourceVideoId || '');
+    if (!videoId) return setMessage('Không tìm được video nguồn để tạo đề xuất.', 'error');
+    const selected = $('analysisProviderSelect')?.value || '';
+    const provider = ['anthropic_claude', 'openai_gpt', 'codex_cli', 'claude_code_cli', 'antigravity'].includes(selected) ? selected : null;
+    setMessage('AI đang tạo đề xuất tiêu đề, caption, hashtag và brief thumbnail...');
+    try {
+      await api(`/api/videos/${encodeURIComponent(videoId)}/writer`, {method: 'POST', body: JSON.stringify({provider})});
+      await refresh();
+      await openProjectDetail(projectId, 'export');
+      setMessage('Đã cập nhật đề xuất xuất bản bằng AI.', 'success');
+    } catch (error) { setMessage(`Không tạo được đề xuất AI: ${error.message}`, 'error'); }
+  }
+
+  async function generatePublicationThumbnailFrames(projectId, button) {
+    applyPublicationThumbnailBrief(button);
+    await generateProjectThumbnails(projectId);
+  }
+
+  const PUBLICATION_PLATFORM_DEFAULTS = {
+    youtube: {profile: 'youtube_landscape', note: 'YouTube: upload tự động khi OAuth đã kết nối.'},
+    tiktok: {profile: 'tiktok', note: 'TikTok: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+    facebook: {profile: 'facebook_reels', note: 'Facebook: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+    instagram: {profile: 'instagram_reels', note: 'Instagram: app chuẩn bị MP4 và metadata để bạn đăng thủ công.'},
+  };
+
+  function syncPublicationTarget() {
+    const platformSelect = $('publicationPlatform');
+    let platform = platformSelect?.value || 'youtube';
+    const channelId = Number($('publicationChannel')?.value || 0);
+    const variant = $('publicationVariant')?.value || 'long';
+    const channel = state.managedChannels.find((item) => Number(item.id) === channelId);
+    const profile = $('publicationProfile');
+    const note = $('publicationTargetNote');
+    if (channel?.platform && channel.platform !== platform) {
+      platform = channel.platform;
+      if (platformSelect) platformSelect.value = platform;
+    }
+    const defaults = PUBLICATION_PLATFORM_DEFAULTS[platform] || PUBLICATION_PLATFORM_DEFAULTS.youtube;
+    if (profile) profile.value = channel?.output_profile || (variant === 'short' && platform === 'youtube' ? 'youtube_shorts' : defaults.profile);
+    if (note) note.textContent = channel ? `${esc(channel.name)} · ${defaults.note}` : defaults.note;
+  }
+
+  const PUBLISHER_PLATFORM_LABELS = {
+    tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram',
+  };
+
+  // Only YouTube has an uploader. Rows for the other platforms sit as a
+  // ready-to-post package, which looks like a stuck queue unless it is named.
+  function publisherWaitingNote(publications) {
+    const waiting = {};
+    (publications || []).forEach((item) => {
+      if (item.status !== 'ready_manual') return;
+      const key = String(item.platform || '').toLowerCase();
+      if (!key || key === 'youtube') return;
+      waiting[key] = (waiting[key] || 0) + 1;
+    });
+    const parts = Object.entries(waiting)
+      .map(([key, count]) => `${PUBLISHER_PLATFORM_LABELS[key] || key}: ${count}`);
+    if (!parts.length) return 'Chỉ YouTube được đăng tự động; các nền tảng khác sẽ tạo gói để bạn tải lên tay.';
+    return `Chờ đăng thủ công — ${parts.join(' · ')}. App chưa nối API các nền tảng này, `
+      + 'nên chúng không bị đưa nhầm lên YouTube; bấm “Tải gói đăng” rồi đăng tay.';
+  }
+
+  // The publish controls existed but were built into a variable that was
+  // never inserted anywhere, so the app had no upload button at all: the last
+  // wizard step only offered a link across to the channel list, which has no
+  // upload button either. They belong on the step that says "Xuất bản".
+  const PUBLISH_PROFILE_LABELS = {
+    youtube_landscape: 'YouTube ngang · 16:9',
+    youtube_shorts: 'YouTube Shorts · 9:16',
+    instagram_reels: 'Instagram Reels · 9:16',
+    tiktok: 'TikTok · 9:16',
+    facebook_reels: 'Facebook Reels · 9:16',
+    facebook_feed: 'Facebook feed · 1:1',
+  };
+
+  async function cutShortSourceScenes() {
+    // The same control is intentionally workflow-aware: Reup cuts the local
+    // source; Content queues vertical AI visuals on the Short's own timeline.
+    await queueShortVariantJob('source_visuals');
+    await loadShortLane();
+  }

@@ -6,13 +6,12 @@ import re
 from pathlib import Path
 
 import pytest
-
-PAGE = Path(__file__).resolve().parent.parent / "youtube_monitor" / "templates" / "index.html"
+from tests.ui_source import studio_ui
 
 
 @pytest.fixture(scope="module")
 def page() -> str:
-    return PAGE.read_text(encoding="utf-8")
+    return studio_ui()
 
 
 def test_hidden_is_enforced_against_class_display_rules(page: str) -> None:

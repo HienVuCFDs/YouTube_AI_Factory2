@@ -18,13 +18,12 @@ from fastapi.testclient import TestClient
 from youtube_monitor import main
 from youtube_monitor.database import Database
 from youtube_monitor.main import app
-
-PAGE = Path(__file__).resolve().parent.parent / "youtube_monitor" / "templates" / "index.html"
+from tests.ui_source import studio_ui
 
 
 @pytest.fixture(scope="module")
 def page() -> str:
-    return PAGE.read_text(encoding="utf-8")
+    return studio_ui()
 
 
 def test_the_page_has_somewhere_to_show_pending_approvals(page: str) -> None:

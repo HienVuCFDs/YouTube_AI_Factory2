@@ -23,6 +23,7 @@ from youtube_monitor.source_visuals import (
     mismatched_source_clips,
     prepare_source_visuals,
 )
+from tests.ui_source import studio_ui
 
 
 def _make_media(path: Path, seconds: float, kind: str = "video") -> Path:
@@ -203,10 +204,7 @@ class SegmentStateNamesBothHalvesTests(unittest.TestCase):
             self.assertEqual(database.resync_timeline_segment_states(), 0)
 
     def test_the_storyboard_reads_the_files_rather_than_the_label(self) -> None:
-        page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        page = studio_ui()
         self.assertIn("function segmentHaveBadges", page)
         self.assertIn("segment.visual_path", page)
         self.assertIn("segment.audio_path", page)
@@ -305,10 +303,7 @@ class DialogueCutWarnsWhatItDestroysTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_the_warning_counts_the_work_that_will_be_lost(self) -> None:
         self.assertIn("const withVoice = current.filter", self.page)
@@ -395,10 +390,7 @@ class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
         The page used to force on every call, so the refusal it was meant to
         surface never reached anyone.
         """
-        page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        page = studio_ui()
 
         confirm_at = page.index("Vẫn cắt lại theo lời thoại?")
         call_at = page.index("timeline/from-dialogue?force=true")

@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from youtube_monitor.ffmpeg_renderer import resolve_ffmpeg
+from tests.ui_source import studio_ui
 
 
 class TheEndpointsExistTests(unittest.TestCase):
@@ -75,10 +76,7 @@ class FfmpegCanDrawTheWaveformTests(unittest.TestCase):
 
 class TheReviewControlsAreOnTheCardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.page = (
-            Path(__file__).resolve().parent.parent
-            / "youtube_monitor" / "templates" / "index.html"
-        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
 
     def test_every_scene_shows_the_shape_of_its_audio(self) -> None:
         self.assertIn("storyboard-wave", self.page)
