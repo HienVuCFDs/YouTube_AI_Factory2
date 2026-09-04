@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import math
 import mimetypes
 import os
 import re
@@ -138,6 +139,7 @@ from .media_probe import MediaProbeError, describe, probe_media, reject_reason
 from . import publish_gate
 from . import platform_copy
 from . import project_log
+from . import voice_library
 from .reuse_check import measure_reuse, rule_findings, rule_verdict
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
@@ -4918,6 +4920,10 @@ def build_timeline_from_dialogue(
         item["shot_id"] = int(shot["id"])
 
     timeline = database.create_project_timeline(project_id, int(script["id"]), planned, force=True)
+    # Rebuilding replaced the rows the voice hung off. The files are
+    # still there, so the scenes whose words are unchanged get theirs
+    # back rather than being generated again.
+    _reattach_project_voice(project_id)
     if timeline is None:
         raise HTTPException(status_code=404, detail="Không lưu được timeline")
     for segment, start in zip(timeline, cuts):
@@ -6128,6 +6134,51 @@ class PlatformCopyRequest(BaseModel):
     title: str = Field(default="", max_length=300)
     description: str = Field(default="", max_length=5000)
     tags: list[str] = Field(default_factory=list)
+
+
+def _reattach_project_voice(project_id: int, variant: str = "long") -> dict[str, Any]:
+    """Give a rebuilt timeline back the voice this project already made.
+
+    Audio hangs off a timeline row, so replacing the rows loses it even
+    though the files are still there. They are matched back by the words they
+    were spoken from - never by scene number, which a rebuild renumbers.
+    """
+    script = database.get_latest_project_script(project_id, variant=variant)
+    if not script:
+        return {"attached": 0, "matched": [], "missing": []}
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    layout = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)
+    library = voice_library.index_voices(layout["work"] / "voiceover", layout["audio"])
+    matched, missing = voice_library.match_timeline(timeline, library)
+    for item in matched:
+        duration = media_duration_seconds(Path(item["audio_path"]), FFMPEG_BINARY)
+        database.update_project_timeline_segment(
+            item["segment_id"],
+            audio_path=item["audio_path"],
+            duration_seconds=max(1, int(math.ceil(duration))) if duration else None,
+        )
+    if matched:
+        database.resync_timeline_segment_states(project_id)
+    return {
+        "attached": len(matched),
+        "matched": matched,
+        "missing": missing,
+        "library_size": len(library),
+    }
+
+
+class ReattachVoiceRequest(BaseModel):
+    video_variant: Literal["long", "short"] = "long"
+
+
+@app.post("/api/projects/{project_id}/timeline/reattach-voice")
+def reattach_project_voice(
+    project_id: int, payload: ReattachVoiceRequest = ReattachVoiceRequest()
+) -> dict[str, Any]:
+    """Attach voice this project has already generated to the scenes that need it."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return _reattach_project_voice(project_id, payload.video_variant)
 
 
 @app.get("/api/projects/{project_id}/log")
@@ -7849,6 +7900,10 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             for index, shot in enumerate(shots, start=1)
         ]
         timeline = database.create_project_timeline(project_id, int(script["id"]), segments, force=True) or []
+        # Rebuilding replaced the rows the voice hung off. The files are
+        # still there, so the scenes whose words are unchanged get theirs
+        # back rather than being generated again.
+        _reattach_project_voice(project_id, "short")
         for segment, raw_scene in zip(timeline, raw_scenes):
             database.set_segment_visual_kind(
                 int(segment["id"]),

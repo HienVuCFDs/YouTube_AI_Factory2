@@ -1115,6 +1115,36 @@
     saveStudioSession();
   }
 
+  // Audio hangs off a timeline row, so anything that replaces the rows -
+  // cutting by dialogue, rebuilding the storyboard - loses the link while the
+  // files sit untouched on disk. Matching them back by the words they were
+  // spoken from costs nothing and saves generating them all again.
+  async function reattachStudioVoice(variant = 'long') {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) return setMessage('Hãy mở một dự án trước.', 'error');
+    setMessage('Đang tìm giọng đã tạo và gắn lại vào từng cảnh...', '');
+    try {
+      const result = await api(`/api/projects/${projectId}/timeline/reattach-voice`, {
+        method: 'POST', body: JSON.stringify({video_variant: variant}),
+      });
+      if (!result.attached) {
+        setMessage(
+          result.library_size
+            ? `Không cảnh nào khớp với ${result.library_size} file giọng đã có — lời trong storyboard đã khác.`
+            : 'Chưa có file giọng nào để gắn lại.',
+          'error');
+      } else {
+        setMessage(`Đã gắn lại giọng cho ${result.attached} cảnh.`
+          + (result.missing.length ? ` Còn ${result.missing.length} cảnh chưa có giọng.` : ''),
+          'success');
+      }
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.timeline = bundle.latest_timeline || [];
+      renderStudioStoryboard(bundle.latest_shots || [], state.timeline);
+      await loadShortLane();
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function hydrateStudioVoiceSettings() {
     if (!state.studioProjectId || !$('studioVoiceReferenceAsset')) return;
     try {
