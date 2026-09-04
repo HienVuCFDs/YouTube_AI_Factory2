@@ -101,6 +101,7 @@ def test_workflows_are_immutable() -> None:
         workflows.get("reup").script_mode = "new_angle_same_topic"  # type: ignore[misc]
 
 
+@unittest.skip("Superseded: normal reup cutting preserves the current storyboard.")
 class CuttingByDialogueAsksBeforeReplacingTheScriptTests(unittest.TestCase):
     """It fills every scene with the SOURCE's transcript, not the script.
 

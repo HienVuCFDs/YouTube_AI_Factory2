@@ -63,11 +63,15 @@
       : '<div class="studio-empty">Chưa có thumbnail. Bấm “Tạo thumbnail” để cắt từ video đã dựng.</div>';
 
     box.innerHTML = `<div class="studio-option-card"><b>Thumbnail</b>
-      <div class="studio-model-note" style="margin-top:4px">Cắt từ chính video đã dựng. Bấm vào một ảnh để chọn làm thumbnail khi đăng.</div>
+      <div class="studio-model-note" style="margin-top:4px">Hai cách: <b>AI vẽ</b> một ảnh bìa dựng theo câu chuyện, hoặc <b>cắt khung</b> từ video đã dựng. Bấm vào một ảnh để chọn làm thumbnail khi đăng.</div>
       <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
-        <select id="thumbnailVariants" aria-label="Số ảnh"><option value="3">3 ảnh</option><option value="5">5 ảnh</option></select>
-        <button class="btn" type="button" onclick="generateStudioThumbnails(${project.id})">Tạo thumbnail</button>
+        <select id="thumbnailVariants" aria-label="Số ảnh"><option value="2">2 ảnh</option><option value="3" selected>3 ảnh</option><option value="5">5 ảnh</option></select>
+        <select id="thumbnailProvider" aria-label="Model vẽ thumbnail">${THUMBNAIL_PROVIDER_OPTIONS}</select>
+        <button class="btn primary" type="button" onclick="generateStudioThumbnails(${project.id}, 'ai')">AI vẽ thumbnail</button>
+        <button class="btn ghost" type="button" onclick="generateStudioThumbnails(${project.id}, 'frame')">Cắt khung từ video</button>
       </div>
+      <div class="studio-field" style="margin-top:8px"><label for="thumbnailDirection">Gợi ý thêm cho AI (không bắt buộc)</label>
+        <input id="thumbnailDirection" type="text" placeholder="Ví dụ: cận mặt người đàn ông, rừng tuyết phía sau" /></div>
       <div id="studioThumbnailGrid" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${thumbGrid}</div>
     </div>
     <div class="studio-option-card" style="margin-top:12px"><b>Các lần đăng</b>
@@ -167,6 +171,7 @@
       // Redraw both lanes: the segment belongs to one of them and the caller
       // does not know which.
       const bundle = await api(`/api/projects/${state.studioProjectId}`);
+      state.narrationSource = bundle.narration_source || state.narrationSource;
       renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
       await loadShortLane();
     } catch (error) { setMessage(error.message, 'error'); }
@@ -524,13 +529,29 @@
     await refreshStudioPublish(project.id);
   }
 
-  async function generateStudioThumbnails(projectId) {
+  // A frame lifted out of the video is whatever the camera was doing that
+  // second - a blink, an empty wide shot. Useful, free, and not what makes
+  // anyone click, so the composed one is the default and both are offered.
+  const THUMBNAIL_PROVIDER_OPTIONS = [
+    ['gemini_image', 'Gemini Image · API'],
+    ['openai_image', 'OpenAI Image · API'],
+    ['gflow_image', 'gFlow · gói thuê bao'],
+  ].map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
+
+  async function generateStudioThumbnails(projectId, mode = 'ai') {
     const variants = Number($('thumbnailVariants')?.value || 3);
-    setMessage('Đang cắt thumbnail từ video đã dựng...', '');
+    const provider = $('thumbnailProvider')?.value || 'gemini_image';
+    setMessage(mode === 'ai'
+      ? 'AI đang vẽ thumbnail theo câu chuyện của video...'
+      : 'Đang cắt thumbnail từ video đã dựng...', '');
     try {
       await api(`/api/projects/${projectId}/thumbnails/generate`, {
         method: 'POST',
-        body: JSON.stringify({variants, prompt: (state.publishTitles || [])[0] || ''}),
+        body: JSON.stringify({
+          variants, mode, provider,
+          video_variant: state.publishVariant || 'long',
+          prompt: $('thumbnailDirection')?.value || '',
+        }),
       });
       setMessage('Đã tạo thumbnail. Bấm vào một ảnh để chọn.', 'success');
       await refreshStudioPublish(projectId);
@@ -882,6 +903,7 @@
     try {
       const bundle = await api(`/api/projects/${state.studioProjectId}`);
       state.timeline = bundle.latest_timeline || [];
+      state.narrationSource = bundle.narration_source || state.narrationSource;
       renderStudioStoryboard(bundle.latest_shots || [], state.timeline);
       // The short is its own lane with its own jobs, and a finished one has
       // to show there too - otherwise its steps stay grey after the work is
@@ -1385,7 +1407,13 @@
   $('studioPlanVisualsButton')?.addEventListener('click', () => void planStudioVisuals());
   $('studioPlanEditButton')?.addEventListener('click', () => void planStudioEdit());
   $('studioDownloadSourceButton')?.addEventListener('click', () => void downloadStudioSource());
-  $('studioCutByDialogueButton')?.addEventListener('click', () => void cutStudioScenesByDialogue());
+  const studioDialogueCutButton = $('studioCutByDialogueButton');
+  if (studioDialogueCutButton) {
+    studioDialogueCutButton.textContent = '2. Chọn mốc hình theo lời thoại';
+    studioDialogueCutButton.addEventListener('click', () => void cutStudioScenesByDialogue());
+  }
+  const studioSourceCutButton = $('studioCutSourceScenesButton');
+  if (studioSourceCutButton) studioSourceCutButton.textContent = '3. Cắt clip theo các mốc đã chọn';
   $('studioPlanSourceCuesButton')?.addEventListener('click', () => void planStudioSourceCues());
   $('studioCutSourceScenesButton')?.addEventListener('click', () => void cutStudioSourceScenes());
   $('studioRenderReupButton')?.addEventListener('click', () => void renderStudioReup());

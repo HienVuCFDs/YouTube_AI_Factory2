@@ -140,7 +140,10 @@ from . import publish_gate
 from . import platform_copy
 from . import project_log
 from . import voice_library
-from .reuse_check import measure_reuse, rule_findings, rule_verdict
+from . import thumbnail_prompt
+from . import oauth as youtube_oauth
+from .publisher import oauth_status
+from .reuse_check import measure_reuse, narration_overlap, rule_findings, rule_verdict
 from .shot_planner import build_shot_plan, shots_to_markdown
 from .timeline_builder import build_timeline, timeline_to_manifest, timeline_to_markdown
 from .transcriber import (
@@ -623,6 +626,11 @@ class GenerateThumbnailsRequest(BaseModel):
     prompt: str = Field(default="", max_length=5_000)
     seed: int | None = None
     variants: int = Field(default=3, ge=1, le=6)
+    # A frame lifted out of the video is whatever the camera was doing that
+    # second; a thumbnail is composed. Both are useful, so both are offered.
+    mode: Literal["frame", "ai"] = "frame"
+    provider: str = Field(default="gemini_image", max_length=50)
+    video_variant: Literal["long", "short"] = "long"
 
 
 ProductionJobType = Literal["voiceover", "voiceover_segment", "source_visuals", "render", "render_short", "premiere_draft", "director_production"]
@@ -1045,6 +1053,42 @@ def list_projects(limit: int = Query(default=100, ge=1, le=200)) -> list[dict[st
     return database.list_production_projects(limit)
 
 
+def _narration_source(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Whose words the storyboard is actually going to read aloud.
+
+    A written script and the source's own transcript are both plausible
+    narrations, and one button replaces the first with the second - so a
+    project can sit with an English script and a Vietnamese storyboard and
+    nothing on screen says which one the voice will use. Measured by overlap
+    rather than by language, because the two are just as easily confused
+    within one language.
+    """
+    timeline = bundle.get("latest_timeline") or []
+    narration = " ".join(str(item.get("voice_text") or "") for item in timeline)
+    if not narration.strip():
+        return {"source": "unknown", "script_overlap": 0.0, "transcript_overlap": 0.0}
+    script = bundle.get("latest_script") or {}
+    script_text = " ".join(
+        str(script.get(field) or "") for field in ("hook", "intro", "main_content", "cta")
+    )
+    transcript = str((bundle.get("latest_transcript") or {}).get("content_text") or "")
+    from_script = narration_overlap(narration, script_text)
+    from_transcript = narration_overlap(narration, transcript)
+
+    if from_script >= 0.55:
+        source = "script"
+    elif from_transcript >= 0.55 and from_transcript > from_script:
+        source = "transcript"
+    else:
+        source = "unknown"
+    return {
+        "source": source,
+        "script_overlap": from_script,
+        "transcript_overlap": from_transcript,
+        "scene_count": len(timeline),
+    }
+
+
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: int) -> dict[str, Any]:
     bundle = database.get_production_project_bundle(project_id, transcript_text_limit=2_000)
@@ -1056,6 +1100,7 @@ def get_project(project_id: int) -> dict[str, Any]:
         "url": f"/api/projects/{project_id}/final-video" if final_path else None,
         "size_bytes": final_path.stat().st_size if final_path else None,
     }
+    bundle["narration_source"] = _narration_source(bundle)
     return bundle
 
 
@@ -1438,18 +1483,49 @@ def generate_project_shots(
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo shot list")
     writer_analysis = database.get_video_analysis(str(project["youtube_video_id"]), analysis_type="writer")
-    writer_content = writer_analysis.get("result") if writer_analysis else None
+    # Scene blueprints are only valid for the exact writer response that made
+    # this script.  Saving/translating a script in place keeps version 1, but
+    # its updated timestamp moves past the analysis; reusing blueprints then
+    # rebuilt the former (often Vietnamese) storyboard over the new English
+    # script.  The saved script is authoritative after that point.
+    writer_content = (
+        writer_analysis.get("result")
+        if writer_analysis and str(script.get("updated_at") or "") <= str(writer_analysis.get("created_at") or "")
+        else None
+    )
+    if isinstance(writer_content, dict):
+        blueprints = writer_content.get("scene_blueprints")
+        if isinstance(blueprints, list):
+            script_words = set(re.findall(
+                r"\w+",
+                " ".join(str(script.get(field) or "") for field in ("hook", "intro", "main_content", "cta")).lower(),
+                flags=re.UNICODE,
+            ))
+            blueprint_words = set(re.findall(
+                r"\w+",
+                " ".join(str(item.get("narration") or "") for item in blueprints if isinstance(item, dict)).lower(),
+                flags=re.UNICODE,
+            ))
+            overlap = len(script_words & blueprint_words) / min(len(script_words), len(blueprint_words)) if script_words and blueprint_words else 0.0
+            if overlap < 0.45:
+                # Different-language or manually rewritten blueprints are not
+                # a plan for this script.  Rebuild from the visible script.
+                writer_content = None
     existing = database.list_project_shots(project_id, script_id=int(script["id"]))
     # Editing a script in place leaves its old storyboard attached to the same
     # script ID.  Reusing it would make the voice job read yesterday's words.
     # Never silently regenerate (it can discard reviewed media); tell callers
     # exactly when they need to explicitly rebuild instead.
     script_updated = str(script.get("updated_at") or "")
-    storyboard_stale = bool(
-        existing
-        and script_updated
-        and script_updated > max(str(item.get("updated_at") or "") for item in existing)
+    expected = build_shot_plan(project, script, writer_content=writer_content)
+    narration_mismatch = len(existing) != len(expected) or any(
+        str(shot.get("narration") or "").strip() != str(planned.get("narration") or "").strip()
+        for shot, planned in zip(existing, expected)
     )
+    storyboard_stale = bool(existing and (
+        narration_mismatch
+        or (script_updated and script_updated > max(str(item.get("updated_at") or "") for item in existing))
+    ))
     if storyboard_stale and not payload.force:
         return {
             "status": "stale",
@@ -1457,11 +1533,10 @@ def generate_project_shots(
             "stale": True,
             "shots": existing,
         }
-    planned = build_shot_plan(project, script, writer_content=writer_content)
     shots = database.create_project_shots(
         project_id,
         int(script["id"]),
-        planned,
+        expected,
         force=payload.force,
     )
     if shots is None:
@@ -1621,8 +1696,16 @@ def generate_project_timeline(
     rebuilt = bool(payload.force) or previous_count == 0
     newest_shot_update = max((str(item.get("updated_at") or "") for item in shots), default="")
     newest_timeline_update = max((str(item.get("updated_at") or "") for item in previous_timeline), default="")
+    # SQLite timestamps have second precision, so a script edit, shot update
+    # and voice retry in one second can look fresh even when their words are
+    # in different languages.  A voice job reads timeline.voice_text, so the
+    # actual narration is the only reliable freshness check.
+    narration_mismatch = len(previous_timeline) != len(shots) or any(
+        str(segment.get("voice_text") or "").strip() != str(shot.get("narration") or "").strip()
+        for segment, shot in zip(previous_timeline, shots)
+    )
     stale = not rebuilt and (
-        len(timeline) != len(shots)
+        narration_mismatch
         or bool(newest_shot_update and newest_timeline_update and newest_shot_update > newest_timeline_update)
     )
     return {
@@ -2566,6 +2649,68 @@ def list_project_thumbnails(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_thumbnails(project_id)
 
 
+def _generate_ai_thumbnails(
+    project_id: int,
+    project: dict[str, Any],
+    script: dict[str, Any] | None,
+    payload: "GenerateThumbnailsRequest",
+    output_dir: Path,
+) -> list[Path]:
+    """Draw thumbnails from the project's own story, not from its footage.
+
+    The image providers already in the app are reused rather than reached for
+    directly: they take a job with a prompt and return a file, and a thumbnail
+    is that with a different brief. Each variant is given a different framing,
+    because three renders of one prompt is not a choice.
+    """
+    reference = (database.get_video_analysis(
+        str(project.get("youtube_video_id") or ""), analysis_type="reference"
+    ) or {}).get("result", {})
+    base = thumbnail_prompt.build(
+        script,
+        project,
+        vertical=payload.video_variant == "short",
+        visual_style=str(reference.get("visual_style") or ""),
+        direction=payload.prompt.strip(),
+    )
+    prompts = thumbnail_prompt.variant_prompts(base, payload.variants)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    made: list[Path] = []
+    failures: list[str] = []
+    for index, text in enumerate(prompts, start=1):
+        job = {
+            "id": f"thumb-{uuid.uuid4().hex[:8]}",
+            "project_id": project_id,
+            "timeline_segment_id": 0,
+            "prompt": text,
+            "provider": payload.provider,
+            "ratio": "720:1280" if payload.video_variant == "short" else "1280:720",
+            "seed": payload.seed,
+        }
+        try:
+            produced = scene_provider_gateway.execute_scene(
+                payload.provider, database, job, PRODUCTION_ARTIFACT_DIR,
+                capability=SCENE_IMAGE,
+            )
+        except Exception as exc:  # noqa: BLE001 - one failure must not lose the rest
+            failures.append(f"{index}: {str(exc)[:160]}")
+            continue
+        source = Path(str(produced))
+        if not source.is_file():
+            failures.append(f"{index}: provider không trả về file")
+            continue
+        target = output_dir / f"ai-thumbnail-{index:02d}{source.suffix or '.png'}"
+        shutil.copy2(source, target)
+        made.append(target)
+
+    if not made:
+        raise SceneGenerationError(
+            "Không tạo được thumbnail AI nào. " + (" · ".join(failures) if failures else "")
+        )
+    return made
+
+
 @app.post("/api/projects/{project_id}/thumbnails/generate")
 def generate_project_thumbnails(
     project_id: int,
@@ -2575,13 +2720,23 @@ def generate_project_thumbnails(
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
-    script = database.get_latest_project_script(project_id)
+    script = database.get_latest_project_script(project_id, variant=payload.video_variant)
     prompt = payload.prompt.strip() or str((script or {}).get("script_title") or project.get("title") or "")
     output_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "thumbnails" / uuid.uuid4().hex[:10]
-    try:
-        files = generate_frame_thumbnails(final_path, output_dir, FFMPEG_BINARY, payload.variants)
-    except ThumbnailGenerationError as exc:
-        raise _api_error(exc) from exc
+    if payload.mode == "ai":
+        try:
+            files = _generate_ai_thumbnails(
+                project_id, project, script, payload, output_dir,
+            )
+        except SceneGenerationError as exc:
+            raise _api_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        try:
+            files = generate_frame_thumbnails(final_path, output_dir, FFMPEG_BINARY, payload.variants)
+        except ThumbnailGenerationError as exc:
+            raise _api_error(exc) from exc
     thumbnails: list[dict[str, Any]] = []
     for index, path in enumerate(files, start=1):
         asset = database.create_project_asset(
@@ -2643,6 +2798,12 @@ def attach_asset_to_timeline(segment_id: int, payload: AttachAssetRequest) -> di
     result = database.attach_asset_to_timeline_segment(segment_id, payload.asset_id)
     if not result:
         raise HTTPException(status_code=400, detail="Asset không hợp lệ hoặc không cùng project với timeline segment")
+    # An asset is attached directly to a timeline row.  Recompute the row's
+    # combined state now, otherwise a manually restored voice can still look
+    # unavailable to storyboard/render checks until some unrelated job runs.
+    project_id = int(result["segment"]["project_id"])
+    database.resync_timeline_segment_states(project_id)
+    result["segment"] = database.get_project_timeline_segment(segment_id)
     return {"status": "attached", **result}
 
 
@@ -4802,6 +4963,7 @@ def build_timeline_from_dialogue(
     project_id: int,
     min_seconds: float = Query(default=1.2, ge=0.3, le=10.0),
     force: bool = Query(default=False),
+    replace_existing: bool = Query(default=False),
 ) -> dict[str, Any]:
     """Cut the timeline on the source's own dialogue turns.
 
@@ -4824,7 +4986,10 @@ def build_timeline_from_dialogue(
     # gone. A confirm in the page is not enough: a browser left open still
     # shows the old wording, and one user lost a twenty-minute voiceover to
     # it three times. Refusing here protects the work whatever page asks.
-    if not force:
+    # `force=true` used to be sent by an old, cached browser page and erased
+    # the storyboard silently.  Replacing it is now an explicit destructive
+    # operation, never the default action behind a storyboard button.
+    if not (force and replace_existing):
         existing = database.list_project_timeline(project_id, script_id=int(script["id"]))
         attached = [item for item in existing if str(item.get("audio_path") or "").strip()]
         # Losing a voiceover is not the only damage, and it was the only one
@@ -5551,6 +5716,13 @@ def translate_project_narration(
             updated = database.save_segment_translation(
                 int(segment["id"]), text, str(segment.get("voice_text") or "")
             )
+            # The timeline is the production source for the voice, while the
+            # matching shot supplies the storyboard card. Keep both records
+            # in the same language so reopening the project cannot show an
+            # old Vietnamese card beside newly generated English audio.
+            shot_id = (updated or {}).get("shot_id") or segment.get("shot_id")
+            if shot_id:
+                database.update_project_shot(int(shot_id), narration=text)
             translated.append({
                 "segment_index": segment.get("segment_index"),
                 "source_voice_text": (updated or {}).get("source_voice_text", ""),
@@ -6105,6 +6277,8 @@ def _publish_checklist(
         platform=platform,
         reuse_verdict=reuse_verdict,
         source_title=str(source_video.get("title") or ""),
+        youtube_configured=youtube_oauth.is_configured(),
+        youtube_connected=bool(oauth_status().get("connected")),
     )
     return checks, {
         "scene_count": len(timeline),
@@ -6171,6 +6345,10 @@ class ReattachVoiceRequest(BaseModel):
     video_variant: Literal["long", "short"] = "long"
 
 
+class AttachGeneratedVoiceRequest(BaseModel):
+    voice_key: str = Field(min_length=1, max_length=20_000)
+
+
 @app.post("/api/projects/{project_id}/timeline/reattach-voice")
 def reattach_project_voice(
     project_id: int, payload: ReattachVoiceRequest = ReattachVoiceRequest()
@@ -6179,6 +6357,44 @@ def reattach_project_voice(
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     return _reattach_project_voice(project_id, payload.video_variant)
+
+
+@app.get("/api/projects/{project_id}/voice-library")
+def list_project_voice_library(project_id: int) -> dict[str, Any]:
+    """List only the generated audio files belonging to this project."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    layout = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)
+    library = voice_library.index_voices(layout["work"] / "voiceover", layout["audio"])
+    return {
+        "voices": [
+            {
+                "key": key,
+                "text": str(item.get("text") or ""),
+                "filename": Path(str(item.get("audio_path") or "")).name,
+            }
+            for key, item in library.items()
+        ]
+    }
+
+
+@app.post("/api/timeline/{segment_id}/attach-generated-voice")
+def attach_generated_voice_to_timeline(
+    segment_id: int, payload: AttachGeneratedVoiceRequest
+) -> dict[str, Any]:
+    """Manually attach one voice from this project's generated voice library."""
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
+    project_id = int(segment["project_id"])
+    layout = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)
+    library = voice_library.index_voices(layout["work"] / "voiceover", layout["audio"])
+    selected = library.get(payload.voice_key)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Không tìm thấy file voice đã tạo trong project")
+    database.update_project_timeline_segment(segment_id, audio_path=str(selected["audio_path"]))
+    database.resync_timeline_segment_states(project_id)
+    return {"status": "attached", "segment": database.get_project_timeline_segment(segment_id)}
 
 
 @app.get("/api/projects/{project_id}/log")

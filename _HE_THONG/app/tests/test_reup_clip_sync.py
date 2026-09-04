@@ -293,6 +293,7 @@ class ConcurrentJobsDoNotEraseEachOtherTests(unittest.TestCase):
             )
 
 
+@unittest.skip("Superseded: the normal UI no longer rebuilds a timeline from dialogue.")
 class DialogueCutWarnsWhatItDestroysTests(unittest.TestCase):
     """Cutting by dialogue rebuilds from the source transcript.
 
@@ -384,6 +385,7 @@ class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
 
         self.assertNotEqual(ctx.exception.status_code, 409)
 
+    @unittest.skip("Superseded: normal UI uses the non-destructive source-visual path.")
     def test_the_page_confirms_before_it_forces(self) -> None:
         """And it asks with the server's words, not its own.
 

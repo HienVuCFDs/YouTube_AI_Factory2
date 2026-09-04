@@ -1140,6 +1140,7 @@
       }
       const bundle = await api(`/api/projects/${projectId}`);
       state.timeline = bundle.latest_timeline || [];
+      state.narrationSource = bundle.narration_source || state.narrationSource;
       renderStudioStoryboard(bundle.latest_shots || [], state.timeline);
       await loadShortLane();
     } catch (error) { setMessage(error.message, 'error'); }

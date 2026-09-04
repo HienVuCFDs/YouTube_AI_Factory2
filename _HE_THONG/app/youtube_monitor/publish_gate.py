@@ -46,6 +46,8 @@ def evaluate(
     platform: str,
     reuse_verdict: str = "",
     source_title: str = "",
+    youtube_connected: bool = True,
+    youtube_configured: bool = True,
 ) -> list[dict[str, str]]:
     """The full checklist for one video going to one destination."""
     checks: list[dict[str, str]] = []
@@ -172,6 +174,27 @@ def evaluate(
             "reuse", PASS, "Đã kiểm tra bản quyền",
             "Rủi ro thấp" if reuse_verdict == "low" else "Cần xem lại, nhưng đăng được",
         ))
+
+    # --- there has to be somewhere for it to go ---------------------------
+    # The gate said "ready to publish" while publishing was impossible: no
+    # OAuth client means no way to authorise, no token, and an upload queue
+    # that can never move. Only YouTube is uploaded to; the other platforms
+    # produce a package the user posts themselves.
+    if platform == "youtube":
+        if not youtube_configured:
+            checks.append(_check(
+                "youtube_account", BLOCK, "Đã nối tài khoản YouTube",
+                "Chưa cấu hình YouTube OAuth client (client id/secret).",
+                "Vào Cài đặt · Kết nối, khai báo YOUTUBE_CLIENT_ID và YOUTUBE_CLIENT_SECRET.",
+            ))
+        elif not youtube_connected:
+            checks.append(_check(
+                "youtube_account", BLOCK, "Đã nối tài khoản YouTube",
+                "Đã cấu hình nhưng chưa đăng nhập YouTube.",
+                "Vào Cài đặt · Kết nối và bấm đăng nhập YouTube.",
+            ))
+        else:
+            checks.append(_check("youtube_account", PASS, "Đã nối tài khoản YouTube"))
 
     # --- an approved script is the user's own sign-off --------------------
     if str((script or {}).get("status") or "") != "approved":

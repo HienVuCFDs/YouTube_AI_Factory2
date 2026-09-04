@@ -241,6 +241,54 @@
       || null;
   }
 
+  // A written script and the source's own transcript are both plausible
+  // narrations, and one button swaps the first for the second. Nothing on
+  // screen said which one the voice would read, so a project could sit with
+  // an English script and a Vietnamese storyboard looking perfectly normal.
+  function narrationSourceNotice() {
+    const found = state.narrationSource;
+    if (!found || found.source !== 'transcript') return '';
+    const fromScript = Math.round((found.script_overlap || 0) * 100);
+    const fromSource = Math.round((found.transcript_overlap || 0) * 100);
+    return `<div class="risk-finding sev-high">
+      <b>Lời trong storyboard KHÔNG phải lời kịch bản.</b>
+      <div class="studio-model-note" style="margin-top:4px">
+        Các cảnh đang đọc lại transcript của video gốc (${fromSource}% trùng),
+        chỉ ${fromScript}% trùng kịch bản bạn đã viết — “Cắt cảnh theo lời thoại” đã thay chúng.
+      </div>
+      <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+        <button class="btn primary" type="button" onclick="rebuildStoryboardFromScript()">Dựng lại storyboard từ kịch bản</button>
+        <button class="btn" type="button" onclick="translateStudioNarration()">Hoặc dịch lời gốc sang ngôn ngữ xuất bản</button>
+      </div>
+    </div>`;
+  }
+
+  // The way back from a dialogue cut: shots and timeline rebuilt from the
+  // script that is actually approved, then whatever voice already exists for
+  // those words is attached again.
+  async function rebuildStoryboardFromScript() {
+    const projectId = Number(state.studioProjectId || state.projectId || 0);
+    if (!projectId) return setMessage('Hãy mở một dự án trước.', 'error');
+    if (!confirm('Dựng lại storyboard từ kịch bản?\n\nCác cảnh đang đọc transcript của video gốc sẽ bị thay bằng lời kịch bản. Giọng đã tạo cho lời kịch bản sẽ được gắn lại tự động.')) return;
+    setMessage('Đang dựng lại storyboard từ kịch bản...', '');
+    try {
+      await api(`/api/projects/${projectId}/shots/generate?force=true`, {method: 'POST'});
+      await api(`/api/projects/${projectId}/timeline/generate?force=true`, {method: 'POST'});
+      const restored = await api(`/api/projects/${projectId}/timeline/reattach-voice`, {
+        method: 'POST', body: JSON.stringify({video_variant: 'long'}),
+      });
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.narrationSource = bundle.narration_source || null;
+      state.shots = bundle.latest_shots || [];
+      state.timeline = bundle.latest_timeline || [];
+      renderStudioStoryboard(state.shots, state.timeline);
+      setMessage(
+        `Đã dựng lại ${state.shots.length} cảnh từ kịch bản.`
+        + (restored.attached ? ` Gắn lại giọng cho ${restored.attached} cảnh.` : ' Chưa có giọng cho lời mới — hãy tạo giọng.'),
+        'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   function renderStudioStoryboard(shots = [], timeline = [], containerId = 'studioStoryboardResult') {
     const result = $(containerId);
     if (!result) return;
@@ -248,8 +296,12 @@
       result.innerHTML = '<div class="studio-empty">Chưa có cảnh. Hãy tạo storyboard hoặc mở chỉnh sửa chi tiết để thêm cảnh.</div>';
       return;
     }
-    result.innerHTML = `<div class="studio-checklist"><div class="studio-check"><b>✓</b><span>Storyboard gồm <b>${shots.length} cảnh</b>. Mỗi thẻ bên dưới hiển thị <b>lời AI sẽ đọc</b>, prompt hình ảnh và thời lượng của cảnh.</span></div></div><div class="storyboard-grid">${shots.map((shot, index) => {
+    result.innerHTML = narrationSourceNotice() + `<div class="studio-checklist"><div class="studio-check"><b>✓</b><span>Storyboard gồm <b>${shots.length} cảnh</b>. Mỗi thẻ bên dưới hiển thị <b>lời AI sẽ đọc</b>, prompt hình ảnh và thời lượng của cảnh.</span></div><div class="queue-controls" style="justify-content:flex-start;margin:8px 0 0;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="restoreStudioGeneratedVoices()">Khôi phục voice đã tạo</button><span class="secondary-text">Dùng khi audio đã tạo nhưng chưa hiện lại trong storyboard.</span></div></div><div class="storyboard-grid">${shots.map((shot, index) => {
       const segment = timeline.find((item) => Number(item.shot_id) === Number(shot.id));
+      // Voiceover is rendered from timeline.voice_text.  A shot is its visual
+      // plan and can be older after a per-scene translation, so displaying
+      // shot.narration here made an English audio look as if it were Vietnamese.
+      const spokenText = String(segment?.voice_text || shot.narration || '').trim();
       const preview = segment?.visual_path
         ? (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(segment.visual_path) ? `<img src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" alt="Cảnh ${shot.shot_index || index + 1}">` : `<video src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" controls muted preload="metadata"></video>`)
         : `<div class="storyboard-prompt">Chưa có video/ảnh thật. Hãy tạo cảnh AI hoặc gắn asset trước khi render.</div>`;
@@ -262,6 +314,9 @@
           + ` onerror="this.remove()" />`
           + `<audio controls preload="metadata" src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/audio-preview"></audio></div>`
         : `<div class="secondary-text" style="margin-top:8px">Chưa có giọng đọc cho cảnh này.</div>`;
+      const voiceControls = segment
+        ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="attachStudioGeneratedVoiceForScene(${segment.id})">Chọn voice đã tạo</button><button class="btn small ghost" type="button" onclick="uploadStudioVoiceForScene(${segment.id})">${segment.audio_path ? 'Thay bằng file voice' : 'Nạp file giọng vào cảnh'}</button><span class="secondary-text">Audio được gắn trực tiếp vào cảnh này.</span></div>`
+        : '';
       // Where in the source this picture was taken from, editable before the
       // render rather than discovered in it.
       const cutControls = String(segment?.visual_path || '').includes('source_clips')
@@ -285,7 +340,7 @@
       <div class="storyboard-card"${wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
         <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1}</span>${shot.status ? shotStatusTag(shot.status) : ''}</div>
         <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(shot.narration || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${cutControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
+        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(spokenText || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${voiceControls}${cutControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
       </div>`;
     }).join('')}</div>`;
     result.querySelectorAll('.storyboard-card').forEach((card, index) => {
@@ -300,6 +355,81 @@
       label.textContent = `Cắt từ video nguồn: ${formatStudioDuration(sourceStart)} → ${formatStudioDuration(end)}`;
       card.querySelector('.storyboard-summary')?.after(label);
     });
+  }
+
+  async function refreshStudioStoryboard() {
+    if (!state.studioProjectId) return null;
+    const bundle = await api(`/api/projects/${state.studioProjectId}`);
+    state.studioProject = bundle.project || state.studioProject;
+    state.shots = bundle.latest_shots || [];
+    state.timeline = bundle.latest_timeline || [];
+    renderStudioStoryboard(state.shots, state.timeline);
+    return bundle;
+  }
+
+  async function restoreStudioGeneratedVoices() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    setMessage('Đang tìm các file voice đã tạo để gắn lại vào storyboard...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/timeline/reattach-voice`, {
+        method: 'POST', body: JSON.stringify({video_variant: 'long'}),
+      });
+      await refreshStudioStoryboard();
+      const missing = (result.missing || []).length;
+      setMessage(
+        result.attached
+          ? `Đã khôi phục voice cho ${result.attached} cảnh.${missing ? ` Còn ${missing} cảnh cần nạp tay hoặc tạo lại voice.` : ''}`
+          : (result.library_size ? 'Không tìm được voice khớp lời đọc hiện tại. Hãy dùng “Nạp file giọng vào cảnh” trên từng thẻ.' : 'Chưa tìm thấy file voice đã tạo trong project.'),
+        result.attached ? 'success' : 'error',
+      );
+    } catch (error) { setMessage(`Không khôi phục được voice: ${error.message}`, 'error'); }
+  }
+
+  async function uploadStudioVoiceForScene(segmentId) {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      setMessage(`Đang nạp ${file.name} vào cảnh...`);
+      try {
+        const form = new FormData();
+        form.append('asset_type', 'audio');
+        form.append('file', file);
+        const response = await fetch(`/api/projects/${state.studioProjectId}/assets/upload`, {method: 'POST', body: form});
+        const uploaded = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(uploaded.detail || `HTTP ${response.status}`);
+        const assetId = Number(uploaded.asset?.id || 0);
+        if (!assetId) throw new Error('App không nhận được audio vừa tải lên.');
+        await api(`/api/timeline/${segmentId}/attach-asset`, {
+          method: 'POST', body: JSON.stringify({asset_id: assetId}),
+        });
+        await refreshStudioStoryboard();
+        setMessage(`Đã gắn ${file.name} vào cảnh. Bạn có thể bấm Nghe lời đọc ngay trên thẻ.`, 'success');
+      } catch (error) { setMessage(`Không nạp được audio: ${error.message}`, 'error'); }
+    };
+    input.click();
+  }
+
+  async function attachStudioGeneratedVoiceForScene(segmentId) {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/voice-library`);
+      const voices = result.voices || [];
+      if (!voices.length) throw new Error('Chưa tìm thấy voice đã tạo trong project. Hãy nạp file audio từ máy.');
+      const choices = voices.map((voice, index) => `${index + 1}. ${voice.filename} — ${String(voice.text || '').slice(0, 90)}`).join('\n');
+      const answer = window.prompt(`Chọn số voice để gắn vào cảnh:\n\n${choices}`, '1');
+      if (answer == null) return;
+      const selected = voices[Number(answer) - 1];
+      if (!selected) throw new Error('Số voice không hợp lệ.');
+      await api(`/api/timeline/${segmentId}/attach-generated-voice`, {
+        method: 'POST', body: JSON.stringify({voice_key: selected.key}),
+      });
+      await refreshStudioStoryboard();
+      setMessage(`Đã gắn ${selected.filename} vào cảnh.`, 'success');
+    } catch (error) { setMessage(`Không gắn được voice: ${error.message}`, 'error'); }
   }
 
   // Providers that use a browser sidecar + the caller's own logged-in
@@ -537,7 +667,9 @@
     return project?.youtube_video_id || state.studioVideoId || '';
   }
 
-  async function watchStudioProductionJob(jobId, jobType) {
+  // Used for generic source/clip jobs.  The storyboard watcher below has
+  // voice-specific post-processing and must remain separate.
+  async function watchStudioQueueJob(jobId, jobType) {
     for (let attempt = 0; attempt < 1200; attempt += 1) {
       try {
         const job = await api(`/api/jobs/${jobId}`);
@@ -571,7 +703,7 @@
         method: 'POST',
         body: JSON.stringify({job_type: jobType, provider, confirmed: true}),
       });
-      if (response.job?.id) return await watchStudioProductionJob(response.job.id, label);
+      if (response.job?.id) return await watchStudioQueueJob(response.job.id, label);
       return response;
     } catch (error) {
       setStudioProgress(0, `${label} thất bại: ${error.message}`, 'error');
@@ -600,58 +732,22 @@
 
   async function cutStudioScenesByDialogue() {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
-    // The old wording said only that the timeline would be replaced. It cost
-    // a user twenty minutes of freshly generated voice, because this path
-    // rebuilds from the source transcript and drops whatever is attached.
-    const current = state.timeline || [];
-    const withVoice = current.filter((item) => String(item.audio_path || '').trim()).length;
-    const withVisual = current.filter((item) => String(item.visual_path || '').trim()).length;
-    const losing = [];
-    if (withVoice) losing.push(`${withVoice} cảnh đã có giọng đọc`);
-    if (withVisual) losing.push(`${withVisual} cảnh đã có hình`);
-    const warning = [
-      'Dựng lại timeline theo từng lượt thoại của video gốc?',
-      '',
-      'Lời thoại sẽ lấy từ TRANSCRIPT của video gốc, KHÔNG phải từ kịch bản bạn đã viết.',
-      ...(losing.length ? ['', `Sẽ mất: ${losing.join(' và ')}. Phải tạo lại từ đầu.`] : []),
-      '',
-      'Tiếp tục?',
-    ].join(String.fromCharCode(10));
-    if (!confirm(warning)) return;
     const button = $('studioCutByDialogueButton');
     if (button) button.disabled = true;
-    setMessage('Đang cắt cảnh theo lời thoại...');
+    setMessage('Đang chọn mốc hình trong video gốc cho từng câu của storyboard; voice và cảnh hiện có sẽ được giữ nguyên...');
     try {
-      // Never force blindly. The server refuses when there is something to
-      // lose and says exactly what; forcing regardless made that refusal
-      // unreachable from the app, which is how a written English script came
-      // to be replaced by the source's Vietnamese transcript without a word.
-      let result;
-      try {
-        result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue`, {method: 'POST'});
-      } catch (error) {
-        if (!/cảnh hiện có sẽ bị thay|đã có giọng đọc/.test(error.message || '')) throw error;
-        if (!confirm(`${error.message}\n\nVẫn cắt lại theo lời thoại?`)) {
-          setMessage('Đã huỷ cắt theo lời thoại.', '');
-          if (button) button.disabled = false;
-          return;
-        }
-        result = await api(`/api/projects/${state.studioProjectId}/timeline/from-dialogue?force=true`, {method: 'POST'});
+      const before = await refreshStudioStoryboard();
+      const timeline = before?.latest_timeline || [];
+      if (!timeline.length) throw new Error('Chưa có storyboard. Hãy tạo storyboard từ kịch bản trước.');
+      const voiceCount = timeline.filter((item) => String(item.audio_path || '').trim()).length;
+      const plan = await api(`/api/projects/${state.studioProjectId}/timeline/plan-source-cues`, {method: 'POST'});
+      renderStudioSourceCuePlan(plan);
+      if (Number(plan.planned || 0) !== timeline.length) {
+        throw new Error(`Mới chọn được ${plan.planned || 0}/${timeline.length} mốc hình. Hãy chạy lại bước này trước khi cắt clip.`);
       }
-      const minutes = Math.round((result.total_duration_seconds || 0) / 60);
-      const missing = result.turns_without_timing || 0;
-      const publishLanguage = String(state.studioProject?.render_settings?.publish_language
-        || $('studioScriptLanguage')?.value || '').toLowerCase();
-      // The scenes now hold the source's own words. Saying so here is the
-      // difference between a next step and a surprise at the voiceover.
-      const needsTranslation = publishLanguage && publishLanguage !== 'vi';
-      setMessage(
-        `Đã cắt ${result.segments} cảnh theo lời thoại (${result.speakers.length} người nói, ~${minutes} phút)`
-        + (missing ? ` · ${missing} lượt không có mốc giây, đã ước lượng.` : '.')
-        + (needsTranslation ? ' Lời trong storyboard đang là lời gốc — bấm “Dịch lời bình” trước khi tạo giọng.' : ''),
-        missing ? 'error' : 'success');
-      const bundle = await api(`/api/projects/${state.studioProjectId}`);
-      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+      const currentVoices = (state.timeline || []).filter((item) => String(item.audio_path || '').trim()).length;
+      if (currentVoices < voiceCount) throw new Error('Voice trong storyboard ít hơn trước khi chọn mốc; app đã dừng để tránh xuất video thiếu tiếng. Hãy bấm “Khôi phục voice đã tạo”.');
+      setMessage(`Đã chọn mốc hình cho ${plan.planned}/${timeline.length} cảnh. Bấm “3. Cắt clip theo các mốc đã chọn” để tạo video cảnh.`, 'success');
     } catch (error) { setMessage(`Không cắt được: ${error.message}`, 'error'); }
     finally { if (button) button.disabled = false; }
   }
@@ -697,11 +793,29 @@
   }
 
   async function cutStudioSourceScenes() {
-    const job = await queueStudioProductionJob('source_visuals', 'source_video', 'Cắt cảnh từ video gốc');
-    if (job && state.studioProjectId) {
-      const bundle = await api(`/api/projects/${state.studioProjectId}`);
-      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
-    }
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    try {
+      const before = await refreshStudioStoryboard();
+      const timeline = before?.latest_timeline || [];
+      if (!timeline.length) throw new Error('Chưa có storyboard để cắt clip.');
+      const missingVoice = timeline.filter((item) => !String(item.audio_path || '').trim());
+      if (missingVoice.length) throw new Error(`Còn ${missingVoice.length}/${timeline.length} cảnh chưa có voice. Hãy tạo voice trước để clip được cắt đúng thời lượng lời đọc.`);
+      const unplanned = timeline.filter((item) => {
+        const sourceStart = Number(item.source_start_seconds);
+        return !Number.isFinite(sourceStart) || sourceStart < 0;
+      });
+      if (unplanned.length) throw new Error(`Còn ${unplanned.length}/${timeline.length} cảnh chưa có mốc hình. Hãy bấm “2. Chọn mốc hình theo lời thoại” trước.`);
+      const voiceCount = timeline.length;
+      const job = await queueStudioProductionJob('source_visuals', 'source_video', 'Cắt clip từ video gốc');
+      if (!job || job.status === 'error') throw new Error(job?.error || 'Không cắt được clip từ video gốc.');
+      const after = await refreshStudioStoryboard();
+      const afterTimeline = after?.latest_timeline || [];
+      const attachedVoices = afterTimeline.filter((item) => String(item.audio_path || '').trim()).length;
+      const attachedVisuals = afterTimeline.filter((item) => String(item.visual_path || '').trim()).length;
+      if (attachedVoices !== voiceCount) throw new Error('Clip đã cắt nhưng số voice bị thay đổi; app đã dừng để tránh xuất video thiếu tiếng.');
+      if (attachedVisuals !== afterTimeline.length) throw new Error(`Mới cắt được ${attachedVisuals}/${afterTimeline.length} clip. Xem lỗi job và thử lại.`);
+      setMessage(`Đã gắn ${attachedVisuals} clip nguồn vào storyboard, giữ nguyên ${attachedVoices} voice.`, 'success');
+    } catch (error) { setMessage(`Không cắt được clip: ${error.message}`, 'error'); }
   }
 
   async function renderStudioReup() {
@@ -753,15 +867,15 @@
       } else {
         setMessage(`Đã dịch xong ${result.translated}/${result.total} cảnh sang ${language}.`, 'success');
       }
-      const bundle = await api(`/api/projects/${state.studioProjectId}`);
-      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+      await refreshStudioStoryboard();
     } catch (error) { setMessage(`Không dịch được: ${error.message}`, 'error'); }
   }
 
   async function editStudioScene(shotId, segmentId) {
     const shot = findStudioShot(shotId);
     if (!shot) return setMessage('Không tìm thấy cảnh cần sửa.', 'error');
-    const narration = prompt(`Lời AI đọc · Cảnh ${shot.shot_index || ''}`, shot.narration || '');
+    const timelineSegment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    const narration = prompt(`Lời AI đọc · Cảnh ${shot.shot_index || ''}`, timelineSegment?.voice_text || shot.narration || '');
     if (narration === null) return;
     const visualPrompt = prompt(`Mô tả hình ảnh · Cảnh ${shot.shot_index || ''}`, shot.visual_prompt || '');
     if (visualPrompt === null) return;
@@ -844,31 +958,23 @@
       setStudioProgress(10, 'Đang lưu cấu hình giọng đọc...');
       await saveRenderSettings(state.studioProjectId);
       setStudioProgress(18, 'Đang chuẩn bị các cảnh và timeline từ kịch bản...');
+      let rebuiltStoryboard = false;
       let shotsResult = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
       if (shotsResult?.stale) {
-        const rebuild = confirm(
-          'Kịch bản đã thay đổi sau khi tạo storyboard. Tạo giọng từ kịch bản hiện tại cần dựng lại storyboard và timeline; các audio/hình đang gắn sẽ bị thay. Tiếp tục?'
-        );
-        if (!rebuild) {
-          setMessage('Đã dừng: storyboard hiện vẫn thuộc phiên bản kịch bản cũ, nên chưa tạo giọng.', 'error');
-          return;
-        }
+        // The Voice action means "read the current script".  Do not leave a
+        // stale storyboard as an optional branch: that used to let a new TTS
+        // job read old Vietnamese cards after the script had become English.
+        setStudioProgress(20, 'Kịch bản mới hơn storyboard; đang đồng bộ cảnh theo kịch bản hiện tại...');
         shotsResult = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: true})});
+        rebuiltStoryboard = true;
       }
-      const timelineResult = await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      const timelineResult = await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: rebuiltStoryboard})});
       // Without force an existing timeline comes back untouched. After a
       // script rewrite that means the old scenes stay and the voice is then
       // generated from them - the button appears to work while nothing it
       // produces has anything to do with the new script.
       if (timelineResult?.stale) {
-        const rebuild = confirm(
-          `Timeline dang co ${timelineResult.timeline?.length ?? '?'} canh nhung kich ban moi nhat cho ${timelineResult.shot_count} canh. `
-          + 'Dung lai timeline theo kich ban moi? Cac canh hien tai se bi thay, ke ca giong doc va hinh da gan.'
-        );
-        if (!rebuild) {
-          setMessage('Da dung: timeline van theo kich ban cu, nen chua tao giong.', 'error');
-          return;
-        }
+        setStudioProgress(22, 'Timeline cũ không khớp kịch bản; đang đồng bộ lời đọc hiện tại...');
         await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: true})});
       }
       setStudioProgress(25, 'Đang đưa toàn bộ lời dẫn vào hàng đợi tạo giọng đọc...');
@@ -976,7 +1082,8 @@
             await loadShortLane();
           } else {
             const bundle = await api(`/api/projects/${state.studioProjectId}`);
-            renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+            state.narrationSource = bundle.narration_source || state.narrationSource;
+      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
           }
           if (job.status === 'error') setMessage(`Một cảnh AI thất bại: ${job.error || 'Lỗi không xác định'}`, 'error');
           return job;
@@ -1040,8 +1147,15 @@
         const job = await api(`/api/jobs/${jobId}`);
         if (job.status === 'completed') {
           if (jobType === 'voiceover') {
-            const bundle = await api(`/api/projects/${state.studioProjectId}`);
-            const actualSeconds = (bundle.latest_timeline || []).reduce((total, segment) => total + Number(segment.duration_seconds || 0), 0);
+            const bundle = await refreshStudioStoryboard();
+            const voiceTimeline = bundle?.latest_timeline || [];
+            const missingAudio = voiceTimeline.filter((segment) => !String(segment.audio_path || '').trim());
+            if (missingAudio.length) {
+              setStudioProgress(0, `Tạo voice xong nhưng chưa gắn được ${missingAudio.length}/${voiceTimeline.length} cảnh.`, 'error');
+              setMessage(`Voice job hoàn tất nhưng ${missingAudio.length} cảnh chưa có audio trong storyboard. Không chuyển sang cắt cảnh; hãy thử tạo lại voice.`, 'error');
+              return job;
+            }
+            const actualSeconds = voiceTimeline.reduce((total, segment) => total + Number(segment.duration_seconds || 0), 0);
             const targetSeconds = Number(bundle.writer_content?.result?.target_duration_seconds || 0);
             const actualLabel = formatStudioDuration(actualSeconds);
             const targetLabel = targetSeconds ? ` · mục tiêu ${formatStudioDuration(targetSeconds)}` : '';
@@ -1050,7 +1164,6 @@
               ? ` Thời lượng voice hiện là ${actualLabel}${targetLabel}; lệch ${Math.round(deviation * 100)}%. Hãy quay lại Kịch bản để viết dài hơn/ngắn hơn trước khi dựng.`
               : ` Thời lượng voice: ${actualLabel}${targetLabel}.`;
             if ($('studioVoiceSummary')) $('studioVoiceSummary').innerHTML = `<div class="studio-check"><b>✓</b><span>Đã tạo giọng đọc cho toàn bộ cảnh.${esc(durationNote)}</span></div>`;
-            renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
             setStudioStep(5);
             setStudioProgress(100, `Đã tạo xong giọng đọc · ${actualLabel}.`);
             setMessage(`Đã tạo xong giọng đọc. Bạn có thể nghe và sửa từng cảnh trong Storyboard.${durationNote}`, targetSeconds && deviation > 0.05 ? 'error' : 'success');
