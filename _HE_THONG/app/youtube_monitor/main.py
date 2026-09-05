@@ -2781,8 +2781,14 @@ def _image_provider_blocked(key: str) -> str:
         status = gflow_cli_status()
         if not status.get("installed"):
             return "chưa cài gflow-cli"
+        # A sign-in helps only when the session is actually dead. When the
+        # probe could not look, asking for one leaves another browser window
+        # holding the profile - which is the reason it could not look.
+        state = str(status.get("session_state") or "")
+        if state == "unverified":
+            return "chưa kiểm tra được phiên Flow — đóng cửa sổ Chrome đang mở profile gflow rồi thử lại"
         if not status.get("logged_in"):
-            return "gflow-cli đã cài nhưng phiên Google hết hạn — bấm “Đăng nhập Flow” ở tab Tích hợp"
+            return "gflow-cli chưa đăng nhập — bấm “Đăng nhập Flow” ở tab Tích hợp"
     return ""
 
 

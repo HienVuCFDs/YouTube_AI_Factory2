@@ -595,4 +595,76 @@ class OneRefusalIsNotTheEndOfDrawingTests(unittest.TestCase):
             advice = main._image_provider_advice("gemini_image")
 
         self.assertNotIn("Có thể thử model khác: gflow_image", advice)
-        self.assertIn("gflow_image (gflow-cli đã cài", advice)
+        self.assertIn("gflow_image (gflow-cli chưa đăng nhập", advice)
+
+
+class SignedOutIsNotTheSameAsCouldNotLookTests(unittest.TestCase):
+    """`gflow auth status` exits 1 for two unrelated reasons.
+
+    The session is dead, or the probe could not run - most often because a
+    Chrome window left over from a previous sign-in still holds the profile
+    directory, and nothing else can read it while it does. Both arrived here
+    as logged_in=False, so the app asked for a sign-in that had already
+    happened and could not have helped: signing in again only adds another
+    window holding the profile.
+    """
+
+    def test_a_clean_exit_is_a_verified_session(self) -> None:
+        from youtube_monitor.gflow_bridge import session_state
+
+        self.assertEqual(session_state(0, "Flow session verified as a@b.com"), "verified")
+
+    def test_the_cli_saying_no_sign_in_is_signed_out(self) -> None:
+        from youtube_monitor.gflow_bridge import session_state
+
+        state = session_state(1, "No sign-in detected. Run gflow auth login to refresh.")
+
+        self.assertEqual(state, "signed_out")
+
+    def test_a_probe_that_could_not_look_is_not_signed_out(self) -> None:
+        from youtube_monitor.gflow_bridge import session_state
+
+        state = session_state(
+            1,
+            "Could not verify the Flow session. Check network connectivity and "
+            "retry; re-login is only needed if the session is actually dead.",
+        )
+
+        self.assertEqual(state, "unverified")
+
+    def test_only_a_dead_session_asks_for_a_sign_in(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import gflow_bridge
+
+        def status_for(text: str) -> dict:
+            done = mock.Mock(returncode=1, stdout=text, stderr="")
+            version = mock.Mock(returncode=0, stdout="gflow, version 0.68.0", stderr="")
+            with mock.patch.object(gflow_bridge.subprocess, "run", side_effect=[version, done]):
+                gflow_bridge._status_cache = None
+                return gflow_bridge.gflow_cli_status(force=True)
+
+        self.assertTrue(status_for("No sign-in detected.")["needs_login"])
+        self.assertFalse(status_for("Could not verify the Flow session.")["needs_login"])
+        gflow_bridge._status_cache = None
+
+    def test_the_probe_is_given_longer_than_the_probe_takes(self) -> None:
+        """The CLI warns it can take ~45s; waiting 30 called a live session dead."""
+        from youtube_monitor.gflow_bridge import AUTH_STATUS_TIMEOUT_SECONDS
+
+        self.assertGreaterEqual(AUTH_STATUS_TIMEOUT_SECONDS, 60)
+
+    def test_an_unverified_flow_is_not_told_to_sign_in_again(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main,
+            "gflow_cli_status",
+            return_value={"installed": True, "logged_in": False, "session_state": "unverified"},
+        ):
+            reason = main._image_provider_blocked("gflow_image")
+
+        self.assertIn("đóng cửa sổ Chrome", reason)
+        self.assertNotIn("Đăng nhập Flow", reason)

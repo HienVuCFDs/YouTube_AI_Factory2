@@ -12,6 +12,28 @@ from typing import Any, Callable
 from . import settings, usage_limits
 
 
+# `gflow auth status` exits 1 both when the session is dead and when it could
+# not be checked. Its own words are the only thing that tells them apart.
+SIGNED_OUT_MARKERS = ("no sign-in detected", "not signed in", "no saved session")
+UNVERIFIED_MARKERS = ("could not verify", "check network connectivity")
+
+# The CLI warns the probe can take ~45s on a slow network. Waiting less than
+# that reports a live session as a dead one.
+AUTH_STATUS_TIMEOUT_SECONDS = 90
+
+
+def session_state(returncode: int, output: str) -> str:
+    """"verified", "signed_out", or "unverified" - three different remedies."""
+    if returncode == 0:
+        return "verified"
+    lowered = str(output or "").lower()
+    if any(marker in lowered for marker in SIGNED_OUT_MARKERS):
+        return "signed_out"
+    if any(marker in lowered for marker in UNVERIFIED_MARKERS):
+        return "unverified"
+    return "signed_out"
+
+
 class GFlowCliError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "provider", retryable: bool = False, exit_code: int = 1):
         super().__init__(message)
@@ -61,6 +83,8 @@ def gflow_cli_status(*, force: bool = False) -> dict[str, Any]:
             "installed": False,
             "logged_in": False,
             "ready": False,
+            "session_state": "signed_out",
+            "needs_login": False,
             "path": "",
             "profile": str(config.get("profile") or "default"),
             "version": "",
@@ -75,13 +99,16 @@ def gflow_cli_status(*, force: bool = False) -> dict[str, Any]:
         )
         auth_process = subprocess.run(
             [path, "auth", "status", *_profile_args()], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=30, check=False,
+            encoding="utf-8", errors="replace", timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         result = {
             "installed": True,
             "logged_in": False,
             "ready": False,
+            "session_state": "unverified",
+            "needs_login": False,
             "path": path,
             "profile": str(config.get("profile") or "default"),
             "version": "",
@@ -91,16 +118,32 @@ def gflow_cli_status(*, force: bool = False) -> dict[str, Any]:
         version = (version_process.stdout or version_process.stderr or "").strip().splitlines()
         logged_in = auth_process.returncode == 0
         detail_text = (auth_process.stdout or auth_process.stderr or "").strip()
+        state = session_state(auth_process.returncode, detail_text)
+        if state == "verified":
+            detail = "gflow-cli đã đăng nhập Google Flow"
+        elif state == "unverified":
+            # Signing in again is the one thing that cannot help here, and it
+            # leaves another window holding the profile.
+            detail = (
+                "Không kiểm tra được phiên Flow — thường do một cửa sổ Chrome cũ "
+                "còn giữ profile gflow. Đóng hết cửa sổ Chrome của profile gflow "
+                "rồi thử lại; chỉ cần đăng nhập lại nếu phiên thật sự đã hỏng."
+            )
+        else:
+            detail = detail_text[-500:] or "gflow-cli chưa đăng nhập; chạy gflow auth login --browser chrome"
         result = {
             "installed": True,
             "logged_in": logged_in,
             "ready": logged_in,
+            "session_state": state,
+            # Only a dead session is worth a sign-in. Asking for one when the
+            # probe merely could not look is what sent the user round in a
+            # circle, re-authorising an account that was never signed out.
+            "needs_login": state == "signed_out",
             "path": path,
             "profile": str(config.get("profile") or "default"),
             "version": version[-1] if version else "",
-            "detail": "gflow-cli đã đăng nhập Google Flow" if logged_in else (
-                detail_text[-500:] or "gflow-cli chưa đăng nhập; chạy gflow auth login --browser chrome"
-            ),
+            "detail": detail,
         }
     _status_cache, _status_cache_at = result, now
     return result
