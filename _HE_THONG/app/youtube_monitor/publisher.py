@@ -79,9 +79,18 @@ def next_channel_schedule(channel: dict[str, Any], now: datetime | None = None) 
 class YouTubePublisher:
     """Small raw HTTP adapter for the YouTube resumable upload API."""
 
-    def list_authorized_channels(self) -> list[dict[str, Any]]:
+    def list_authorized_channels(
+        self, managed_channel_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Which YouTube channel this sign-in actually reaches.
+
+        A Google account can own several channels, and the consent flow asks
+        which one - so "signed in" is not the same as "signed in to the right
+        channel". Asking per managed channel is the only way to see that the
+        video will land where it was meant to.
+        """
         try:
-            token = get_access_token()
+            token = get_access_token(managed_channel_id)
             with httpx.Client(timeout=30.0, follow_redirects=True) as client:
                 response = client.get(
                     CHANNELS_ENDPOINT,

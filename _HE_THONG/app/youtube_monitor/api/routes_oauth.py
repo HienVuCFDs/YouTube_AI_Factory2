@@ -36,9 +36,15 @@ def youtube_oauth_status(managed_channel_id: int | None = Query(default=None, ge
 
 
 @router.get("/api/oauth/youtube/channels")
-def youtube_oauth_channels() -> dict[str, Any]:
+def youtube_oauth_channels(
+    managed_channel_id: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """The YouTube channels this sign-in can post to."""
     try:
-        return {"channels": publisher_worker.publisher.list_authorized_channels()}
+        return {
+            "managed_channel_id": managed_channel_id,
+            "channels": publisher_worker.publisher.list_authorized_channels(managed_channel_id),
+        }
     except (OAuthError, PublisherError) as exc:
         raise _api_error(exc) from exc
 

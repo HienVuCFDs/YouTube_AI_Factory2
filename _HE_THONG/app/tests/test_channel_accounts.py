@@ -172,3 +172,32 @@ class ItIsWiredThroughToTheUploadTests(unittest.TestCase):
     def test_the_picker_shows_which_channels_are_signed_in(self) -> None:
         self.assertIn("state.channelAccounts", self.page)
         self.assertIn("chưa đăng nhập", self.page)
+
+
+class VerifyingWhereAChannelActuallyPostsTests(unittest.TestCase):
+    """Signed in is not the same as signed in to the right channel.
+
+    A Google account can own several YouTube channels, and the consent flow
+    asks which one. Without checking per managed channel there is no way to
+    see that a video will land where it was meant to - only that somebody
+    somewhere is authorised.
+    """
+
+    def setUp(self) -> None:
+        root = Path(__file__).resolve().parent.parent / "youtube_monitor"
+        self.publisher = (root / "publisher.py").read_text(encoding="utf-8")
+        self.routes = (root / "api" / "routes_oauth.py").read_text(encoding="utf-8")
+
+    def test_the_listing_asks_for_one_channels_account(self) -> None:
+        self.assertIn(
+            "def list_authorized_channels(\n        self, managed_channel_id: int | None = None",
+            self.publisher,
+        )
+        self.assertIn("get_access_token(managed_channel_id)", self.publisher)
+
+    def test_the_route_passes_the_channel_through(self) -> None:
+        self.assertIn("list_authorized_channels(managed_channel_id)", self.routes)
+
+    def test_the_answer_says_which_channel_it_is_about(self) -> None:
+        """Otherwise two answers look identical and cannot be told apart."""
+        self.assertIn('"managed_channel_id": managed_channel_id', self.routes)
