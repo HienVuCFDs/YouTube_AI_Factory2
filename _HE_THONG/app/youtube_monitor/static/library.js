@@ -243,7 +243,11 @@
   }
 
   async function loadVideos() {
-    state.videoCatalog = await api('/api/videos?limit=500');
+    const videos = await api('/api/videos?limit=500');
+    const signature = JSON.stringify([videos, state.channels]);
+    if (state.videoCatalogSignature === signature) return;
+    state.videoCatalogSignature = signature;
+    state.videoCatalog = videos;
     renderVideos();
   }
 
@@ -259,7 +263,11 @@
   }
 
   async function loadProjects() {
-    state.projects = await api('/api/projects?limit=50');
+    const projects = await api('/api/projects?limit=50');
+    const signature = JSON.stringify([projects, state.channels]);
+    if (state.projectCatalogSignature === signature) return;
+    state.projectCatalogSignature = signature;
+    state.projects = projects;
     const activeProjects = state.projects.filter((project) => !Number(project.is_published) && project.status !== 'archived');
     const publishedProjects = state.projects.filter((project) => Number(project.is_published));
     const archivedProjects = state.projects.filter((project) => !Number(project.is_published) && project.status === 'archived');

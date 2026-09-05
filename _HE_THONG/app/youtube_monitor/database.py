@@ -741,6 +741,7 @@ class Database:
             # record its findings. status already had draft/review/approved;
             # nothing ever moved a script into review.
             self._ensure_column(connection, "project_scripts", "review_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_thumbnails", "video_variant", "TEXT NOT NULL DEFAULT 'long'")
             self._ensure_column(connection, "project_scripts", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_scripts", "review_agent", "TEXT NOT NULL DEFAULT ''")
             # Whether a retelling has been checked against the source it is
@@ -2969,17 +2970,20 @@ class Database:
         model: str = "ffmpeg",
         prompt: str = "",
         seed: int | None = None,
+        video_variant: str = "long",
     ) -> dict[str, Any] | None:
+        if video_variant not in {"long", "short"}:
+            raise ValueError("Unknown thumbnail video variant")
         asset = self.get_project_asset(asset_id)
         if not asset or int(asset["project_id"]) != project_id or asset["asset_type"] != "image":
             return None
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO project_thumbnails (project_id, asset_id, provider, model, prompt, seed, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO project_thumbnails (project_id, asset_id, provider, model, prompt, seed, created_at, video_variant)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, asset_id, provider.strip(), model.strip(), prompt.strip(), seed, utc_now()),
+                (project_id, asset_id, provider.strip(), model.strip(), prompt.strip(), seed, utc_now(), video_variant),
             )
         return self.get_project_thumbnail(int(cursor.lastrowid))
 
@@ -3012,7 +3016,7 @@ class Database:
         if not thumbnail:
             return None
         with self._connect() as connection:
-            connection.execute("UPDATE project_thumbnails SET selected = 0 WHERE project_id = ?", (thumbnail["project_id"],))
+            connection.execute("UPDATE project_thumbnails SET selected = 0 WHERE project_id = ? AND video_variant = ?", (thumbnail["project_id"], thumbnail["video_variant"]))
             connection.execute("UPDATE project_thumbnails SET selected = 1 WHERE id = ?", (thumbnail_id,))
         return self.get_project_thumbnail(thumbnail_id)
 

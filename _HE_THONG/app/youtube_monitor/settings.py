@@ -7,6 +7,7 @@ import site
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 
 
@@ -468,13 +469,34 @@ def _pyvideotrans_cuda_ready() -> bool:
     return probe.returncode == 0
 
 
-PYVIDEOTRANS_CUDA_READY = _pyvideotrans_cuda_ready()
-PYVIDEOTRANS_RUNTIME_READY = bool(
-    PYVIDEOTRANS_COMMAND
-    and (not PYVIDEOTRANS_WORKDIR or (PYVIDEOTRANS_ROOT / ".venv" / "Scripts" / "python.exe").is_file())
-    and (not PYVIDEOTRANS_WORKDIR or (PYVIDEOTRANS_ROOT / ".venv" / "Lib" / "site-packages" / "edge_tts").is_dir())
-    and PYVIDEOTRANS_CUDA_READY
-)
+# Do not import torch in a subprocess while importing the web server. Cold
+# CUDA startup can take 20 seconds and is unrelated to opening the library.
+PYVIDEOTRANS_CUDA_READY = False
+PYVIDEOTRANS_RUNTIME_READY = False
+_pyvideotrans_probe_at = 0.0
+_pyvideotrans_probe_lock = threading.Lock()
+_pyvideotrans_probe_thread_lock = threading.Lock()
+_pyvideotrans_probe_thread: threading.Thread | None = None
+
+
+def pyvideotrans_runtime_status(wait: bool = True) -> tuple[bool, bool]:
+    global PYVIDEOTRANS_CUDA_READY, PYVIDEOTRANS_RUNTIME_READY
+    global _pyvideotrans_probe_at, _pyvideotrans_probe_thread
+    if _pyvideotrans_probe_at and (PYVIDEOTRANS_RUNTIME_READY or time.monotonic() - _pyvideotrans_probe_at < 60):
+        return PYVIDEOTRANS_CUDA_READY, PYVIDEOTRANS_RUNTIME_READY
+    if not wait:
+        with _pyvideotrans_probe_thread_lock:
+            if _pyvideotrans_probe_thread is None or not _pyvideotrans_probe_thread.is_alive():
+                _pyvideotrans_probe_thread = threading.Thread(target=pyvideotrans_runtime_status, daemon=True)
+                _pyvideotrans_probe_thread.start()
+        return PYVIDEOTRANS_CUDA_READY, PYVIDEOTRANS_RUNTIME_READY
+    with _pyvideotrans_probe_lock:
+        if not _pyvideotrans_probe_at or (not PYVIDEOTRANS_RUNTIME_READY and time.monotonic() - _pyvideotrans_probe_at >= 60):
+            PYVIDEOTRANS_CUDA_READY = _pyvideotrans_cuda_ready()
+            PYVIDEOTRANS_RUNTIME_READY = bool(PYVIDEOTRANS_COMMAND and PYVIDEOTRANS_CUDA_READY
+                and (not PYVIDEOTRANS_WORKDIR or (PYVIDEOTRANS_ROOT / ".venv" / "Lib" / "site-packages" / "edge_tts").is_dir()))
+            _pyvideotrans_probe_at = time.monotonic()
+    return PYVIDEOTRANS_CUDA_READY, PYVIDEOTRANS_RUNTIME_READY
 
 VOXCPM_PYTHON = Path(
     os.getenv("VOXCPM_PYTHON", str(_pyvideotrans_venv_python))
@@ -498,6 +520,9 @@ _VOXCPM_PROBE_TIMEOUT_SECONDS = 180
 _VOXCPM_RETRY_AFTER_SECONDS = 60
 
 _voxcpm_probe: tuple[float, bool, str] | None = None
+_voxcpm_probe_lock = threading.Lock()
+_voxcpm_probe_thread_lock = threading.Lock()
+_voxcpm_probe_thread: threading.Thread | None = None
 
 
 def _run_voxcpm_probe() -> tuple[bool, str]:
@@ -533,17 +558,28 @@ def _run_voxcpm_probe() -> tuple[bool, str]:
     return False, detail[-1] if detail else f"Phép thử VoxCPM thoát với mã {probe.returncode}"
 
 
-def voxcpm_runtime_status(force: bool = False) -> tuple[bool, str]:
+def voxcpm_runtime_status(force: bool = False, *, wait: bool = True) -> tuple[bool, str]:
     """Cached answer to "can VoxCPM run", with the reason when it cannot."""
-    global _voxcpm_probe
+    global _voxcpm_probe, _voxcpm_probe_thread
     now = time.monotonic()
     if not force and _voxcpm_probe is not None:
         checked_at, ready, detail = _voxcpm_probe
         if ready or now - checked_at < _VOXCPM_RETRY_AFTER_SECONDS:
             return ready, detail
-    ready, detail = _run_voxcpm_probe()
-    _voxcpm_probe = (now, ready, detail)
-    return ready, detail
+    if not wait:
+        with _voxcpm_probe_thread_lock:
+            if _voxcpm_probe_thread is None or not _voxcpm_probe_thread.is_alive():
+                _voxcpm_probe_thread = threading.Thread(target=voxcpm_runtime_status, daemon=True)
+                _voxcpm_probe_thread.start()
+        return (_voxcpm_probe[1], _voxcpm_probe[2]) if _voxcpm_probe else (False, "Đang kiểm tra VoxCPM/CUDA trong nền")
+    with _voxcpm_probe_lock:
+        if not force and _voxcpm_probe is not None:
+            checked_at, ready, detail = _voxcpm_probe
+            if ready or time.monotonic() - checked_at < _VOXCPM_RETRY_AFTER_SECONDS:
+                return ready, detail
+        ready, detail = _run_voxcpm_probe()
+        _voxcpm_probe = (time.monotonic(), ready, detail)
+        return ready, detail
 
 
 def voxcpm_runtime_ready() -> bool:

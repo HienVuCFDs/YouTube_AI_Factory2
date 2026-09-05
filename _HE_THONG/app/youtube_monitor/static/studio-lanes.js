@@ -117,18 +117,26 @@
     // shown back in the build step, so the last step listed one of the two
     // videos the project had just made and offered no way to publish the other.
     const output = $('studioShortFinal');
-    if (output) {
+    const outputKey = JSON.stringify([projectId, script?.id, lane?.output_path, lane?.render_version,
+      lane?.output_path ? null : [lane?.with_visuals, scenes]]);
+    if (output && output.dataset.renderKey !== outputKey) {
+      output.dataset.renderKey = outputKey;
       output.innerHTML = '<div class="studio-lane-head" style="display:block">Short</div>'
         + (lane?.output_path
-          ? `<div class="studio-result"><video controls preload="metadata"`
+          ? `<div class="studio-result"><video controls playsinline preload="metadata"`
             + ` style="max-width:320px;border-radius:8px;background:#000"`
-            + ` src="/api/projects/${projectId}/short-video"></video>`
+            + ` src="/api/projects/${projectId}/short-video?v=${encodeURIComponent(lane?.render_version || '')}"></video>`
+            + `<div class="studio-model-note short-playback-error" hidden>Không phát được video. Hãy thử nút Mở / tải MP4 bên dưới.</div>`
             + `<div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">`
             + `<a class="btn ghost" href="/api/projects/${projectId}/short-video" target="_blank" rel="noreferrer">Mở / tải MP4</a>`
             + `<button class="btn primary" type="button" onclick="openPublishDialog('short')">Đăng Short</button>`
             + `</div></div>`
           : `<div class="studio-result"><div class="studio-empty">Chưa dựng Short. `
             + `Hình ${lane?.with_visuals || 0}/${scenes} cảnh — quay lại Xưởng dựng để dựng.</div></div>`);
+      output.querySelector('video')?.addEventListener('error', () => {
+        const note = output.querySelector('.short-playback-error');
+        if (note) note.hidden = false;
+      });
     }
   }
 

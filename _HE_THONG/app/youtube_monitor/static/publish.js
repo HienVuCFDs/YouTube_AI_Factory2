@@ -48,7 +48,9 @@
     renderCopyrightPanel();
     syncFinalVideoLink(bundle);
     const publications = bundle.publications || [];
-    const thumbnails = bundle.thumbnails || [];
+    const thumbnailVariant = state.thumbnailVariant || 'long';
+    const thumbnails = (bundle.thumbnails || []).filter((item) => (item.video_variant || 'long') === thumbnailVariant);
+    const draft = state.thumbnailDrafts?.[`${project.id}:${thumbnailVariant}`] || {};
     const writer = (bundle.writer_content || {}).result || {};
     // The writer already produced titles, a description and hashtags for this
     // video. None of it used to reach here, so the form opened pre-filled with
@@ -59,19 +61,22 @@
     const thumbGrid = thumbnails.length
       ? thumbnails.map((item) => `<button type="button" class="studio-thumb${item.selected ? ' is-selected' : ''}"`
           + ` onclick="selectStudioThumbnail(${item.id}, ${project.id})" title="Chọn ảnh này">`
-          + `<img src="/api/assets/${item.asset_id}/download" alt="thumbnail" /></button>`).join('')
-      : '<div class="studio-empty">Chưa có thumbnail. Bấm “Tạo thumbnail” để cắt từ video đã dựng.</div>';
+          + `<img loading="lazy" src="/api/assets/${item.asset_id}/download" style="aspect-ratio:${thumbnailVariant === 'short' ? '9/16' : '16/9'};height:${thumbnailVariant === 'short' ? '240px' : '110px'};width:auto;object-fit:contain" alt="thumbnail" /></button>`).join('')
+      : '<div class="studio-empty">Chưa có ảnh bìa cho bản video này. Chọn cách tạo bên dưới.</div>';
 
     box.innerHTML = `<div class="studio-option-card"><b>Thumbnail</b>
-      <div class="studio-model-note" style="margin-top:4px">Hai cách: <b>AI vẽ</b> một ảnh bìa dựng theo câu chuyện, hoặc <b>cắt khung</b> từ video đã dựng. Bấm vào một ảnh để chọn làm thumbnail khi đăng.</div>
+      <select id="thumbnailVideoVariant" aria-label="Ảnh bìa cho video" onchange="setThumbnailVariant(this.value)"><option value="long" ${thumbnailVariant === 'long' ? 'selected' : ''}>Video dài · 16:9</option><option value="short" ${thumbnailVariant === 'short' ? 'selected' : ''}>Short / Reels · 9:16</option></select>
+      <div class="studio-model-note" style="margin-top:4px">Ảnh bìa được lưu và chọn riêng cho từng bản. AI vẽ theo kịch bản đã chọn; thiết kế từ video thêm bố cục chữ, nền tương phản. Ảnh dọc giữ chữ trong vùng giữa để dễ xem trên điện thoại.</div>
       <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
         <select id="thumbnailVariants" aria-label="Số ảnh"><option value="2">2 ảnh</option><option value="3" selected>3 ảnh</option><option value="5">5 ảnh</option></select>
         <select id="thumbnailProvider" aria-label="Model vẽ thumbnail">${THUMBNAIL_PROVIDER_OPTIONS}</select>
         <button class="btn primary" type="button" onclick="generateStudioThumbnails(${project.id}, 'ai')">AI vẽ thumbnail</button>
+        <button class="btn" type="button" onclick="generateStudioThumbnails(${project.id}, 'designed')">Thiết kế bìa từ video</button>
         <button class="btn ghost" type="button" onclick="generateStudioThumbnails(${project.id}, 'frame')">Cắt khung từ video</button>
       </div>
       <div class="studio-field" style="margin-top:8px"><label for="thumbnailDirection">Gợi ý thêm cho AI (không bắt buộc)</label>
-        <input id="thumbnailDirection" type="text" placeholder="Ví dụ: cận mặt người đàn ông, rừng tuyết phía sau" /></div>
+        <input id="thumbnailDirection" type="text" value="${esc(draft.prompt || '')}" oninput="saveThumbnailDraft()" placeholder="Ví dụ: cận mặt người đàn ông, rừng tuyết phía sau" /></div>
+      <div class="studio-field" style="margin-top:8px"><label for="thumbnailTitleText">Chữ trên ảnh bìa · nên dùng 3–6 từ</label><input id="thumbnailTitleText" maxlength="120" value="${esc(draft.title || '')}" oninput="saveThumbnailDraft()" placeholder="Nhập hook ngắn; để trống khi chỉ cần hình" /></div>
       <div id="studioThumbnailGrid" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${thumbGrid}</div>
     </div>
     <div class="studio-option-card" style="margin-top:12px"><b>Các lần đăng</b>
@@ -80,6 +85,24 @@
         ? publications.map((item) => publicationRow(item, project)).join('')
         : '<div class="studio-empty">Chưa có lần đăng nào.</div>'}</div>
     </div>`;
+    if (draft.provider) $('thumbnailProvider').value = draft.provider;
+    if (draft.variants) $('thumbnailVariants').value = draft.variants;
+  }
+
+  function saveThumbnailDraft() {
+    const projectId = state.publishBundle?.project?.id;
+    if (!projectId) return;
+    state.thumbnailDrafts ||= {};
+    state.thumbnailDrafts[`${projectId}:${state.thumbnailVariant || 'long'}`] = {
+      prompt: $('thumbnailDirection')?.value || '', title: $('thumbnailTitleText')?.value || '',
+      provider: $('thumbnailProvider')?.value, variants: $('thumbnailVariants')?.value,
+    };
+  }
+
+  function setThumbnailVariant(variant) {
+    saveThumbnailDraft();
+    state.thumbnailVariant = variant === 'short' ? 'short' : 'long';
+    if (state.publishBundle) renderStudioPublish(state.publishBundle);
   }
 
   // The long video's link is static markup, so it needs filling in once the
@@ -539,6 +562,9 @@
   ].map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
 
   async function generateStudioThumbnails(projectId, mode = 'ai') {
+    if (state.thumbnailBusy) return;
+    saveThumbnailDraft();
+    state.thumbnailBusy = true;
     const variants = Number($('thumbnailVariants')?.value || 3);
     const provider = $('thumbnailProvider')?.value || 'gemini_image';
     setMessage(mode === 'ai'
@@ -549,13 +575,15 @@
         method: 'POST',
         body: JSON.stringify({
           variants, mode, provider,
-          video_variant: state.publishVariant || 'long',
+          video_variant: state.thumbnailVariant || 'long',
+          title_text: $('thumbnailTitleText')?.value || '',
           prompt: $('thumbnailDirection')?.value || '',
         }),
       });
       setMessage('Đã tạo thumbnail. Bấm vào một ảnh để chọn.', 'success');
       await refreshStudioPublish(projectId);
     } catch (error) { setMessage(error.message, 'error'); }
+    finally { state.thumbnailBusy = false; }
   }
 
   async function selectStudioThumbnail(thumbnailId, projectId) {
@@ -1024,17 +1052,45 @@
     await loadRunningOperations();
   }
 
-  async function refresh() {
-    try {
-      await Promise.all([loadHealth(), loadWorkflows(), loadEdgeVoices(), loadUsageLimits(), loadRunningOperations(), loadOAuthStatus(), loadSummary(), loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadOrchestratorSettings(), loadQueueStatus(), loadAnalysisProviders(), loadTranscriptQueueStatus(), loadProductionQueueStatus()]);
-      await Promise.all([loadChannels(), loadManagedChannels()]);
-      await Promise.all([loadVideos(), loadProjects()]);
-      await loadJobs();
-      if (state.workspace === 'orchestration') {
-        await Promise.all([loadAutomationProjectList(), loadAutomationInbox(), loadProviderCatalog()]);
+  let studioRefreshPending = null;
+  let studioSettingsPending = null;
+  let lastLibraryRefresh = 0;
+  let lastSettingsRefresh = 0;
+
+  function refreshStudioSettings() {
+    if (studioSettingsPending) return studioSettingsPending;
+    studioSettingsPending = Promise.allSettled([
+      loadHealth(), loadWorkflows(), loadEdgeVoices(), loadOAuthStatus(),
+      loadToolStatus(), loadModelCatalog(), loadIntegrations(),
+      loadOrchestratorSettings(), loadAnalysisProviders(),
+    ]).finally(() => { lastSettingsRefresh = Date.now(); studioSettingsPending = null; });
+    return studioSettingsPending;
+  }
+
+  // Optional runtime probes must not gate opening a saved project. Polls share
+  // one in-flight refresh, and only user refreshes reload the configuration.
+  function refresh(options = {}) {
+    if (!options.poll || Date.now() - lastSettingsRefresh >= 60000) void refreshStudioSettings();
+    if (studioRefreshPending) return studioRefreshPending;
+    studioRefreshPending = (async () => {
+      const tasks = [loadUsageLimits(), loadRunningOperations(), loadSummary(),
+        loadQueueStatus(), loadTranscriptQueueStatus(), loadProductionQueueStatus(), loadJobs()];
+      if (!options.poll || Date.now() - lastLibraryRefresh >= 30000) {
+        tasks.push((async () => {
+          await Promise.all([loadChannels(), loadManagedChannels()]);
+          await Promise.all([loadVideos(), loadProjects()]);
+          lastLibraryRefresh = Date.now();
+        })());
       }
-      if (state.automationProjectId) await loadAutomationStatus(true);
-    } catch (error) { setMessage(error.message, 'error'); }
+      if (state.workspace === 'orchestration') {
+        tasks.push(loadAutomationProjectList(), loadAutomationInbox(), loadProviderCatalog());
+      }
+      if (state.automationProjectId) tasks.push(loadAutomationStatus(true));
+      const results = await Promise.allSettled(tasks);
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed && !options.poll) setMessage(failed.reason?.message || 'Không tải được một phần dữ liệu.', 'error');
+    })().finally(() => { studioRefreshPending = null; });
+    return studioRefreshPending;
   }
 
   async function queuePendingTranscripts() {
@@ -1466,7 +1522,6 @@
   restorePanel('channels');
   restorePanel('videos');
   try { state.studioWorkflow = localStorage.getItem('ytFactory.workflow') || 'content'; } catch (_) {}
-  void loadWorkflows();
   const savedWorkspace = localStorage.getItem('ytFactory.workspace') || 'dashboard';
   const initialWorkspace = workspaces[savedWorkspace] ? savedWorkspace : 'dashboard';
   try { setWorkspace(initialWorkspace, false); } catch (_) { setWorkspace('dashboard', false); }
@@ -1478,4 +1533,8 @@
     await restoreSavedProjectDetail(sessionBeforeRestore);
   }
   void initializeApp();
-  window.setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+  async function pollStudioStatus() {
+    try { if (!document.hidden) await refresh({poll: true}); }
+    finally { window.setTimeout(pollStudioStatus, 5000); }
+  }
+  window.setTimeout(pollStudioStatus, 5000);

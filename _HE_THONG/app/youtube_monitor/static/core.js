@@ -127,6 +127,9 @@
   async function loadWorkflows() {
     try {
       const result = await api('/api/workflows');
+      const signature = JSON.stringify(result);
+      if (state.workflowSignature === signature) return;
+      state.workflowSignature = signature;
       Object.keys(WORKFLOWS).forEach((key) => delete WORKFLOWS[key]);
       (result.workflows || []).forEach((flow) => { WORKFLOWS[flow.key] = withVisibleShortFlow(flow); });
       if (!WORKFLOWS[state.studioWorkflow]) state.studioWorkflow = result.default || 'content';

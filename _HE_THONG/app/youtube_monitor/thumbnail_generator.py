@@ -110,6 +110,7 @@ def generate_frame_thumbnails(
     output_dir: Path,
     ffmpeg_binary: str = "ffmpeg",
     variants: int = 3,
+    *, vertical: bool = False,
 ) -> list[Path]:
     """Extract readable 16:9 frame variants from the rendered project video."""
     executable = resolve_ffmpeg(ffmpeg_binary)
@@ -124,6 +125,7 @@ def generate_frame_thumbnails(
         raise ThumbnailGenerationError("Không đọc được thời lượng video để tạo thumbnail")
     output_dir.mkdir(parents=True, exist_ok=True)
     positions = choose_frame_positions(source, duration, count, executable)
+    width, height = (720, 1280) if vertical else (1280, 720)
     generated: list[Path] = []
     for index, position in enumerate(positions, start=1):
         target = output_dir / f"thumbnail-{index:02d}.jpg"
@@ -131,7 +133,7 @@ def generate_frame_thumbnails(
             [
                 executable, "-y", "-ss", f"{position:.3f}", "-i", str(source),
                 "-frames:v", "1",
-                "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih):color=black",
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}",
                 "-q:v", "2", str(target),
             ],
             capture_output=True,
@@ -144,3 +146,46 @@ def generate_frame_thumbnails(
             raise ThumbnailGenerationError(f"FFmpeg không tạo được thumbnail {index}: {detail}")
         generated.append(target)
     return generated
+
+
+def compose_thumbnail(source: Path, target: Path, *, vertical: bool = False, title: str = "") -> Path:
+    """Export a correctly shaped JPEG with editable, faithfully spelled cover text."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+    size = (720, 1280) if vertical else (1280, 720)
+    with Image.open(source) as original:
+        cover = ImageOps.fit(ImageOps.exif_transpose(original).convert("RGB"), size, Image.Resampling.LANCZOS)
+    words = title.strip().split()
+    if words:
+        font_paths = [Path("C:/Windows/Fonts/arialbd.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")]
+        font_path = next((path for path in font_paths if path.is_file()), None)
+        margin = int(size[0] * 0.08)
+        max_width = size[0] - margin * 2
+        draw = ImageDraw.Draw(cover)
+        for font_size in range(68 if vertical else 72, 15, -2):
+            font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default(size=font_size)
+            lines = []
+            line = ""
+            for word in words:
+                candidate = f"{line} {word}".strip()
+                if line and draw.textlength(candidate, font=font) > max_width:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            if line:
+                lines.append(line)
+            if len(lines) <= 4 and all(draw.textlength(line, font=font) <= max_width for line in lines):
+                break
+        line_height = int(font_size * 1.35)
+        y = int(size[1] * 0.16) if vertical else size[1] - margin - len(lines) * line_height
+        shade = Image.new("RGBA", size)
+        overlay = ImageDraw.Draw(shade)
+        overlay.rounded_rectangle((margin - 16, y - 16, size[0] - margin + 16, y + len(lines) * line_height + 12), radius=18, fill=(8, 14, 23, 205))
+        cover = Image.alpha_composite(cover.convert("RGBA"), shade)
+        draw = ImageDraw.Draw(cover)
+        for index, line in enumerate(lines):
+            draw.text((margin, y + index * line_height), line, font=font, fill="#ffe266" if index == 0 else "white", stroke_width=1, stroke_fill="#111111")
+    cover.convert("RGB").save(target, "JPEG", quality=92, optimize=True)
+    return target

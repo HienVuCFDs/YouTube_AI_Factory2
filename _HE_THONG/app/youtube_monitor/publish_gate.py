@@ -185,7 +185,8 @@ def evaluate(
             checks.append(_check(
                 "youtube_account", BLOCK, "Đã nối tài khoản YouTube",
                 "Chưa cấu hình YouTube OAuth client (client id/secret).",
-                "Vào Cài đặt · Kết nối, khai báo YOUTUBE_CLIENT_ID và YOUTUBE_CLIENT_SECRET.",
+                "Mở Cài đặt · Kết nối · Kết nối YouTube, dán Client ID và Client Secret "
+                "của OAuth client (Google Cloud Console), rồi bấm đăng nhập.",
             ))
         elif not youtube_connected:
             checks.append(_check(

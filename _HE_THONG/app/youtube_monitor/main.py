@@ -115,7 +115,6 @@ from .settings import (
     LOCAL_ASSET_MAX_BYTES,
     PRODUCTION_ARTIFACT_DIR,
     PYVIDEOTRANS_COMMAND,
-    PYVIDEOTRANS_RUNTIME_READY,
     PYVIDEOTRANS_TTS_TYPE,
     PYVIDEOTRANS_VOICE_ROLE,
     PYVIDEOTRANS_WORKDIR,
@@ -629,7 +628,8 @@ class GenerateThumbnailsRequest(BaseModel):
     variants: int = Field(default=3, ge=1, le=6)
     # A frame lifted out of the video is whatever the camera was doing that
     # second; a thumbnail is composed. Both are useful, so both are offered.
-    mode: Literal["frame", "ai"] = "frame"
+    mode: Literal["frame", "ai", "designed"] = "frame"
+    title_text: str = Field(default="", max_length=120)
     provider: str = Field(default="gemini_image", max_length=50)
     video_variant: Literal["long", "short"] = "long"
 
@@ -2752,8 +2752,9 @@ def generate_project_thumbnails(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
     script = database.get_latest_project_script(project_id, variant=payload.video_variant)
+    if not script:
+        raise HTTPException(status_code=400, detail="Chưa có kịch bản cho bản video đã chọn")
     prompt = payload.prompt.strip() or str((script or {}).get("script_title") or project.get("title") or "")
     output_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "thumbnails" / uuid.uuid4().hex[:10]
     if payload.mode == "ai":
@@ -2766,12 +2767,23 @@ def generate_project_thumbnails(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
+        if payload.video_variant == "short":
+            final_path = Path(_short_lane_progress(project_id).get("output_path") or "")
+        else:
+            final_path = _current_final_video_path(project_id, int(script["id"])) or Path()
         try:
-            files = generate_frame_thumbnails(final_path, output_dir, FFMPEG_BINARY, payload.variants)
+            files = generate_frame_thumbnails(final_path, output_dir, FFMPEG_BINARY, payload.variants,
+                vertical=payload.video_variant == "short")
         except ThumbnailGenerationError as exc:
             raise _api_error(exc) from exc
     thumbnails: list[dict[str, Any]] = []
     for index, path in enumerate(files, start=1):
+        from .thumbnail_generator import compose_thumbnail
+        title_text = payload.title_text.strip()
+        if payload.mode == "designed" and not title_text:
+            title_text = str(script.get("script_title") or "")[:120]
+        path = compose_thumbnail(path, output_dir / f"cover-{index:02d}.jpg",
+            vertical=payload.video_variant == "short", title=title_text)
         asset = database.create_project_asset(
             project_id,
             "image",
@@ -2786,10 +2798,11 @@ def generate_project_thumbnails(
         thumbnail = database.create_project_thumbnail(
             project_id,
             int(asset["id"]),
-            provider="ffmpeg_frame",
-            model="ffmpeg",
+            provider=payload.provider if payload.mode == "ai" else "ffmpeg_frame",
+            model=payload.provider if payload.mode == "ai" else ("cover_design" if payload.mode == "designed" else "ffmpeg"),
             prompt=prompt,
             seed=(payload.seed + index - 1) if payload.seed is not None else None,
+            video_variant=payload.video_variant,
         )
         if thumbnail:
             thumbnails.append(thumbnail)
@@ -6175,7 +6188,7 @@ def queue_project_job(
         )
     if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_COMMAND:
         raise HTTPException(status_code=400, detail="Chưa cấu hình PYVIDEOTRANS_COMMAND trong .env")
-    if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_RUNTIME_READY:
+    if provider in {"pyvideotrans", "py_video_trans"} and not settings.pyvideotrans_runtime_status()[1]:
         raise HTTPException(status_code=400, detail="Môi trường pyVideoTrans chưa hoàn tất dependency")
     if provider == "voxcpm":
         ready, detail = voxcpm_runtime_status()
@@ -6293,7 +6306,7 @@ def _publish_checklist(
         video_path = None
     frame = video_frame_size(video_path, FFMPEG_BINARY) if video_path else None
     selected = next(
-        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected") and item.get("video_variant", "long") == variant),
         None,
     )
     source_video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
@@ -6649,7 +6662,7 @@ def queue_project_publication(
         output_profile = "youtube_shorts" if payload.video_variant == "short" else "youtube_landscape"
 
     selected_thumbnail = next(
-        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected") and item.get("video_variant", "long") == payload.video_variant),
         None,
     )
     thumbnail_path = str((selected_thumbnail or {}).get("file_path") or "")
@@ -6886,7 +6899,7 @@ def get_project_quality_check(project_id: int) -> dict[str, Any]:
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"])) if script else []
     final_path = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["exports"] / "final.mp4"
     selected_thumbnail = next(
-        (item for item in database.list_project_thumbnails(project_id) if item.get("selected")),
+        (item for item in database.list_project_thumbnails(project_id) if item.get("selected") and item.get("video_variant", "long") == "long"),
         None,
     )
     return build_quality_report(
@@ -6943,11 +6956,11 @@ def production_queue_status() -> dict[str, Any]:
         "gpu_only": settings.GPU_ONLY,
         "nvenc_available": nvenc_available(FFMPEG_BINARY),
         "pyvideotrans_configured": bool(PYVIDEOTRANS_COMMAND),
-        "pyvideotrans_cuda_ready": settings.PYVIDEOTRANS_CUDA_READY,
-        "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
+        "pyvideotrans_cuda_ready": settings.pyvideotrans_runtime_status(wait=False)[0],
+        "pyvideotrans_runtime_ready": settings.pyvideotrans_runtime_status(wait=False)[1],
         "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
         "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
-        "voxcpm_runtime_ready": voxcpm_runtime_status()[0],
+        "voxcpm_runtime_ready": voxcpm_runtime_status(wait=False)[0],
         "voxcpm_model": VOXCPM_MODEL,
         "voxcpm_device": VOXCPM_DEVICE,
         "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
@@ -8698,6 +8711,7 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
     voiced = sum(1 for item in timeline if str(item.get("audio_path") or "").strip())
     with_visuals = sum(1 for item in timeline if str(item.get("visual_path") or "").strip())
     output_path = ""
+    render_version = ""
     for job in database.list_project_jobs(project_id, limit=100):
         if (
             int(job.get("script_id") or 0) == int(script["id"])
@@ -8706,6 +8720,7 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
             and Path(str(job.get("output_path") or "")).is_file()
         ):
             output_path = str(job.get("output_path") or "")
+            render_version = f"{job['id']}-{Path(output_path).stat().st_mtime_ns}"
             break
     return {
         "script": script,
@@ -8716,6 +8731,7 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
         "voiced": voiced,
         "with_visuals": with_visuals,
         "output_path": output_path,
+        "render_version": render_version,
         "steps": {
             "script": bool(timeline),
             # Every scene, not any: a lane that says "done" with half its

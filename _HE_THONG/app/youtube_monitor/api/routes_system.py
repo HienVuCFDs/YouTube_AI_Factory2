@@ -26,7 +26,6 @@ from ..settings import (
     FFMPEG_RENDER_COMMAND,
     FFMPEG_BINARY,
     PYVIDEOTRANS_COMMAND,
-    PYVIDEOTRANS_RUNTIME_READY,
     PYVIDEOTRANS_VOICE_ROLE,
     PYVIDEOTRANS_WORKDIR,
     VOXCPM_DEVICE,
@@ -141,11 +140,11 @@ def health() -> dict[str, Any]:
         ),
         "youtube_oauth_connected": bool(oauth.get("connected")),
         "pyvideotrans_configured": bool(PYVIDEOTRANS_COMMAND),
-        "pyvideotrans_cuda_ready": settings.PYVIDEOTRANS_CUDA_READY,
-        "pyvideotrans_runtime_ready": PYVIDEOTRANS_RUNTIME_READY,
+        "pyvideotrans_cuda_ready": settings.pyvideotrans_runtime_status(wait=False)[0],
+        "pyvideotrans_runtime_ready": settings.pyvideotrans_runtime_status(wait=False)[1],
         "pyvideotrans_workdir_configured": bool(PYVIDEOTRANS_WORKDIR),
         "pyvideotrans_voice_role": PYVIDEOTRANS_VOICE_ROLE,
-        "voxcpm_runtime_ready": voxcpm_runtime_status()[0],
+        "voxcpm_runtime_ready": voxcpm_runtime_status(wait=False)[0],
         "voxcpm_model": VOXCPM_MODEL,
         "voxcpm_device": VOXCPM_DEVICE,
         "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
@@ -667,8 +666,8 @@ def model_catalog() -> list[dict[str, Any]]:
         {"stage": "Image AI", "provider": "openai_image", "model": "gpt-image-1", "mode": "cloud", "ready": bool(openai_key), "vram": "Cloud"},
         {"stage": "LLM", "provider": "anthropic_claude", "model": anthropic_model, "mode": "cloud", "ready": bool(anthropic_key), "vram": "Cloud"},
         {"stage": "STT", "provider": "faster_whisper", "model": settings.WHISPER_MODEL_SIZE, "mode": "local_gpu" if settings.WHISPER_DEVICE != "cpu" else "local_cpu", "ready": whisper_ready, "vram": "~1–6 GB"},
-        {"stage": "TTS", "provider": "voxcpm", "model": settings.VOXCPM_MODEL, "mode": "local_gpu", "ready": voxcpm_runtime_status()[0], "vram": "~6–10 GB"},
-        {"stage": "TTS", "provider": "pyvideotrans", "model": PYVIDEOTRANS_VOICE_ROLE, "mode": "local_gpu", "ready": PYVIDEOTRANS_RUNTIME_READY, "vram": "Theo engine"},
+        {"stage": "TTS", "provider": "voxcpm", "model": settings.VOXCPM_MODEL, "mode": "local_gpu", "ready": voxcpm_runtime_status(wait=False)[0], "vram": "~6–10 GB"},
+        {"stage": "TTS", "provider": "pyvideotrans", "model": PYVIDEOTRANS_VOICE_ROLE, "mode": "local_gpu", "ready": settings.pyvideotrans_runtime_status(wait=False)[1], "vram": "Theo engine"},
         {"stage": "TTS", "provider": "edge_tts", "model": "Neural voices", "mode": "cloud", "ready": EDGE_TTS_RUNTIME_READY, "vram": "Cloud"},
         {"stage": "Video AI", "provider": "runway", "model": runway_model, "mode": "cloud", "ready": bool(runway_key), "vram": "Cloud"},
         {"stage": "Video AI", "provider": "gflow_cli", "model": settings.gflow_config().get("video_model") or "Flow/Veo mặc định", "mode": "cloud_subscription", "ready": bool(gflow["logged_in"]), "vram": "Cloud"},
@@ -678,7 +677,8 @@ def model_catalog() -> list[dict[str, Any]]:
 
 @router.get("/api/tool-status")
 def tool_status() -> list[dict[str, Any]]:
-    voxcpm_ready, voxcpm_detail = voxcpm_runtime_status()
+    voxcpm_ready, voxcpm_detail = voxcpm_runtime_status(wait=False)
+    pyvideotrans_ready = settings.pyvideotrans_runtime_status(wait=False)[1]
     oauth = oauth_status()
     anthropic_key, _ = settings.anthropic_config()
     openai_key, _ = settings.openai_config()
@@ -760,11 +760,11 @@ def tool_status() -> list[dict[str, Any]]:
         {
             "key": "pyvideotrans",
             "label": "pyVideoTrans voiceover · GPU check",
-            "ready": PYVIDEOTRANS_RUNTIME_READY,
-            "phase": "ready" if PYVIDEOTRANS_RUNTIME_READY else "configure",
+            "ready": pyvideotrans_ready,
+            "phase": "ready" if pyvideotrans_ready else "configure",
             "detail": (
                 "PyTorch CUDA sẵn sàng; F5/Qwen local sẽ dùng GPU"
-                if PYVIDEOTRANS_RUNTIME_READY
+                if pyvideotrans_ready
                 else ("Đang hoàn tất dependency pyVideoTrans" if PYVIDEOTRANS_COMMAND else "Cần cài tool và cấu hình PYVIDEOTRANS_COMMAND")
             ),
         },
