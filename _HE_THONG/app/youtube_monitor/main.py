@@ -2707,6 +2707,8 @@ def _generate_ai_thumbnails(
 
     made: list[Path] = []
     failures: list[str] = []
+    chain = _image_provider_chain(payload.provider)
+    drew_with = ""
     for index, text in enumerate(prompts, start=1):
         job = {
             "id": f"thumb-{uuid.uuid4().hex[:8]}",
@@ -2717,18 +2719,30 @@ def _generate_ai_thumbnails(
             "ratio": "720:1280" if payload.video_variant == "short" else "1280:720",
             "seed": payload.seed,
         }
-        try:
-            produced = scene_provider_gateway.execute_scene(
-                payload.provider, database, job, PRODUCTION_ARTIFACT_DIR,
-                capability=SCENE_IMAGE,
-            )
-        except Exception as exc:  # noqa: BLE001 - one failure must not lose the rest
-            failures.append(f"{index}: {str(exc)[:160]}")
+        # Once one model has drawn, the rest of the set stays with it: three
+        # variants from three different models is not a set to choose between.
+        produced = None
+        used = ""
+        for key in ([drew_with] if drew_with else chain):
+            job["provider"] = key
+            try:
+                produced = scene_provider_gateway.execute_scene(
+                    key, database, job, PRODUCTION_ARTIFACT_DIR,
+                    capability=SCENE_IMAGE,
+                )
+            except Exception as exc:  # noqa: BLE001 - the next model may still draw
+                failures.append(f"{index}/{key}: {str(exc)[:140]}")
+                produced = None
+                continue
+            used = key
+            break
+        if produced is None:
             continue
         source = Path(str(produced))
         if not source.is_file():
-            failures.append(f"{index}: provider không trả về file")
+            failures.append(f"{index}/{used}: provider không trả về file")
             continue
+        drew_with = used
         target = output_dir / f"ai-thumbnail-{index:02d}{source.suffix or '.png'}"
         shutil.copy2(source, target)
         made.append(target)
@@ -2746,16 +2760,66 @@ def _generate_ai_thumbnails(
     return made
 
 
+def _image_provider_blocked(key: str) -> str:
+    """Why this model cannot draw right now, or "" if it is worth trying.
+
+    Saying "not configured" is not enough to act on. A signed-out Flow is one
+    click from working and an empty quota is not, so they are different
+    answers even though both come back as a failure to draw.
+    """
+    try:
+        adapter = scene_provider_gateway.get(key)
+    except Exception:  # noqa: BLE001 - an unknown key is simply not a candidate
+        return "không có trong danh sách provider"
+    if not adapter.supports(SCENE_IMAGE):
+        return "không vẽ được ảnh"
+    if adapter.descriptor.execution_mode == EXECUTION_EXTERNAL_SIDECAR:
+        return "cần sidecar/trình duyệt đang chạy"
+    if key == "openai_image" and not OPENAI_API_KEY:
+        return "chưa có OPENAI_API_KEY"
+    if key in {"gflow_image", "gflow_cli"}:
+        status = gflow_cli_status()
+        if not status.get("installed"):
+            return "chưa cài gflow-cli"
+        if not status.get("logged_in"):
+            return "gflow-cli đã cài nhưng phiên Google hết hạn — bấm “Đăng nhập Flow” ở tab Tích hợp"
+    return ""
+
+
+def _image_provider_chain(attempted: str) -> list[str]:
+    """The models worth trying for one drawn image, best first.
+
+    The provider the user picked comes first, then what its descriptor says
+    to fall back to, then anything else that can draw. A thumbnail does not
+    care which model made it; being told "no" by one of them is not a reason
+    to stop.
+    """
+    order: list[str] = []
+
+    def offer(key: str) -> None:
+        if key and key not in order and not _image_provider_blocked(key):
+            order.append(key)
+
+    offer(attempted)
+    try:
+        declared = scene_provider_gateway.get(attempted).descriptor.fallback_keys
+    except Exception:  # noqa: BLE001 - an unknown provider still gets the rest
+        declared = ()
+    for key in declared:
+        offer(key)
+    for key in scene_provider_gateway.provider_keys(capability=SCENE_IMAGE):
+        offer(key)
+    return order
+
+
 def _image_provider_advice(attempted: str) -> str:
     """What the user can actually switch to, given what is configured here."""
     ready: list[str] = []
     blocked: list[str] = []
     for key in scene_provider_gateway.provider_keys(capability=SCENE_IMAGE):
-        descriptor = scene_provider_gateway.get(key).descriptor
-        if descriptor.execution_mode == EXECUTION_EXTERNAL_SIDECAR:
-            blocked.append(f"{key} (cần sidecar/trình duyệt đang chạy)")
-        elif key == "openai_image" and not OPENAI_API_KEY:
-            blocked.append(f"{key} (chưa có OPENAI_API_KEY)")
+        reason = _image_provider_blocked(key)
+        if reason:
+            blocked.append(f"{key} ({reason})")
         elif key == attempted:
             continue
         else:

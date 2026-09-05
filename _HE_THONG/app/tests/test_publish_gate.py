@@ -496,3 +496,103 @@ class BothPanelsOfferTheDrawnThumbnailTests(unittest.TestCase):
     def test_the_publish_panel_does_too(self) -> None:
         self.assertIn("generateStudioThumbnails(${project.id}, 'ai')", self.page)
         self.assertIn("generateStudioThumbnails(${project.id}, 'frame')", self.page)
+
+
+class OneRefusalIsNotTheEndOfDrawingTests(unittest.TestCase):
+    """execute_scene runs exactly the model it is handed.
+
+    The thumbnail default is gemini_image, whose image quota on this machine
+    is zero, so every attempt ended on the first refusal while other models
+    sat there able to draw. The descriptors have declared fallback_keys all
+    along; nothing walked them.
+    """
+
+    def test_the_chain_starts_with_what_was_asked_for(self) -> None:
+        from youtube_monitor.main import _image_provider_chain
+
+        chain = _image_provider_chain("gemini_image")
+
+        self.assertTrue(chain)
+        self.assertEqual(chain[0], "gemini_image")
+
+    def test_it_never_offers_a_model_that_cannot_draw_now(self) -> None:
+        from youtube_monitor.main import _image_provider_blocked, _image_provider_chain
+
+        for key in _image_provider_chain("gemini_image"):
+            with self.subTest(provider=key):
+                self.assertEqual(_image_provider_blocked(key), "")
+
+    def test_a_browser_provider_is_never_in_it(self) -> None:
+        """A sidecar provider takes work from a queue; calling it raises."""
+        from youtube_monitor.main import _image_provider_chain
+
+        chain = _image_provider_chain("gemini_image")
+
+        self.assertNotIn("chatgpt_web_image", chain)
+        self.assertNotIn("gemini_web_image", chain)
+
+    def test_a_provider_never_appears_twice(self) -> None:
+        from youtube_monitor.main import _image_provider_chain
+
+        chain = _image_provider_chain("gemini_image")
+
+        self.assertEqual(len(chain), len(set(chain)))
+
+    def test_an_unknown_provider_still_gets_the_others(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(main, "_image_provider_blocked", return_value=""):
+            chain = main._image_provider_chain("khong-co-provider-nay")
+
+        self.assertIn("gemini_image", chain)
+        self.assertIn("gflow_image", chain)
+
+    def test_the_declared_fallbacks_come_before_the_rest(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(main, "_image_provider_blocked", return_value=""):
+            chain = main._image_provider_chain("gemini_image")
+
+        # gemini_image declares gflow_image, then gemini_web_image.
+        self.assertLess(chain.index("gflow_image"), chain.index("openai_image"))
+
+    def test_a_signed_out_flow_says_what_to_click(self) -> None:
+        """"Not configured" is not something a user can act on."""
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main, "gflow_cli_status", return_value={"installed": True, "logged_in": False}
+        ):
+            reason = main._image_provider_blocked("gflow_image")
+
+        self.assertIn("Đăng nhập Flow", reason)
+
+    def test_a_signed_in_flow_is_offered(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main, "gflow_cli_status", return_value={"installed": True, "logged_in": True}
+        ):
+            self.assertEqual(main._image_provider_blocked("gflow_image"), "")
+            self.assertIn("gflow_image", main._image_provider_chain("gemini_image"))
+
+    def test_the_advice_no_longer_recommends_a_signed_out_flow(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main, "gflow_cli_status", return_value={"installed": True, "logged_in": False}
+        ):
+            advice = main._image_provider_advice("gemini_image")
+
+        self.assertNotIn("Có thể thử model khác: gflow_image", advice)
+        self.assertIn("gflow_image (gflow-cli đã cài", advice)
