@@ -668,3 +668,54 @@ class SignedOutIsNotTheSameAsCouldNotLookTests(unittest.TestCase):
 
         self.assertIn("đóng cửa sổ Chrome", reason)
         self.assertNotIn("Đăng nhập Flow", reason)
+
+
+class TheFakeJobMustBeOneAProviderCanUseTests(unittest.TestCase):
+    """A thumbnail borrows the scene providers by handing them a job dict.
+
+    Every image provider builds its output filename with int(job["id"]), so
+    the readable string id the thumbnail path used raised ValueError before a
+    single provider was reached. The drawn thumbnail could not have worked
+    with any model - not only the one that was out of quota.
+    """
+
+    def _job(self) -> dict:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        captured: dict = {}
+
+        def remember(provider, database, job, root, *, capability=""):
+            captured.update(job)
+            raise RuntimeError("stop here")
+
+        payload = main.GenerateThumbnailsRequest(mode="ai", variants=1)
+        with mock.patch.object(main.scene_provider_gateway, "execute_scene", remember), \
+                mock.patch.object(main, "_image_provider_chain", return_value=["gemini_image"]), \
+                mock.patch.object(main.database, "get_video_analysis", return_value=None):
+            with self.assertRaises(main.SceneGenerationError):
+                main._generate_ai_thumbnails(
+                    1, {"title": "Rung"}, {"hook": "Mot dieu la"}, payload, Path(tempfile.mkdtemp()),
+                )
+        return captured
+
+    def test_the_id_survives_int(self) -> None:
+        self.assertIsInstance(int(self._job()["id"]), int)
+
+    def test_the_segment_id_survives_int_too(self) -> None:
+        self.assertIsInstance(int(self._job()["timeline_segment_id"]), int)
+
+    def test_the_id_can_never_be_a_real_job_row(self) -> None:
+        """Real ids are positive, so a negative one keeps the heartbeat a no-op."""
+        self.assertLess(int(self._job()["id"]), 0)
+
+    def test_two_thumbnails_do_not_share_a_filename(self) -> None:
+        self.assertNotEqual(self._job()["id"], self._job()["id"])
+
+    def test_the_filename_every_provider_builds_now_works(self) -> None:
+        job = self._job()
+
+        name = f"gemini-image-segment-{int(job['timeline_segment_id'])}-job-{int(job['id'])}.png"
+
+        self.assertIn("job--", name)

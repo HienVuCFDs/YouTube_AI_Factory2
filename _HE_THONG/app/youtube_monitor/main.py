@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import os
+import random
 import re
 import shlex
 import shutil
@@ -2710,8 +2711,14 @@ def _generate_ai_thumbnails(
     chain = _image_provider_chain(payload.provider)
     drew_with = ""
     for index, text in enumerate(prompts, start=1):
+        # Every image provider builds its output filename with int(job["id"]),
+        # so a readable string id raised ValueError before a single provider
+        # was reached - the drawn thumbnail could not have worked with any
+        # model, not only the one out of quota. A negative id converts, keeps
+        # each variant's file distinct, and can never match a real job row:
+        # ids are positive, so the heartbeat UPDATE stays a no-op.
         job = {
-            "id": f"thumb-{uuid.uuid4().hex[:8]}",
+            "id": -random.randrange(1_000_000, 1_000_000_000),
             "project_id": project_id,
             "timeline_segment_id": 0,
             "prompt": text,
