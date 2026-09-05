@@ -487,7 +487,7 @@ class BothPanelsOfferTheDrawnThumbnailTests(unittest.TestCase):
 
     def test_the_project_panel_names_the_mode_it_wants(self) -> None:
         self.assertIn("generateProjectThumbnails(projectId, mode = 'ai')", self.page)
-        self.assertIn("JSON.stringify({prompt, variants: 3, mode})", self.page)
+        self.assertIn("JSON.stringify({prompt, variants: 3, mode, provider})", self.page)
 
     def test_it_offers_both_kinds(self) -> None:
         self.assertIn("generateProjectThumbnails(${project.id}, 'ai')", self.page)
@@ -719,3 +719,74 @@ class TheFakeJobMustBeOneAProviderCanUseTests(unittest.TestCase):
         name = f"gemini-image-segment-{int(job['timeline_segment_id'])}-job-{int(job['id'])}.png"
 
         self.assertIn("job--", name)
+
+
+class OneListOfModelsInsteadOfTwoHandWrittenOnesTests(unittest.TestCase):
+    """A model missing from a list looks like a model the app does not have.
+
+    Both thumbnail panels carried their own list: the step-7 one named three
+    models, the project one had no picker at all and silently used the
+    default. Neither matched what the app can reach, so Gemini web, ChatGPT
+    web, Antigravity and Flow web were invisible - the user asked where they
+    were, and the honest answer was "nobody typed them into that array".
+    """
+
+    def setUp(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from youtube_monitor.main import app
+
+        self.client = TestClient(app)
+        self.page = studio_ui()
+
+    def test_the_app_can_be_asked_which_models_draw(self) -> None:
+        response = self.client.get("/api/image-providers")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["providers"])
+
+    def test_every_image_provider_is_listed_not_only_the_usable_ones(self) -> None:
+        keys = {item["key"] for item in self.client.get("/api/image-providers").json()["providers"]}
+
+        for expected in ("gemini_image", "openai_image", "gflow_image",
+                         "gemini_web_image", "chatgpt_web_image", "antigravity_image"):
+            with self.subTest(provider=expected):
+                self.assertIn(expected, keys)
+
+    def test_one_that_cannot_draw_says_why(self) -> None:
+        providers = self.client.get("/api/image-providers").json()["providers"]
+
+        for item in providers:
+            with self.subTest(provider=item["key"]):
+                self.assertEqual(bool(item["reason"]), not item["ready"])
+
+    def test_the_usable_ones_come_first(self) -> None:
+        ready = [item["ready"] for item in self.client.get("/api/image-providers").json()["providers"]]
+
+        self.assertEqual(ready, sorted(ready, reverse=True))
+
+    def test_listing_them_never_waits_on_a_network_probe(self) -> None:
+        """A dropdown must not hang for the 90s a Flow session check can take."""
+        import time
+
+        started = time.monotonic()
+        self.client.get("/api/image-providers")
+
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_neither_panel_hand_writes_the_list_any_more(self) -> None:
+        self.assertNotIn("THUMBNAIL_PROVIDER_OPTIONS", self.page)
+        self.assertEqual(self.page.count("imageProviderOptions("), 3)
+
+    def test_the_project_panel_finally_has_a_picker(self) -> None:
+        self.assertIn('id="projectThumbnailProvider"', self.page)
+        self.assertIn("$('projectThumbnailProvider')?.value", self.page)
+
+    def test_the_chosen_model_is_actually_sent(self) -> None:
+        self.assertIn("JSON.stringify({prompt, variants: 3, mode, provider})", self.page)
+
+    def test_the_list_is_loaded_at_startup(self) -> None:
+        self.assertIn("loadImageProviders()", self.page)
+
+    def test_a_model_that_cannot_draw_cannot_be_picked(self) -> None:
+        self.assertIn("item.ready ? '' : ' disabled'", self.page)

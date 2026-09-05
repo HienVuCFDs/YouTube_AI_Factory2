@@ -8,6 +8,26 @@
 
   const $ = (id) => document.getElementById(id);
   const state = { channels: [], managedChannels: [], workflowReferences: [], videos: [], videoCatalog: [], videoGroupFilter: '', videoChannelFilter: '', projects: [], jobs: [], productionJobs: [], assets: [], integrations: [], queue: null, transcriptQueue: null, productionQueue: null, toolStatus: [], modelCatalog: [], transcriptVideoId: null, projectView: 'overview', projectId: null, scriptId: null, shots: [], timeline: [], oauth: null, selectedVideoIds: new Set(), studioStep: 1, studioSourceChannelId: '', studioVideoId: '', studioAnalysis: null, studioReference: null, studioWriter: null, studioProjectId: null, studioWorkflow: 'content', usageLimits: [], workspace: 'dashboard', automationProjectId: null, automationStatus: null, automationProjects: [], automationApprovals: [], providerCatalog: [] };
+  // Both thumbnail panels used to carry their own hand-written list of
+  // models: one had three entries, the other none at all, and neither
+  // matched what the app can actually reach. A model missing from a list
+  // looks like a model the app does not have, so the list now comes from
+  // the app itself - including the ones it cannot use yet, and why.
+  async function loadImageProviders() {
+    try { state.imageProviders = (await api('/api/image-providers')).providers || []; }
+    catch (error) { state.imageProviders = []; }
+  }
+
+  function imageProviderOptions(selected = '') {
+    const providers = state.imageProviders || [];
+    if (!providers.length) return '<option value="gemini_image">Gemini Image · API</option>';
+    return providers.map((item) => {
+      const label = item.ready ? item.label : `${item.label} — ${item.reason}`;
+      return `<option value="${esc(item.key)}"${item.key === selected ? ' selected' : ''}`
+        + `${item.ready ? '' : ' disabled'}>${esc(label)}</option>`;
+    }).join('');
+  }
+
   const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const number = (value) => value == null ? '—' : Number(value).toLocaleString('vi-VN');
   const date = (value) => value ? new Date(value).toLocaleString('vi-VN', {dateStyle:'short', timeStyle:'short'}) : '—';

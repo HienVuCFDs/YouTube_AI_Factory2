@@ -42,6 +42,7 @@ from . import operations, usage_limits, workflows
 from . import languages
 from .fidelity_guard import unsourced_details
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
+from .gflow_bridge import cached_status as gflow_cached_status
 from .gflow_bridge import gflow_cli_status
 from .llm_analyzer import LlmAnalysisError, resolve_analyzer
 from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_codex_json
@@ -2767,7 +2768,7 @@ def _generate_ai_thumbnails(
     return made
 
 
-def _image_provider_blocked(key: str) -> str:
+def _image_provider_blocked(key: str, *, probe: bool = True) -> str:
     """Why this model cannot draw right now, or "" if it is worth trying.
 
     Saying "not configured" is not enough to act on. A signed-out Flow is one
@@ -2785,7 +2786,11 @@ def _image_provider_blocked(key: str) -> str:
     if key == "openai_image" and not OPENAI_API_KEY:
         return "chưa có OPENAI_API_KEY"
     if key in {"gflow_image", "gflow_cli"}:
-        status = gflow_cli_status()
+        # Rendering a list must not wait on a network probe. Unknown is
+        # offered rather than hidden: trying it returns the real answer.
+        status = gflow_cli_status() if probe else gflow_cached_status()
+        if status is None:
+            return ""
         if not status.get("installed"):
             return "chưa cài gflow-cli"
         # A sign-in helps only when the session is actually dead. When the
@@ -2847,6 +2852,30 @@ def _image_provider_advice(attempted: str) -> str:
         "nhưng đó là khung phim chứ không phải ảnh bìa được dựng."
     )
     return " ".join(parts)
+
+
+@app.get("/api/image-providers")
+def list_image_providers() -> dict[str, Any]:
+    """Every model that can draw, and for the ones that cannot, why not.
+
+    Both thumbnail panels used to carry their own hand-written list: one had
+    three entries, the other none at all, and neither matched what the app
+    can actually reach. A model missing from a list looks like a model the
+    app does not have.
+    """
+    providers: list[dict[str, Any]] = []
+    for key in scene_provider_gateway.provider_keys(capability=SCENE_IMAGE):
+        reason = _image_provider_blocked(key, probe=False)
+        providers.append({
+            "key": key,
+            "label": scene_provider_gateway.get(key).descriptor.display_name,
+            "ready": not reason,
+            "reason": reason,
+        })
+    # Usable first; within each group the same order every time, so the
+    # selection does not move under the pointer between renders.
+    providers.sort(key=lambda item: (not item["ready"], item["key"]))
+    return {"providers": providers}
 
 
 @app.post("/api/projects/{project_id}/thumbnails/generate")

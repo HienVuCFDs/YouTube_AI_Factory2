@@ -72,7 +72,7 @@
       <div class="studio-model-note" style="margin-top:4px">Ảnh bìa được lưu và chọn riêng cho từng bản. AI vẽ theo kịch bản đã chọn; thiết kế từ video thêm bố cục chữ, nền tương phản. Ảnh dọc giữ chữ trong vùng giữa để dễ xem trên điện thoại.</div>
       <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
         <select id="thumbnailVariants" aria-label="Số ảnh"><option value="2">2 ảnh</option><option value="3" selected>3 ảnh</option><option value="5">5 ảnh</option></select>
-        <select id="thumbnailProvider" aria-label="Model vẽ thumbnail">${THUMBNAIL_PROVIDER_OPTIONS}</select>
+        <select id="thumbnailProvider" aria-label="Model vẽ thumbnail">${imageProviderOptions(draft.provider || 'gemini_image')}</select>
         <button class="btn primary" type="button" onclick="generateStudioThumbnails(${project.id}, 'ai')">AI vẽ thumbnail</button>
         <button class="btn" type="button" onclick="generateStudioThumbnails(${project.id}, 'designed')">Thiết kế bìa từ video</button>
         <button class="btn ghost" type="button" onclick="generateStudioThumbnails(${project.id}, 'frame')">Cắt khung từ video</button>
@@ -591,12 +591,6 @@
   // A frame lifted out of the video is whatever the camera was doing that
   // second - a blink, an empty wide shot. Useful, free, and not what makes
   // anyone click, so the composed one is the default and both are offered.
-  const THUMBNAIL_PROVIDER_OPTIONS = [
-    ['gemini_image', 'Gemini Image · API'],
-    ['openai_image', 'OpenAI Image · API'],
-    ['gflow_image', 'gFlow · gói thuê bao'],
-  ].map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
-
   async function generateStudioThumbnails(projectId, mode = 'ai') {
     if (state.thumbnailBusy) return;
     saveThumbnailDraft();
@@ -1106,7 +1100,7 @@
     if (studioSettingsPending) return studioSettingsPending;
     studioSettingsPending = Promise.allSettled([
       loadHealth(), loadWorkflows(), loadEdgeVoices(), loadOAuthStatus(),
-      loadToolStatus(), loadModelCatalog(), loadIntegrations(),
+      loadToolStatus(), loadModelCatalog(), loadIntegrations(), loadImageProviders(),
       loadOrchestratorSettings(), loadAnalysisProviders(),
     ]).finally(() => { lastSettingsRefresh = Date.now(); studioSettingsPending = null; });
     return studioSettingsPending;

@@ -149,6 +149,16 @@ def gflow_cli_status(*, force: bool = False) -> dict[str, Any]:
     return result
 
 
+def cached_status() -> dict[str, Any] | None:
+    """The last status already measured, or None - never a fresh probe.
+
+    Listing the models on a screen must not wait up to 90 seconds for a
+    network check. A list that renders with one entry's state unknown is
+    better than a page that hangs.
+    """
+    return _status_cache
+
+
 def launch_gflow_login() -> dict[str, Any]:
     """Open gflow's passive authentication flow in real Chrome."""
     global _auth_process, _status_cache, _status_cache_at
