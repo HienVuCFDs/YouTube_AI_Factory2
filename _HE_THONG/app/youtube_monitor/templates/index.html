@@ -179,7 +179,7 @@
         <div id="workflowsList" class="studio-result"></div>
       </section>
       <section id="managedChannelsPanel" class="panel workspace-panel">
-        <div class="panel-head"><div><div class="panel-title"><span class="mark">◎</span> KÊNH CỦA TÔI</div><div class="panel-sub">Quản lý kênh xuất bản, workflow tham khảo và lịch đăng. Publisher sẽ dùng lịch này khi module upload được bật.</div></div><span id="managedChannelCountLabel" class="tag cyan">0 KÊNH</span></div>
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">◎</span> KÊNH CỦA TÔI</div><div class="panel-sub">Quản lý kênh xuất bản, workflow tham khảo và lịch đăng. Publisher sẽ dùng lịch này khi module upload được bật.</div></div><div style="display:flex;align-items:center;gap:8px"><button class="btn small ghost" type="button" onclick="refreshManagedChannels()">↻ Làm mới danh sách kênh</button><button class="btn small primary" type="button" onclick="addChannelBySignIn()" title="Đăng nhập Google rồi app tự tạo kênh với tên và ID thật">+ Thêm kênh bằng đăng nhập Google</button><span id="managedChannelCountLabel" class="tag cyan">0 KÊNH</span></div></div>
         <div class="panel-body">
           <div class="managed-channel-grid">
             <form id="managedChannelForm" class="managed-form">

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 
+import shutil
+from ..oauth import token_path as oauth_token_path
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -103,12 +105,70 @@ def youtube_oauth_callback(
     if not code:
         return HTMLResponse("<p>Thiếu mã xác thực từ Google. Bạn có thể đóng tab này.</p>", status_code=400)
     try:
-        oauth_exchange_code(code, state)
+        managed_channel_id = oauth_exchange_code(code, state)
     except OAuthError as exc:
         return HTMLResponse(f"<p>Kết nối YouTube OAuth thất bại: {exc}</p>", status_code=400)
+
+    # A sign-in that named no channel is one started from "add a channel":
+    # the account has just told us which channel it granted, so that becomes
+    # the row rather than something the user types in beforehand.
+    note = ""
+    if managed_channel_id is None:
+        try:
+            note = _adopt_signed_in_channel()
+        except (OAuthError, PublisherError) as exc:
+            note = f"<p>Đã đăng nhập, nhưng chưa đọc được tên kênh: {exc}</p>"
     return HTMLResponse(
-        "<p>Đã kết nối YouTube OAuth thành công. Bạn có thể đóng tab này và quay lại ứng dụng.</p>"
+        "<p>Đã kết nối YouTube thành công. Bạn có thể đóng tab này và quay lại ứng dụng.</p>"
+        + note
     )
+
+
+def _adopt_signed_in_channel() -> str:
+    """Turn the just-authorised YouTube channel into a channel of its own.
+
+    One consent grants one channel, so whatever comes back is the channel the
+    user picked on Google's own screen - a more reliable answer than a name
+    typed from memory, and it carries the real id and URL.
+    """
+    found = publisher_worker.publisher.list_authorized_channels()
+    if not found:
+        return "<p>Tài khoản này không có kênh YouTube nào.</p>"
+    channel = found[0]
+    youtube_id = str(channel.get("id") or "")
+    title = str(channel.get("title") or "Kênh YouTube")
+    handle = str(channel.get("handle") or "")
+    url = (
+        f"https://www.youtube.com/{handle}" if handle.startswith("@")
+        else f"https://www.youtube.com/channel/{youtube_id}"
+    )
+
+    existing = next(
+        (
+            item for item in database.list_managed_channels()
+            if str(item.get("youtube_channel_id") or "") == youtube_id
+        ),
+        None,
+    )
+    if existing:
+        # Re-authorising an existing channel: keep the row, move the token to
+        # it so it stops sharing the app-wide account.
+        target_id = int(existing["id"])
+        action = "cập nhật đăng nhập cho"
+    else:
+        created = database.create_managed_channel(
+            name=title,
+            channel_url=url,
+            youtube_channel_id=youtube_id,
+            platform="youtube",
+        )
+        if not created:
+            return "<p>Đã đăng nhập, nhưng không tạo được kênh trong app.</p>"
+        target_id = int(created["id"])
+        action = "thêm"
+
+    shutil.move(str(oauth_token_path(None)), str(oauth_token_path(target_id)))
+    return f"<p>Đã {action} kênh <b>{title}</b>. Quay lại app và làm mới danh sách kênh.</p>"
 
 
 @router.post("/api/oauth/youtube/disconnect")

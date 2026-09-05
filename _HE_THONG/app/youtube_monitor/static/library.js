@@ -136,6 +136,21 @@
   // A channel is set up here, so this is where its account is connected.
   // Buried in the publish dialog it was found only at the end, with a
   // finished video already in hand.
+  // Signing in first and letting the account name the channel, rather than
+  // typing a name and URL from memory into a form and only then finding out
+  // whether it connects.
+  function addChannelBySignIn() {
+    window.open('/oauth/youtube/authorize', '_blank', 'noopener');
+    setMessage(
+      'Đã mở tab Google. Chọn tài khoản và kênh muốn thêm, xong quay lại đây bấm “Làm mới danh sách kênh”.',
+      '');
+  }
+
+  async function refreshManagedChannels() {
+    await loadManagedChannels();
+    setMessage(`Đã làm mới: ${state.managedChannels.length} kênh.`, 'success');
+  }
+
   function channelAccountRow(channel) {
     if (String(channel.platform || 'youtube').toLowerCase() !== 'youtube') {
       return '<div class="managed-card-meta">Nền tảng này chưa đăng tự động — app sẽ xuất gói để bạn đăng tay.</div>';

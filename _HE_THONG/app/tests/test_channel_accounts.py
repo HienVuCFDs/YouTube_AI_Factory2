@@ -237,3 +237,47 @@ class TheChannelListIsWhereAChannelIsConnectedTests(unittest.TestCase):
     def test_the_accounts_are_loaded_with_the_channels(self) -> None:
         """Written but never called is the defect this project keeps hitting."""
         self.assertIn("void loadManagedChannelAccounts();", self.page)
+
+
+class AddingAChannelBySigningInTests(unittest.TestCase):
+    """The account already knows which channel it granted.
+
+    Adding a channel meant typing its name and URL into a form first, so a
+    creator with ten channels filled ten forms from memory before finding out
+    whether any of them connected. One consent grants one channel and YouTube
+    will name it, so the order is reversed.
+    """
+
+    def setUp(self) -> None:
+        self.routes = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "api" / "routes_oauth.py"
+        ).read_text(encoding="utf-8")
+        self.page = studio_ui()
+
+    def test_a_sign_in_with_no_channel_adopts_the_one_it_granted(self) -> None:
+        self.assertIn("if managed_channel_id is None:", self.routes)
+        self.assertIn("def _adopt_signed_in_channel", self.routes)
+
+    def test_the_row_is_built_from_what_youtube_reported(self) -> None:
+        """Not from a name typed beforehand: this carries the real id."""
+        self.assertIn("database.create_managed_channel(", self.routes)
+        self.assertIn("youtube_channel_id=youtube_id", self.routes)
+
+    def test_signing_in_again_updates_the_channel_rather_than_duplicating_it(self) -> None:
+        self.assertIn('str(item.get("youtube_channel_id") or "") == youtube_id', self.routes)
+
+    def test_the_token_is_moved_onto_the_channel_it_belongs_to(self) -> None:
+        """Left app-wide, the next channel would silently share this account."""
+        self.assertIn("shutil.move(str(oauth_token_path(None)), str(oauth_token_path(target_id)))", self.routes)
+
+    def test_an_account_with_no_channel_is_reported_rather_than_crashing(self) -> None:
+        self.assertIn("không có kênh YouTube nào", self.routes)
+
+    def test_the_channel_panel_offers_it(self) -> None:
+        self.assertIn("addChannelBySignIn()", self.page)
+        self.assertIn("Thêm kênh bằng đăng nhập Google", self.page)
+
+    def test_the_list_can_be_refreshed_after_the_google_tab(self) -> None:
+        """The channel appears in another tab; this window has to be told."""
+        self.assertIn("refreshManagedChannels()", self.page)
