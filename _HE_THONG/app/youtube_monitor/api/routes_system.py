@@ -46,6 +46,7 @@ from ..main import (
     production_worker,
     publisher_worker,
     scene_generation_worker,
+    running_build_is_stale,
     template_path,
 )
 
@@ -120,6 +121,9 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "api_key_configured": bool(YOUTUBE_API_KEY),
+        # The page is served from disk and updates without a restart, so it
+        # can show controls the running Python has never heard of.
+        "restart_needed": running_build_is_stale(),
         "database": str(DB_PATH),
         # Monitoring, analysis and transcript queues do not download video.  The
         # confirmed AI Director action may download a single source for editing.

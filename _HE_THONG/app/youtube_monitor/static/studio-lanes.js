@@ -549,6 +549,26 @@
     const status = $('apiStatus');
     status.className = `status-pill ${health.api_key_configured ? 'ok' : 'warn'}`;
     status.innerHTML = `<span class="dot"></span> ${health.api_key_configured ? 'API ĐÃ KẾT NỐI' : 'THIẾU API KEY'}`;
+    renderRestartNotice(health.restart_needed);
+  }
+
+  // The page is served from disk and refreshes without a restart, so it can
+  // show controls the running Python has never heard of. Pressing one then
+  // looks like a broken feature rather than a missing one - which is exactly
+  // how a sign-in came to land in the wrong place and read as data loss.
+  function renderRestartNotice(needed) {
+    let bar = $('restartNotice');
+    if (!needed) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'restartNotice';
+      bar.className = 'message error';
+      bar.style.cssText = 'margin:10px 17px 0;position:sticky;top:0;z-index:5';
+      document.body.prepend(bar);
+    }
+    bar.textContent = 'App đang chạy bản cũ hơn mã nguồn trên đĩa. '
+      + 'Giao diện đã cập nhật nhưng phần xử lý thì chưa — hãy tắt và chạy lại '
+      + 'CHAY_YOUTUBE_AI_FACTORY.bat, rồi Ctrl+F5.';
   }
 
   async function loadOAuthStatus() {

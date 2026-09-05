@@ -98,3 +98,65 @@ class TheModulesAreServedTests(unittest.TestCase):
 
     def test_a_missing_module_is_a_404_not_a_crash(self) -> None:
         self.assertEqual(self.client.get("/static/khong-co.js").status_code, 404)
+
+
+class SayingWhenTheServerIsBehindTheCodeTests(unittest.TestCase):
+    """Splitting the page made a stale server much harder to notice.
+
+    The browser fetches /static fresh on every load, so the interface looks
+    updated while the Python behind it is whatever was imported when the
+    process started. A control that appears after an edit can still be
+    talking to code from an hour ago, and the symptom - a sign-in landing in
+    the wrong place, a flow that "did nothing" - reads as a bug in the new
+    code rather than its absence.
+    """
+
+    def test_the_process_records_what_it_imported(self) -> None:
+        from youtube_monitor import main
+
+        self.assertGreater(main._IMPORTED_SOURCE_MTIME, 0)
+
+    def test_a_freshly_imported_process_is_not_stale(self) -> None:
+        from youtube_monitor import main
+
+        self.assertFalse(main.running_build_is_stale())
+
+    def test_a_newer_file_on_disk_makes_it_stale(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main, "_source_fingerprint", return_value=main._IMPORTED_SOURCE_MTIME + 60
+        ):
+            self.assertTrue(main.running_build_is_stale())
+
+    def test_a_touch_within_a_second_does_not_cry_wolf(self) -> None:
+        """Filesystem timestamps drift; a warning that is always on is ignored."""
+        from unittest import mock
+
+        from youtube_monitor import main
+
+        with mock.patch.object(
+            main, "_source_fingerprint", return_value=main._IMPORTED_SOURCE_MTIME + 0.2
+        ):
+            self.assertFalse(main.running_build_is_stale())
+
+    def test_health_reports_it(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from youtube_monitor.main import app
+
+        self.assertIn("restart_needed", TestClient(app).get("/api/health").json())
+
+    def test_the_page_shows_it_and_says_what_to_do(self) -> None:
+        from tests.ui_source import studio_ui
+
+        page = studio_ui()
+        self.assertIn("renderRestartNotice(health.restart_needed)", page)
+        self.assertIn("CHAY_YOUTUBE_AI_FACTORY.bat", page)
+
+    def test_the_notice_disappears_once_it_is_no_longer_true(self) -> None:
+        from tests.ui_source import studio_ui
+
+        self.assertIn("if (!needed) { if (bar) bar.remove(); return; }", studio_ui())

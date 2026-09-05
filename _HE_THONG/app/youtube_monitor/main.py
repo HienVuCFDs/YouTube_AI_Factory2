@@ -265,6 +265,34 @@ scene_generation_worker = SceneGenerationWorker(
 )
 template_path = Path(__file__).resolve().parent / "templates" / "index.html"
 
+
+def _source_fingerprint() -> float:
+    """The newest modification time across the app's own Python files."""
+    root = Path(__file__).resolve().parent
+    newest = 0.0
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+# Recorded once, at import: this is the code the running process actually has.
+_IMPORTED_SOURCE_MTIME = _source_fingerprint()
+
+
+def running_build_is_stale() -> bool:
+    """Whether the files on disk have moved on since this process started.
+
+    The interface is served from disk and updates without a restart, so it
+    can show controls the running Python has never heard of. Saying so is the
+    difference between "this feature is broken" and "restart the app".
+    """
+    return _source_fingerprint() > _IMPORTED_SOURCE_MTIME + 1.0
+
 # Tracks the last time each external-sidecar provider (Antigravity/Flow/Meta
 # AI) actually polled for work, so the UI can tell "queued, waiting for a
 # sidecar that isn't running" apart from "queued, sidecar will pick it up in
