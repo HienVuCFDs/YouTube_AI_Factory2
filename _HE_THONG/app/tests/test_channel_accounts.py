@@ -265,7 +265,9 @@ class AddingAChannelBySigningInTests(unittest.TestCase):
         self.assertIn("youtube_channel_id=youtube_id", self.routes)
 
     def test_signing_in_again_updates_the_channel_rather_than_duplicating_it(self) -> None:
-        self.assertIn('str(item.get("youtube_channel_id") or "") == youtube_id', self.routes)
+        """Recognition moved into a helper that also matches a pasted URL."""
+        self.assertIn("existing = _find_existing_channel(youtube_id, handle)", self.routes)
+        self.assertIn("def _find_existing_channel", self.routes)
 
     def test_the_token_is_moved_onto_the_channel_it_belongs_to(self) -> None:
         """Left app-wide, the next channel would silently share this account."""
@@ -281,3 +283,64 @@ class AddingAChannelBySigningInTests(unittest.TestCase):
     def test_the_list_can_be_refreshed_after_the_google_tab(self) -> None:
         """The channel appears in another tab; this window has to be told."""
         self.assertIn("refreshManagedChannels()", self.page)
+
+
+class RecognisingAChannelAddedBeforeSignInExistedTests(unittest.TestCase):
+    """Rows typed in by hand carry a URL and no id.
+
+    Matching on the id alone would make a second row for a channel the user
+    already has, and leave the first one still borrowing the shared account.
+    The id is usually sitting in the URL they pasted from YouTube.
+    """
+
+    def _find(self, channels, youtube_id, handle=""):
+        import youtube_monitor.main  # import order: routes_oauth imports main
+        from youtube_monitor.api import routes_oauth
+
+        with mock.patch.object(routes_oauth.database, "list_managed_channels", return_value=channels):
+            return routes_oauth._find_existing_channel(youtube_id, handle)
+
+    def test_an_exact_id_wins(self) -> None:
+        rows = [
+            {"id": 1, "youtube_channel_id": "", "channel_url": "https://x/UC-other"},
+            {"id": 2, "youtube_channel_id": "UC-me", "channel_url": ""},
+        ]
+
+        self.assertEqual(self._find(rows, "UC-me")["id"], 2)
+
+    def test_an_id_inside_a_pasted_url_is_recognised(self) -> None:
+        rows = [{
+            "id": 7, "youtube_channel_id": "",
+            "channel_url": "https://studio.youtube.com/channel/UCFqQ6k8CaYCArWvFFBsFaow",
+        }]
+
+        self.assertEqual(self._find(rows, "UCFqQ6k8CaYCArWvFFBsFaow")["id"], 7)
+
+    def test_a_handle_in_the_url_is_recognised_too(self) -> None:
+        rows = [{"id": 3, "youtube_channel_id": "", "channel_url": "https://www.youtube.com/@forestborn"}]
+
+        self.assertEqual(self._find(rows, "UC-unknown", "@forestborn")["id"], 3)
+
+    def test_an_unrelated_channel_is_not_claimed(self) -> None:
+        """A wrong match would move a token onto somebody else's channel."""
+        rows = [{"id": 1, "youtube_channel_id": "UC-a", "channel_url": "https://x/UC-a"}]
+
+        self.assertIsNone(self._find(rows, "UC-b", "@b"))
+
+    def test_the_missing_id_is_filled_in_when_it_is_recognised(self) -> None:
+        routes = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "api" / "routes_oauth.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("database.update_managed_channel(target_id, youtube_channel_id=youtube_id)", routes)
+
+    def test_the_module_can_reach_the_database_it_uses(self) -> None:
+        """It called database.* without importing it, so it raised NameError
+        at the moment a user finished signing in."""
+        routes = (
+            Path(__file__).resolve().parent.parent
+            / "youtube_monitor" / "api" / "routes_oauth.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("from ..main import _api_error, database, publisher_worker", routes)

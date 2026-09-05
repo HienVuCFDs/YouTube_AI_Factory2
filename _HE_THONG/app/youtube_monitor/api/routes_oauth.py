@@ -19,7 +19,7 @@ from ..publisher import PublisherError
 
 # Deferred import: see routes_system.py for why this is safe (main.py has
 # already defined its singletons by the time this router is included).
-from ..main import _api_error, publisher_worker
+from ..main import _api_error, database, publisher_worker
 
 router = APIRouter()
 
@@ -124,6 +124,29 @@ def youtube_oauth_callback(
     )
 
 
+def _find_existing_channel(youtube_id: str, handle: str) -> dict[str, Any] | None:
+    """The row this YouTube channel already has, however it was added.
+
+    Rows created by hand before sign-in existed carry a URL and no id - and
+    that URL almost always contains the id, because it was copied from
+    YouTube. Matching on it avoids making a second row for a channel the user
+    already set up, and leaving the first one borrowing the shared account.
+    """
+    channels = database.list_managed_channels()
+    for item in channels:
+        if str(item.get("youtube_channel_id") or "").strip() == youtube_id:
+            return item
+    if not youtube_id:
+        return None
+    for item in channels:
+        url = str(item.get("channel_url") or "")
+        if youtube_id in url:
+            return item
+        if handle and handle.lstrip("@") and handle.lstrip("@").lower() in url.lower():
+            return item
+    return None
+
+
 def _adopt_signed_in_channel() -> str:
     """Turn the just-authorised YouTube channel into a channel of its own.
 
@@ -143,17 +166,13 @@ def _adopt_signed_in_channel() -> str:
         else f"https://www.youtube.com/channel/{youtube_id}"
     )
 
-    existing = next(
-        (
-            item for item in database.list_managed_channels()
-            if str(item.get("youtube_channel_id") or "") == youtube_id
-        ),
-        None,
-    )
+    existing = _find_existing_channel(youtube_id, handle)
     if existing:
-        # Re-authorising an existing channel: keep the row, move the token to
-        # it so it stops sharing the app-wide account.
+        # Re-authorising a channel already known: keep the row, and fill in
+        # the id if it was added by hand without one.
         target_id = int(existing["id"])
+        if not str(existing.get("youtube_channel_id") or "").strip():
+            database.update_managed_channel(target_id, youtube_channel_id=youtube_id)
         action = "cập nhật đăng nhập cho"
     else:
         created = database.create_managed_channel(
