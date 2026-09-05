@@ -133,6 +133,78 @@
     $('managedChannelName').focus();
   }
 
+  // A channel is set up here, so this is where its account is connected.
+  // Buried in the publish dialog it was found only at the end, with a
+  // finished video already in hand.
+  function channelAccountRow(channel) {
+    if (String(channel.platform || 'youtube').toLowerCase() !== 'youtube') {
+      return '<div class="managed-card-meta">Nền tảng này chưa đăng tự động — app sẽ xuất gói để bạn đăng tay.</div>';
+    }
+    const account = (state.channelAccounts || {})[channel.id];
+    if (account === undefined) {
+      return `<div class="managed-card-meta">Tài khoản đăng: đang kiểm…</div>`;
+    }
+    if (!account.connected) {
+      return `<div class="managed-card-meta">
+        <span class="tag red">CHƯA ĐĂNG NHẬP</span>
+        Kênh này chưa nối tài khoản Google nên chưa đăng được.
+        <button class="btn small primary" style="margin-left:6px"
+          onclick="connectManagedChannel(${channel.id})">Đăng nhập kênh này</button>
+      </div>`;
+    }
+    const where = account.youtube_title
+      ? `Đăng lên: <b>${esc(account.youtube_title)}</b>`
+      : 'Đã đăng nhập';
+    // Borrowing the app-wide account is not the same as having one, and two
+    // channels quietly posting to the same place should not look like two.
+    const borrowed = account.own_account === false
+      ? ' <span class="tag">DÙNG CHUNG TÀI KHOẢN APP</span>' : '';
+    return `<div class="managed-card-meta">
+      <span class="tag green">ĐÃ NỐI</span> ${where}${borrowed}
+      <button class="btn small ghost" style="margin-left:6px"
+        onclick="connectManagedChannel(${channel.id})">Đổi tài khoản</button>
+      <button class="btn small ghost" onclick="checkManagedChannelAccount(${channel.id})">Kiểm tra</button>
+    </div>`;
+  }
+
+  async function loadManagedChannelAccounts() {
+    const accounts = {};
+    await Promise.all((state.managedChannels || []).map(async (channel) => {
+      if (String(channel.platform || 'youtube').toLowerCase() !== 'youtube') return;
+      try {
+        const status = await api(`/api/oauth/youtube/status?managed_channel_id=${channel.id}`);
+        accounts[channel.id] = {
+          connected: Boolean(status.connected),
+          own_account: status.own_account,
+        };
+      } catch (_) { accounts[channel.id] = {connected: false}; }
+    }));
+    state.channelAccounts = accounts;
+    renderManagedChannels();
+  }
+
+  function connectManagedChannel(channelId) {
+    window.open(`/oauth/youtube/authorize?managed_channel_id=${channelId}`, '_blank', 'noopener');
+    setMessage('Đã mở tab Google. Chọn tài khoản và kênh, xong quay lại đây bấm “Kiểm tra”.', '');
+  }
+
+  // Signed in is not the same as signed in to the right channel: one Google
+  // account can own several, and the consent screen asks which.
+  async function checkManagedChannelAccount(channelId) {
+    setMessage('Đang hỏi YouTube xem kênh này đăng lên đâu...', '');
+    try {
+      const result = await api(`/api/oauth/youtube/channels?managed_channel_id=${channelId}`);
+      const first = (result.channels || [])[0];
+      if (!first) { setMessage('Tài khoản này không có kênh YouTube nào.', 'error'); return; }
+      state.channelAccounts = {
+        ...(state.channelAccounts || {}),
+        [channelId]: {connected: true, own_account: true, youtube_title: first.title},
+      };
+      renderManagedChannels();
+      setMessage(`Kênh này sẽ đăng lên: ${first.title}`, 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   function renderManagedChannels() {
     const body = $('managedChannelsBody');
     if (!body) return;
@@ -150,6 +222,7 @@
     body.innerHTML = [...groups.entries()].map(([group, channels]) => `<div class="managed-card"><div class="eyebrow">${esc(group)}</div>${channels.map((channel) => `
       <div class="managed-card" style="margin-top:8px;background:rgba(9,11,16,.38)">
         <div class="managed-card-head"><div><div class="managed-card-title">${esc(channel.name)}</div><div class="managed-card-meta"><a href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.channel_url)}</a><br>Nền tảng: ${esc(channel.platform || 'youtube')} · Định dạng: ${esc(channel.output_profile)} · Ngôn ngữ: ${esc(channel.language || 'vi')}<br>Preset: ${esc(channel.default_voice_provider || 'edge_tts')} · ${esc(channel.default_voice_model || '')} · ${esc(channel.default_subtitle_provider || 'timeline_text')}<br>Workflow tham khảo: <b>${esc(channel.workflow_reference_title || workflowReferenceName(channel.workflow_reference_channel_id))}</b>${channel.notes ? `<br>Ghi chú: ${esc(channel.notes)}` : ''}</div></div><span class="tag ${channel.enabled ? 'green' : 'red'}">${channel.enabled ? 'ĐANG DÙNG' : 'TẠM TẮT'}</span></div>
+        ${channelAccountRow(channel)}
         <div class="managed-card-actions"><button class="btn small ghost" onclick="editManagedChannel(${channel.id})">Chỉnh sửa</button><button class="btn small ${channel.enabled ? 'danger' : 'primary'}" onclick="toggleManagedChannel(${channel.id}, ${!channel.enabled})">${channel.enabled ? 'Tạm tắt' : 'Bật lại'}</button></div>
       </div>`).join('')}</div>`).join('');
   }
@@ -161,6 +234,7 @@
     populateManagedWorkflowSelect($('managedChannelWorkflow'));
     populateStudioManagedChannelSelect();
     renderManagedChannels();
+    void loadManagedChannelAccounts();
   }
 
   async function saveManagedChannel(event) {

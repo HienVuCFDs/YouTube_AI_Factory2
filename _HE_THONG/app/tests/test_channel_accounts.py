@@ -201,3 +201,39 @@ class VerifyingWhereAChannelActuallyPostsTests(unittest.TestCase):
     def test_the_answer_says_which_channel_it_is_about(self) -> None:
         """Otherwise two answers look identical and cannot be told apart."""
         self.assertIn('"managed_channel_id": managed_channel_id', self.routes)
+
+
+class TheChannelListIsWhereAChannelIsConnectedTests(unittest.TestCase):
+    """Signing in belonged only to the publish dialog.
+
+    That is the last place you look when setting a channel up, and the worst
+    place to learn it is not connected - by then there is a finished video in
+    hand. A channel is configured in the channel list, so that is where its
+    account is connected and where it says where it actually posts.
+    """
+
+    def setUp(self) -> None:
+        self.page = studio_ui()
+
+    def test_each_channel_card_reports_its_account(self) -> None:
+        self.assertIn("function channelAccountRow(channel)", self.page)
+        self.assertIn("CHƯA ĐĂNG NHẬP", self.page)
+
+    def test_a_channel_can_be_signed_in_from_its_card(self) -> None:
+        self.assertIn("connectManagedChannel(", self.page)
+        self.assertIn("/oauth/youtube/authorize?managed_channel_id=${channelId}", self.page)
+
+    def test_the_card_can_confirm_which_youtube_channel_it_reaches(self) -> None:
+        """One Google account can own several; the consent screen asks which."""
+        self.assertIn("checkManagedChannelAccount(", self.page)
+        self.assertIn("/api/oauth/youtube/channels?managed_channel_id=${channelId}", self.page)
+
+    def test_borrowing_the_shared_account_is_shown_as_borrowing(self) -> None:
+        self.assertIn("DÙNG CHUNG TÀI KHOẢN APP", self.page)
+
+    def test_a_platform_with_no_uploader_says_so_instead(self) -> None:
+        self.assertIn("chưa đăng tự động", self.page)
+
+    def test_the_accounts_are_loaded_with_the_channels(self) -> None:
+        """Written but never called is the defect this project keeps hitting."""
+        self.assertIn("void loadManagedChannelAccounts();", self.page)
