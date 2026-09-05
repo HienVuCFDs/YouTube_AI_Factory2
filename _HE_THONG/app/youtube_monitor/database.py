@@ -3020,6 +3020,22 @@ class Database:
             connection.execute("UPDATE project_thumbnails SET selected = 1 WHERE id = ?", (thumbnail_id,))
         return self.get_project_thumbnail(thumbnail_id)
 
+    def delete_project_thumbnail(self, thumbnail_id: int) -> dict[str, Any] | None:
+        """Remove a thumbnail and the asset behind it.
+
+        Returns what was deleted so the caller can remove the file too - the
+        row is the only record of where it is.
+        """
+        thumbnail = self.get_project_thumbnail(thumbnail_id)
+        if not thumbnail:
+            return None
+        with self._connect() as connection:
+            connection.execute("DELETE FROM project_thumbnails WHERE id = ?", (thumbnail_id,))
+            asset_id = thumbnail.get("asset_id")
+            if asset_id:
+                connection.execute("DELETE FROM project_assets WHERE id = ?", (int(asset_id),))
+        return thumbnail
+
     def get_project_render_settings(self, project_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(

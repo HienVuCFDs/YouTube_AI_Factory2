@@ -707,9 +707,9 @@
       <article class="storyboard-card" style="max-width:320px">
         <div class="storyboard-card-head"><div class="storyboard-card-title">${thumbnail.selected ? '✓ Đã chọn' : 'Phương án'}</div><span class="tag ${thumbnail.selected ? 'green' : 'orange'}">${esc(thumbnail.provider)}</span></div>
         <div class="storyboard-media"><img src="/api/assets/${thumbnail.asset_id}/download" alt="${esc(thumbnail.original_name)}"></div>
-        <div class="storyboard-body"><div class="secondary-text">${esc(thumbnail.prompt || 'Frame từ video đã render')}</div><div class="secondary-text" style="margin-top:5px">${esc(thumbnail.model)}${thumbnail.seed == null ? '' : ` · seed ${esc(thumbnail.seed)}`}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:8px"><button class="btn small ${thumbnail.selected ? 'ghost' : 'primary'}" onclick="selectProjectThumbnail(${project.id}, ${thumbnail.id})" ${thumbnail.selected ? 'disabled' : ''}>${thumbnail.selected ? 'Đang dùng' : 'Chọn bản này'}</button></div></div>
+        <div class="storyboard-body"><div class="secondary-text">${esc(thumbnail.prompt || 'Frame từ video đã render')}</div><div class="secondary-text" style="margin-top:5px">${esc(thumbnail.model)}${thumbnail.seed == null ? '' : ` · seed ${esc(thumbnail.seed)}`}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:8px"><button class="btn small ${thumbnail.selected ? 'ghost' : 'primary'}" onclick="selectProjectThumbnail(${project.id}, ${thumbnail.id})" ${thumbnail.selected ? 'disabled' : ''}>${thumbnail.selected ? 'Đang dùng' : 'Chọn bản này'}</button><button class="btn small danger" onclick="deleteProjectThumbnail(${project.id}, ${thumbnail.id})">Xoá</button></div></div>
       </article>`).join('') : '<div class="empty">Chưa có thumbnail. Tạo từ video đã render rồi chọn một bản cuối.</div>';
-    const thumbnailPanel = `<div class="analysis-item" style="margin-top:12px"><label>Thumbnail · ${number(thumbnails.length)} phương án</label><p class="panel-sub">Tạo frame 16:9 từ video đã render, sau đó chọn một bản. Prompt, provider, model và seed được lưu cùng project.</p><div class="queue-controls" style="justify-content:flex-start;margin-top:8px;flex-wrap:wrap"><input id="thumbnailPrompt" value="${esc(script?.script_title || project.title || '')}" placeholder="Prompt/ghi chú thumbnail" aria-label="Prompt thumbnail"><button class="btn small primary" onclick="generateProjectThumbnails(${project.id})">Tạo 3 thumbnail local</button></div><div class="storyboard-grid" style="margin-top:10px">${thumbnailCards}</div></div>`;
+    const thumbnailPanel = `<div class="analysis-item" style="margin-top:12px"><label>Thumbnail · ${number(thumbnails.length)} phương án</label><p class="panel-sub">Hai cách: <b>AI vẽ</b> ảnh bìa theo câu chuyện của video, hoặc <b>cắt khung</b> từ bản đã render (app chọn khung nét và đủ sáng nhất).</p><div class="queue-controls" style="justify-content:flex-start;margin-top:8px;flex-wrap:wrap"><input id="thumbnailPrompt" value="${esc(script?.script_title || project.title || '')}" placeholder="Prompt/ghi chú thumbnail" aria-label="Prompt thumbnail"><button class="btn small primary" onclick="generateProjectThumbnails(${project.id}, 'ai')">AI vẽ thumbnail</button><button class="btn small ghost" onclick="generateProjectThumbnails(${project.id}, 'frame')">Cắt khung từ video</button></div><div class="storyboard-grid" style="margin-top:10px">${thumbnailCards}</div></div>`;
     const musicOptions = `<option value="">Không dùng nhạc nền</option>${assets.filter((asset) => asset.asset_type === 'audio').map((asset) => `<option value="${asset.id}" ${Number(renderSettings.music_asset_id) === Number(asset.id) ? 'selected' : ''}>${esc(asset.original_name)} · ${fileSize(asset.file_size)}</option>`).join('')}`;
     const productionJobRows = productionJobs.length ? productionJobs.map((job) => `
       <div class="job-row">
@@ -973,16 +973,30 @@
     } catch (error) { setMessage(`Không đọc được Quality Check: ${error.message}`, 'error'); }
   }
 
-  async function generateProjectThumbnails(projectId) {
-    setMessage('Đang tách frame để tạo thumbnail...');
+  // Both panels reach the same endpoint, and this one used to omit the mode
+  // entirely - so it fell back to cropping a frame however the request was
+  // meant, which is why "AI thumbnails" kept producing stills from the video.
+  async function generateProjectThumbnails(projectId, mode = 'ai') {
+    setMessage(mode === 'ai'
+      ? 'AI đang vẽ thumbnail theo câu chuyện của video...'
+      : 'Đang chọn khung nét nhất để cắt thumbnail...');
     try {
       const prompt = $('thumbnailPrompt')?.value || '';
       const response = await api(`/api/projects/${projectId}/thumbnails/generate`, {
-        method: 'POST', body: JSON.stringify({prompt, variants: 3}),
+        method: 'POST', body: JSON.stringify({prompt, variants: 3, mode}),
       });
       setMessage(`Đã tạo ${response.thumbnails?.length || 0} thumbnail local. Hãy chọn một bản cuối.`, 'success');
       await openProjectDetail(projectId);
     } catch (error) { setMessage(`Không tạo được thumbnail: ${error.message}`, 'error'); }
+  }
+
+  async function deleteProjectThumbnail(projectId, thumbnailId) {
+    if (!confirm('Xoá thumbnail này? Ảnh sẽ bị xoá khỏi máy.')) return;
+    try {
+      await api(`/api/thumbnails/${thumbnailId}`, {method: 'DELETE'});
+      setMessage('Đã xoá thumbnail.', 'success');
+      await openProjectDetail(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
   }
 
   async function selectProjectThumbnail(projectId, thumbnailId) {

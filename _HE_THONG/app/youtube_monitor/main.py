@@ -2837,6 +2837,22 @@ def generate_project_thumbnails(
     return {"status": "generated", "thumbnails": thumbnails}
 
 
+@app.delete("/api/thumbnails/{thumbnail_id}")
+def delete_project_thumbnail(thumbnail_id: int) -> dict[str, Any]:
+    """Throw away one thumbnail, and the file it points at."""
+    removed = database.delete_project_thumbnail(thumbnail_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thumbnail")
+    path = Path(str(removed.get("file_path") or ""))
+    # Best effort: the row is already gone, and a leftover file is a smaller
+    # problem than an endpoint that fails after half the work.
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {"status": "deleted", "thumbnail_id": thumbnail_id}
+
+
 @app.post("/api/thumbnails/{thumbnail_id}/select")
 def select_project_thumbnail(thumbnail_id: int) -> dict[str, Any]:
     thumbnail = database.select_project_thumbnail(thumbnail_id)

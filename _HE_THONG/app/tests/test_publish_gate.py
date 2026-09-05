@@ -385,3 +385,114 @@ class PublishingNeedsSomewhereToPublishToTests(unittest.TestCase):
         checks = publish_gate.evaluate(**_ready(platform="tiktok", youtube_configured=False))
 
         self.assertNotIn("youtube_account", [item["key"] for item in checks])
+
+
+class ThrowingAwayAThumbnailTests(unittest.TestCase):
+    """Three at a time, kept for ever, is a grid worth less than no grid."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        from youtube_monitor.database import Database
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.database = Database(self.root / "thumbs.db")
+        self.database.upsert_channel({
+            "youtube_channel_id": "UC0000000000000000000088",
+            "channel_url": "https://www.youtube.com/channel/UC0000000000000000000088",
+            "title": "Kênh", "uploads_playlist_id": "UU0000000000000000000088",
+        })
+        self.database.upsert_video({
+            "youtube_video_id": "video-thumb-1",
+            "youtube_channel_id": "UC0000000000000000000088",
+            "video_url": "https://www.youtube.com/watch?v=video-thumb-1",
+            "title": "Nguồn", "metadata_hash": "h", "raw_payload": {},
+        })
+        project = self.database.create_production_project("video-thumb-1")
+        self.project_id = int(project["id"])
+
+    def _thumbnail(self, name: str = "thumb.jpg"):
+        path = self.root / name
+        path.write_bytes(b"jpeg")
+        asset = self.database.create_project_asset(
+            self.project_id, "image", name, str(path), mime_type="image/jpeg", file_size=4,
+        )
+        return self.database.create_project_thumbnail(self.project_id, int(asset["id"]))
+
+    def test_deleting_removes_the_row(self) -> None:
+        thumbnail = self._thumbnail()
+
+        removed = self.database.delete_project_thumbnail(int(thumbnail["id"]))
+
+        self.assertIsNotNone(removed)
+        self.assertEqual(self.database.list_project_thumbnails(self.project_id), [])
+
+    def test_it_removes_the_asset_behind_it_too(self) -> None:
+        """An asset left after its thumbnail is only there to puzzle over."""
+        thumbnail = self._thumbnail()
+        asset_id = int(thumbnail["asset_id"])
+
+        self.database.delete_project_thumbnail(int(thumbnail["id"]))
+
+        self.assertIsNone(self.database.get_project_asset(asset_id))
+
+    def test_it_returns_the_row_so_the_file_can_be_removed(self) -> None:
+        thumbnail = self._thumbnail()
+
+        removed = self.database.delete_project_thumbnail(int(thumbnail["id"]))
+
+        self.assertTrue(str(removed.get("file_path") or "").endswith("thumb.jpg"))
+
+    def test_deleting_one_leaves_the_others(self) -> None:
+        keep = self._thumbnail("keep.jpg")
+        drop = self._thumbnail("drop.jpg")
+
+        self.database.delete_project_thumbnail(int(drop["id"]))
+        left = self.database.list_project_thumbnails(self.project_id)
+
+        self.assertEqual([item["id"] for item in left], [int(keep["id"])])
+
+    def test_deleting_something_that_is_gone_says_so(self) -> None:
+        self.assertIsNone(self.database.delete_project_thumbnail(999_999))
+
+    def test_the_endpoint_exists(self) -> None:
+        from youtube_monitor.main import app
+
+        routes = {
+            (getattr(route, "path", ""), method)
+            for route in app.routes
+            for method in getattr(route, "methods", set())
+        }
+        self.assertIn(("/api/thumbnails/{thumbnail_id}", "DELETE"), routes)
+
+    def test_both_thumbnail_panels_can_delete(self) -> None:
+        page = studio_ui()
+
+        self.assertIn("deleteProjectThumbnail(", page)
+        self.assertIn("deleteStudioThumbnail(", page)
+
+
+class BothPanelsOfferTheDrawnThumbnailTests(unittest.TestCase):
+    """One panel omitted the mode entirely.
+
+    The endpoint defaults to cropping a frame, so the button most within
+    reach produced a still from the video however the request was meant -
+    which is why "AI thumbnails" kept coming back as screenshots.
+    """
+
+    def setUp(self) -> None:
+        self.page = studio_ui()
+
+    def test_the_project_panel_names_the_mode_it_wants(self) -> None:
+        self.assertIn("generateProjectThumbnails(projectId, mode = 'ai')", self.page)
+        self.assertIn("JSON.stringify({prompt, variants: 3, mode})", self.page)
+
+    def test_it_offers_both_kinds(self) -> None:
+        self.assertIn("generateProjectThumbnails(${project.id}, 'ai')", self.page)
+        self.assertIn("generateProjectThumbnails(${project.id}, 'frame')", self.page)
+
+    def test_the_publish_panel_does_too(self) -> None:
+        self.assertIn("generateStudioThumbnails(${project.id}, 'ai')", self.page)
+        self.assertIn("generateStudioThumbnails(${project.id}, 'frame')", self.page)

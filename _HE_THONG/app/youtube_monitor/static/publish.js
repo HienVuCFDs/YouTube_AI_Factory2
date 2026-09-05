@@ -59,9 +59,12 @@
     state.publishDescription = String(writer.new_description || '');
     state.publishHashtags = (writer.hashtags || []).join(', ');
     const thumbGrid = thumbnails.length
-      ? thumbnails.map((item) => `<button type="button" class="studio-thumb${item.selected ? ' is-selected' : ''}"`
+      ? thumbnails.map((item) => `<div class="studio-thumb-wrap">`
+          + `<button type="button" class="studio-thumb${item.selected ? ' is-selected' : ''}"`
           + ` onclick="selectStudioThumbnail(${item.id}, ${project.id})" title="Chọn ảnh này">`
-          + `<img loading="lazy" src="/api/assets/${item.asset_id}/download" style="aspect-ratio:${thumbnailVariant === 'short' ? '9/16' : '16/9'};height:${thumbnailVariant === 'short' ? '240px' : '110px'};width:auto;object-fit:contain" alt="thumbnail" /></button>`).join('')
+          + `<img loading="lazy" src="/api/assets/${item.asset_id}/download" style="aspect-ratio:${thumbnailVariant === 'short' ? '9/16' : '16/9'};height:${thumbnailVariant === 'short' ? '240px' : '110px'};width:auto;object-fit:contain" alt="thumbnail" /></button>`
+          + `<button type="button" class="studio-thumb-remove" title="Xoá ảnh này"`
+          + ` onclick="deleteStudioThumbnail(${item.id}, ${project.id})">×</button></div>`).join('')
       : '<div class="studio-empty">Chưa có ảnh bìa cho bản video này. Chọn cách tạo bên dưới.</div>';
 
     box.innerHTML = `<div class="studio-option-card"><b>Thumbnail</b>
@@ -617,6 +620,15 @@
       await refreshStudioPublish(projectId);
     } catch (error) { setMessage(error.message, 'error'); }
     finally { state.thumbnailBusy = false; }
+  }
+
+  async function deleteStudioThumbnail(thumbnailId, projectId) {
+    if (!confirm('Xoá thumbnail này? Ảnh sẽ bị xoá khỏi máy.')) return;
+    try {
+      await api(`/api/thumbnails/${thumbnailId}`, {method: 'DELETE'});
+      setMessage('Đã xoá thumbnail.', 'success');
+      await refreshStudioPublish(projectId);
+    } catch (error) { setMessage(error.message, 'error'); }
   }
 
   async function selectStudioThumbnail(thumbnailId, projectId) {

@@ -375,6 +375,11 @@
     .risk-finding { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin-top: 8px; }
     .risk-finding.sev-high { border-left-color: var(--red); }
     .risk-finding.sev-medium { border-left-color: var(--accent); }
+    .studio-thumb-wrap { position: relative; display: inline-block; line-height: 0; }
+    .studio-thumb-remove { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+      border-radius: 50%; border: none; background: rgba(3,7,18,.72); color: #fff;
+      font-size: 15px; line-height: 1; cursor: pointer; padding: 0; }
+    .studio-thumb-remove:hover { background: var(--red); }
     .studio-thumb { padding: 0; border: 2px solid var(--line); border-radius: 8px;
       overflow: hidden; background: var(--surface-2); line-height: 0; cursor: pointer; }
     .studio-thumb img { width: 168px; height: 94px; object-fit: cover; display: block; }
