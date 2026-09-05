@@ -30,8 +30,9 @@ class YouTubeOAuthConfigRequest(BaseModel):
 
 
 @router.get("/api/oauth/youtube/status")
-def youtube_oauth_status() -> dict[str, Any]:
-    return oauth_status()
+def youtube_oauth_status(managed_channel_id: int | None = Query(default=None, ge=1)) -> dict[str, Any]:
+    """Whether one channel can publish; without an id, the app-wide account."""
+    return oauth_status(managed_channel_id)
 
 
 @router.get("/api/oauth/youtube/channels")
@@ -106,5 +107,5 @@ def youtube_oauth_callback(
 
 @router.post("/api/oauth/youtube/disconnect")
 def youtube_oauth_disconnect() -> dict[str, Any]:
-    oauth_disconnect()
+    oauth_disconnect(managed_channel_id)
     return oauth_status()

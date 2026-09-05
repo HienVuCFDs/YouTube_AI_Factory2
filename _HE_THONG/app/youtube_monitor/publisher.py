@@ -146,8 +146,13 @@ class YouTubePublisher:
         path = Path(str(publication.get("local_file_path") or "")).expanduser()
         if not path.is_file():
             raise PublisherError(f"Không tìm thấy file video để upload: {path}")
+        # The publication names its channel, and each channel signs in as its
+        # own account. Uploading with whichever account was linked last is how
+        # a video ends up on the wrong channel - and that cannot be undone
+        # from here.
+        channel_id = publication.get("managed_channel_id")
         try:
-            token = get_access_token()
+            token = get_access_token(int(channel_id) if channel_id else None)
         except OAuthError as exc:
             raise PublisherError(str(exc)) from exc
 
@@ -239,7 +244,10 @@ class PublisherWorker:
             self.last_run_at = datetime.now(timezone.utc).isoformat()
             # OAuth is deliberately checked before claiming a job. Without a
             # token, queued publications remain visible and recoverable.
-            if oauth_status().get("connected"):
+            # Configured is enough to start looking: whether a particular
+            # channel is signed in is decided per publication, since they no
+            # longer share one account.
+            if oauth_status().get("configured"):
                 self._process_due()
             self._stop.wait(self.TICK_INTERVAL)
 

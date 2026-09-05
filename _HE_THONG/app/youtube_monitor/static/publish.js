@@ -151,8 +151,12 @@
         .map((profile) => `<option value="${profile}">${esc(PUBLISH_PROFILE_LABELS[profile] || profile)}</option>`)
         .join('');
       const channelOptions = channels
-        .map((channel) => `<option value="${channel.id}">${esc(channel.name)}`
-          + `${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}</option>`)
+        .map((channel) => {
+          const linked = (state.channelAccounts || {})[channel.id];
+          const mark = linked === true ? ' ✓' : linked === false ? ' (chưa đăng nhập)' : '';
+          return `<option value="${channel.id}">${esc(channel.name)}`
+            + `${channel.group_name ? ` · ${esc(channel.group_name)}` : ''}${mark}</option>`;
+        })
         .join('');
       let note = '';
       if (wrongShape) {
@@ -171,6 +175,9 @@
           aria-label="Kênh ${esc(target.label)}">${channelOptions || '<option value="">\u2014</option>'}</select>
         <select class="publish-target-profile" data-platform="${target.platform}" ${blocked ? 'disabled' : ''}
           aria-label="Định dạng ${esc(target.label)}">${options}</select>
+        ${target.platform === 'youtube' && !blocked
+          ? '<button class="btn small ghost" type="button" onclick="connectChannelAccount()">Đăng nhập kênh này</button>'
+          : ''}
         ${note ? `<span class="studio-model-note">${note}</span>` : ''}
       </div>`;
     }).join('');
@@ -294,6 +301,31 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  // One account per channel, because a creator's channels are usually not
+  // all on one Google account - and uploading with whichever account was
+  // linked last puts the video on the wrong channel, which cannot be undone
+  // from in here.
+  async function loadChannelAccounts() {
+    const channels = state.managedChannels || [];
+    const linked = {};
+    await Promise.all(channels.map(async (channel) => {
+      if (String(channel.platform || 'youtube').toLowerCase() !== 'youtube') return;
+      try {
+        const status = await api(`/api/oauth/youtube/status?managed_channel_id=${channel.id}`);
+        linked[channel.id] = Boolean(status.connected);
+      } catch (_) { linked[channel.id] = false; }
+    }));
+    state.channelAccounts = linked;
+    return linked;
+  }
+
+  function connectChannelAccount() {
+    const selected = document.querySelector('.publish-target-channel[data-platform="youtube"]')?.value;
+    if (!selected) return setMessage('Hãy chọn kênh trước.', 'error');
+    window.open(`/oauth/youtube/authorize?managed_channel_id=${selected}`, '_blank', 'noopener');
+    setMessage('Đã mở tab đăng nhập Google cho kênh này. Xong thì đóng và mở lại hộp thoại đăng.', '');
+  }
+
   function openPublishDialog(variant) {
     const bundle = state.publishBundle;
     const project = bundle?.project || {};
@@ -306,6 +338,7 @@
       return setMessage('Chưa dựng xong video dài để đăng.', 'error');
     }
     state.publishVariant = variant;
+    void loadChannelAccounts().then(() => renderPublishTargets());
     const defaultTitle = isShort
       ? String(state.shortLane?.script?.script_title || '')
       : String((state.publishTitles || [])[0] || '');

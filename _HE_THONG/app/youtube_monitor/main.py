@@ -6288,6 +6288,7 @@ def _publish_checklist(
     description: str = "",
     tags: list[str] | None = None,
     reuse_verdict: str = "",
+    managed_channel_id: int | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Gather every fact that decides whether this video may go out.
 
@@ -6324,7 +6325,10 @@ def _publish_checklist(
         reuse_verdict=reuse_verdict,
         source_title=str(source_video.get("title") or ""),
         youtube_configured=youtube_oauth.is_configured(),
-        youtube_connected=bool(oauth_status().get("connected")),
+        # This channel's account, not the app's: with several channels linked
+        # to different Google accounts, "someone is signed in" says nothing
+        # about whether this one is.
+        youtube_connected=bool(oauth_status(managed_channel_id).get("connected")),
     )
     return checks, {
         "scene_count": len(timeline),
@@ -6335,6 +6339,7 @@ def _publish_checklist(
 
 class PublishChecklistRequest(BaseModel):
     video_variant: Literal["long", "short"] = "long"
+    managed_channel_id: int | None = Field(default=None, ge=1)
     platform: Literal["youtube", "tiktok", "facebook", "instagram"] = "youtube"
     output_profile: Literal[
         "youtube_landscape", "youtube_shorts", "instagram_reels",
@@ -6514,6 +6519,7 @@ def project_publish_checklist(
         description=payload.description,
         tags=payload.tags,
         reuse_verdict=payload.reuse_verdict,
+        managed_channel_id=payload.managed_channel_id,
     )
     return {
         "ready": publish_gate.is_ready(checks),
@@ -6691,6 +6697,7 @@ def queue_project_publication(
         description=payload.description,
         tags=list(payload.tags or []),
         reuse_verdict=payload.reuse_verdict,
+        managed_channel_id=int(managed_id) if managed_id else None,
     )
     stopped = publish_gate.blockers(checks)
     if stopped and not payload.override_checklist:
