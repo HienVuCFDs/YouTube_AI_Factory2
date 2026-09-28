@@ -65,6 +65,17 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Không tìm thấy dự án")
 
+    def test_astra_context_endpoint_returns_compact_project_state(self) -> None:
+        project = database.create_idea_project("Tao video ve Astra dieu phoi app", title="Astra Director")
+
+        response = self.client.get(f"/api/projects/{project['id']}/astra-context")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["context_version"], "youtube_ai_factory.project_context.v1")
+        self.assertEqual(body["project"]["id"], project["id"])
+        self.assertEqual(body["source_package"]["source"]["kind"], "prompt_text")
+
     def test_videos_and_channels_list_endpoints(self) -> None:
         for path in ("/api/videos", "/api/channels"):
             response = self.client.get(path)
@@ -126,7 +137,10 @@ class MainApiTests(unittest.TestCase):
             status.assert_not_called()
 
     def test_high_level_pipeline_creates_project_and_durable_research_task(self) -> None:
-        with patch("youtube_monitor.main.agent_pipeline.start") as start:
+        # Which chat app directs is decided by settings and who is attached;
+        # pinned here so the machine's .env does not choose for the test.
+        with patch("youtube_monitor.main._directing_chat_agent", return_value="claude_chat"), \
+                patch("youtube_monitor.main.agent_pipeline.start") as start:
             start.return_value = {
                 "id": "task-research-1",
                 "role": "research",
@@ -150,7 +164,9 @@ class MainApiTests(unittest.TestCase):
             "Tao video giai thich cach cac AI hop tac voi nhau",
             auto_generate_media=False,
             auto_render=False,
+            external_agent="claude_chat",
         )
+        self.assertEqual(body["chat_agent"], "claude_chat")
         status = self.client.get(f"/api/automation/projects/{body['project']['id']}")
         self.assertEqual(status.status_code, 200)
         self.assertTrue(any(item["event_type"] == "project.created" for item in status.json()["events"]))

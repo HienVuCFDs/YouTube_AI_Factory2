@@ -6,16 +6,29 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any, Callable, Mapping
 
+from .chat_agent_presence import CHAT_AGENTS
 from .database import Database
 
 
 AGENT_ROLES = ("research", "script", "director", "media", "qc")
+
+# A goal driven end to end by an orchestrating agent (agent_loop). It is not
+# part of the five-role hand-off, and its result is not judged by another AI:
+# whether the goal was reached is read from the project itself.
+ORCHESTRATOR_ROLE = "orchestrator"
+
+# What requeue_interrupted_agent_tasks writes: a restart, not a verdict on the
+# work, so it is not passed to the next attempt as feedback.
+RESTART_NOTE = "Agent worker khởi động lại"
+SELF_VERIFIED_ROLES = frozenset({ORCHESTRATOR_ROLE})
+
 ROLE_STAGE = {
     "research": "orchestration",
     "script": "script",
     "director": "storyboard",
     "media": "image_generation",
     "qc": "quality_review",
+    ORCHESTRATOR_ROLE: "orchestration",
 }
 
 
@@ -269,13 +282,23 @@ class AgentTaskWorker:
             return
         if pending.get("status") != "queued":
             return
+        if str(pending.get("assigned_agent") or "") in CHAT_AGENTS:
+            # A chat app pulls its own tasks; running one here would put a CLI
+            # in its place without anyone choosing that.
+            return
         order = self._agent_order(pending)
         if not order:
             self.database.finish_agent_task(task_id, "failed", error="Không có AI được phép nhận task")
             return
+        # Claiming wipes the error column, and that column holds why the last
+        # attempt was turned back. Without carrying it over, a retry was the
+        # same request again - and came back with the same fault.
+        previous_error = str(pending.get("error") or "").strip()
         claimed = self.database.claim_agent_task(task_id, order[0])
         if not claimed:
             return
+        if previous_error and not previous_error.startswith(RESTART_NOTE):
+            claimed = {**claimed, "previous_error": previous_error}
         executor = self._executor
         reviewer_call = self._reviewer
         assert executor is not None and reviewer_call is not None
@@ -327,6 +350,10 @@ class AgentTaskWorker:
                 self.database.finish_agent_task(task_id, "failed", error=message)
             return
 
+        if str(claimed.get("role") or "") in SELF_VERIFIED_ROLES:
+            self._finish_self_verified(task_id, used_agent, output)
+            return
+
         reviewer_agent, review = self._perform_review(claimed, used_agent, output, order)
 
         combined = {**output, "_execution": {"executor": used_agent, "reviewer": reviewer_agent, "review": review}}
@@ -352,6 +379,39 @@ class AgentTaskWorker:
             except Exception:
                 # The task remains complete; the pipeline can be resumed from
                 # its durable output by an API/MCP caller.
+                pass
+
+    def _finish_self_verified(self, task_id: str, executor_agent: str, output: dict[str, Any]) -> None:
+        """Close a task whose output carries its own check against the project.
+
+        No cross-review: a second AI reading the first one's report would be
+        judging words, and the loop has already read the project. No requeue on
+        failure either - the loop has spent its strategies, and running it
+        again unchanged is the identical retry it exists to avoid.
+        """
+        verified = bool(output.get("verified"))
+        combined = {
+            **output,
+            "_execution": {
+                "executor": executor_agent,
+                "reviewer": "",
+                "review": {
+                    "approved": verified,
+                    "score": 10 if verified else 0,
+                    "note": "Kiểm bằng trạng thái thật của dự án, không chấm chéo.",
+                },
+            },
+        }
+        error = "" if verified else str(
+            output.get("reason") or f"Chưa đạt mục tiêu, còn thiếu: {output.get('missing')}"
+        )[:4000]
+        completed = self.database.finish_agent_task(
+            task_id, "completed" if verified else "failed", output=combined, error=error,
+        )
+        if verified and completed and self._completion_handler is not None:
+            try:
+                self._completion_handler(completed)
+            except Exception:
                 pass
 
     def _process_pending_review(self, task: dict[str, Any]) -> None:
@@ -400,10 +460,12 @@ class AgentPipeline:
         database: Database,
         worker: AgentTaskWorker,
         policy_resolver: PolicyResolver | None = None,
+        external_agent: str = "",
     ):
         self.database = database
         self.worker = worker
         self.policy_resolver = policy_resolver or (lambda: {})
+        self.external_agent = external_agent.strip()
 
     def _max_attempts(self) -> int:
         try:
@@ -418,7 +480,9 @@ class AgentPipeline:
         *,
         auto_generate_media: bool = False,
         auto_render: bool = False,
+        external_agent: str | None = None,
     ) -> dict[str, Any]:
+        chat_agent = self.external_agent if external_agent is None else external_agent.strip()
         task = self.database.create_agent_task(
             project_id,
             "research",
@@ -429,11 +493,14 @@ class AgentPipeline:
                     "auto_generate_media": bool(auto_generate_media),
                     "auto_render": bool(auto_render),
                 },
+                "chat_agent": chat_agent,
             },
             requested_by="orchestrator",
+            assigned_agent=chat_agent,
             max_attempts=self._max_attempts(),
         )
-        self.worker.enqueue(str(task["id"]))
+        if not chat_agent:
+            self.worker.enqueue(str(task["id"]))
         return task
 
     def advance(self, completed: dict[str, Any]) -> dict[str, Any] | None:
@@ -446,6 +513,7 @@ class AgentPipeline:
         next_role = self.sequence[position + 1]
         output = dict(completed.get("output") or {})
         original_input = dict(completed.get("input") or {})
+        chat_agent = str(original_input.get("chat_agent", self.external_agent) or "").strip()
         task = self.database.create_agent_task(
             completed.get("project_id"),
             next_role,
@@ -455,8 +523,10 @@ class AgentPipeline:
                 "pipeline": original_input.get("pipeline") or output.get("pipeline") or {},
                 "previous_role": role,
                 "previous_result": output,
+                "chat_agent": chat_agent,
             },
             requested_by="orchestrator",
+            assigned_agent=chat_agent,
             parent_task_id=str(completed["id"]),
             correlation_id=str(completed.get("correlation_id") or ""),
             max_attempts=self._max_attempts(),
@@ -470,5 +540,6 @@ class AgentPipeline:
             correlation_id=str(completed.get("correlation_id") or ""),
             payload={"from_task_id": completed["id"], "result": output},
         )
-        self.worker.enqueue(str(task["id"]))
+        if not chat_agent:
+            self.worker.enqueue(str(task["id"]))
         return task

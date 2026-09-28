@@ -1,90 +1,63 @@
-# Kết nối MiniMax Design, Claude và Antigravity với YT Factory
+# Kết nối ChatGPT app với YouTube AI Factory
 
-YT Factory đã có một MCP local tại:
+YouTube AI Factory dùng **ChatGPT Chat làm AI điều phối chính** qua MCP. Luồng này không gọi Codex CLI để suy luận và không gọi model qua OpenAI API. Do ChatGPT không kết nối trực tiếp tới `127.0.0.1`, lớp truyền tải chính thức vẫn cần Secure MCP Tunnel và khóa Platform để chạy `tunnel-client`.
+
+Giao diện web tại `http://127.0.0.1:8787` vẫn hoạt động độc lập: bạn có thể click thủ công như trước, hoặc chat trong ChatGPT để giao việc cấp cao. ChatGPT gọi các tool MCP để đọc/ghi project, còn worker của YouTube AI Factory tiếp tục xử lý job media, voice và render dài hạn.
+
+## Cấu hình kết nối ChatGPT
+
+MCP bridge của project nằm tại:
 
 `F:\YouTube_AI_Factory\_HE_THONG\app\youtube_monitor\ai_desktop_mcp.py`
 
-MCP này không cần API key của Claude, Google hay MiniMax. Nó chỉ trao đổi với YT Factory đang chạy ở `http://127.0.0.1:8787` và chỉ import file từ thư mục an toàn của từng dự án.
+Bridge chỉ kết nối tới YouTube AI Factory đang chạy ở `http://127.0.0.1:8787`. Nó không đọc cookie, browser profile hay token ChatGPT.
 
-## Thêm vào MiniMax Design
+Điều kiện phía tài khoản:
 
-Trong phần **MCP / Tools / Add local server** của MiniMax Design, thêm server local với các giá trị:
+1. Tài khoản/workspace ChatGPT có Developer Mode và quyền dùng MCP app phù hợp.
+2. Có `tunnel_id` trong OpenAI Platform và khóa dành cho `tunnel-client`.
+3. Trong ChatGPT, tạo app ở Developer Mode, chọn kết nối **Tunnel** và chọn đúng `tunnel_id`.
 
-- Name: `youtube_factory`
-- Command: `C:\Program Files\Python313\python.exe`
-- Arguments: `F:\YouTube_AI_Factory\_HE_THONG\app\youtube_monitor\ai_desktop_mcp.py`
-- Environment: `YOUTUBE_FACTORY_URL=http://127.0.0.1:8787`
+Cấu hình tunnel theo MCP stdio, với lệnh server:
 
-Nếu MiniMax hiển thị ô cấu hình JSON theo chuẩn OpenCode, dùng:
-
-```json
-{
-  "mcp": {
-    "youtube_factory": {
-      "type": "local",
-      "command": [
-        "C:\\Program Files\\Python313\\python.exe",
-        "F:\\YouTube_AI_Factory\\_HE_THONG\\app\\youtube_monitor\\ai_desktop_mcp.py"
-      ],
-      "environment": {
-        "YOUTUBE_FACTORY_URL": "http://127.0.0.1:8787"
-      },
-      "enabled": true
-    }
-  }
-}
+```text
+"C:\Program Files\Python313\python.exe" "F:\YouTube_AI_Factory\_HE_THONG\app\youtube_monitor\ai_desktop_mcp.py"
 ```
 
-Khởi động lại MiniMax Design sau khi lưu cấu hình.
+Sau khi tạo tunnel, lưu `CHATGPT_MCP_TUNNEL_ID=<tunnel_id>` trong phần cấu hình tích hợp của YouTube AI Factory để dashboard hiển thị đúng trạng thái.
 
-## Claude Desktop
+YouTube AI Factory và `tunnel-client` phải đang chạy khi ChatGPT gọi tool. Không cấu hình `tunnel-client` thành dịch vụ nền nếu bạn chưa chủ động muốn vậy.
 
-Trong **Settings → Developer → Edit Config**, thêm vào `mcpServers`:
+## Cách giao việc trong ChatGPT
 
-```json
-{
-  "mcpServers": {
-    "youtube_factory": {
-      "command": "C:\\Program Files\\Python313\\python.exe",
-      "args": [
-        "F:\\YouTube_AI_Factory\\_HE_THONG\\app\\youtube_monitor\\ai_desktop_mcp.py"
-      ],
-      "env": {
-        "YOUTUBE_FACTORY_URL": "http://127.0.0.1:8787"
-      }
-    }
-  }
-}
-```
+Ví dụ:
 
-Nếu đã có `mcpServers`, chỉ thêm entry `youtube_factory`, không ghi đè các server khác.
+> Dùng YouTube AI Factory tạo một video 5 phút về lịch sử AI cho người mới. Hãy tự nghiên cứu, viết kịch bản trong chat này, lưu kịch bản vào app, xây storyboard và dừng lại trước bước tạo media để tôi duyệt.
 
-## Google Antigravity
+Luồng task tự động:
 
-Trong **MCP Servers / Add local MCP server**, sử dụng cùng Command, Arguments và Environment của phần MiniMax. Antigravity cần khởi động lại sau khi thêm.
+1. ChatGPT gọi `youtube_factory_create_project` để tạo project và task Research.
+2. ChatGPT gọi `youtube_factory_get_next_task`, thực hiện công việc ngay trong cuộc chat.
+3. Với task Script, ChatGPT gọi `youtube_factory_save_script`; app tự tạo storyboard/timeline cơ bản.
+4. ChatGPT gọi `youtube_factory_complete_task`; app tự tạo task kế tiếp.
+5. Các bước tạo media, voice hoặc render chỉ chạy khi có `confirmed=true`.
 
-## Cách dùng trong app AI
+Các tool quan trọng:
 
-Mở YT Factory trước, sau đó có thể giao một yêu cầu cấp cao thay vì điều khiển từng nút:
+- Task: `youtube_factory_get_next_task`, `youtube_factory_complete_task`, `youtube_factory_fail_task`.
+- Project/kịch bản: `youtube_factory_create_project`, `youtube_factory_list_projects`, `youtube_factory_save_script`, `youtube_factory_get_storyboard`, `youtube_factory_update_shot`.
+- Media: `youtube_factory_generate_image`, `youtube_factory_generate_gif`, `youtube_factory_generate_video`, `youtube_factory_get_job_status`, `youtube_factory_approve_scene`.
+- Hoàn thiện: `youtube_factory_build_timeline`, `youtube_factory_generate_voice`, `youtube_factory_render_video`, `youtube_factory_get_render_status`.
 
-> Dùng `youtube_factory_create_project` để tạo video giải thích lịch sử AI cho người mới, dài khoảng 5 phút. Chưa tự render; hãy để Research, Script, Director, Media và QC Agent thực hiện và nghiệm thu chéo, rồi dùng `youtube_factory_get_pipeline_status` báo lại các lỗi còn thiếu.
+## Giới hạn cần hiểu đúng
 
-MCP hiện cung cấp các nhóm tool cấp cao:
+- ChatGPT chỉ suy luận khi cuộc trò chuyện đang thực hiện một lượt chạy. Các job đã xếp hàng trong app có thể tiếp tục chạy độc lập.
+- Ứng dụng web không thể âm thầm gọi gói thuê bao ChatGPT như một API. Chiều gọi đúng là ChatGPT gọi app qua MCP.
+- Full MCP có hành động ghi hiện phụ thuộc gói và quyền Developer Mode của ChatGPT. Nếu tài khoản không có quyền này, phần kết nối ChatGPT Chat chưa thể bật chỉ bằng sửa code local.
+- Gửi một link video và yêu cầu dựng lại có thể chạy theo chuỗi, nhưng các bước tốn tài nguyên hoặc xuất bản vẫn cần xác nhận theo policy của app.
 
-1. **Project và đa AI**: `youtube_factory_create_project`, `youtube_factory_start_pipeline`, `youtube_factory_get_pipeline_status`, `youtube_factory_create_agent_task`, `youtube_factory_list_agent_tasks`, `youtube_factory_list_events`.
-2. **Provider Gateway**: `youtube_factory_list_providers`, `youtube_factory_route_provider`.
-3. **Media bất đồng bộ**: `youtube_factory_generate_image`, `youtube_factory_generate_gif`, `youtube_factory_generate_video`, `youtube_factory_get_job_status`, `youtube_factory_approve_scene`.
-4. **Timeline, voice và render**: `youtube_factory_build_timeline`, `youtube_factory_generate_voice`, `youtube_factory_render_video`, `youtube_factory_get_render_status`.
-5. **Tương thích luồng import cũ**: `youtube_factory_list_projects`, `youtube_factory_get_storyboard`, `youtube_factory_import_asset`, `youtube_factory_import_assets_batch`, `youtube_factory_complete_antigravity_scene`.
-
-Các tool tạo media, voice hoặc render yêu cầu `confirmed=true`. Tool tạo video còn bắt buộc `reference_asset_id` của ảnh scene đã có; MCP không được tự hạ xuống text-to-video khi thiếu ảnh nguồn.
-
-Luồng đa AI không cho CLI truy cập trực tiếp SQLite. App lưu `AgentTask`, message A2A, review chéo, event và quyết định provider; MCP chỉ là hợp đồng để agent gọi công cụ cấp cao.
-
-Nếu một reviewer hết hạn mức, pipeline trả trạng thái `review_required` và giữ nguyên output executor. App tự thử lại phần review sau thời điểm reset; nó không chạy lại executor. Khi provider không báo giờ reset nhưng tài khoản đã hồi phục, mở YT Factory và bấm **Cho thử lại** trong banner hạn mức để cho phép một lượt probe ngay.
-
-Asset chỉ được import từ:
+Asset do công cụ ngoài tạo chỉ được import từ:
 
 `F:\YouTube_AI_Factory\01_DU_AN\<project_id>\03_TAI_NGUYEN\ai_desktop_import`
 
-Điều này giúp app AI không có quyền đọc/ghi tuỳ ý trên máy và không cần lấy cookie/token đăng nhập.
+Giới hạn này ngăn MCP đọc/ghi file tuỳ ý trên máy.

@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from .database import Database
-from .settings import GPU_ONLY, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, WHISPER_MODEL_SIZE
+from .settings import (
+    GPU_ONLY,
+    WHISPER_COMPUTE_TYPE,
+    WHISPER_DEVICE,
+    WHISPER_MODEL_FALLBACKS,
+    WHISPER_MODEL_SIZE,
+)
+from .video_downloader import VideoDownloadError, download_audio_for_transcription
 
 
 class TranscriptionError(RuntimeError):
@@ -15,33 +22,9 @@ class TranscriptionError(RuntimeError):
 
 def _extract_audio(video_url: str, dest_dir: Path) -> Path:
     try:
-        import yt_dlp
-    except ImportError as exc:
-        raise TranscriptionError(
-            "Thiếu thư viện yt-dlp. Cài đặt bằng: pip install yt-dlp"
-        ) from exc
-
-    options = {
-        "format": "bestaudio/best",
-        "outtmpl": str(dest_dir / "audio.%(ext)s"),
-        "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "wav", "preferredquality": "192"}
-        ],
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "noprogress": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([video_url])
-    except Exception as exc:
+        return download_audio_for_transcription(video_url, dest_dir)
+    except VideoDownloadError as exc:
         raise TranscriptionError(f"Không trích xuất được audio: {exc}") from exc
-
-    audio_files = sorted(dest_dir.glob("audio.*"))
-    if not audio_files:
-        raise TranscriptionError("Không tìm thấy file audio sau khi trích xuất")
-    return audio_files[0]
 
 
 _model_cache: dict[str, Any] = {}
@@ -91,19 +74,33 @@ def _get_model(model_size: str | None = None):
     device, compute_type = resolve_whisper_runtime()
     selected_model = str(model_size or WHISPER_MODEL_SIZE).strip() or WHISPER_MODEL_SIZE
     key = f"{selected_model}:{device}:{compute_type}"
-    if key not in _model_cache:
+    if key in _model_cache:
+        return _model_cache[key]
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise TranscriptionError(
+            "Thiếu thư viện faster-whisper. Cài đặt bằng: pip install faster-whisper"
+        ) from exc
+    # The accurate model is asked for first and the smaller ones are only
+    # reached when it will not load - which on a card with little free memory
+    # means an allocation failure. A rougher transcript is worth more than a
+    # run that stops here.
+    attempts = [selected_model] + [
+        name for name in WHISPER_MODEL_FALLBACKS if name != selected_model
+    ]
+    failures: list[str] = []
+    for candidate in attempts:
         try:
-            from faster_whisper import WhisperModel
-        except ImportError as exc:
-            raise TranscriptionError(
-                "Thiếu thư viện faster-whisper. Cài đặt bằng: pip install faster-whisper"
-            ) from exc
-        _model_cache[key] = WhisperModel(
-            selected_model,
-            device=device,
-            compute_type=compute_type,
-        )
-    return _model_cache[key]
+            model = WhisperModel(candidate, device=device, compute_type=compute_type)
+        except Exception as exc:
+            failures.append(f"{candidate}: {exc}")
+            continue
+        _model_cache[key] = model
+        return model
+    raise TranscriptionError(
+        "Không nạp được model Whisper nào. " + " | ".join(failures)[:800]
+    )
 
 
 def _format_timestamp(seconds: float) -> str:

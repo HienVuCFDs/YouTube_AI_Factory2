@@ -145,8 +145,17 @@ def call_claude_code_json(
     # minutes was not enough and the run was thrown away at the end.
     timeout_seconds: int = 1800,
     image_path: str | Path | None = None,
+    allow_web: bool = False,
 ) -> dict[str, Any]:
     """Run the user's local Claude Code CLI as a structured-output agent.
+
+    `allow_web` opens exactly one extra tool, WebFetch, and is for the one job
+    that needs it: reading a page the app cannot fetch for itself. Marketplaces
+    serve an ordinary HTTP client a script-only shell and a headless browser a
+    redirect to their home page, while the CLI's own reader gets the listing -
+    price, rating and review count included, none of which appear anywhere in
+    the HTML the app can reach. Every other caller keeps the no-tools posture,
+    because a script writer has no business browsing.
 
     Uses the CLI's existing claude.ai login (subscription) rather than an
     ANTHROPIC_API_KEY. When image_path is given, the Read tool is allowed so
@@ -173,7 +182,7 @@ def call_claude_code_json(
         # no-command posture); --tools "Read" allows viewing exactly the one
         # image file referenced above and nothing else. Both forms are
         # documented by `claude --help` (verified live on this machine).
-        "--tools", "Read" if image_path else "",
+        "--tools", "WebFetch" if allow_web else ("Read" if image_path else ""),
     ]
     try:
         process = operations.run_cancellable(

@@ -194,6 +194,35 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "button[aria-label*='Upload' i]",
         ],
     ),
+    "meta_ai_image": ProviderConfig(
+        url=os.getenv("META_AI_IMAGE_URL", "https://www.meta.ai/"),
+        output_kind="image",
+        prompt_selectors=[
+            "textarea[placeholder*='Imagine' i]",
+            "textarea[placeholder*='Ask' i]",
+            "[contenteditable='true']",
+            "textarea",
+        ],
+        submit_selectors=[
+            "button[aria-label*='Send' i]",
+            "button[aria-label*='Gui' i]",
+            "button[type='submit']",
+        ],
+        image_result_selectors=[
+            # Meta serves generated pictures from its own CDN, which is the
+            # one handle that does not depend on the interface language.
+            "img[src*='fbcdn.net']",
+            "img[alt*='AI' i]",
+            "div[role='img'] img",
+        ],
+        image_upload_selectors=[
+            "input[type='file']",
+            "button[aria-label*='Add photo' i]",
+            "button[aria-label*='Upload' i]",
+        ],
+        prompt_instruction="O nhap tin nhan cua Meta AI (thuong o duoi cung khung chat)",
+        submit_instruction="Nut gui tin nhan cua Meta AI, thuong canh o nhap",
+    ),
     "gemini_web_image": ProviderConfig(
         url=os.getenv("GEMINI_WEB_URL", "https://gemini.google.com/app"),
         output_kind="image",
@@ -243,8 +272,14 @@ class WebVideoError(RuntimeError):
     pass
 
 
+# Providers that are the same site behind the same sign-in. Giving them one
+# profile each would mean signing in once per provider on a single account.
+_SHARED_PROFILES = {"meta_ai_image": "meta_ai_video"}
+
+
 def _profile_dir(provider: str) -> Path:
-    return Path(os.getenv("WEB_VIDEO_PROFILE_DIR", str(STATE_DIR / f"profile_{provider}")))
+    owner = _SHARED_PROFILES.get(provider, provider)
+    return Path(os.getenv("WEB_VIDEO_PROFILE_DIR", str(STATE_DIR / f"profile_{owner}")))
 
 
 def _download_dir(provider: str) -> Path:

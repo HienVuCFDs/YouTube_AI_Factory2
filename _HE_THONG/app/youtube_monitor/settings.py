@@ -35,11 +35,19 @@ EDITABLE_INTEGRATION_KEYS = {
     "GOOGLE_OAUTH_CLIENT_SECRET",
     "GOOGLE_OAUTH_REDIRECT_URI",
     "AI_ORCHESTRATOR_PROVIDER",
+    "AI_ORCHESTRATOR_FALLBACK_PROVIDER",
     "AI_STAGE_ASSIGNMENTS_JSON",
     "AUTOMATION_POLICY_JSON",
+    "ASTRA_MCP_TUNNEL_ID",
+    "CHATGPT_MCP_TUNNEL_ID",
     "GFLOW_CLI_PATH",
     "GFLOW_PROFILE",
     "GFLOW_VIDEO_MODEL",
+    "PHANTOM_CANVAS_URL",
+    "GOOGLE_TTS_API_KEY",
+    "GOOGLE_TTS_VOICE",
+    "PIPER_BINARY",
+    "PIPER_MODEL",
 }
 
 
@@ -59,6 +67,22 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
+
+
+def google_tts_config() -> tuple[str, str]:
+    """The Google TTS key and voice. The key is returned only to the caller
+    about to speak with it, never through the settings API."""
+    return integration_value("GOOGLE_TTS_API_KEY"), (
+        integration_value("GOOGLE_TTS_VOICE") or GOOGLE_TTS_VOICE
+    )
+
+
+def piper_config() -> tuple[str, str]:
+    """The piper binary and the .onnx model to speak with."""
+    return (
+        integration_value("PIPER_BINARY") or PIPER_BINARY,
+        integration_value("PIPER_MODEL") or PIPER_MODEL,
+    )
 
 
 def integration_value(key: str, default: str = "") -> str:
@@ -192,7 +216,16 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 YOUTUBE_MAX_INITIAL_VIDEOS = int(os.getenv("YOUTUBE_MAX_INITIAL_VIDEOS", "100"))
 YOUTUBE_PUSH_VERIFY_TOKEN = os.getenv("YOUTUBE_PUSH_VERIFY_TOKEN", "").strip()
 
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base").strip() or "base"
+# `base` is the second smallest model, and on Vietnamese it mishears enough to
+# change the meaning: "vu tru" came back as "vu chup", "he mat troi" as "he mat
+# cho", "nguyen to hoa hoc" as "vinh tuu khoa hoc". The transcript is the raw
+# material for every step after it, and a writer handed that repairs it by
+# guessing - which reads perfectly well and is sometimes wrong. large-v3 costs
+# about four extra seconds on a minute of audio and fixes all of the above.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3").strip() or "large-v3"
+# Tried in turn when the chosen model will not load, which on a small card
+# means running out of memory. A smaller transcript is worth more than none.
+WHISPER_MODEL_FALLBACKS: tuple[str, ...] = ("medium", "small", "base", "tiny")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "auto").strip().lower() or "auto"
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "auto").strip().lower() or "auto"
 
@@ -236,7 +269,20 @@ def gflow_config() -> dict[str, str]:
     }
 
 
-AGENT_IDS = ("codex_cli", "claude_code_cli", "antigravity")
+# The runtime has one active Orchestrator: the AI that directs a run, deciding
+# which step comes next. Astra is the default when nothing is chosen.
+ORCHESTRATOR_IDS = ("astra", "antigravity", "chatgpt_app", "claude_chat", "claude")
+ORCHESTRATOR_FALLBACK_IDS = ("claude", "antigravity", "claude_chat", "chatgpt_app", "astra")
+
+# The desktop chat apps (GPT Work, Claude Cowork). They reach the app over MCP
+# and pull their own work; nothing here can call one and wait for an answer.
+# So they can direct a run, but they cannot be the AI a step calls mid-way.
+CHAT_AGENT_IDS = ("chatgpt_app", "claude_chat")
+
+# Agent assignments are the user-facing routing policy for orchestration and
+# specialist tasks. A concrete integration can still be unavailable at runtime;
+# API routes expose readiness and the app enforces policy before execution.
+AGENT_IDS = ("astra", "antigravity", "chatgpt_app", "claude_chat", "claude")
 AGENT_STAGE_IDS = (
     "orchestration",
     "script",
@@ -247,16 +293,66 @@ AGENT_STAGE_IDS = (
 )
 
 
+# The agents were once named after the CLI that ran them. A saved assignment
+# still speaks the old names, and dropping an unknown name as malformed left a
+# stage allowed to use exactly one AI - usually not the one the user picked.
+LEGACY_AGENT_IDS: dict[str, str] = {
+    "codex_cli": "astra",
+    "codex": "astra",
+    "claude_code_cli": "claude",
+    "claude_code": "claude",
+    "claude_cli": "claude",
+    "antigravity_cli": "antigravity",
+    "chatgpt": "chatgpt_app",
+}
+
+# The one table from an agent (what the user assigns) to the runtime that
+# executes it. Everything that needs "which CLI is Astra" asks runtime_for()
+# (re-exported as orchestrator_runtime.runtime_id); no module keeps its own copy.
+# Chat apps have no runtime here: they pull their own work over MCP.
+AGENT_RUNTIME: dict[str, str] = {
+    "astra": "codex_cli",
+    "claude": "claude_code_cli",
+    "antigravity": "antigravity",
+}
+
+
+def canonical_agent_id(agent: object) -> str:
+    """Return the current id for an agent name, or "" if there is none."""
+    name = str(agent or "").strip()
+    name = LEGACY_AGENT_IDS.get(name, name)
+    return name if name in AGENT_IDS else ""
+
+
+def runtime_for(name: object) -> str:
+    """The runtime behind an agent name; any other name comes back unchanged.
+
+    Unknown names (openai_gpt, anthropic_claude, gflow_cli...) are returned as
+    given so the caller can refuse them by name instead of having them quietly
+    rewritten into a runtime nobody picked.
+    """
+    raw = str(name or "").strip().lower()
+    agent = canonical_agent_id(raw)
+    return AGENT_RUNTIME.get(agent, agent) if agent else raw
+
+
 def default_agent_assignments() -> dict[str, dict[str, object]]:
+    # A stage is the thinking a step does while it runs, which the app calls
+    # and waits on. A chat app directing the run cannot be called that way, so
+    # choosing one to direct must not also make it every stage's executor.
     primary = orchestrator_provider()
-    fallback = [agent for agent in AGENT_IDS if agent != primary]
+    fallback = orchestrator_fallback_provider()
+    if primary in CHAT_AGENT_IDS:
+        primary = "astra"
+    if fallback in CHAT_AGENT_IDS:
+        fallback = "claude"
     return {
         stage: {
-            "mode": "auto" if stage not in {"orchestration"} else "fixed",
+            "mode": "auto",
             "executor": primary,
             "allowed_agents": list(AGENT_IDS),
-            "fallback_agents": fallback,
-            "reviewer": "auto" if stage != "quality_review" else fallback[0],
+            "fallback_agents": [fallback] if fallback != primary else [],
+            "reviewer": "auto",
         }
         for stage in AGENT_STAGE_IDS
     }
@@ -281,19 +377,19 @@ def agent_assignments() -> dict[str, dict[str, object]]:
         mode = str(configured.get("mode") or defaults[stage]["mode"])
         if mode not in {"fixed", "auto", "fallback"}:
             mode = str(defaults[stage]["mode"])
-        executor = str(configured.get("executor") or defaults[stage]["executor"])
-        if executor not in AGENT_IDS:
-            executor = str(defaults[stage]["executor"])
-        allowed = [str(item) for item in configured.get("allowed_agents", []) if str(item) in AGENT_IDS]
+        executor = canonical_agent_id(configured.get("executor")) or str(defaults[stage]["executor"])
+        allowed = [
+            name for name in (canonical_agent_id(item) for item in configured.get("allowed_agents", []))
+            if name
+        ]
         if not allowed:
             allowed = list(AGENT_IDS)
         fallbacks = [
-            str(item) for item in configured.get("fallback_agents", [])
-            if str(item) in AGENT_IDS and str(item) != executor
+            name for name in (canonical_agent_id(item) for item in configured.get("fallback_agents", []))
+            if name and name != executor
         ]
-        reviewer = str(configured.get("reviewer") or defaults[stage]["reviewer"])
-        if reviewer not in {*AGENT_IDS, "auto"}:
-            reviewer = "auto"
+        reviewer = configured.get("reviewer") or defaults[stage]["reviewer"]
+        reviewer = "auto" if str(reviewer) == "auto" else canonical_agent_id(reviewer) or "auto"
         defaults[stage] = {
             "mode": mode,
             "executor": executor,
@@ -377,13 +473,31 @@ def automation_policy() -> dict[str, object]:
 
 
 def orchestrator_provider() -> str:
-    """Return the selected cloud agent reached through its logged-in local client.
+    """Return the selected primary Orchestrator."""
+    configured = integration_value("AI_ORCHESTRATOR_PROVIDER", "astra") or "astra"
+    return configured if configured in ORCHESTRATOR_IDS else "astra"
 
-    This is a function, rather than an import-time constant, so switching among
-    Codex CLI, Claude Code CLI, and Antigravity takes effect without restarting
-    the app.
+
+def orchestrator_fallback_provider() -> str:
+    """Return the configured fallback Orchestrator."""
+    configured = integration_value("AI_ORCHESTRATOR_FALLBACK_PROVIDER", "claude") or "claude"
+    return configured if configured in ORCHESTRATOR_FALLBACK_IDS else "claude"
+
+
+def orchestrator_chat_agents() -> list[str]:
+    """The desktop chat apps chosen to direct runs, primary first.
+
+    Empty when the primary is a CLI: runs then stay with the in-app worker, as
+    they did before a chat app could be picked. A CLI fallback behind a chat
+    primary is left out too - a chat app that has been quiet for a while is
+    usually idle, not gone, and handing its run to a CLI would put the CLI
+    back in the director's seat without anyone choosing that.
     """
-    return integration_value("AI_ORCHESTRATOR_PROVIDER", "codex_cli") or "codex_cli"
+    primary = orchestrator_provider()
+    if primary not in CHAT_AGENT_IDS:
+        return []
+    chosen = (primary, orchestrator_fallback_provider())
+    return [agent for agent in dict.fromkeys(chosen) if agent in CHAT_AGENT_IDS]
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
@@ -504,6 +618,12 @@ VOXCPM_PYTHON = Path(
 VOXCPM_RUNNER = Path(
     os.getenv("VOXCPM_RUNNER", str(Path(__file__).with_name("voxcpm_runner.py")))
 ).expanduser()
+# Edge ships exactly two Vietnamese voices, so every video a Vietnamese
+# channel makes is narrated by one of the same two. These are the ways out.
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "vi-VN-Neural2-A").strip() or "vi-VN-Neural2-A"
+PIPER_BINARY = os.getenv("PIPER_BINARY", "piper").strip() or "piper"
+PIPER_MODEL = os.getenv("PIPER_MODEL", "").strip()
+
 VOXCPM_MODEL = os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2").strip() or "openbmb/VoxCPM2"
 VOXCPM_DEVICE = os.getenv("VOXCPM_DEVICE", "cuda").strip() or "cuda"
 VOXCPM_REFERENCE_AUDIO = os.getenv("VOXCPM_REFERENCE_AUDIO", "").strip()

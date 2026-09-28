@@ -314,6 +314,67 @@ class Database:
                         ON DELETE SET NULL
                 );
 
+                -- A segment is one line of narration.  Its edit can contain
+                -- several visual beats (source clip, extracted frame, or an
+                -- AI/image asset) without replacing the segment's main
+                -- storyboard visual.
+                CREATE TABLE IF NOT EXISTS project_timeline_edit_beats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timeline_segment_id INTEGER NOT NULL,
+                    beat_index INTEGER NOT NULL,
+                    asset_id INTEGER,
+                    visual_path TEXT NOT NULL DEFAULT '',
+                    source_kind TEXT NOT NULL DEFAULT 'primary',
+                    start_seconds REAL NOT NULL DEFAULT 0,
+                    duration_seconds REAL NOT NULL DEFAULT 1,
+                    effect TEXT NOT NULL DEFAULT 'static',
+                    transition TEXT NOT NULL DEFAULT 'cut',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(timeline_segment_id, beat_index),
+                    FOREIGN KEY (timeline_segment_id)
+                        REFERENCES project_timeline_segments(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (asset_id)
+                        REFERENCES project_assets(id)
+                        ON DELETE SET NULL
+                );
+
+                -- An AI edit proposal is not the live timeline.  Keeping it
+                -- separately gives the user an explicit review/apply boundary
+                -- and lets us invalidate it when its source script or scenes
+                -- change.
+                CREATE TABLE IF NOT EXISTS project_director_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES production_projects(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_director_artifacts ON project_director_artifacts(project_id, kind, id);
+                CREATE TABLE IF NOT EXISTS project_edit_plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    script_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    source_revision TEXT NOT NULL,
+                    plan_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    approved_at TEXT,
+                    applied_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, script_id),
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (script_id)
+                        REFERENCES project_scripts(id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS project_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL,
@@ -455,6 +516,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL,
                     timeline_segment_id INTEGER NOT NULL,
+                    edit_beat_id INTEGER,
                     provider TEXT NOT NULL,
                     prompt TEXT NOT NULL DEFAULT '',
                     duration_seconds INTEGER NOT NULL DEFAULT 5,
@@ -484,6 +546,9 @@ class Database:
                     FOREIGN KEY (timeline_segment_id)
                         REFERENCES project_timeline_segments(id)
                         ON DELETE CASCADE,
+                    FOREIGN KEY (edit_beat_id)
+                        REFERENCES project_timeline_edit_beats(id)
+                        ON DELETE SET NULL,
                     FOREIGN KEY (reference_asset_id)
                         REFERENCES project_assets(id)
                         ON DELETE SET NULL
@@ -644,6 +709,30 @@ class Database:
                         ON DELETE SET NULL
                 );
 
+                -- One row per AI step actually attempted: which runtime ran
+                -- it, why that one, what came out, and whether a local
+                -- fallback stood in. Without this a finished video says
+                -- nothing about whether an AI ever made a decision in it.
+                CREATE TABLE IF NOT EXISTS orchestrator_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    stage TEXT NOT NULL DEFAULT '',
+                    step TEXT NOT NULL DEFAULT '',
+                    runtime TEXT NOT NULL DEFAULT '',
+                    agent TEXT NOT NULL DEFAULT '',
+                    why TEXT NOT NULL DEFAULT '',
+                    input_summary TEXT NOT NULL DEFAULT '',
+                    output_ref TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    fallback_used INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    attempts_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id)
+                        REFERENCES production_projects(id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_video
                     ON analysis_jobs(youtube_video_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_video_analyses_video
@@ -658,6 +747,8 @@ class Database:
                     ON project_shots(project_id, script_id, shot_index);
                 CREATE INDEX IF NOT EXISTS idx_project_timeline_project
                     ON project_timeline_segments(project_id, script_id, segment_index);
+                CREATE INDEX IF NOT EXISTS idx_project_edit_plans_project
+                    ON project_edit_plans(project_id, script_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_project_jobs_project
                     ON project_jobs(project_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_project_publications_due
@@ -694,6 +785,8 @@ class Database:
                     ON provider_route_decisions(project_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_provider_usage_project
                     ON provider_usage_ledger(project_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_orchestrator_steps_project
+                    ON orchestrator_steps(project_id, id DESC);
                 """
             )
             self._ensure_column(connection, "videos", "local_media_path", "TEXT")
@@ -725,6 +818,20 @@ class Database:
             self._ensure_column(connection, "project_timeline_segments", "visual_kind", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_timeline_segments", "visual_fps", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "project_timeline_segments", "visual_kind_reason", "TEXT NOT NULL DEFAULT ''")
+            # Storyboard's transform plan explains how a scene keeps the
+            # source's meaning while changing what is shown on screen. These
+            # fields are intentionally data-only here; media jobs and the
+            # editor UI consume them later.
+            self._ensure_column(connection, "project_timeline_segments", "content_dna", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(connection, "project_timeline_segments", "visual_strategy", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "visual_provider", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "source_dependency", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "risk_level", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_timeline_segments", "transform_actions", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(connection, "project_timeline_segments", "required_assets", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(connection, "project_timeline_segments", "overlays", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(connection, "project_timeline_segments", "sound_cues", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(connection, "project_timeline_segments", "edit_direction", "TEXT NOT NULL DEFAULT '{}'")
             # How the final edit should treat this scene — planned before
             # rendering rather than applying one blanket transition to all.
             self._ensure_column(connection, "project_timeline_segments", "edit_transition", "TEXT NOT NULL DEFAULT ''")
@@ -773,6 +880,7 @@ class Database:
             # Cannot be inferred from pipeline_stage: claiming a job
             # overwrites that with 'running', erasing the marker.
             self._ensure_column(connection, "scene_generation_jobs", "prompt_written", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "scene_generation_jobs", "edit_beat_id", "INTEGER")
             self._ensure_column(connection, "scene_generation_jobs", "review_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "scene_generation_jobs", "review_note", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "scene_generation_jobs", "review_status", "TEXT NOT NULL DEFAULT ''")
@@ -1687,6 +1795,16 @@ class Database:
             project_id,
             script_id=int(latest_script["id"]) if latest_script else None,
         ) if latest_script else []
+        if latest_script and latest_timeline:
+            latest_timeline = self.attach_edit_beats_to_timeline(
+                project_id,
+                latest_timeline,
+                script_id=int(latest_script["id"]),
+            )
+        latest_edit_beats = {
+            str(segment["id"]): segment.get("edit_beats") or []
+            for segment in latest_timeline
+        }
         production_jobs = self.list_project_jobs(project_id, limit=20)
         production_job_events = {
             str(job["id"]): self.list_project_job_events(int(job["id"]), limit=20)
@@ -1760,6 +1878,7 @@ class Database:
             "latest_script": latest_script,
             "latest_shots": latest_shots,
             "latest_timeline": latest_timeline,
+            "edit_beats": latest_edit_beats,
             "production_jobs": production_jobs,
             "production_job_events": production_job_events,
             "publications": publications,
@@ -3290,6 +3409,198 @@ class Database:
             "segment": self.get_project_timeline_segment(segment_id),
         }
 
+    def attach_asset_to_edit_beat(
+        self,
+        beat_id: int,
+        asset_id: int,
+        *,
+        source_kind: str = "",
+    ) -> dict[str, Any] | None:
+        """Attach generated media to one edit beat without replacing its scene clip."""
+        asset = self.get_project_asset(asset_id)
+        if not asset or str(asset.get("asset_type") or "") not in {"image", "video"}:
+            return None
+        with self._connect() as connection:
+            beat = connection.execute(
+                """
+                SELECT b.id, b.timeline_segment_id, s.project_id
+                FROM project_timeline_edit_beats b
+                JOIN project_timeline_segments s ON s.id = b.timeline_segment_id
+                WHERE b.id = ?
+                """,
+                (beat_id,),
+            ).fetchone()
+            if not beat or int(beat["project_id"]) != int(asset["project_id"]):
+                return None
+            connection.execute(
+                """
+                UPDATE project_timeline_edit_beats
+                SET asset_id = ?, visual_path = ?, source_kind = ?, status = 'ready', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    asset_id,
+                    str(asset.get("file_path") or ""),
+                    source_kind.strip() or ("ai_video" if str(asset.get("asset_type") or "") == "video" else "ai_image"),
+                    utc_now(),
+                    beat_id,
+                ),
+            )
+        return {
+            "asset": self.get_project_asset(asset_id),
+            "beat": self.get_timeline_edit_beat(beat_id),
+        }
+
+    def set_timeline_edit_beat_status(self, beat_id: int, status: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE project_timeline_edit_beats SET status = ?, updated_at = ? WHERE id = ?",
+                (status.strip()[:32], utc_now(), beat_id),
+            )
+        return self.get_timeline_edit_beat(beat_id)
+
+    def get_timeline_edit_beat(self, beat_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT b.*, s.project_id, s.script_id,
+                       a.original_name AS asset_name, a.mime_type AS asset_mime_type
+                FROM project_timeline_edit_beats b
+                JOIN project_timeline_segments s ON s.id = b.timeline_segment_id
+                LEFT JOIN project_assets a ON a.id = b.asset_id
+                WHERE b.id = ?
+                """,
+                (beat_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_timeline_edit_beats(self, segment_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT b.*, a.original_name AS asset_name, a.mime_type AS asset_mime_type
+                FROM project_timeline_edit_beats b
+                LEFT JOIN project_assets a ON a.id = b.asset_id
+                WHERE b.timeline_segment_id = ?
+                ORDER BY b.beat_index ASC, b.id ASC
+                """,
+                (segment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_project_edit_beats(self, project_id: int, script_id: int | None = None) -> dict[int, list[dict[str, Any]]]:
+        query = """
+            SELECT b.*, s.project_id, s.script_id, a.original_name AS asset_name, a.mime_type AS asset_mime_type
+            FROM project_timeline_edit_beats b
+            JOIN project_timeline_segments s ON s.id = b.timeline_segment_id
+            LEFT JOIN project_assets a ON a.id = b.asset_id
+            WHERE s.project_id = ?
+        """
+        params: list[Any] = [project_id]
+        if script_id is not None:
+            query += " AND s.script_id = ?"
+            params.append(script_id)
+        query += " ORDER BY b.timeline_segment_id, b.beat_index, b.id"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            grouped.setdefault(int(item["timeline_segment_id"]), []).append(item)
+        return grouped
+
+    def attach_edit_beats_to_timeline(
+        self,
+        project_id: int,
+        timeline: list[dict[str, Any]],
+        script_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return timeline rows with approved per-scene edit beats attached.
+
+        The renderer already knows how to turn edit beats into a real visual
+        composition. Keeping this join here makes project reloads, manifests,
+        previews, and production renders see the same scene data.
+        """
+        if not timeline:
+            return []
+        grouped = self.list_project_edit_beats(project_id, script_id=script_id)
+        attached: list[dict[str, Any]] = []
+        for segment in timeline:
+            item = dict(segment)
+            item["edit_beats"] = grouped.get(int(item.get("id") or 0), [])
+            attached.append(item)
+        return attached
+
+    def replace_timeline_edit_beats(self, segment_id: int, beats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        segment = self.get_project_timeline_segment(segment_id)
+        if not segment:
+            return []
+        now = utc_now()
+        with self._connect() as connection:
+            existing = {
+                int(row["beat_index"]): int(row["id"])
+                for row in connection.execute(
+                    "SELECT id, beat_index FROM project_timeline_edit_beats WHERE timeline_segment_id = ?",
+                    (segment_id,),
+                ).fetchall()
+            }
+            cursor = 0.0
+            retained_ids: list[int] = []
+            for index, beat in enumerate(beats, start=1):
+                duration = max(0.15, float(beat.get("duration_seconds") or 1))
+                asset_id = beat.get("asset_id")
+                visual_path = str(beat.get("visual_path") or "").strip()
+                if asset_id:
+                    asset = self.get_project_asset(int(asset_id))
+                    if not asset or int(asset["project_id"]) != int(segment["project_id"]):
+                        continue
+                    visual_path = str(asset["file_path"] or "")
+                values = (
+                    int(asset_id) if asset_id else None, visual_path,
+                    str(beat.get("source_kind") or "primary")[:32], cursor, duration,
+                    str(beat.get("effect") or "static")[:32],
+                    str(beat.get("transition") or "cut")[:32],
+                    str(beat.get("prompt") or "")[:5000],
+                    str(beat.get("status") or ("ready" if visual_path else "needs_asset"))[:32],
+                )
+                existing_id = existing.get(index)
+                if existing_id:
+                    connection.execute(
+                        """
+                        UPDATE project_timeline_edit_beats
+                        SET asset_id = ?, visual_path = ?, source_kind = ?, start_seconds = ?,
+                            duration_seconds = ?, effect = ?, transition = ?, prompt = ?, status = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (*values, now, existing_id),
+                    )
+                    retained_ids.append(existing_id)
+                else:
+                    inserted = connection.execute(
+                        """
+                        INSERT INTO project_timeline_edit_beats (
+                            timeline_segment_id, beat_index, asset_id, visual_path, source_kind,
+                            start_seconds, duration_seconds, effect, transition, prompt, status,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (segment_id, index, *values, now, now),
+                    )
+                    retained_ids.append(int(inserted.lastrowid))
+                cursor += duration
+            if retained_ids:
+                placeholders = ",".join("?" for _ in retained_ids)
+                connection.execute(
+                    f"DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ? AND id NOT IN ({placeholders})",
+                    (segment_id, *retained_ids),
+                )
+            else:
+                connection.execute("DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (segment_id,))
+            connection.execute(
+                "UPDATE project_timeline_segments SET updated_at = ? WHERE id = ?", (now, segment_id)
+            )
+        return self.list_timeline_edit_beats(segment_id)
+
     def save_transcript(
         self,
         video_id: str,
@@ -3717,6 +4028,7 @@ class Database:
         requires_reference_image: bool = False,
         max_attempts: int = 2,
         prompt_pending: bool = False,
+        edit_beat_id: int | None = None,
     ) -> dict[str, Any] | None:
         now = utc_now()
         with self._connect() as connection:
@@ -3726,6 +4038,16 @@ class Database:
             ).fetchone()
             if not segment:
                 return None
+            if edit_beat_id is not None:
+                beat = connection.execute(
+                    """
+                    SELECT id FROM project_timeline_edit_beats
+                    WHERE id = ? AND timeline_segment_id = ?
+                    """,
+                    (edit_beat_id, timeline_segment_id),
+                ).fetchone()
+                if not beat:
+                    return None
             if reference_asset_id is not None:
                 asset = connection.execute(
                     "SELECT id FROM project_assets WHERE id = ? AND project_id = ?",
@@ -3756,15 +4078,16 @@ class Database:
             cursor = connection.execute(
                 """
                 INSERT INTO scene_generation_jobs (
-                    project_id, timeline_segment_id, provider, prompt,
+                    project_id, timeline_segment_id, edit_beat_id, provider, prompt,
                     duration_seconds, ratio, reference_asset_id, job_kind,
                     depends_on_job_id, requires_reference_image, max_attempts,
                     status, pipeline_stage, prompt_written, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
                     timeline_segment_id,
+                    edit_beat_id,
                     provider.strip(),
                     prompt.strip(),
                     max(1, min(int(duration_seconds), 30)),
@@ -3852,6 +4175,7 @@ class Database:
         "flow_veo",
         "flow_image",
         "meta_ai_video",
+        "meta_ai_image",
         "gemini_web_image",
         "chatgpt_web_image",
     )
@@ -4057,6 +4381,255 @@ class Database:
             )
         return self.get_scene_generation_job(job_id)
 
+    @staticmethod
+    def _decode_edit_plan(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["plan"] = json.loads(str(result.pop("plan_json") or "{}"))
+        except (TypeError, ValueError):
+            result["plan"] = {}
+        return result
+
+    def save_director_artifact(self, project_id: int, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (project_id, kind, json.dumps(payload, ensure_ascii=False, allow_nan=False), utc_now()),
+            )
+            artifact_id = cursor.lastrowid
+        self.emit_domain_event("director.artifact_saved", project_id=project_id,
+                               aggregate_type="director_artifact", aggregate_id=artifact_id,
+                               source="astra", payload={"kind": kind})
+        return {"id": artifact_id, "kind": kind, "payload": payload}
+
+    def get_director_artifact(self, project_id: int, kind: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM project_director_artifacts WHERE project_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+                (project_id, kind),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result.pop("payload_json"))
+        return result
+
+    def get_project_edit_plan(
+        self,
+        project_id: int,
+        script_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        clauses = ["project_id = ?"]
+        params: list[Any] = [int(project_id)]
+        if script_id is not None:
+            clauses.append("script_id = ?")
+            params.append(int(script_id))
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM project_edit_plans
+                WHERE {' AND '.join(clauses)}
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return self._decode_edit_plan(row)
+
+    def save_project_edit_plan(
+        self,
+        project_id: int,
+        script_id: int,
+        source_revision: str,
+        plan: dict[str, Any],
+        status: str = "draft",
+        error: str = "",
+    ) -> dict[str, Any] | None:
+        now = utc_now()
+        selected = status if status in {"draft", "approved", "applying", "ready", "stale", "error"} else "draft"
+        approved_at = now if selected == "approved" else None
+        applied_at = now if selected == "ready" else None
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO project_edit_plans (
+                    project_id, script_id, status, source_revision, plan_json,
+                    error, approved_at, applied_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, script_id) DO UPDATE SET
+                    status = excluded.status,
+                    source_revision = excluded.source_revision,
+                    plan_json = excluded.plan_json,
+                    error = excluded.error,
+                    approved_at = excluded.approved_at,
+                    applied_at = excluded.applied_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(project_id),
+                    int(script_id),
+                    selected,
+                    source_revision,
+                    json.dumps(plan or {}, ensure_ascii=False),
+                    error.strip()[:2000],
+                    approved_at,
+                    applied_at,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_project_edit_plan(project_id, script_id)
+
+    def set_project_edit_plan_status(
+        self,
+        plan_id: int,
+        status: str,
+        *,
+        source_revision: str | None = None,
+        error: str = "",
+    ) -> dict[str, Any] | None:
+        selected = status if status in {"draft", "approved", "applying", "ready", "stale", "error"} else "error"
+        assignments = ["status = ?", "error = ?", "updated_at = ?"]
+        params: list[Any] = [selected, error.strip()[:2000], utc_now()]
+        if source_revision is not None:
+            assignments.append("source_revision = ?")
+            params.append(source_revision)
+        if selected == "approved":
+            assignments.append("approved_at = ?")
+            params.append(utc_now())
+        if selected == "ready":
+            assignments.append("applied_at = ?")
+            params.append(utc_now())
+        params.append(int(plan_id))
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE project_edit_plans SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+            row = connection.execute(
+                "SELECT * FROM project_edit_plans WHERE id = ?",
+                (int(plan_id),),
+            ).fetchone()
+        return self._decode_edit_plan(row)
+
+    def apply_project_edit_plan_scenes(
+        self,
+        project_id: int,
+        script_id: int,
+        scenes: list[dict[str, Any]],
+    ) -> int:
+        """Apply every proposed scene in one transaction.
+
+        A failed row must not leave the renderer using half of the old plan
+        and half of the new one.
+        """
+        now = utc_now()
+        applied = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, shot_id FROM project_timeline_segments
+                WHERE project_id = ? AND script_id = ?
+                """,
+                (int(project_id), int(script_id)),
+            ).fetchall()
+            timeline = {int(row["id"]): dict(row) for row in rows}
+            for entry in scenes:
+                segment_id = int(entry.get("segment_id") or 0)
+                segment = timeline.get(segment_id)
+                if not segment:
+                    raise ValueError(f"Cảnh {segment_id} không còn thuộc timeline hiện tại")
+                kind = str(entry.get("kind") or "image").strip()[:20]
+                fps = max(0, min(int(entry.get("fps") or 0), 60)) if kind in {"gif", "video"} else 0
+                connection.execute(
+                    """
+                    UPDATE project_timeline_segments
+                    SET visual_kind = ?, visual_fps = ?, visual_kind_reason = ?,
+                        content_dna = ?, visual_strategy = ?, visual_provider = ?,
+                        source_dependency = ?, risk_level = ?, transform_actions = ?,
+                        required_assets = ?, overlays = ?, sound_cues = ?, edit_direction = ?,
+                        edit_transition = ?, edit_effect = ?, edit_note = ?,
+                        edit_trim_head = ?, edit_trim_tail = ?, edit_cleanups = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        kind,
+                        fps,
+                        str(entry.get("reason") or "").strip()[:500],
+                        json.dumps(entry.get("content_dna") or {}, ensure_ascii=False),
+                        str(entry.get("visual_strategy") or "").strip()[:80],
+                        str(entry.get("provider") or entry.get("visual_provider") or "").strip()[:80],
+                        str(entry.get("source_dependency") or "").strip()[:20],
+                        str(entry.get("risk_level") or "").strip()[:20],
+                        json.dumps(
+                            [item for item in (entry.get("transform_actions") or []) if isinstance(item, dict)],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            [item for item in (entry.get("required_assets") or []) if isinstance(item, dict)],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            [item for item in (entry.get("overlays") or []) if isinstance(item, dict)],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            [item for item in (entry.get("sound_cues") or []) if isinstance(item, dict)],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(entry.get("direction") or {}, ensure_ascii=False),
+                        str(entry.get("transition") or "fade").strip()[:20],
+                        str(entry.get("effect") or "zoom_in").strip()[:20],
+                        str(entry.get("note") or "").strip()[:400],
+                        max(0.0, float(entry.get("trim_head_seconds") or 0)),
+                        max(0.0, float(entry.get("trim_tail_seconds") or 0)),
+                        json.dumps(
+                            [item for item in (entry.get("cleanups") or []) if isinstance(item, dict)],
+                            ensure_ascii=False,
+                        ),
+                        now,
+                        segment_id,
+                    ),
+                )
+                if "compiled_beats" in entry:
+                    connection.execute("DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (segment_id,))
+                    for beat_index, beat in enumerate(entry["compiled_beats"], 1):
+                        connection.execute(
+                            """INSERT INTO project_timeline_edit_beats
+                            (timeline_segment_id, beat_index, asset_id, visual_path, source_kind,
+                             start_seconds, duration_seconds, effect, transition, prompt, status, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (segment_id, beat_index, beat.get("asset_id"), beat.get("visual_path", ""),
+                             beat.get("source_kind", "primary"), beat["start_seconds"], beat["duration_seconds"],
+                             beat.get("effect", "static"), beat.get("transition", "cut"), beat.get("prompt", ""),
+                             beat.get("status", "ready"), now, now),
+                        )
+                shot_id = int(segment.get("shot_id") or 0)
+                if shot_id:
+                    needs_visual = bool(entry.get("needs_extra_visual"))
+                    extra_note = str(entry.get("extra_visual_note") or "").strip()
+                    if needs_visual:
+                        if extra_note:
+                            connection.execute(
+                                "UPDATE project_shots SET visual_prompt = ?, status = 'needs_visual', updated_at = ? WHERE id = ?",
+                                (extra_note, now, shot_id),
+                            )
+                        else:
+                            connection.execute(
+                                "UPDATE project_shots SET status = 'needs_visual', updated_at = ? WHERE id = ?",
+                                (now, shot_id),
+                            )
+                    else:
+                        connection.execute(
+                            "UPDATE project_shots SET status = 'planned', updated_at = ? WHERE id = ? AND status = 'needs_visual'",
+                            (now, shot_id),
+                        )
+                applied += 1
+        return applied
+
     def set_timeline_cleanups(
         self,
         project_id: int,
@@ -4122,6 +4695,38 @@ class Database:
                     segment_id,
                 ),
             )
+
+    def save_segment_edit_layers(
+        self,
+        segment_id: int,
+        *,
+        overlays: list[dict[str, Any]] | None = None,
+        sound_cues: list[dict[str, Any]] | None = None,
+        direction: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Store renderable graphic and audio layers for one timeline scene."""
+        updates: list[tuple[str, Any]] = []
+        if overlays is not None:
+            updates.append((
+                "overlays",
+                json.dumps([item for item in overlays if isinstance(item, dict)], ensure_ascii=False),
+            ))
+        if sound_cues is not None:
+            updates.append((
+                "sound_cues",
+                json.dumps([item for item in sound_cues if isinstance(item, dict)], ensure_ascii=False),
+            ))
+        if direction is not None:
+            updates.append(("edit_direction", json.dumps(direction or {}, ensure_ascii=False)))
+        if not updates:
+            return self.get_project_timeline_segment(segment_id)
+        assignments = ", ".join(f"{column} = ?" for column, _ in updates)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE project_timeline_segments SET {assignments}, updated_at = ? WHERE id = ?",
+                [*(value for _, value in updates), utc_now(), segment_id],
+            )
+        return self.get_project_timeline_segment(segment_id)
 
     def set_segment_visual_kind(
         self,
@@ -4256,6 +4861,87 @@ class Database:
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_orchestrator_step(
+        self,
+        *,
+        stage: str,
+        step: str,
+        status: str,
+        project_id: int | None = None,
+        runtime: str = "",
+        agent: str = "",
+        why: str = "",
+        input_summary: str = "",
+        output_ref: str = "",
+        fallback_used: bool = False,
+        error: str = "",
+        attempts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Record one AI step exactly as it happened, successful or not.
+
+        A failed step is the most valuable row here: it is the difference
+        between "the AI planned this cut" and "the AI could not be reached and
+        a template filled in", which the finished video cannot show.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO orchestrator_steps (
+                    project_id, stage, step, runtime, agent, why, input_summary,
+                    output_ref, status, fallback_used, error, attempts_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    stage.strip()[:80],
+                    step.strip()[:120],
+                    runtime.strip()[:80],
+                    agent.strip()[:80],
+                    why.strip()[:600],
+                    input_summary.strip()[:600],
+                    output_ref.strip()[:600],
+                    status.strip()[:40],
+                    1 if fallback_used else 0,
+                    error.strip()[:2000],
+                    json.dumps(attempts or [], ensure_ascii=False),
+                    utc_now(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM orchestrator_steps WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        return self._orchestrator_step(row)
+
+    def list_orchestrator_steps(
+        self,
+        project_id: int | None = None,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Steps oldest first, which is the order a run report reads in."""
+        clauses = ["1 = 1"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(int(project_id))
+        params.append(max(1, min(int(limit), 1000)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM orchestrator_steps WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [self._orchestrator_step(row) for row in reversed(rows)]
+
+    @staticmethod
+    def _orchestrator_step(row: Any) -> dict[str, Any]:
+        result = dict(row)
+        result["fallback_used"] = bool(result.get("fallback_used"))
+        try:
+            result["attempts"] = json.loads(str(result.pop("attempts_json", "") or "[]"))
+        except json.JSONDecodeError:
+            result["attempts"] = []
+        return result
 
     def set_project_workflow(self, project_id: int, workflow: str) -> dict[str, Any] | None:
         """Record which production workflow this project follows.
@@ -4532,7 +5218,7 @@ class Database:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT project_id, timeline_segment_id, provider
+                SELECT project_id, timeline_segment_id, edit_beat_id, provider, job_kind
                 FROM scene_generation_jobs WHERE id = ?
                 """,
                 (job_id,),
@@ -4572,7 +5258,31 @@ class Database:
                     job_id,
                 ),
             )
-            if status == "completed" and output_path:
+
+            if row["edit_beat_id"] is not None and status in {"error", "cancelled"}:
+                connection.execute(
+                    """
+                    UPDATE project_timeline_edit_beats
+                    SET status = ?, updated_at = ? WHERE id = ?
+                    """,
+                    ("error" if status == "error" else "needs_asset", now, int(row["edit_beat_id"])),
+                )
+            if status == "completed" and output_path and row["edit_beat_id"] is not None:
+                connection.execute(
+                    """
+                    UPDATE project_timeline_edit_beats
+                    SET asset_id = ?, visual_path = ?, source_kind = ?, status = 'ready', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        resolved_asset_id,
+                        output_path,
+                        "ai_video" if str(row["job_kind"] or "").strip().lower() == "video" else "ai_image",
+                        now,
+                        int(row["edit_beat_id"]),
+                    ),
+                )
+            elif status == "completed" and output_path:
                 segment = connection.execute(
                     "SELECT audio_path FROM project_timeline_segments WHERE id = ?",
                     (row["timeline_segment_id"],),
@@ -4993,6 +5703,7 @@ class Database:
                 """
                 SELECT id FROM agent_tasks
                 WHERE status = 'queued' AND attempt_count < max_attempts
+                  AND assigned_agent NOT IN ('chatgpt_app', 'claude_chat')
                 ORDER BY created_at ASC LIMIT ?
                 """,
                 (max(1, min(int(limit), 5000)),),
@@ -5019,7 +5730,7 @@ class Database:
                 SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
                     assigned_agent = '', error = 'Agent worker khởi động lại trước khi hoàn tất',
                     updated_at = ?, completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE ? END
-                WHERE status = 'running'
+                WHERE status = 'running' AND assigned_agent NOT IN ('chatgpt_app', 'claude_chat')
                 """,
                 (utc_now(), utc_now()),
             )

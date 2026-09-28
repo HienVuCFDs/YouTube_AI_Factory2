@@ -21,6 +21,7 @@ from .shorts import (
     is_vertical,
     profile_size,
 )
+from . import google_tts, piper_tts, settings as app_settings
 from .ffmpeg_renderer import generate_local_visual_draft, media_duration_seconds, render_timeline_with_ffmpeg
 from .premiere_export import build_premiere_export_package
 from .project_layout import ensure_project_layout
@@ -113,6 +114,11 @@ def _context(database: Database, job: dict[str, Any]) -> tuple[dict[str, Any], d
         raise ProductionJobError("Project hoặc script không còn tồn tại")
     if not timeline:
         raise ProductionJobError("Project chưa có timeline để chạy production job")
+    timeline = database.attach_edit_beats_to_timeline(
+        int(job["project_id"]),
+        timeline,
+        script_id=int(job["script_id"]),
+    )
     return project, script, timeline
 
 
@@ -349,6 +355,20 @@ def run_voxcpm_voice_preview_job(
     return str(preview_dir)
 
 
+# Edge is the default and the only one that needs nothing configured, but it
+# ships two Vietnamese voices and answers from a public endpoint that
+# intermittently returns no audio at all. Google adds the rest of the vi-VN
+# voices; Piper adds one that cannot be taken away.
+VOICE_PROVIDERS: frozenset[str] = frozenset(
+    {"pyvideotrans", "py_video_trans", "edge_tts", "voxcpm", "google_tts", "piper"}
+)
+# Which of them write straight to the file the caller asked for, rather than
+# into a directory that then has to be searched.
+_DIRECT_OUTPUT_PROVIDERS: frozenset[str] = frozenset(
+    {"edge_tts", "voxcpm", "google_tts", "piper"}
+)
+
+
 def run_voiceover_job(
     database: Database,
     job: dict[str, Any],
@@ -401,7 +421,7 @@ def run_voiceover_job(
     provider = str(job["provider"]).strip().lower()
     if provider in {"dry_run", "preview", "mock"}:
         return str(manifest_path)
-    if provider not in {"pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"}:
+    if provider not in VOICE_PROVIDERS:
         raise ProductionJobError(f"Voiceover provider không được hỗ trợ: {job['provider']}")
     if provider == "edge_tts" and not edge_tts_command.strip():
         raise ProductionJobError("Chưa cấu hình EDGE_TTS_COMMAND")
@@ -464,7 +484,8 @@ def run_voiceover_job(
         duration = max(0.1, float(item.get("duration_seconds") or 1))
         srt_path = project_dir / f"segment-{index:03d}.srt"
         text_path = project_dir / f"segment-{index:03d}.txt"
-        output_path = audio_dir / f"segment-{index:03d}.{ 'mp3' if provider == 'edge_tts' else 'wav' }"
+        suffix = "mp3" if provider in {"edge_tts", "google_tts"} else "wav"
+        output_path = audio_dir / f"segment-{index:03d}.{suffix}"
         output_dir = project_dir / f"tts-output-{index:03d}"
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_voiceover_srt(srt_path, voice_text, duration)
@@ -503,6 +524,25 @@ def run_voiceover_job(
                         "không phải lỗi kịch bản. Hãy chọn VoxCPM2 local GPU ở bước Giọng đọc rồi thử lại."
                     ) from last_error
                 raise last_error
+        elif provider == "google_tts":
+            api_key, google_voice = app_settings.google_tts_config()
+            try:
+                google_tts.synthesize(
+                    voice_text, output_path,
+                    api_key=api_key,
+                    voice=voice_role if google_tts.is_google_voice(voice_role) else google_voice,
+                    rate=float(voice_rate or 1.0),
+                )
+            except google_tts.GoogleTtsError as exc:
+                raise ProductionJobError(str(exc)) from exc
+        elif provider == "piper":
+            piper_binary, piper_model = app_settings.piper_config()
+            try:
+                piper_tts.synthesize(
+                    voice_text, output_path, binary=piper_binary, model=piper_model,
+                )
+            except piper_tts.PiperTtsError as exc:
+                raise ProductionJobError(str(exc)) from exc
         elif provider in {"pyvideotrans", "py_video_trans"}:
             command_cwd = Path(pyvideotrans_workdir).expanduser() if pyvideotrans_workdir.strip() else project_dir
             if pyvideotrans_workdir.strip() and not command_cwd.is_dir():
@@ -523,7 +563,7 @@ def run_voiceover_job(
                 cwd=command_cwd,
                 require_cuda=GPU_ONLY,
             )
-        generated = output_path if provider in {"edge_tts", "voxcpm"} and output_path.is_file() else None
+        generated = output_path if provider in _DIRECT_OUTPUT_PROVIDERS and output_path.is_file() else None
         if provider in {"pyvideotrans", "py_video_trans"}:
             generated = _find_generated_audio(output_dir, output_path)
         if not generated:
@@ -669,6 +709,14 @@ def _autocover_source_marks(
     marking already on the timeline is left alone, whether it came from the
     user, the planner or an earlier render.
     """
+    workflow = str(project.get("workflow") or "content").strip().lower()
+    uses_source_visual = any(
+        str(item.get("visual_strategy") or "").strip().lower()
+        in {"source_clip_short", "source_freeze_frame"}
+        for item in timeline
+    )
+    if workflow != "reup" and not uses_source_visual:
+        return timeline
     if any(str(item.get("edit_cleanups") or "").strip() not in {"", "[]"} for item in timeline):
         return timeline
     video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
@@ -758,6 +806,11 @@ def run_render_job(
             background_music=music_path if music_path.is_file() else None,
             music_volume=float(render_settings.get("music_volume") or 0.12),
             transition=str(render_settings.get("transition_style") or "fade"),
+            # A 16:9 source rendered into a vertical delivery profile must be
+            # cropped to fill it.  Padding is appropriate for landscape long
+            # videos, but produces a tiny image surrounded by black bars for
+            # 9:16 output.
+            fit="cover" if is_vertical(str(render_settings.get("output_profile") or "")) else "pad",
         )
     if provider not in {"ffmpeg", "ffmpeg_command"}:
         raise ProductionJobError(f"Render provider không được hỗ trợ: {job['provider']}")
@@ -812,7 +865,7 @@ def run_director_production_job(
     """
     render_settings = database.get_project_render_settings(int(job["project_id"]))
     provider = str(render_settings.get("voice_provider") or job["provider"] or "edge_tts").strip().lower()
-    if provider not in {"edge_tts", "pyvideotrans", "voxcpm"}:
+    if provider not in VOICE_PROVIDERS:
         raise ProductionJobError("AI Đạo diễn hiện dùng Edge TTS cho luồng dựng tự động")
     if provider == "edge_tts" and not edge_tts_command.strip():
         raise ProductionJobError("Chưa cấu hình EDGE_TTS_COMMAND")
@@ -967,7 +1020,7 @@ def run_premiere_draft_job(
     if provider in {"dry_run", "preview", "mock"}:
         project, script, timeline = _context(database, job)
     else:
-        if provider not in {"pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"}:
+        if provider not in VOICE_PROVIDERS:
             raise ProductionJobError(f"Premiere draft provider không được hỗ trợ: {job['provider']}")
         run_voiceover_job(
             database,

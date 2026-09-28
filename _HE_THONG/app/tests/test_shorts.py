@@ -251,9 +251,14 @@ class ShortIsReachableFromThePageTests(unittest.TestCase):
 
     def test_short_controls_live_in_the_main_wizard_lane(self) -> None:
         self.assertNotIn('id="studioPlanShortButton"', self.page)
-        self.assertNotIn('id="studioRenderShortButton"', self.page)
+        self.assertIn('id="studioRenderShortButton"', self.page)
         self.assertIn("queueShortVariantJob('voiceover')", self.page)
         self.assertIn("queueShortVariantJob('render_short')", self.page)
+
+    def test_short_render_is_disabled_until_real_media_exists(self) -> None:
+        self.assertIn("renderAction.disabled = !Boolean(lane?.can_render)", self.page)
+        self.assertIn("if (!lane.can_render)", self.page)
+        self.assertIn("Short chưa thể dựng", self.page)
 
     def test_the_wizard_uses_the_standalone_short_lane(self) -> None:
         self.assertIn("/short-lane", self.page)

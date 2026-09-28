@@ -1,6 +1,6 @@
 # Pinned, known-good dependency snapshot for _HE_THONG/app.
 #
-# requirements.txt only pins floors (e.g. `yt-dlp>=2024.8.6`, no ceiling),
+# requirements.txt only pins floors (e.g. `yt-dlp[default]>=2026.8.19`, no ceiling),
 # so a fresh `pip install -r requirements.txt` on a new machine can resolve
 # to very different — and untested — versions than what this app actually
 # runs on today. This file pins the exact versions currently proven to work
@@ -60,4 +60,4 @@ typing_extensions==4.15.0
 uvicorn==0.38.0
 watchfiles==1.2.0
 websockets==15.0.1
-yt-dlp==2026.7.4
+yt-dlp[default]==2026.8.19

@@ -1,7 +1,8 @@
-"""Local MCP bridge for desktop AI tools and YouTube AI Factory.
+"""Local MCP bridge between a desktop chat app and YouTube AI Factory.
 
-This is intentionally dependency-free: Claude Desktop, MiniMax Design or another
-MCP client starts this process over stdio.  The process never reads browser
+This is intentionally dependency-free: the desktop app (GPT Work, or Claude
+Desktop/Cowork with YOUTUBE_CHAT_AGENT=claude_chat) starts this process over
+stdio.  The process never reads browser
 profiles, application tokens, or cloud credentials.  It talks only to the local
 YouTube AI Factory HTTP server and only imports media from a project drop folder.
 
@@ -12,10 +13,12 @@ Run by an MCP client, not by the user directly::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,8 +26,60 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import steps as step_catalog
+    from .agent_runtime import redact
+    from .tool_layer.registry import astra_mcp_tool_definitions, astra_tool_names
+except ImportError:  # pragma: no cover - direct script execution
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from youtube_monitor import steps as step_catalog
+    from youtube_monitor.agent_runtime import redact
+    from youtube_monitor.tool_layer.registry import astra_mcp_tool_definitions, astra_tool_names
+
 
 FACTORY_URL = os.getenv("YOUTUBE_FACTORY_URL", "http://127.0.0.1:8787").rstrip("/")
+CHAT_AGENT = os.getenv("YOUTUBE_CHAT_AGENT", "chatgpt_app").strip().lower()
+if CHAT_AGENT not in {"chatgpt_app", "claude_chat"}:
+    raise ValueError("YOUTUBE_CHAT_AGENT phải là chatgpt_app hoặc claude_chat")
+CHAT_AGENT_LABEL = "Claude Chat" if CHAT_AGENT == "claude_chat" else "ChatGPT Chat"
+
+# A step such as writing a script or planning scenes runs inside one call and
+# takes minutes; 45 seconds cut the caller off while the app kept working.
+REQUEST_TIMEOUT_SECONDS = 45
+STEP_TIMEOUT_SECONDS = int(os.getenv("YOUTUBE_FACTORY_STEP_TIMEOUT", "1500") or 1500)
+
+# Agent-run mode. Set only by the app when it starts its own orchestrating
+# agent (codex_agent_bridge / claude_agent_bridge); a desktop chat app never
+# sets it, so for GPT Work and Claude Cowork nothing below changes.
+AGENT_RUN_LOG = os.getenv("YOUTUBE_AGENT_RUN_LOG", "").strip()
+AGENT_ROUND = int(os.getenv("YOUTUBE_AGENT_ROUND", "1") or 1)
+AGENT_PROJECT_ID = int(os.getenv("YOUTUBE_AGENT_PROJECT_ID", "0") or 0)
+AGENT_ALLOW_SPEND = os.getenv("YOUTUBE_AGENT_ALLOW_SPEND", "0") == "1"
+AGENT_ALLOW_OVERWRITE = os.getenv("YOUTUBE_AGENT_ALLOW_OVERWRITE", "0") == "1"
+AGENT_TOOL_BUDGET = max(1, int(os.getenv("YOUTUBE_AGENT_TOOL_BUDGET", "40") or 40))
+
+# The chat apps' own task queue. An agent the app started has no business
+# claiming work queued for GPT Work or Claude Cowork, or queueing more.
+_CHAT_QUEUE_TOOLS = {
+    "youtube_factory_get_next_task",
+    "youtube_factory_complete_task",
+    "youtube_factory_fail_task",
+    "youtube_factory_create_project",
+    "youtube_factory_start_pipeline",
+    "youtube_factory_create_agent_task",
+}
+
+SERVER_INSTRUCTIONS = (
+    "Đây là cổng điều khiển trực tiếp YouTube AI Factory. Làm việc với app bằng các tool youtube_factory_*, "
+    "KHÔNG bằng cách bấm giao diện: gọi youtube_factory_list_steps để xem dự án đang ở đâu, "
+    "youtube_factory_run_step để chạy một bước (cùng đường với nút bấm). Tool trả lỗi thì đọc lỗi rồi chọn "
+    "cách khác (bước tiên quyết, provider khác). Chỉ dùng giao diện hoặc điều khiển máy khi không có tool nào "
+    "làm được việc đó, và nói rõ vì sao."
+)
+
+
+def _agent_mode() -> bool:
+    return bool(AGENT_RUN_LOG)
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 PROJECTS_ROOT = WORKSPACE_ROOT / "01_DU_AN"
 MAX_IMPORT_BYTES = 2 * 1024 * 1024 * 1024
@@ -42,12 +97,18 @@ def _json_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def _factory_request(path: str, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None) -> Any:
+def _factory_request(
+    path: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> Any:
     request = urllib.request.Request(
         f"{FACTORY_URL}{path}", data=data, method=method, headers=headers or {}
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -67,13 +128,39 @@ def _factory_request(path: str, method: str = "GET", data: bytes | None = None, 
         raise RuntimeError("YT Factory trả về dữ liệu không hợp lệ") from exc
 
 
-def _json_factory(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST") -> Any:
+def _json_factory(
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    method: str = "POST",
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> Any:
     return _factory_request(
         path,
         method=method,
         data=json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if method != "GET" else None,
         headers={"Content-Type": "application/json"} if method != "GET" else None,
+        timeout=timeout,
     )
+
+
+def _report_chat_contact() -> None:
+    """Best-effort liveness signal; tool discovery must remain responsive offline."""
+    if _agent_mode():
+        # An agent the app started is not GPT Work or Claude Cowork; saying
+        # otherwise would make the app believe a chat app is attached.
+        return
+    request = urllib.request.Request(
+        f"{FACTORY_URL}/api/chat-agents/{CHAT_AGENT}/heartbeat",
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2):
+            pass
+    except (OSError, urllib.error.URLError):
+        pass
 
 
 def _drop_folder(project_id: int) -> Path:
@@ -141,8 +228,37 @@ def _automation_tool_definitions() -> list[dict[str, Any]]:
     }
     return [
         {
+            "name": "youtube_factory_get_next_task",
+            "description": f"Nhận hoặc tiếp tục task kế tiếp mà YouTube AI Factory giao cho {CHAT_AGENT_LABEL}.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
+        {
+            "name": "youtube_factory_complete_task",
+            "description": f"Đánh dấu task {CHAT_AGENT_LABEL} đã hoàn tất và chuyển pipeline sang công đoạn tiếp theo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "output": {"type": "object", "description": "Kết quả có cấu trúc và ID artifact đã lưu vào app"},
+                },
+                "required": ["task_id", "output"],
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
+        {
+            "name": "youtube_factory_fail_task",
+            "description": f"Báo task {CHAT_AGENT_LABEL} không thể hoàn tất, kèm lý do rõ ràng.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}, "error": {"type": "string", "minLength": 1}},
+                "required": ["task_id", "error"],
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
+        {
             "name": "youtube_factory_create_project",
-            "description": "Tao du an tu yeu cau cap cao va khoi dong chuoi Research -> Script -> Director -> Media -> QC.",
+            "description": f"Tạo dự án và hàng đợi Research -> Script -> Director -> Media -> QC để {CHAT_AGENT_LABEL} xử lý.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -157,7 +273,7 @@ def _automation_tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "youtube_factory_start_pipeline",
-            "description": "Khoi dong chuoi da AI cho mot du an da co.",
+            "description": f"Khởi động chuỗi task {CHAT_AGENT_LABEL} cho một dự án đã có.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -298,7 +414,40 @@ def _automation_tool_definitions() -> list[dict[str, Any]]:
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
-    return _automation_tool_definitions() + [
+    return astra_mcp_tool_definitions() + _automation_tool_definitions() + [
+        {
+            "name": "youtube_factory_save_script",
+            "description": f"Lưu nguyên văn kịch bản do {CHAT_AGENT_LABEL} vừa viết vào dự án; nếu chưa có project_id thì tạo dự án mới.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "text": {"type": "string", "minLength": 1},
+                    "language": {"type": "string", "default": "vi"},
+                    "variant": {"type": "string", "enum": ["long", "short"], "default": "long"},
+                },
+                "required": ["text"],
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
+        {
+            "name": "youtube_factory_update_shot",
+            "description": "Sửa lời đọc, prompt hình, loại asset hoặc thời lượng của một cảnh storyboard.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "shot_id": {"type": "integer"},
+                    "narration": {"type": "string"},
+                    "visual_prompt": {"type": "string"},
+                    "asset_type": {"type": "string"},
+                    "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+                    "status": {"type": "string", "enum": ["planned", "ready", "done"]},
+                },
+                "required": ["shot_id"],
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
         {
             "name": "youtube_factory_list_projects",
             "description": "Liệt kê các dự án YT Factory đang có để chọn dự án cần sản xuất.",
@@ -361,6 +510,95 @@ def _text_result(value: Any, is_error: bool = False) -> dict[str, Any]:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name in astra_tool_names():
+        # Readiness is the one Astra question that is not about a project:
+        # it asks which AI can run at all before a run is started.
+        if name == "youtube_factory_get_ai_runtimes":
+            return _text_result(_factory_request("/api/orchestrator/runtimes"))
+        # Research is not about a project either: it is how a project starts.
+        if name == "youtube_factory_search_web":
+            query = urllib.parse.quote(str(arguments.get("query") or "").strip(), safe="")
+            limit = max(1, min(int(arguments.get("limit") or 5), 10))
+            return _text_result(_factory_request(f"/api/research/search?query={query}&limit={limit}"))
+        project_id = int(arguments.get("project_id"))
+        if name == "youtube_factory_get_project_context":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/astra-context"))
+        if name == "youtube_factory_get_source_package":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/source-package"))
+        if name == "youtube_factory_get_project_edit_plan":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/edit-plan"))
+        if name == "youtube_factory_plan_project_edit":
+            motion_policy = urllib.parse.quote(str(arguments.get("motion_policy") or "balanced"), safe="")
+            return _text_result(_factory_request(f"/api/projects/{project_id}/edit-plan?motion_policy={motion_policy}", method="POST"))
+        if name == "youtube_factory_update_project_edit_scene":
+            segment_id = int(arguments.get("segment_id"))
+            changes = arguments.get("changes") if isinstance(arguments.get("changes"), dict) else {}
+            return _text_result(_json_factory(f"/api/projects/{project_id}/edit-plan/scenes/{segment_id}", changes, method="PATCH"))
+        if name == "youtube_factory_approve_project_edit_plan":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/edit-plan/approve", method="POST"))
+        if name == "youtube_factory_apply_project_edit_plan":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/edit-plan/apply", method="POST"))
+        if name == "youtube_factory_get_storyboard_required_jobs":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/storyboard/required-jobs"))
+        if name == "youtube_factory_plan_scene_edit_beats":
+            segment_id = int(arguments.get("segment_id"))
+            return _text_result(_json_factory(
+                f"/api/timeline/{segment_id}/edit-beats/plan",
+                {"max_beats": int(arguments.get("max_beats") or 4)},
+            ))
+        if name == "youtube_factory_apply_scene_edit_beats":
+            segment_id = int(arguments.get("segment_id"))
+            provider = str(arguments.get("image_provider") or "auto").strip()
+            if provider == "auto":
+                route = _json_factory(
+                    "/api/providers/route",
+                    {"project_id": project_id, "capability": "scene.image"},
+                )
+                provider = str(route.get("selected_provider") or "")
+            return _text_result(_json_factory(
+                f"/api/timeline/{segment_id}/edit-beats/apply",
+                {
+                    "image_provider": provider,
+                    "ratio": str(arguments.get("ratio") or "1280:720"),
+                    "confirmed": bool(arguments.get("confirmed", False)),
+                },
+            ))
+        if name == "youtube_factory_get_scene_speech_timing":
+            segment_id = int(arguments.get("segment_id"))
+            return _text_result(_factory_request(f"/api/timeline/{segment_id}/speech-timing"))
+        if name == "youtube_factory_get_contact_sheet":
+            tiles = max(1, min(int(arguments.get("tiles") or 12), 24))
+            return _text_result(_factory_request(f"/api/projects/{project_id}/contact-sheet?tiles={tiles}"))
+        if name == "youtube_factory_list_steps":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/steps"))
+        if name == "youtube_factory_run_step":
+            step = urllib.parse.quote(str(arguments.get("step") or "").strip(), safe="")
+            options = arguments.get("options") if isinstance(arguments.get("options"), dict) else {}
+            return _text_result(_json_factory(
+                f"/api/projects/{project_id}/steps/{step}", {"options": options},
+                timeout=STEP_TIMEOUT_SECONDS,
+            ))
+        if name == "youtube_factory_get_render_readiness":
+            return _text_result(_factory_request(f"/api/projects/{project_id}/render-readiness"))
+        if name == "youtube_factory_get_orchestrator_report":
+            limit = max(1, min(int(arguments.get("limit") or 200), 1000))
+            return _text_result(_factory_request(f"/api/projects/{project_id}/orchestrator-report?limit={limit}"))
+
+    if name == "youtube_factory_get_next_task":
+        return _text_result(_json_factory(f"/api/chat-agents/{CHAT_AGENT}/tasks/next", {}))
+
+    if name in {"youtube_factory_complete_task", "youtube_factory_fail_task"}:
+        task_id = urllib.parse.quote(str(arguments.get("task_id") or ""), safe="")
+        if not task_id:
+            raise ValueError("Thiếu task_id")
+        if name == "youtube_factory_complete_task":
+            payload = {"output": arguments.get("output") if isinstance(arguments.get("output"), dict) else {}}
+            action = "complete"
+        else:
+            payload = {"error": str(arguments.get("error") or "").strip()}
+            action = "fail"
+        return _text_result(_json_factory(f"/api/chat-agents/{CHAT_AGENT}/tasks/{task_id}/{action}", payload))
+
     if name in {"youtube_factory_create_project", "youtube_factory_start_pipeline"}:
         payload = {
             "goal": str(arguments.get("goal") or "").strip(),
@@ -368,6 +606,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             "language": str(arguments.get("language") or "vi").strip(),
             "auto_generate_media": bool(arguments.get("auto_generate_media", False)),
             "auto_render": bool(arguments.get("auto_render", False)),
+            "chat_agent": CHAT_AGENT,
         }
         if name == "youtube_factory_start_pipeline":
             payload["project_id"] = int(arguments.get("project_id"))
@@ -485,6 +724,26 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         render_jobs = [job for job in jobs if isinstance(job, dict) and job.get("job_type") == "render"]
         return _text_result({"project_id": project_id, "render_jobs": render_jobs, "all_jobs": jobs})
 
+    if name == "youtube_factory_save_script":
+        payload = {
+            "project_id": int(arguments["project_id"]) if arguments.get("project_id") is not None else None,
+            "title": str(arguments.get("title") or "").strip(),
+            "text": str(arguments.get("text") or "").strip(),
+            "language": str(arguments.get("language") or "vi").strip(),
+            "variant": str(arguments.get("variant") or "long").strip(),
+            "workflow": "content",
+        }
+        return _text_result(_json_factory("/api/scripts/import", payload))
+
+    if name == "youtube_factory_update_shot":
+        shot_id = int(arguments.get("shot_id"))
+        payload = {
+            key: arguments[key]
+            for key in ("narration", "visual_prompt", "asset_type", "duration_seconds", "status")
+            if key in arguments
+        }
+        return _text_result(_json_factory(f"/api/shots/{shot_id}", payload, method="PATCH"))
+
     if name == "youtube_factory_list_projects":
         projects = _factory_request("/api/projects")
         compact = [
@@ -543,12 +802,152 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"Không có tool MCP: {name}")
 
 
+def _call_key(name: str, arguments: dict[str, Any]) -> str:
+    return json.dumps({"tool": name, "arguments": arguments}, sort_keys=True, ensure_ascii=False)
+
+
+def _read_agent_log() -> list[dict[str, Any]]:
+    path = Path(AGENT_RUN_LOG)
+    if not path.is_file():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            entries.append(item)
+    return entries
+
+
+def _append_agent_log(entry: dict[str, Any]) -> None:
+    path = Path(AGENT_RUN_LOG)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"round": AGENT_ROUND, "at": time.time(), **entry}, ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as handle:
+        # The log is read after a failed run; it must never hold a credential.
+        handle.write(redact(line) + "\n")
+
+
+def _state_fingerprint(project_id: int) -> str:
+    """What the project has actually got, reduced to a comparable token.
+
+    "The conditions have not changed" is decided on this: the steps that are
+    done and the state of every step, read from the app.
+    """
+    if not project_id:
+        return ""
+    try:
+        state = _factory_request(f"/api/projects/{project_id}/steps")
+    except RuntimeError:
+        return ""
+    shape = [state.get("done"), [(row.get("key"), row.get("state")) for row in state.get("steps") or []]]
+    return hashlib.sha256(json.dumps(shape, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _refuse_guarded(name: str, arguments: dict[str, Any]) -> None:
+    """The actions an agent run may not take on its own.
+
+    Nothing in the tool set deletes; what can undo someone's work is `force`,
+    which rebuilds a script, scene list, timeline or render over what is there -
+    possibly after a person edited it. Spending and publishing are the other
+    two. Ordinary steps need none of these, so they are not slowed down.
+    """
+    options = arguments.get("options") if isinstance(arguments.get("options"), dict) else {}
+    if (arguments.get("force") or options.get("force")) and not AGENT_ALLOW_OVERWRITE:
+        raise ValueError(
+            "force ghi đè dữ liệu đã có (kịch bản/cảnh/timeline/bản dựng có thể đã được người dùng sửa), "
+            "và lượt chạy này không được phép ghi đè. Nếu bước bị từ chối vì dữ liệu cũ, báo blocked và nói rõ."
+        )
+    _refuse_spending(name, arguments)
+
+
+def _refuse_spending(name: str, arguments: dict[str, Any]) -> None:
+    if name == "youtube_factory_run_step":
+        options = arguments.get("options") if isinstance(arguments.get("options"), dict) else {}
+        if options.get("confirmed_publish"):
+            raise ValueError("Lượt chạy tự động không được đăng video: đăng lên kênh luôn cần người dùng duyệt.")
+        step = step_catalog.get(str(arguments.get("step") or ""))
+        if step is not None and step.spends and step.key != "publish" and not AGENT_ALLOW_SPEND:
+            raise ValueError(
+                f"Bước '{step.label}' tiêu lượt tạo/quota, và lượt chạy này không được phép tiêu. "
+                "Báo blocked kèm lý do; đừng tìm đường vòng."
+            )
+        return
+    if arguments.get("confirmed") and not AGENT_ALLOW_SPEND:
+        raise ValueError("Tool này tiêu lượt tạo/quota, và lượt chạy này không được phép tiêu. Báo blocked kèm lý do.")
+
+
+def _agent_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """One tool call on behalf of an agent the app started, with its guards.
+
+    The guards are here rather than in the prompt because a prompt can be
+    ignored: the budget of a round, the one project the run is about, no
+    spending unless allowed, and no identical retry of a call that already
+    failed while the project is exactly as it was.
+    """
+    if name in _CHAT_QUEUE_TOOLS:
+        raise ValueError("Tool này thuộc hàng đợi của app chat; lượt chạy của app không dùng nó.")
+    log = _read_agent_log()
+    used = sum(1 for entry in log if entry.get("round") == AGENT_ROUND)
+    if used >= AGENT_TOOL_BUDGET:
+        raise ValueError(
+            f"Đã dùng hết {AGENT_TOOL_BUDGET} lần gọi tool của vòng này. Dừng lại và trả báo cáo: "
+            "đã làm gì, còn thiếu gì."
+        )
+    raw_project = arguments.get("project_id")
+    if AGENT_PROJECT_ID and raw_project not in (None, "") and int(raw_project) != AGENT_PROJECT_ID:
+        raise ValueError(f"Lượt chạy này chỉ làm việc trên dự án {AGENT_PROJECT_ID}.")
+    project_id = AGENT_PROJECT_ID or int(raw_project or 0)
+    key = _call_key(name, arguments)
+    try:
+        _refuse_guarded(name, arguments)
+    except ValueError as exc:
+        _append_agent_log({"tool": name, "arguments": arguments, "key": key, "ok": False,
+                           "refused": "guard", "error": str(exc)})
+        raise
+    # Only calls that actually ran and failed count. A call refused by policy
+    # never reached the app, so it says nothing about whether it would work.
+    failures = [
+        entry for entry in log
+        if entry.get("key") == key and not entry.get("ok") and not entry.get("refused")
+    ]
+    if failures:
+        previous = failures[-1]
+        now = _state_fingerprint(project_id)
+        if now == str(previous.get("fingerprint") or ""):
+            message = (
+                f"Lệnh này đã được gọi y hệt và thất bại: {str(previous.get('error') or '')[:500]}. "
+                "Trạng thái dự án chưa đổi kể từ đó, nên gọi lại y hệt sẽ ra cùng kết quả. "
+                "Chọn cách khác: chạy bước tiên quyết, đổi tham số hoặc provider, hoặc báo blocked."
+            )
+            _append_agent_log({"tool": name, "arguments": arguments, "key": key, "ok": False,
+                               "refused": "identical_retry", "error": message, "fingerprint": now})
+            raise ValueError(message)
+    try:
+        result = _call_tool(name, arguments)
+    except (RuntimeError, ValueError, TypeError) as exc:
+        _append_agent_log({"tool": name, "arguments": arguments, "key": key, "ok": False,
+                           "error": str(exc)[:2000], "fingerprint": _state_fingerprint(project_id)})
+        raise
+    text = "".join(str(part.get("text") or "") for part in result.get("content") or [])
+    _append_agent_log({"tool": name, "arguments": arguments, "key": key, "ok": not result.get("isError"),
+                       "result": text[:800]})
+    return result
+
+
 def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     method = message.get("method")
     request_id = message.get("id")
     if method == "notifications/initialized":
         return None
     if method == "initialize":
+        # Announced here as well as on tools/list. A client that connects and
+        # then sits idle was reported as "not connected" until it happened to
+        # touch a tool, so the one screen that says whether the desktop app is
+        # reachable answered no while it was plainly attached.
+        _report_chat_contact()
         requested_version = str((message.get("params") or {}).get("protocolVersion") or "2025-03-26")
         return _json_response(
             request_id,
@@ -556,14 +955,21 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                 "protocolVersion": requested_version,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "youtube-ai-factory", "version": "1.0.0"},
+                "instructions": SERVER_INSTRUCTIONS,
             },
         )
     if method == "tools/list":
-        return _json_response(request_id, {"tools": _tool_definitions()})
+        _report_chat_contact()
+        tools = _tool_definitions()
+        if _agent_mode():
+            tools = [tool for tool in tools if tool["name"] not in _CHAT_QUEUE_TOOLS]
+        return _json_response(request_id, {"tools": tools})
     if method == "tools/call":
+        _report_chat_contact()
         params = message.get("params") or {}
+        call = _agent_call if _agent_mode() else _call_tool
         try:
-            result = _call_tool(str(params.get("name") or ""), params.get("arguments") or {})
+            result = call(str(params.get("name") or ""), params.get("arguments") or {})
         except (RuntimeError, ValueError, TypeError) as exc:
             result = _text_result({"error": str(exc)}, is_error=True)
         return _json_response(request_id, result)

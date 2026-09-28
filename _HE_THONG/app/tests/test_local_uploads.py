@@ -17,6 +17,7 @@ from youtube_monitor.main import (
     _xstack_layout,
     analyze_reference_images,
     database,
+    stream_source_video_preview,
     upload_local_source,
 )
 
@@ -71,6 +72,19 @@ def test_an_uploaded_video_becomes_a_usable_source(tmp_path: Path) -> None:
     assert Path(video["local_media_path"]).is_file(), "file phai nam tren dia de con cat canh duoc"
     assert result["duration_seconds"] == 3, "thoi luong phai doc tu chinh file"
     assert result["media_kind"] == "video"
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="Can FFmpeg de tao file thu")
+def test_a_local_source_can_be_previewed_inside_the_app(tmp_path: Path) -> None:
+    clip = _clip(tmp_path / "preview.mp4", seconds=1)
+
+    with clip.open("rb") as handle:
+        result = upload_local_source(file=UploadFile(filename="preview.mp4", file=handle), title="")
+
+    response = stream_source_video_preview(result["video"]["youtube_video_id"])
+
+    assert response.media_type == "video/mp4"
+    assert Path(response.path).is_file()
 
 
 @pytest.mark.skipif(FFMPEG is None, reason="Can FFmpeg de tao file thu")

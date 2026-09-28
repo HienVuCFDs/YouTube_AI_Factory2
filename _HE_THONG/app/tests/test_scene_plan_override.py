@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from youtube_monitor.main import database, update_timeline_segment_plan, UpdateScenePlanRequest
@@ -96,8 +98,104 @@ def test_changing_only_the_frame_rate_keeps_the_planner_s_reason(segment_id: int
     assert result["segment"]["visual_kind_reason"] == "AI: so dem tang dan"
 
 
+def test_manual_overlay_and_sound_cue_override_is_saved(segment_id: int) -> None:
+    result = update_timeline_segment_plan(
+        segment_id,
+        UpdateScenePlanRequest(
+            overlays=[{
+                "kind": "title",
+                "text": "Điểm chính",
+                "position": "top_center",
+                "style": "card",
+                "animation": "pop",
+                "start_seconds": 0.2,
+                "end_seconds": 1.7,
+            }],
+            sound_cues=[{
+                "type": "pop",
+                "start_seconds": 0.2,
+                "end_seconds": 0.45,
+                "intensity": "low",
+            }],
+        ),
+    )
+
+    segment = result["segment"]
+    assert json.loads(segment["overlays"])[0]["text"] == "Điểm chính"
+    assert json.loads(segment["sound_cues"])[0]["type"] == "pop"
+
+
+def test_manual_overlay_outside_scene_duration_is_refused(segment_id: int) -> None:
+    with pytest.raises(HTTPException) as caught:
+        update_timeline_segment_plan(
+            segment_id,
+            UpdateScenePlanRequest(overlays=[{
+                "kind": "title",
+                "text": "Quá dài",
+                "position": "top_center",
+                "style": "card",
+                "animation": "pop",
+                "start_seconds": 0.2,
+                "end_seconds": 99,
+            }]),
+        )
+
+    assert caught.value.status_code == 422
+
+
 def test_an_unknown_segment_is_refused() -> None:
     with pytest.raises(HTTPException) as caught:
         update_timeline_segment_plan(999999, UpdateScenePlanRequest(visual_kind="image"))
 
     assert caught.value.status_code == 404
+
+
+# The planner holds the picture's description, the kind of scene and word
+# timing measured from the voice, and still returns nothing but static frames
+# on some runs while producing a fully worked plan on others. The result is a
+# slideshow with narration over it, and the app used to accept that in silence.
+_TIMELINE = [
+    {"segment_index": 1, "duration_seconds": 16.0},
+    {"segment_index": 2, "duration_seconds": 17.0},
+]
+
+
+def test_a_plan_with_no_movement_anywhere_is_flat() -> None:
+    from youtube_monitor.main import plan_is_flat
+
+    scenes = [
+        {"segment_index": 1, "effect": "static", "overlays": []},
+        {"segment_index": 2, "effect": "static", "overlays": []},
+    ]
+
+    assert plan_is_flat(scenes, _TIMELINE)
+
+
+def test_one_camera_move_is_enough_to_be_an_edit() -> None:
+    from youtube_monitor.main import plan_is_flat
+
+    scenes = [
+        {"segment_index": 1, "effect": "zoom_in", "overlays": []},
+        {"segment_index": 2, "effect": "static", "overlays": []},
+    ]
+
+    assert not plan_is_flat(scenes, _TIMELINE)
+
+
+def test_a_graphic_beat_counts_as_well() -> None:
+    from youtube_monitor.main import plan_is_flat
+
+    scenes = [{"segment_index": 1, "effect": "static", "overlays": [{"text": "Khí sơ khai"}]}]
+
+    assert not plan_is_flat(scenes, _TIMELINE)
+
+
+def test_short_scenes_are_allowed_to_simply_sit_there() -> None:
+    """A three second beat holding one frame is a choice, not an omission, so
+    it must not trigger a retry that costs minutes."""
+    from youtube_monitor.main import plan_is_flat
+
+    brief = [{"segment_index": 1, "duration_seconds": 3.0}]
+    scenes = [{"segment_index": 1, "effect": "static", "overlays": []}]
+
+    assert not plan_is_flat(scenes, brief)

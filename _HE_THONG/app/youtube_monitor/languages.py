@@ -70,6 +70,14 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "min_tokens_per_second": 2.5,
         "unit": "từ",
     },
+    "de": {
+        "label": "Tiếng Đức",
+        "name": "tieng Duc",
+        "english_name": "German",
+        "tokens_per_second": 2.3,
+        "min_tokens_per_second": 2.1,
+        "unit": "từ",
+    },
     "fr": {
         "label": "Tiếng Pháp",
         "name": "tieng Phap",

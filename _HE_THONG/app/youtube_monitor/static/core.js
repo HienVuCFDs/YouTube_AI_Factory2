@@ -34,7 +34,11 @@
   const channelName = (id) => { const item = state.channels.find((c) => c.youtube_channel_id === id); return item?.title || id || 'Chưa rõ nguồn'; };
   const setMessage = (text, type = '') => {
     if ($('message')) { $('message').textContent = text; $('message').className = `message ${type}`; }
-    if ($('studioMessage')) { $('studioMessage').textContent = text; $('studioMessage').className = `message ${type}`; }
+    if ($('studioMessage')) {
+      $('studioMessage').textContent = text;
+      $('studioMessage').className = `message ${type}`;
+      $('studioMessage').hidden = !String(text || '').trim();
+    }
   };
   const setStudioProgress = (percent, label, type = '') => {
     const panel = $('studioProgress');
@@ -61,12 +65,10 @@
       detailProjectId: state.projectId,
       projectView: state.projectView,
       workspace: localStorage.getItem('ytFactory.workspace') || 'dashboard',
-      creativeDirection: $('studioCreativeDirectionInput')?.value || '',
       scriptInstruction: $('studioScriptInstructionInput')?.value || '',
       targetDuration: $('studioTargetDurationSeconds')?.value || '',
       createStandaloneShort: Boolean($('studioCreateStandaloneShort')?.checked),
-      standaloneShortSeconds: $('studioInitialShortSeconds')?.value || '',
-      remakeMode: $('studioRemakeModeSelect')?.value || '',
+      standaloneShortSeconds: $('studioShortScriptSeconds')?.value || '',
       analysisLanguage: $('studioAnalysisLanguage')?.value || '',
       scriptLanguage: $('studioScriptLanguage')?.value || '',
       managedChannelId: $('studioManagedChannelSelect')?.value || '',
@@ -129,19 +131,63 @@
   async function loadEdgeVoices() {
     const group = $('studioEdgeVoiceGroup');
     if (!group) return;
+    ensureStudioNarrationVoices();
     try {
       const result = await api('/api/tts/voices');
       const chosen = $('studioVoiceModelSelect')?.value || '';
       group.innerHTML = (result.voices || []).map((voice) => {
         const gender = voice.gender === 'Female' ? 'Nữ' : voice.gender === 'Male' ? 'Nam' : '';
         const name = String(voice.short_name || '').replace(/Neural$/, '').split('-').slice(2).join('-');
-        return `<option value="${esc(voice.short_name)}">${esc(voice.locale)} · ${esc(name)}${gender ? ' · ' + gender : ''}</option>`;
+        return `<option value="${esc(voice.short_name)}">${esc(voiceLocaleLabel(voice.locale))} · ${esc(name)}${gender ? ' · ' + gender : ''}</option>`;
       }).join('');
       group.label = `Edge TTS · ${result.total} giọng, ${result.locales} ngôn ngữ`;
       const select = $('studioVoiceModelSelect');
       if (select && chosen) select.value = chosen;
       state.edgeVoiceCount = result.total;
+      syncStudioVoiceModelOptions();
     } catch (_) { /* giữ hai giọng tiếng Việt mặc định nếu không hỏi được */ }
+  }
+
+  function voiceLocaleLabel(locale) {
+    const code = String(locale || '').toLowerCase();
+    const labels = {
+      'vi-vn': 'Tiếng Việt', 'en-us': 'Tiếng Anh (Mỹ)', 'en-gb': 'Tiếng Anh (Anh)',
+      'de-de': 'Tiếng Đức', 'es-es': 'Tiếng Tây Ban Nha', 'es-mx': 'Tiếng Tây Ban Nha (Mexico)',
+      'fr-fr': 'Tiếng Pháp', 'pt-br': 'Tiếng Bồ Đào Nha (Brazil)', 'th-th': 'Tiếng Thái',
+      'ja-jp': 'Tiếng Nhật', 'ko-kr': 'Tiếng Hàn', 'zh-cn': 'Tiếng Trung (Giản thể)',
+      'zh-tw': 'Tiếng Trung (Phồn thể)', 'id-id': 'Tiếng Indonesia',
+    };
+    return labels[code] || String(locale || 'Ngôn ngữ khác');
+  }
+
+  function ensureStudioNarrationVoices() {
+    const group = $('studioEdgeVoiceGroup');
+    if (!group) return;
+    const fallback = {
+      'de-DE-KatjaNeural': 'Tiếng Đức · Katja · Nữ',
+      'de-DE-ConradNeural': 'Tiếng Đức · Conrad · Nam',
+      'es-ES-ElviraNeural': 'Tiếng Tây Ban Nha · Elvira · Nữ',
+      'es-ES-AlvaroNeural': 'Tiếng Tây Ban Nha · Álvaro · Nam',
+    };
+    for (const [voice, label] of Object.entries(fallback)) {
+      if (![...group.querySelectorAll('option')].some((option) => option.value === voice)) {
+        const option = document.createElement('option');
+        option.value = voice;
+        option.textContent = label;
+        group.appendChild(option);
+      }
+    }
+  }
+
+  function syncStudioNarrationLanguage(code) {
+    const language = code === 'zh' ? 'zh-CN' : code;
+    if ($('studioPublishLanguageSelect')) $('studioPublishLanguageSelect').value = language;
+    // These languages have verified native voices in the Edge catalog.
+    if (['de', 'es'].includes(language) && $('studioVoiceProviderSelect')) {
+      $('studioVoiceProviderSelect').value = 'edge_tts';
+    }
+    ensureStudioNarrationVoices();
+    syncStudioVoiceModelOptions();
   }
 
   async function loadWorkflows() {
@@ -208,8 +254,8 @@
 
   const workspaces = {
     dashboard: {
-      label: 'Tạo video', eyebrow: 'WIZARD 7 BƯỚC', title: 'Tạo một video mới',
-      description: 'Chọn nguồn, chọn model ở từng bước, rồi đi theo nút Tiếp tục đến khi có video hoàn chỉnh.',
+      label: 'Tạo video', eyebrow: '', title: 'Tạo một video mới',
+      description: '',
       panels: ['studioWizard'],
     },
     source: {
@@ -255,8 +301,10 @@
     });
     $('workspaceCrumb').innerHTML = `<strong>YOUTUBE AI FACTORY</strong><span> / </span> ${workspace.label}`;
     $('workspaceEyebrow').textContent = workspace.eyebrow;
+    $('workspaceEyebrow').hidden = !workspace.eyebrow;
     $('workspaceTitle').textContent = workspace.title;
     $('workspaceDescription').textContent = workspace.description;
+    $('workspaceDescription').hidden = !workspace.description;
     if (persist) {
       try { localStorage.setItem('ytFactory.workspace', name); } catch (_) {}
       saveStudioSession();
@@ -679,7 +727,7 @@
   // long video on the left, the short beside it - so both are worked on in
   // view of each other rather than by switching back and forth. Unticked,
   // nothing about it shows: a project not making a short is not asked about one.
-  const SHORT_LANE_PANES = ['studioStep3', 'studioStep4', 'studioStep5', 'studioStep6'];
+  const SHORT_LANE_PANES = ['studioStep3', 'studioStep4', 'studioStep5', 'studioStep6', 'studioStep7'];
 
   function shortLaneWanted() {
     return Boolean($('studioCreateStandaloneShort')?.checked) || Boolean(state.shortLane?.script);

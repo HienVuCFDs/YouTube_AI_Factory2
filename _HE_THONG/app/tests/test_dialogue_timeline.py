@@ -217,7 +217,7 @@ def test_the_edit_planner_is_told_what_the_source_looks_like(monkeypatch) -> Non
 
     seen: dict[str, str] = {}
 
-    def capture(system_prompt, user_prompt, _schema, stage=""):
+    def capture(system_prompt, user_prompt, _schema, **_kwargs):
         seen["system"] = system_prompt
         seen["user"] = user_prompt
         return {"scenes": [], "pacing": "", "music_mood": ""}
@@ -238,6 +238,8 @@ def _plan_with(monkeypatch, project_id: int, scenes: list[dict]) -> None:
         lambda *_a, **_k: {"scenes": scenes, "pacing": "", "music_mood": ""},
     )
     main.plan_project_edit(project_id)
+    main.approve_project_edit_plan(project_id)
+    main.apply_project_edit_plan(project_id)
 
 
 def test_a_scene_short_of_pictures_goes_back_to_the_storyboard(monkeypatch) -> None:

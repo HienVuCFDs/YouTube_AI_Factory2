@@ -39,7 +39,7 @@ class StoryboardVoiceRecoveryUiTests(unittest.TestCase):
 
     def test_voice_generation_automatically_syncs_stale_script_data(self) -> None:
         start = self.page.index("async function generateStudioVoiceover()")
-        end = self.page.index("async function generateStudioTimeline()", start)
+        end = self.page.index("async function runStudioSceneBatch(", start)
         action = self.page[start:end]
         self.assertIn("Kịch bản mới hơn storyboard; đang đồng bộ", action)
         self.assertIn("Timeline cũ không khớp kịch bản; đang đồng bộ", action)

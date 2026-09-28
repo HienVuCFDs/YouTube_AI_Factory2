@@ -207,7 +207,8 @@
     state.scriptId = script.id || state.scriptId;
     state.studioProjectId = script.project_id || state.studioProjectId;
     const writer = writerPayload?.result || writerPayload || {};
-    const productionScenes = Array.isArray(writer.scene_blueprints) ? writer.scene_blueprints : [];
+    const productionScenes = Array.isArray(writer.scene_blueprints) ? writer.scene_blueprints
+      : (state.shots || []).filter((shot) => Number(shot.script_id) === Number(script.id));
     const productionSeconds = productionScenes.reduce((total, scene) => total + Number(scene.duration_seconds || 0), 0);
     const productionWords = productionScenes.reduce((total, scene) => total + String(scene.narration || '').trim().split(/\s+/).filter(Boolean).length, 0);
     const targetSeconds = Number(writer.target_duration_seconds || 0);
@@ -254,7 +255,7 @@
       <b>Lời trong storyboard KHÔNG phải lời kịch bản.</b>
       <div class="studio-model-note" style="margin-top:4px">
         Các cảnh đang đọc lại transcript của video gốc (${fromSource}% trùng),
-        chỉ ${fromScript}% trùng kịch bản bạn đã viết — “Cắt cảnh theo lời thoại” đã thay chúng.
+        chỉ ${fromScript}% trùng kịch bản bạn đã viết — “Tạo mốc cắt theo lời thoại” đã thay chúng.
       </div>
       <div class="studio-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
         <button class="btn primary" type="button" onclick="rebuildStoryboardFromScript()">Dựng lại storyboard từ kịch bản</button>
@@ -289,15 +290,467 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  function storyboardSceneFacts(shot, segment) {
+    const hasVisual = Boolean(segment && String(segment.visual_path || '').trim());
+    const hasAudio = Boolean(segment && String(segment.audio_path || '').trim());
+    const fallback = hasVisual && String(segment.asset_type || '') === 'fallback';
+    const draft = hasVisual && String(segment.visual_path || '').replaceAll('\\', '/').includes('director_draft_visuals');
+    const missingVisual = !hasVisual;
+    const missingAudio = !hasAudio;
+    let state = 'ready';
+    let label = 'Sẵn sàng';
+    if (missingVisual && missingAudio) { state = 'missing_both'; label = 'Thiếu hình + tiếng'; }
+    else if (missingVisual) { state = 'missing_visual'; label = 'Thiếu hình'; }
+    else if (missingAudio) { state = 'missing_audio'; label = 'Thiếu tiếng'; }
+    else if (draft) { state = 'draft'; label = 'Visual nháp'; }
+    else if (fallback) { state = 'fallback'; label = 'Dự phòng'; }
+    return {state, label, missingVisual, missingAudio, fallback, draft, ready: hasVisual && hasAudio && !draft};
+  }
+
+  function storyboardSceneState(shot, segment) {
+    return storyboardSceneFacts(shot, segment).state;
+  }
+
+  function filterStudioStoryboard(filter = 'all') {
+    document.querySelectorAll('#studioStoryboardResult .storyboard-card[data-scene-state]').forEach((card) => {
+      const matches = filter === 'all'
+        || (filter === 'missing_visual' && card.dataset.missingVisual === '1')
+        || (filter === 'missing_audio' && card.dataset.missingAudio === '1')
+        || (filter === 'ready' && card.dataset.ready === '1');
+      card.hidden = !matches;
+    });
+    document.querySelectorAll('#studioStoryboardResult [data-storyboard-filter]').forEach((button) => {
+      button.classList.toggle('primary', button.dataset.storyboardFilter === filter);
+      button.classList.toggle('ghost', button.dataset.storyboardFilter !== filter);
+    });
+  }
+
+  function editBeatsForSegment(segment) {
+    return Array.isArray(segment?.edit_beats) ? segment.edit_beats : [];
+  }
+
+  function editBeatSelect(value, labels, className) {
+    return `<select class="${className}">` + Object.entries(labels).map(([key, label]) =>
+      `<option value="${key}"${String(value || '') === key ? ' selected' : ''}>${esc(label)}</option>`
+    ).join('') + '</select>';
+  }
+
+  function storyboardEditSummary(segment) {
+    if (!segment) return '';
+    const beats = editBeatsForSegment(segment);
+    const transition = segment.edit_transition || 'fade';
+    const effect = segment.edit_effect || 'static';
+    if (!beats.length) {
+      return `<div class="storyboard-edit-summary muted"><b>Kế hoạch dựng:</b> chưa lập. <button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập kế hoạch cảnh này</button></div>`;
+    }
+    const inserts = beats.filter((beat) => String(beat.source_kind || '') !== 'primary').length;
+    const needs = beats.filter((beat) => ['needs_asset', 'generating', 'error'].includes(String(beat.status || ''))).length;
+    const sourceLabels = {primary: 'Clip/hình chính', source_frame: 'Frame từ clip gốc', ai_image: 'Ảnh AI phụ'};
+    const effectLabels = {static: 'Giữ khung', zoom_in: 'Zoom vào', zoom_out: 'Zoom ra'};
+    const transitionLabels = {cut: 'Cắt thẳng', fade: 'Mờ dần'};
+    const labels = {
+      ready: 'sẵn sàng',
+      needs_asset: 'thiếu ảnh/frame',
+      generating: 'đang tạo ảnh',
+      error: 'lỗi tạo ảnh',
+    };
+    const statusText = needs
+      ? `${needs} nhịp chưa xong`
+      : 'đủ dữ liệu';
+    const detail = beats.map((beat) => `${beat.beat_index || '?'}:${labels[beat.status] || beat.status || 'sẵn sàng'}`).join(' · ');
+    const rows = beats.map((beat, index) => `
+      <div class="storyboard-edit-beat-row" data-beat-id="${Number(beat.id || 0)}" data-asset-id="${Number(beat.asset_id || 0)}" data-visual-path="${esc(beat.visual_path || '')}">
+        <span>${index + 1}</span>
+        ${editBeatSelect(beat.source_kind || 'primary', sourceLabels, 'beat-source')}
+        <input class="beat-duration" type="number" min="0.15" step="0.1" value="${Number(beat.duration_seconds || 1).toFixed(1)}" aria-label="Thời lượng nhịp">
+        ${editBeatSelect(beat.effect || 'static', effectLabels, 'beat-effect')}
+        ${editBeatSelect(beat.transition || 'cut', transitionLabels, 'beat-transition')}
+        <input class="beat-prompt" value="${esc(beat.prompt || '')}" placeholder="Prompt ảnh phụ nếu chọn Ảnh AI">
+        <em>${esc(labels[beat.status] || beat.status || 'sẵn sàng')}</em>
+      </div>`).join('');
+    return `<div class="storyboard-edit-summary" data-edit-segment="${segment.id}"><b>Kế hoạch dựng:</b> ${beats.length} nhịp · ${inserts} frame/ảnh phụ · ${esc(statusText)} · hiệu ứng ${esc(effect)} · chuyển ${esc(transition)}<div class="secondary-text">${esc(detail)}</div><details><summary>Sửa kế hoạch cảnh</summary><div class="storyboard-edit-beats">${rows}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập lại kế hoạch cảnh</button><button class="btn small ghost" type="button" onclick="saveStudioSceneEditPlan(${segment.id})">Lưu kế hoạch cảnh</button><button class="btn small primary" type="button" onclick="applyStudioSceneEdit(${segment.id})">Áp dụng cảnh này</button></div></details></div>`;
+  }
+
+  async function studioEditBeatGenerationSettings(resolveProvider = true, forcedProvider = '') {
+    let imageProvider = forcedProvider || $('studioEditPlanProviderSelect')?.value || 'phantom_canvas_image';
+    if (resolveProvider) imageProvider = await resolveAutoSceneProvider(imageProvider, 'scene.image');
+    return {
+      image_provider: imageProvider,
+      ratio: $('studioEditPlanRatioSelect')?.value || $('studioSceneRatioSelect')?.value || '1280:720',
+      confirmed: true,
+    };
+  }
+
+  function collectStudioSceneEditBeats(segmentId) {
+    const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    const host = document.querySelector(`[data-edit-segment="${segmentId}"]`);
+    if (!segment || !host) return null;
+    const beats = [...host.querySelectorAll('.storyboard-edit-beat-row')].map((row) => {
+      const sourceKind = row.querySelector('.beat-source')?.value || 'primary';
+      const assetId = sourceKind === 'primary' ? null : (Number(row.dataset.assetId || 0) || null);
+      const visualPath = sourceKind === 'ai_image'
+        ? String(row.dataset.visualPath || '')
+        : String(segment.visual_path || '');
+      return {
+        asset_id: assetId,
+        visual_path: visualPath,
+        source_kind: sourceKind,
+        duration_seconds: Number(row.querySelector('.beat-duration')?.value || 0),
+        effect: row.querySelector('.beat-effect')?.value || 'static',
+        transition: row.querySelector('.beat-transition')?.value || 'cut',
+        prompt: row.querySelector('.beat-prompt')?.value || '',
+        status: sourceKind === 'ai_image' && !visualPath ? 'needs_asset' : 'ready',
+      };
+    });
+    if (beats.some((beat) => !Number.isFinite(beat.duration_seconds) || beat.duration_seconds < 0.15)) {
+      setMessage('Thời lượng mỗi nhịp dựng phải từ 0.15 giây trở lên.', 'error');
+      return null;
+    }
+    return beats;
+  }
+
+  async function saveStudioSceneEditPlan(segmentId, quiet = false) {
+    const beats = collectStudioSceneEditBeats(segmentId);
+    if (!beats) return null;
+    try {
+      const result = await api(`/api/timeline/${segmentId}/edit-beats`, {
+        method: 'PUT', body: JSON.stringify({beats}),
+      });
+      await refreshStudioStoryboard();
+      if (!quiet) setMessage(`Đã lưu kế hoạch dựng ${beats.length} nhịp cho cảnh này.`, 'success');
+      return result;
+    } catch (error) {
+      if (!quiet) setMessage(`Không lưu được kế hoạch dựng: ${error.message}`, 'error');
+      return null;
+    }
+  }
+
+  async function planStudioSceneEdit(segmentId, options = {}) {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
+    const button = options.button || null;
+    if (button) button.disabled = true;
+    if (!options.quiet) setMessage(`AI đang lập kế hoạch dựng cảnh ${segment.segment_index || ''}...`);
+    try {
+      const plan = await api(`/api/timeline/${segmentId}/edit-beats/plan`, {
+        method: 'POST', body: JSON.stringify({max_beats: 4}),
+      });
+      if (!options.skipRefresh) await refreshStudioStoryboard();
+      if (!options.quiet) {
+        setMessage(`Đã lập kế hoạch dựng cảnh ${segment.segment_index || ''}. Hãy xem/sửa rồi bấm Áp dụng.`, 'success');
+      }
+      return plan;
+    } catch (error) {
+      if (!options.quiet) setMessage(`Không lập được kế hoạch cảnh ${segment.segment_index || ''}: ${error.message}`, 'error');
+      throw error;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function applyStudioSceneEdit(segmentId, options = {}) {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
+    const currentBeats = editBeatsForSegment(segment);
+    if (!currentBeats.length) return setMessage('Cảnh này chưa có kế hoạch dựng. Hãy lập kế hoạch trước.', 'error');
+    const saved = document.querySelector(`[data-edit-segment="${segmentId}"]`)
+      ? await saveStudioSceneEditPlan(segmentId, true)
+      : {beats: currentBeats};
+    const beats = saved?.beats || currentBeats;
+    const needsAi = beats.some((beat) =>
+      String(beat.source_kind || '') === 'ai_image' && !String(beat.visual_path || '').trim()
+    );
+    if (needsAi && !options.confirmed && !confirm('Kế hoạch có ảnh AI phụ và có thể dùng hạn mức provider đã chọn. Áp dụng cảnh này?')) return null;
+    try {
+      const settings = await studioEditBeatGenerationSettings(needsAi, options.imageProvider || '');
+      settings.confirmed = needsAi;
+      const result = await api(`/api/timeline/${segmentId}/edit-beats/apply`, {
+        method: 'POST', body: JSON.stringify(settings),
+      });
+      const jobs = result.queued_jobs || [];
+      jobs.forEach((job) => { if (job.id) void watchStudioSceneGenerationJob(job.id, 'long'); });
+      if (!options.skipRefresh) await refreshStudioStoryboard();
+      if (!options.quiet) {
+        const pending = jobs.length ? ` · gửi tạo ${jobs.length} ảnh AI phụ` : '';
+        setMessage(`Đã áp dụng kế hoạch dựng cảnh ${segment.segment_index || ''}${pending}.`, 'success');
+      }
+      return {result, jobs};
+    } catch (error) {
+      if (!options.quiet) setMessage(`Không áp dụng được kế hoạch cảnh ${segment.segment_index || ''}: ${error.message}`, 'error');
+      throw error;
+    }
+  }
+
+  async function planAllStudioSceneEdits() {
+    const segments = (state.timeline || []).filter((segment) => Number(segment.id));
+    if (!segments.length) return setMessage('Storyboard chưa có cảnh để lập kế hoạch dựng. Hãy tạo timeline/storyboard trước.', 'error');
+    if (!confirm(`AI sẽ lập kế hoạch dựng cho ${segments.length} cảnh. Sau bước này bạn có thể mở từng thẻ cảnh để sửa nhịp hình, hiệu ứng, chuyển cảnh và prompt ảnh phụ trước khi áp dụng.\n\nTiếp tục?`)) return;
+    const button = $('studioBuildEditPlanButton');
+    const stateBox = $('studioEditPlanState');
+    if (button) button.disabled = true;
+    let planned = 0;
+    const failed = [];
+    try {
+      for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index];
+        const labelIndex = segment.segment_index || index + 1;
+        const percent = Math.round(5 + (80 * index / Math.max(1, segments.length)));
+        setStudioProgress(percent, `AI đang lập kế hoạch cảnh ${labelIndex} · ${index}/${segments.length} đã xong...`);
+        if (stateBox) stateBox.innerHTML = `<b>Đang lập kế hoạch:</b> cảnh ${esc(labelIndex)} · ${index}/${segments.length} đã xong.`;
+        try {
+          await planStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true});
+          planned += 1;
+        } catch (error) {
+          failed.push(`cảnh ${labelIndex}: ${error.message}`);
+        }
+      }
+      await refreshStudioStoryboard();
+      setStudioProgress(100, failed.length ? `Đã lập ${planned}/${segments.length} kế hoạch, còn lỗi.` : `Đã lập ${planned}/${segments.length} kế hoạch.`);
+      const summary = failed.length
+        ? `Đã lập ${planned}/${segments.length} kế hoạch. Lỗi: ${failed.slice(0, 3).join('; ')}`
+        : `Đã lập kế hoạch dựng cho ${planned} cảnh. Hãy xem/sửa từng cảnh rồi bấm “Áp dụng kế hoạch dựng”.`;
+      if (stateBox) stateBox.innerHTML = failed.length
+        ? `<b>Cần kiểm tra:</b> ${esc(summary)}`
+        : `<b>Đã lập kế hoạch.</b> ${esc(summary)}`;
+      setMessage(summary, failed.length ? 'error' : 'success');
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function applyAllStudioSceneEdits() {
+    const segments = (state.timeline || []).filter((segment) => Number(segment.id));
+    if (!segments.length) return setMessage('Storyboard chưa có cảnh để áp dụng kế hoạch dựng.', 'error');
+    const missingPlan = segments.filter((segment) => !editBeatsForSegment(segment).length);
+    if (missingPlan.length) {
+      return setMessage(`Còn ${missingPlan.length} cảnh chưa có kế hoạch dựng. Hãy bấm “Lập kế hoạch dựng” trước.`, 'error');
+    }
+    let provider = $('studioEditPlanProviderSelect')?.value || 'phantom_canvas_image';
+    try {
+      provider = await resolveAutoSceneProvider(provider, 'scene.image');
+    } catch (error) {
+      return setMessage(`Auto không chọn được provider ảnh phụ: ${error.message}`, 'error');
+    }
+    const warning = await sidecarWarningText(provider);
+    const label = typeof sceneProviderLabel === 'function' ? sceneProviderLabel(provider) : provider;
+    if (!confirm(`Áp dụng kế hoạch dựng cho ${segments.length} cảnh bằng ${label} nếu cần tạo ảnh phụ.\n\nBước này sẽ trích frame, gửi tạo ảnh AI phụ và render sau đó sẽ dùng trực tiếp các nhịp dựng đã lưu.${warning ? `\n\n${warning}` : ''}\n\nTiếp tục?`)) return;
+    const button = $('studioApplyEditPlanToScenesButton');
+    const stateBox = $('studioEditPlanState');
+    if (button) button.disabled = true;
+    let applied = 0;
+    let queued = 0;
+    const failed = [];
+    try {
+      for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index];
+        const labelIndex = segment.segment_index || index + 1;
+        const percent = Math.round(5 + (80 * index / Math.max(1, segments.length)));
+        setStudioProgress(percent, `Đang áp dụng kế hoạch cảnh ${labelIndex} · ${index}/${segments.length} đã xong...`);
+        if (stateBox) stateBox.innerHTML = `<b>Đang áp dụng:</b> cảnh ${esc(labelIndex)} · ${index}/${segments.length} đã xong.`;
+        try {
+          const result = await applyStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true, confirmed: true, imageProvider: provider});
+          applied += 1;
+          queued += (result?.jobs || []).length;
+        } catch (error) {
+          failed.push(`cảnh ${labelIndex}: ${error.message}`);
+        }
+      }
+      await refreshStudioStoryboard();
+      setStudioProgress(100, failed.length ? `Đã áp dụng ${applied}/${segments.length} cảnh, còn lỗi.` : `Đã áp dụng ${applied}/${segments.length} cảnh.`);
+      const summary = failed.length
+        ? `Đã áp dụng ${applied}/${segments.length} cảnh, gửi tạo ${queued} ảnh AI phụ. Lỗi: ${failed.slice(0, 3).join('; ')}`
+        : `Đã áp dụng kế hoạch dựng cho ${applied} cảnh${queued ? ` và gửi tạo ${queued} ảnh AI phụ` : ''}.`;
+      if (stateBox) stateBox.innerHTML = failed.length
+        ? `<b>Cần kiểm tra:</b> ${esc(summary)}`
+        : `<b>Đã áp dụng.</b> ${esc(summary)} Render sẽ dùng các nhịp dựng này.`;
+      setMessage(summary, failed.length ? 'error' : 'success');
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  function storyboardShotForSegment(segment, shots = state.shots || []) {
+    return shots.find((shot) => Number(shot.id) === Number(segment?.shot_id))
+      || shots.find((shot) => Number(shot.shot_index) === Number(segment?.segment_index))
+      || null;
+  }
+
+  function storyboardSegmentForShot(shot, timeline = state.timeline || []) {
+    return timeline.find((item) => Number(item.shot_id) === Number(shot?.id))
+      || timeline.find((item) => Number(item.segment_index) === Number(shot?.shot_index))
+      || null;
+  }
+
+  function renderStudioGraphicPlan(plan) {
+    const target = $('studioGraphicPlanState');
+    if (!target) return;
+    const scenes = Array.isArray(plan?.scenes) ? plan.scenes : [];
+    if (!scenes.length) { target.textContent = 'Chưa có kế hoạch đồ họa.'; return; }
+    const rows = scenes.map((scene) => {
+      const overlays = Array.isArray(scene.overlays) ? scene.overlays : [];
+      const labels = overlays.length
+        ? overlays.map((item) => `${esc(item.text || '')} · ${esc(item.style || 'clean')} / ${esc(item.animation || 'fade')} · ${Number(item.start_seconds || 0).toFixed(1)}–${Number(item.end_seconds || 0).toFixed(1)}s`).join('<br>')
+        : 'Không cần chữ động';
+      return `<div style="margin-top:6px"><b>Cảnh ${esc(scene.segment_index || '')}</b> · ${esc(scene.visual_strategy || '')}<br>${labels}</div>`;
+    }).join('');
+    // A plan the app filled in from a template looks exactly like an AI plan
+    // once it is saved, so the one moment it can still be named is here.
+    const fallbackNote = plan?.is_fallback
+      ? `<div class="warning-text"><b>Đây KHÔNG phải kế hoạch của AI.</b> AI điều phối không chạy được nên app dùng mẫu dựng sẵn${plan.planner_error ? `: ${esc(plan.planner_error)}` : '.'}</div>`
+      : '';
+    target.innerHTML = `${fallbackNote}<b>Bản nháp ${scenes.length} cảnh.</b> Xem lớp chữ và lựa chọn visual trước khi áp dụng.<details><summary>Xem từng cảnh</summary>${rows}</details>`;
+  }
+
+  async function planStudioGraphics() {
+    if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
+    const target = $('studioGraphicPlanState');
+    if (target) target.textContent = 'AI đang lập kế hoạch dựng và chữ động...';
+    try {
+      const plan = await api(`/api/projects/${state.studioProjectId}/edit-plan`, {method: 'POST'});
+      renderStudioGraphicPlan(plan);
+      if (plan?.is_fallback) {
+        setMessage('AI điều phối không chạy được nên đây là kế hoạch mẫu của app, không phải bản dựng do AI quyết định.', 'error');
+      } else {
+        setMessage('Đã lập kế hoạch. Xem từng cảnh rồi bấm Duyệt và áp dụng.', 'success');
+      }
+    } catch (error) {
+      if (target) target.textContent = `Không lập được kế hoạch: ${error.message}`;
+      setMessage(`Không lập được kế hoạch: ${error.message}`, 'error');
+    }
+  }
+
+  async function applyStudioGraphics() {
+    if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
+    const base = `/api/projects/${state.studioProjectId}/edit-plan`;
+    try {
+      const current = await api(base);
+      if (current.status === 'missing' || current.status === 'stale') {
+        return setMessage('Kế hoạch chưa có hoặc đã cũ. Hãy lập lại.', 'error');
+      }
+      if (current.status === 'ready') {
+        return setMessage('Kế hoạch này đã áp dụng. Hãy lập lại nếu muốn thay đổi.', 'success');
+      }
+      if (current.status === 'draft') await api(`${base}/approve`, {method: 'POST'});
+      const result = await api(`${base}/apply`, {method: 'POST'});
+      await refreshStudioStoryboard();
+      const target = $('studioGraphicPlanState');
+      if (target) target.textContent = `Đã áp dụng ${result.applied_scenes || 0} cảnh. Lớp chữ sẽ xuất hiện trong bản render tiếp theo.`;
+      setMessage('Đã áp dụng kế hoạch dựng và chữ động.', 'success');
+    } catch (error) {
+      setMessage(`Không áp dụng được kế hoạch: ${error.message}`, 'error');
+    }
+  }
+
+  function storyboardGraphicSummary(segment) {
+    let graphics = segment?.overlays || [];
+    try { if (typeof graphics === 'string') graphics = JSON.parse(graphics); } catch (_) { graphics = []; }
+    if (!Array.isArray(graphics)) graphics = [];
+    const rows = graphics.length
+      ? graphics.map((item) => `<div>${esc(item.text || '')} · ${esc(item.style || 'clean')} / ${esc(item.animation || 'fade')} · ${Number(item.start_seconds || 0).toFixed(1)}–${Number(item.end_seconds || 0).toFixed(1)}s</div>`).join('')
+      : '<div class="secondary-text">Chưa có lớp chữ động.</div>';
+    return `<details class="storyboard-edit-summary"><summary>Chữ động: ${graphics.length} lớp</summary>${rows}<div class="queue-controls" style="justify-content:flex-start;margin-top:7px"><button class="btn small ghost" type="button" onclick="editStudioSceneOverlays(${Number(segment?.id || 0)})">Sửa chữ động</button></div></details>`;
+  }
+
+  function storyboardSoundCueSummary(segment) {
+    let cues = segment?.sound_cues || [];
+    try { if (typeof cues === 'string') cues = JSON.parse(cues); } catch (_) { cues = []; }
+    if (!Array.isArray(cues)) cues = [];
+    const rows = cues.length
+      ? cues.map((item) => `<div>${esc(item.type || 'sfx')} · ${esc(item.intensity || 'medium')} · ${Number(item.start_seconds || 0).toFixed(1)}–${Number(item.end_seconds || 0).toFixed(1)}s</div>`).join('')
+      : '<div class="secondary-text">Chưa có cue âm thanh.</div>';
+    return `<details class="storyboard-edit-summary"><summary>Âm thanh nhấn nhịp: ${cues.length} cue</summary>${rows}<div class="queue-controls" style="justify-content:flex-start;margin-top:7px"><button class="btn small ghost" type="button" onclick="editStudioSceneSoundCues(${Number(segment?.id || 0)})">Sửa SFX</button></div></details>`;
+  }
+
+  function parseSceneJsonField(segment, key) {
+    let value = segment?.[key] || [];
+    try { if (typeof value === 'string') value = JSON.parse(value); } catch (_) { value = []; }
+    return Array.isArray(value) ? value : [];
+  }
+
+  async function editStudioSceneJsonLayer(segmentId, key, label, emptyTemplate) {
+    const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
+    const current = parseSceneJsonField(segment, key);
+    const initial = JSON.stringify(current.length ? current : emptyTemplate, null, 2);
+    const raw = window.prompt(`Sửa ${label} bằng JSON array. Để [] nếu không dùng.`, initial);
+    if (raw == null) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return setMessage(`${label} không phải JSON hợp lệ: ${error.message}`, 'error');
+    }
+    if (!Array.isArray(parsed)) return setMessage(`${label} phải là JSON array.`, 'error');
+    try {
+      await api(`/api/timeline/${segmentId}/plan`, {
+        method: 'PATCH',
+        body: JSON.stringify({[key]: parsed}),
+      });
+      await refreshStudioStoryboard();
+      setMessage(`Đã lưu ${label} cho cảnh ${segment.segment_index || ''}.`, 'success');
+    } catch (error) {
+      setMessage(`Không lưu được ${label}: ${error.message}`, 'error');
+    }
+  }
+
+  async function editStudioSceneOverlays(segmentId) {
+    await editStudioSceneJsonLayer(segmentId, 'overlays', 'chữ động', [{
+      kind: 'callout',
+      text: 'Điểm chính',
+      position: 'top_center',
+      style: 'card',
+      animation: 'pop',
+      start_seconds: 0.2,
+      end_seconds: 2.0,
+    }]);
+  }
+
+  async function editStudioSceneSoundCues(segmentId) {
+    await editStudioSceneJsonLayer(segmentId, 'sound_cues', 'SFX', [{
+      type: 'whoosh',
+      start_seconds: 0.2,
+      end_seconds: 0.7,
+      intensity: 'low',
+    }]);
+  }
+
   function renderStudioStoryboard(shots = [], timeline = [], containerId = 'studioStoryboardResult') {
     const result = $(containerId);
     if (!result) return;
+    // The project-resume path used to pass the loaded timeline only to this
+    // renderer.  The cards looked correct, but every action read an empty
+    // state.timeline and reported “Storyboard chưa có cảnh”.  Keep the long
+    // storyboard state in sync with exactly what is visible.  The Short lane
+    // uses another container and must not replace the long timeline.
+    if (containerId === 'studioStoryboardResult') {
+      state.timeline = Array.isArray(timeline) ? timeline : [];
+    }
     if (!shots.length) {
       result.innerHTML = '<div class="studio-empty">Chưa có cảnh. Hãy tạo storyboard hoặc mở chỉnh sửa chi tiết để thêm cảnh.</div>';
       return;
     }
-    result.innerHTML = narrationSourceNotice() + `<div class="studio-checklist"><div class="studio-check"><b>✓</b><span>Storyboard gồm <b>${shots.length} cảnh</b>. Mỗi thẻ bên dưới hiển thị <b>lời AI sẽ đọc</b>, prompt hình ảnh và thời lượng của cảnh.</span></div><div class="queue-controls" style="justify-content:flex-start;margin:8px 0 0;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="restoreStudioGeneratedVoices()">Khôi phục voice đã tạo</button><span class="secondary-text">Dùng khi audio đã tạo nhưng chưa hiện lại trong storyboard.</span></div></div><div class="storyboard-grid">${shots.map((shot, index) => {
-      const segment = timeline.find((item) => Number(item.shot_id) === Number(shot.id));
+    const summary = {ready: 0, missing_visual: 0, missing_audio: 0, fallback: 0, draft: 0};
+    shots.forEach((shot) => {
+      const segment = storyboardSegmentForShot(shot, timeline);
+      const facts = storyboardSceneFacts(shot, segment);
+      if (facts.ready) summary.ready += 1;
+      if (facts.missingVisual) summary.missing_visual += 1;
+      if (facts.missingAudio) summary.missing_audio += 1;
+      if (facts.fallback) summary.fallback += 1;
+      if (facts.draft) summary.draft += 1;
+    });
+    const summaryBar = containerId === 'studioStoryboardResult' ? `<div class="storyboard-status-bar">
+      <b>${shots.length} cảnh</b><span class="status-ready">${summary.ready} sẵn sàng</span>
+      <span>${summary.missing_visual} thiếu hình</span><span>${summary.missing_audio} thiếu tiếng</span>
+      ${summary.fallback ? `<span>${summary.fallback} dự phòng</span>` : ''}
+      <div class="storyboard-filter-row"><button class="btn small primary" data-storyboard-filter="all" onclick="filterStudioStoryboard('all')">Tất cả</button><button class="btn small ghost" data-storyboard-filter="missing_visual" onclick="filterStudioStoryboard('missing_visual')">Thiếu hình</button><button class="btn small ghost" data-storyboard-filter="missing_audio" onclick="filterStudioStoryboard('missing_audio')">Thiếu tiếng</button><button class="btn small ghost" data-storyboard-filter="ready" onclick="filterStudioStoryboard('ready')">Sẵn sàng</button></div>
+    </div>` : '';
+    result.innerHTML = narrationSourceNotice() + summaryBar + `<div class="storyboard-grid">${shots.map((shot, index) => {
+      const segment = storyboardSegmentForShot(shot, timeline);
+      const sceneFacts = storyboardSceneFacts(shot, segment);
+      const sceneState = sceneFacts.state;
       // Voiceover is rendered from timeline.voice_text.  A shot is its visual
       // plan and can be older after a per-scene translation, so displaying
       // shot.narration here made an English audio look as if it were Vietnamese.
@@ -317,44 +770,16 @@
       const voiceControls = segment
         ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="attachStudioGeneratedVoiceForScene(${segment.id})">Chọn voice đã tạo</button><button class="btn small ghost" type="button" onclick="uploadStudioVoiceForScene(${segment.id})">${segment.audio_path ? 'Thay bằng file voice' : 'Nạp file giọng vào cảnh'}</button><span class="secondary-text">Audio được gắn trực tiếp vào cảnh này.</span></div>`
         : '';
-      // Where in the source this picture was taken from, editable before the
-      // render rather than discovered in it.
-      const cutControls = String(segment?.visual_path || '').includes('source_clips')
-        ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap">
-             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Cắt từ giây
-               <input id="studioCutStart-${segment.id}" type="number" min="0" step="0.5" style="width:88px"
-                 value="${Number(segment.source_start_seconds ?? -1) >= 0 ? Number(segment.source_start_seconds).toFixed(1) : ''}"
-                 placeholder="tự chọn" /></label>
-             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Bỏ đầu
-               <input id="studioTrimHead-${segment.id}" type="number" min="0" step="0.1" style="width:72px"
-                 value="${Number(segment.edit_trim_head || 0).toFixed(1)}" /></label>
-             <label class="secondary-text" style="display:flex;align-items:center;gap:5px">Bỏ cuối
-               <input id="studioTrimTail-${segment.id}" type="number" min="0" step="0.1" style="width:72px"
-                 value="${Number(segment.edit_trim_tail || 0).toFixed(1)}" /></label>
-             <button class="btn small" type="button" onclick="saveSegmentCut(${segment.id})">Cắt lại cảnh này</button>
-           </div>`
-        : '';
       const shotVisualPath = String(segment?.visual_path || '');
       const wantsVisual = String(shot.status || '') === 'needs_visual';
+      const optionalMediaTools = `<details style="margin-top:9px"><summary class="secondary-text">Thay ảnh/video bằng AI (tùy chọn)</summary><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;flex-wrap:wrap"><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button></div></details>`;
       return `
-      <div class="storyboard-card"${wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
-        <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1}</span>${shot.status ? shotStatusTag(shot.status) : ''}</div>
+      <div class="storyboard-card" data-segment-id="${segment?.id || ''}" data-scene-state="${sceneState}" data-missing-visual="${sceneFacts.missingVisual ? '1' : '0'}" data-missing-audio="${sceneFacts.missingAudio ? '1' : '0'}" data-ready="${sceneFacts.ready ? '1' : '0'}"${wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
+        <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1} · ${Number(shot.duration_seconds || 0).toFixed(1)} giây</span><span class="storyboard-state storyboard-state-${sceneState}">${sceneFacts.label}</span></div>
         <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(spokenText || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${voiceControls}${cutControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div><div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span><span>${Number(shot.duration_seconds || 0).toFixed(1)} giây</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh này</button><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI cho cảnh</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh cho cảnh' : 'Cần tạo ảnh trước'}</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng đọc cảnh này</button></div></div>
+        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(spokenText || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${voiceControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div>${storyboardEditSummary(segment)}${storyboardGraphicSummary(segment)}${storyboardSoundCueSummary(segment)}<div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng</button></div>${optionalMediaTools}</div>
       </div>`;
     }).join('')}</div>`;
-    result.querySelectorAll('.storyboard-card').forEach((card, index) => {
-      const shot = shots[index] || {};
-      const segment = timeline.find((item) => Number(item.shot_id) === Number(shot.id));
-      const sourceStart = Number(segment?.source_start_seconds);
-      if (!segment || !Number.isFinite(sourceStart) || sourceStart < 0) return;
-      const end = sourceStart + Number(segment.duration_seconds || 0);
-      const label = document.createElement('div');
-      label.className = 'secondary-text';
-      label.style.marginTop = '7px';
-      label.textContent = `Cắt từ video nguồn: ${formatStudioDuration(sourceStart)} → ${formatStudioDuration(end)}`;
-      card.querySelector('.storyboard-summary')?.after(label);
-    });
   }
 
   async function refreshStudioStoryboard() {
@@ -363,8 +788,51 @@
     state.studioProject = bundle.project || state.studioProject;
     state.shots = bundle.latest_shots || [];
     state.timeline = bundle.latest_timeline || [];
+    state.projectAssets = bundle.project_assets || [];
     renderStudioStoryboard(state.shots, state.timeline);
     return bundle;
+  }
+
+  function renderStudioRenderReadiness(check = {}) {
+    const total = Number(check.total || 0);
+    const missingVisual = Number(check.missing_visual || 0);
+    const missingAudio = Number(check.missing_audio || 0);
+    const draftVisual = Number(check.draft_visual || 0);
+    const visualReady = Math.max(0, total - missingVisual - draftVisual);
+    const audioReady = Math.max(0, total - missingAudio);
+    const outputLabel = $('studioOutputProfileSelect')?.selectedOptions[0]?.textContent || 'Chưa chọn';
+    const summary = $('studioRenderSummary');
+    if (summary) summary.innerHTML = [
+      `<div class="studio-summary-card"><label>Cảnh</label><strong>${total ? `${Number(check.ready || 0)}/${total} sẵn sàng` : 'Chưa có timeline'}</strong></div>`,
+      `<div class="studio-summary-card"><label>Hình</label><strong>${total ? `${visualReady}/${total} hợp lệ` : '—'}</strong></div>`,
+      `<div class="studio-summary-card"><label>Giọng đọc</label><strong>${total ? `${audioReady}/${total} đã gắn` : '—'}</strong></div>`,
+      `<div class="studio-summary-card"><label>Đầu ra</label><strong>${esc(outputLabel)}</strong></div>`,
+    ].join('');
+    const note = $('studioRenderReadinessNote');
+    const issues = Array.isArray(check.issues) ? check.issues : [];
+    if (note) {
+      note.className = `studio-model-note${check.can_render ? ' status-ready' : ''}`;
+      note.innerHTML = check.can_render
+        ? '<b>Sẵn sàng dựng.</b> Tất cả cảnh đã có hình thật và voice.'
+        : total
+          ? `<b>Chưa thể dựng:</b> ${esc(issues.join(' · ') || 'cảnh chưa hoàn chỉnh')}. Quay lại Storyboard và lọc cảnh thiếu để bổ sung.`
+          : '<b>Chưa có timeline.</b> Hãy tạo storyboard trước.';
+    }
+    const renderButton = $('studioQueueRenderButton');
+    if (renderButton) renderButton.disabled = !check.can_render;
+  }
+
+  async function refreshStudioRenderReadiness() {
+    if (!state.studioProjectId) return null;
+    try {
+      const check = await api(`/api/projects/${state.studioProjectId}/render-readiness`);
+      renderStudioRenderReadiness(check);
+      return check;
+    } catch (error) {
+      const note = $('studioRenderReadinessNote');
+      if (note) note.textContent = `Không kiểm tra được dữ liệu dựng: ${error.message}`;
+      return null;
+    }
   }
 
   async function restoreStudioGeneratedVoices() {
@@ -457,6 +925,32 @@
     chatgpt_web_image: 'ChatGPT (web) sẽ dùng tài khoản ChatGPT Plus/Pro đã đăng nhập.',
   };
   const isSubscriptionProvider = (provider) => provider in SUBSCRIPTION_PROVIDER_HINTS;
+  const NO_KEY_SCENE_PROVIDERS = new Set(['motion_graphics', 'stock_footage']);
+
+  async function resolveAutoSceneProvider(provider, capability) {
+    const selected = String(provider || '').trim() || 'auto';
+    if (selected !== 'auto') return selected;
+    const projectId = Number(state.studioProjectId || state.projectId || 0) || null;
+    const route = await api('/api/providers/route', {
+      method: 'POST',
+      body: JSON.stringify({project_id: projectId, capability}),
+    });
+    if (!route?.selected_provider) throw new Error(route?.reason || 'Router chưa trả về provider phù hợp.');
+    return route.selected_provider;
+  }
+
+  function sceneProviderReadiness(provider, isVeo = false) {
+    if (provider === 'auto') {
+      return {ready: true, integrationKey: '', message: 'AI điều phối sẽ tự chọn provider/tool đang sẵn sàng theo cảnh, quota và chi phí.'};
+    }
+    if (NO_KEY_SCENE_PROVIDERS.has(provider) || isSubscriptionProvider(provider)) {
+      return {ready: true, integrationKey: '', message: ''};
+    }
+    const integrationKey = provider.startsWith('gemini_') ? 'google_gemini' : 'openai_gpt';
+    const ready = Boolean(state.integrations?.find((item) => item.key === integrationKey)?.ready);
+    const label = integrationKey === 'google_gemini' ? 'Google Gemini API' : 'OpenAI GPT + Image API';
+    return {ready, integrationKey, label, message: ready ? '' : `Cần kết nối <b>${label}</b> trước. Vào Công cụ & kết nối, dán API key rồi bấm “Lưu & bật”.`};
+  }
 
   async function sidecarWarningText(provider) {
     // Open archives need no login, no extension and no sidecar to poll.
@@ -489,174 +983,52 @@
 
   async function updateStudioSceneGenerationAvailability() {
     const hasProject = Boolean(state.studioProjectId);
+    const buildEditPlanButton = $('studioBuildEditPlanButton');
+    const applyEditPlanButton = $('studioApplyEditPlanToScenesButton');
+    if (buildEditPlanButton) buildEditPlanButton.disabled = !hasProject;
+    if (applyEditPlanButton) applyEditPlanButton.disabled = !hasProject;
 
     const imageButton = $('studioGenerateImagesButton');
     const imageHint = $('studioSceneImageHint');
     if (imageButton) {
       const provider = $('studioSceneImageProviderSelect')?.value || 'gemini_image';
-      const integrationKey = provider.startsWith('gemini_') ? 'google_gemini' : 'openai_gpt';
-      const providerReady = isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === integrationKey)?.ready);
+      const readiness = sceneProviderReadiness(provider, false);
       // Keep this action clickable: when the key is absent, a click guides
       // the user to the exact connection card instead of looking broken.
       imageButton.disabled = !hasProject;
       if (imageHint) {
-        imageHint.innerHTML = isSubscriptionProvider(provider)
+        imageHint.innerHTML = provider === 'auto'
+          ? 'Auto: AI điều phối sẽ chọn provider ảnh phù hợp nhất trong các tool đang sẵn sàng.'
+          : isSubscriptionProvider(provider)
           ? SUBSCRIPTION_PROVIDER_HINTS[provider]
-          : providerReady
+          : readiness.ready
           ? 'Google Gemini/OpenAI sẽ tạo một ảnh kể chuyện cho mỗi cảnh; FFmpeg tạo chuyển động nhẹ khi dựng video.'
-          : `Cần kết nối <b>${provider.startsWith('gemini_') ? 'Google Gemini API' : 'OpenAI GPT + Image API'}</b> trước. Vào Công cụ & kết nối, dán API key rồi bấm “Lưu & bật”.`;
+          : readiness.message;
         void sidecarWarningHtml(provider).then((warning) => { if (warning) imageHint.innerHTML += warning; });
       }
     }
-
-    const planVisualsButton = $('studioPlanVisualsButton');
-    if (planVisualsButton) planVisualsButton.disabled = !hasProject;
-    const planEditButton = $('studioPlanEditButton');
-    if (planEditButton) planEditButton.disabled = !hasProject;
 
     const videoButton = $('studioGenerateVideosButton');
     const videoHint = $('studioSceneVideoHint');
     if (videoButton) {
       const provider = $('studioSceneVideoProviderSelect')?.value || 'gflow_cli';
-      const providerReady = provider === 'gflow_cli'
-        ? Boolean(state.integrations?.find((item) => item.key === 'gflow_cli')?.ready)
-        : isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === 'google_gemini')?.ready);
+      const readiness = sceneProviderReadiness(provider, true);
       videoButton.disabled = !hasProject;
       if (videoHint) {
-        videoHint.innerHTML = provider === 'motion_graphics'
+        videoHint.innerHTML = provider === 'auto'
+          ? 'Auto: AI điều phối sẽ chọn giữa Veo/Flow, stock footage hoặc motion graphics theo nội dung từng cảnh và tool đang sẵn sàng.'
+          : provider === 'motion_graphics'
           ? 'Cảnh sẽ được vẽ bằng motion graphics: biểu đồ động, thẻ số liệu, tiêu đề chuyển động, cảnh terminal. Không tốn credit và không cần API key. Hợp với cảnh trình bày số liệu — thứ không có footage nào quay được.'
           : provider === 'stock_footage'
           ? 'Cảnh sẽ dùng footage thật public-domain từ Archive.org và NASA, cắt đúng thời lượng. Không tốn credit và không cần API key; nguồn từng clip được ghi vào NGUON_FOOTAGE.json trong thư mục dự án.'
           : isSubscriptionProvider(provider)
           ? SUBSCRIPTION_PROVIDER_HINTS[provider]
-          : providerReady
+          : readiness.ready
           ? 'Google Veo sẽ tạo clip video thật cho mỗi cảnh (chậm hơn và tốn credits hơn). Video hoàn tất sẽ hiện trong storyboard.'
-          : 'Cần kết nối <b>Google Gemini API</b> trước. Vào Công cụ & kết nối, dán API key rồi bấm “Lưu & bật”.';
+          : readiness.message;
         void sidecarWarningHtml(provider).then((warning) => { if (warning) videoHint.innerHTML += warning; });
       }
     }
-  }
-
-  const VISUAL_KIND_LABELS = {image: 'Ảnh tĩnh', gif: 'Ảnh động (GIF)', video: 'Video'};
-  const TRANSITION_LABELS = {cut: 'Cắt thẳng', fade: 'Mờ dần'};
-  const EFFECT_LABELS = {zoom_in: 'Đẩy vào', zoom_out: 'Kéo lui', static: 'Đứng yên'};
-
-  function planSelect(segmentId, field, value, labels) {
-    const options = Object.entries(labels)
-      .map(([key, label]) => `<option value="${key}"${key === value ? ' selected' : ''}>${esc(label)}</option>`)
-      .join('');
-    return `<select class="plan-select" data-segment="${segmentId}" data-field="${field}">${options}</select>`;
-  }
-
-  async function saveScenePlanField(segmentId, field, value) {
-    const body = {};
-    body[field] = field === 'visual_fps' ? Number(value) : value;
-    try {
-      await api(`/api/timeline/${segmentId}/plan`, {method: 'PATCH', body: JSON.stringify(body)});
-      setMessage('Đã lưu thay đổi cho cảnh.', 'success');
-    } catch (error) { setMessage(`Không lưu được: ${error.message}`, 'error'); }
-  }
-
-  function bindPlanSelects(container) {
-    container.querySelectorAll('.plan-select').forEach((select) => {
-      select.addEventListener('change', () => void saveScenePlanField(
-        select.dataset.segment, select.dataset.field, select.value,
-      ));
-    });
-  }
-
-  async function planStudioVisuals() {
-    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
-    const policy = $('studioMotionPolicySelect')?.value || 'balanced';
-    const button = $('studioPlanVisualsButton');
-    const target = $('studioVisualPlan');
-    if (button) button.disabled = true;
-    if (target) target.innerHTML = '<div class="studio-empty">AI đang đọc kịch bản để quyết định từng cảnh...</div>';
-    setMessage('Đang phân tích loại hình cho từng cảnh...');
-    try {
-      const result = await api(
-        `/api/projects/${state.studioProjectId}/timeline/plan-visuals?motion_policy=${policy}`,
-        {method: 'POST'},
-      );
-      renderStudioVisualPlan(result);
-      const summary = Object.entries(result.by_kind || {})
-        .map(([kind, count]) => `${count} ${VISUAL_KIND_LABELS[kind] || kind}`).join(' · ');
-      setMessage(`Đã lên kế hoạch ${result.scenes?.length || 0} cảnh: ${summary}`, 'success');
-    } catch (error) {
-      if (target) target.innerHTML = '';
-      setMessage(`Không phân tích được: ${error.message}`, 'error');
-    } finally { if (button) button.disabled = false; }
-  }
-
-  function renderStudioVisualPlan(result) {
-    const target = $('studioVisualPlan');
-    if (!target) return;
-    const scenes = result.scenes || [];
-    if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa có cảnh nào được lên kế hoạch.</div>');
-    const rows = scenes.map((scene) => `<tr>
-      <td>${esc(scene.segment_index)}</td>
-      <td>${planSelect(scene.segment_id, 'visual_kind', scene.kind, VISUAL_KIND_LABELS)}</td>
-      <td>${scene.fps ? `${esc(scene.fps)} fps` : '—'}</td>
-      <td class="plan-reason">${esc(scene.reason || '')}</td>
-    </tr>`).join('');
-    target.innerHTML = `<div class="studio-result-card"><h3>Loại hình từng cảnh</h3>
-      <p class="hint">AI quyết định dựa trên kịch bản; đổi ở đây nếu bạn thấy chưa đúng, thay đổi được lưu ngay.</p>
-      <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
-      <th>Cảnh</th><th>Loại hình</th><th>FPS</th><th>Lý do</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
-    bindPlanSelects(target);
-  }
-
-  async function planStudioEdit() {
-    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
-    const button = $('studioPlanEditButton');
-    const target = $('studioEditPlan');
-    if (button) button.disabled = true;
-    if (target) target.innerHTML = '<div class="studio-empty">AI đang lên kế hoạch dựng...</div>';
-    setMessage('Đang lập kế hoạch dựng...');
-    try {
-      const result = await api(`/api/projects/${state.studioProjectId}/edit-plan`, {method: 'POST'});
-      renderStudioEditPlan(result);
-      setMessage(`Đã lên kế hoạch dựng cho ${result.scenes?.length || 0} cảnh.`, 'success');
-    } catch (error) {
-      if (target) target.innerHTML = '';
-      setMessage(`Không lập được kế hoạch dựng: ${error.message}`, 'error');
-    } finally { if (button) button.disabled = false; }
-  }
-
-  function renderStudioEditPlan(result) {
-    const target = $('studioEditPlan');
-    if (!target) return;
-    const scenes = result.scenes || [];
-    if (!scenes.length) return void (target.innerHTML = '<div class="studio-empty">Chưa có cảnh nào trong kế hoạch dựng.</div>');
-    const CLEANUP_LABELS = {logo: 'Logo', watermark: 'Watermark', subtitle: 'Phụ đề gốc', other: 'Khác'};
-    const METHOD_LABELS = {blur: 'làm mờ', delogo: 'xoá', crop: 'cắt mép'};
-    const trimText = (scene) => {
-      const head = Number(scene.trim_head_seconds || 0);
-      const tail = Number(scene.trim_tail_seconds || 0);
-      if (!head && !tail) return '—';
-      return [head ? `đầu ${head}s` : '', tail ? `cuối ${tail}s` : ''].filter(Boolean).join(', ');
-    };
-    const cleanupText = (scene) => {
-      const items = (scene.cleanups || []).map((item) =>
-        `${CLEANUP_LABELS[item.kind] || item.kind} · ${METHOD_LABELS[item.method] || item.method}`);
-      if (scene.needs_extra_visual) items.push(`⊕ thiếu hình: ${scene.extra_visual_note || ''}`);
-      return items.length ? items.map((item) => esc(item)).join('<br>') : '—';
-    };
-    const rows = scenes.map((scene) => `<tr>
-      <td>${esc(scene.segment_index)}</td>
-      <td>${planSelect(scene.segment_id, 'transition', scene.transition, TRANSITION_LABELS)}</td>
-      <td>${planSelect(scene.segment_id, 'effect', scene.effect, EFFECT_LABELS)}</td>
-      <td>${esc(trimText(scene))}</td>
-      <td>${cleanupText(scene)}</td>
-      <td class="plan-reason">${esc(scene.note || '')}</td>
-    </tr>`).join('');
-    const header = [result.pacing, result.music_mood].filter(Boolean).map(esc).join(' · ');
-    target.innerHTML = `<div class="studio-result-card"><h3>Kế hoạch dựng</h3>
-      ${header ? `<p class="hint">${header}</p>` : ''}
-      <p class="hint">Áp dụng khi render: chuyển cảnh, hiệu ứng, cắt bỏ phần thừa đầu/cuối, và xoá/làm mờ logo · watermark · phụ đề gốc còn dính trong hình.</p>
-      <div class="plan-table-wrap"><table class="plan-table"><thead><tr>
-      <th>Cảnh</th><th>Chuyển cảnh</th><th>Hiệu ứng</th><th>Cắt thừa</th><th>Dọn hình</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
-    bindPlanSelects(target);
   }
 
   // WF Lồng tiếng gọi đúng những endpoint mà panel Dự án vẫn gọi. Khác biệt
@@ -914,7 +1286,7 @@
       if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
       updateStudioSceneGenerationAvailability();
       setStudioProgress(100, `Storyboard ${shots.length} cảnh đã hoàn tất.`);
-      setMessage(`Đã tạo storyboard gồm ${shots.length} cảnh. Bạn có thể tiếp tục chọn giọng hoặc mở chỉnh sửa chi tiết.`, 'success');
+      setMessage(`Đã tạo storyboard gồm ${shots.length} cảnh. Giọng đọc đã có sẵn nên bạn có thể gắn hình cho từng cảnh rồi sang Xưởng dựng.`, 'success');
     } catch (error) { setStudioProgress(0, `Tạo storyboard thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
     finally { button.disabled = false; }
   }
@@ -927,7 +1299,6 @@
       setStudioProgress(20, 'Đang lưu giọng đọc và phụ đề...');
       await saveRenderSettings(state.studioProjectId);
       if ($('studioVoiceSummary')) $('studioVoiceSummary').innerHTML = `<div class="studio-check"><b>✓</b><span>Đã lưu ${esc($('studioVoiceProviderSelect').selectedOptions[0]?.textContent || '')} · ${esc($('studioVoiceModelSelect').selectedOptions[0]?.textContent || '')} · phụ đề ${esc($('studioSubtitleModelSelect').selectedOptions[0]?.textContent || '')} · ${esc($('studioPublishLanguageSelect').selectedOptions[0]?.textContent || '')}</span></div>`;
-      if ($('studioGenerateTimelineButton')) $('studioGenerateTimelineButton').disabled = false;
       if ($('studioGenerateVoiceoverButton')) $('studioGenerateVoiceoverButton').disabled = false;
       setStudioProgress(100, 'Đã lưu cấu hình giọng đọc và phụ đề.');
       setMessage('Đã lưu model giọng, phụ đề và ngôn ngữ cho project.', 'success');
@@ -990,34 +1361,20 @@
     } finally { button.disabled = false; }
   }
 
-  async function generateStudioTimeline() {
-    if (!state.studioProjectId) return setMessage('Hãy tạo project từ bước kịch bản trước.', 'error');
-    const button = $('studioGenerateTimelineButton');
-    button.disabled = true;
-    setStudioProgress(10, 'Đang chuẩn bị lời đọc, thời lượng và phụ đề...');
-    setMessage('Đang tạo timeline từ storyboard và lời thoại...');
-    try {
-      await saveRenderSettings(state.studioProjectId);
-      setStudioProgress(45, 'Đã lưu cấu hình, đang ghép timeline...');
-      const response = await api(`/api/projects/${state.studioProjectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: false})});
-      const count = response.timeline?.length || 0;
-      if ($('studioRenderSummary')) $('studioRenderSummary').innerHTML = `<div class="studio-summary-card"><label>Timeline</label><strong>${count} đoạn · ${Number(response.total_duration_seconds || 0).toFixed(1)} giây</strong></div><div class="studio-summary-card"><label>Voice</label><strong>${esc($('studioVoiceModelSelect').selectedOptions[0]?.textContent || 'Đã chọn')}</strong></div><div class="studio-summary-card"><label>Đầu ra</label><strong>${esc($('studioOutputProfileSelect').selectedOptions[0]?.textContent || '')}</strong></div>`;
-      if ($('studioQueueRenderButton')) $('studioQueueRenderButton').disabled = false;
-      setStudioProgress(100, `Timeline ${count} đoạn đã hoàn tất.`);
-      setMessage(`Đã tạo timeline gồm ${count} đoạn. Có thể bắt đầu dựng video.`, 'success');
-    } catch (error) { setStudioProgress(0, `Tạo timeline thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
-    finally { button.disabled = false; }
-  }
-
   async function runStudioSceneBatch(provider, isVeo, buttonId, variant = 'long') {
     if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
-    const integrationKey = provider.startsWith('gemini_') ? 'google_gemini' : 'openai_gpt';
-    const providerReady = isSubscriptionProvider(provider) || Boolean(state.integrations?.find((item) => item.key === integrationKey)?.ready);
-    if (!providerReady) {
+    try {
+      provider = await resolveAutoSceneProvider(provider, isVeo ? 'scene.video' : 'scene.image');
+    } catch (error) {
+      setStudioProgress(0, 'Auto chưa chọn được provider phù hợp.', 'error');
+      return setMessage(`Auto không chọn được provider ${isVeo ? 'video' : 'ảnh'}: ${error.message}`, 'error');
+    }
+    const readiness = sceneProviderReadiness(provider, isVeo);
+    if (!readiness.ready) {
       setWorkspace('settings');
       $('integrationBody')?.scrollIntoView({behavior: 'smooth', block: 'start'});
       setStudioProgress(0, 'Cần kết nối API trước khi tạo cảnh.', 'error');
-      return setMessage(`Hãy nhập ${provider.startsWith('gemini_') ? 'GEMINI_API_KEY tại thẻ Google Gemini Image + Veo' : 'OPENAI_API_KEY tại thẻ OpenAI GPT + Image API'}, bấm “Lưu & bật”, sau đó quay lại Storyboard.`, 'error');
+      return setMessage(`Hãy nhập ${readiness.integrationKey === 'google_gemini' ? 'GEMINI_API_KEY tại thẻ Google Gemini Image + Veo' : 'OPENAI_API_KEY tại thẻ OpenAI GPT + Image API'}, bấm “Lưu & bật”, sau đó quay lại Storyboard.`, 'error');
     }
     const sidecarWarning = await sidecarWarningText(provider);
     if (!confirm(`${isVeo ? 'Tạo video từ ảnh storyboard' : 'Tạo ảnh AI'} bằng ${sceneProviderLabel(provider)} cho các cảnh? ${isVeo ? 'Cảnh chưa có ảnh sẽ được tạo ảnh trước; video không bao giờ tự chuyển sang text-to-video. ' : ''}${isSubscriptionProvider(provider) ? SUBSCRIPTION_PROVIDER_SHORT[provider] : 'Việc này dùng API cloud và có thể phát sinh chi phí.'}${sidecarWarning ? `\n\n${sidecarWarning}` : ''}`)) return;
@@ -1032,7 +1389,8 @@
       setStudioProgress(15, 'Timeline đã sẵn sàng, đang xếp hàng tạo cảnh...');
       const ratio = variant === 'short' ? '720:1280' : ($('studioSceneRatioSelect')?.value || '1280:720');
       const selectedImageProvider = $('studioSceneImageProviderSelect')?.value || 'flow_image';
-      const referenceImageProvider = selectedImageProvider === 'auto_parallel' ? 'flow_image' : selectedImageProvider;
+      let referenceImageProvider = selectedImageProvider === 'auto_parallel' ? 'flow_image' : selectedImageProvider;
+      if (referenceImageProvider === 'auto') referenceImageProvider = await resolveAutoSceneProvider('auto', 'scene.image');
       const result = await api(`/api/projects/${state.studioProjectId}/scene-jobs/batch`, {
         method: 'POST', body: JSON.stringify({
           ...batchProviderPayload(provider, isVeo), duration_seconds: isVeo ? 8 : 5, ratio,
@@ -1083,7 +1441,10 @@
           } else {
             const bundle = await api(`/api/projects/${state.studioProjectId}`);
             state.narrationSource = bundle.narration_source || state.narrationSource;
-      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
+            state.shots = bundle.latest_shots || [];
+            state.timeline = bundle.latest_timeline || [];
+            state.projectAssets = bundle.project_assets || [];
+            renderStudioStoryboard(state.shots, state.timeline);
           }
           if (job.status === 'error') setMessage(`Một cảnh AI thất bại: ${job.error || 'Lỗi không xác định'}`, 'error');
           return job;
@@ -1107,26 +1468,23 @@
     setStudioProgress(5, 'Đang kiểm tra cảnh, giọng đọc và thiết lập dựng...');
     setMessage('Đang đưa video vào hàng đợi dựng...');
     try {
-      const bundle = await api(`/api/projects/${state.studioProjectId}`);
-      const timeline = bundle.latest_timeline || [];
-      const missingVisuals = timeline.filter((segment) => !String(segment.visual_path || '').trim());
-      const missingAudio = timeline.filter((segment) => !String(segment.audio_path || '').trim());
-      const draftVisuals = timeline.filter((segment) => String(segment.visual_path || '').replaceAll('\\', '/').includes('director_draft_visuals'));
-      if (!timeline.length) {
-        setStudioStep(6);
-        throw new Error('Chưa có timeline. Hãy bấm “Tạo timeline” trước khi dựng video.');
-      }
-      if (missingVisuals.length) {
+      const check = await api(`/api/projects/${state.studioProjectId}/render-readiness`);
+      renderStudioRenderReadiness(check);
+      if (!check.total) {
         setStudioStep(4);
-        throw new Error(`Còn ${missingVisuals.length}/${timeline.length} cảnh chưa có hình hoặc video thật. Hãy quay lại Storyboard, tạo ảnh/video AI cho các cảnh hoặc gắn asset vào timeline rồi mới render.`);
+        throw new Error('Chưa chia cảnh. Hãy bấm “1. Chia cảnh từ kịch bản” ở bước Giọng đọc trước khi dựng video.');
       }
-      if (draftVisuals.length) {
-        setStudioStep(4);
-        throw new Error(`Còn ${draftVisuals.length} visual draft nội bộ. Hãy thay bằng video AI hoặc ảnh/video thật trong storyboard trước khi render bản xuất bản.`);
-      }
-      if (missingAudio.length) {
+      if (check.missing_visual) {
         setStudioStep(5);
-        throw new Error(`Còn ${missingAudio.length}/${timeline.length} cảnh chưa có giọng đọc. Hãy bấm “Tạo giọng đọc cho các cảnh” trước khi dựng video.`);
+        throw new Error(`Còn ${check.missing_visual}/${check.total} cảnh thiếu hình. Quay lại Storyboard, lọc “Thiếu hình” rồi gắn hoặc tạo hình cho các cảnh đó.`);
+      }
+      if (check.draft_visual) {
+        setStudioStep(5);
+        throw new Error(`Còn ${check.draft_visual} visual draft nội bộ. Hãy thay bằng video AI hoặc ảnh/video thật trước khi render bản xuất bản.`);
+      }
+      if (check.missing_audio) {
+        setStudioStep(4);
+        throw new Error(`Còn ${check.missing_audio}/${check.total} cảnh chưa có giọng đọc. Hãy tạo giọng đọc trước khi dựng video.`);
       }
       await saveRenderSettings(state.studioProjectId);
       setStudioProgress(20, 'Đã kiểm tra xong, đang đưa video vào hàng đợi dựng...');
@@ -1164,7 +1522,7 @@
               ? ` Thời lượng voice hiện là ${actualLabel}${targetLabel}; lệch ${Math.round(deviation * 100)}%. Hãy quay lại Kịch bản để viết dài hơn/ngắn hơn trước khi dựng.`
               : ` Thời lượng voice: ${actualLabel}${targetLabel}.`;
             if ($('studioVoiceSummary')) $('studioVoiceSummary').innerHTML = `<div class="studio-check"><b>✓</b><span>Đã tạo giọng đọc cho toàn bộ cảnh.${esc(durationNote)}</span></div>`;
-            setStudioStep(5);
+            setStudioStep(4);
             setStudioProgress(100, `Đã tạo xong giọng đọc · ${actualLabel}.`);
             setMessage(`Đã tạo xong giọng đọc. Bạn có thể nghe và sửa từng cảnh trong Storyboard.${durationNote}`, targetSeconds && deviation > 0.05 ? 'error' : 'success');
             return job;
@@ -1193,8 +1551,48 @@
     return null;
   }
 
+  async function importStudioPastedScript() {
+    const text = $('studioPasteScriptText')?.value || '';
+    if (!text.trim()) return setMessage('Hãy dán nội dung kịch bản trước khi lưu.', 'error');
+    const variant = $('studioPasteScriptVariant')?.value || 'long';
+    const language = $('studioScriptLanguage')?.value || 'vi';
+    const button = $('studioImportScriptButton');
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    setMessage('Đang lưu kịch bản đã dán và chia cảnh…');
+    try {
+      const result = await api('/api/scripts/import', {method: 'POST', body: JSON.stringify({
+        project_id: state.studioProjectId || null, video_id: state.studioVideoId || '',
+        title: $('studioPasteScriptTitle')?.value || '', text, variant, language,
+        workflow: state.studioWorkflow || 'content',
+      })});
+      state.studioProjectId = result.project.id;
+      state.studioVideoId = result.project.youtube_video_id;
+      state.studioWorkflow = result.project.workflow || 'content';
+      syncStudioNarrationLanguage(language);
+      await saveRenderSettings(state.studioProjectId, {quiet: true});
+      if (variant === 'long') {
+        state.scriptId = result.script.id;
+        state.studioWriter = null;
+        state.shots = result.shots || [];
+        state.timeline = result.timeline || [];
+        renderStudioScript(result.script, null);
+        renderStudioStoryboard(state.shots, state.timeline);
+      } else {
+        if ($('studioCreateStandaloneShort')) $('studioCreateStandaloneShort').checked = true;
+        await loadShortLane();
+        if ($('studioToRenderButton')) $('studioToRenderButton').disabled = false;
+      }
+      await Promise.all([loadChannels(), loadVideos(), loadProjects()]);
+      saveStudioSession();
+      setMessage(`Đã lưu kịch bản ${variant === 'short' ? 'Short' : 'video dài'} v${result.script.version} · ${(result.shots || []).length} cảnh. Có thể tiếp tục tạo giọng đọc.`, 'success');
+    } catch (error) { setMessage(`Không lưu được kịch bản đã dán: ${error.message}`, 'error'); }
+    finally { if (button) button.disabled = false; }
+  }
+
   async function writeStudioScript() {
     if (!state.studioVideoId) return setMessage('Hãy chọn video trước khi viết kịch bản.', 'error');
+    const narrationLanguage = $('studioScriptLanguage')?.value || 'vi';
     const provider = $('studioWriterProviderSelect').value || 'codex_cli';
     const button = $('studioWriteButton');
     button.disabled = true;
@@ -1210,12 +1608,12 @@
       ? 'Đang kể lại đúng nội dung video gốc bằng một cách dẫn khác...'
       : 'Đang viết một câu chuyện mới và blueprint cảnh AI...');
     try {
-      const prompt = $('studioScriptInstructionInput')?.value || $('studioCreativeDirectionInput')?.value || '';
+      const prompt = $('studioScriptInstructionInput')?.value || '';
       const durationInput = $('studioTargetDurationSeconds')?.value.trim() || '';
       const localDuration = parseStudioDuration(durationInput);
-      if (durationInput && !localDuration) return setMessage('Không hiểu thời lượng. Nhập ví dụ: 00:12:00, 12:00, 12 phút hoặc 720 giây.', 'error');
+      if (durationInput && !localDuration) return setMessage('Thời lượng cần nhập theo dạng 00:00:00 (giờ:phút:giây).', 'error');
       if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? flow.script_mode : ($('studioRemakeModeSelect')?.value || flow.script_mode || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: flow.uses_web_research === false ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
+      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? flow.script_mode : (flow.script_mode || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: flow.uses_web_research === false ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
       state.studioWriter = response;
       // The writer is told how long the video should be and its output is
       // already measured against that, but the answer went nowhere. A script
@@ -1231,7 +1629,7 @@
         }).catch(() => {});
       }
       const createStandaloneShort = Boolean($('studioCreateStandaloneShort')?.checked);
-      const shortSeconds = Number($('studioInitialShortSeconds')?.value || 45);
+      const shortSeconds = Number($('studioShortScriptSeconds')?.value || 45);
       setStudioProgress(80, createStandaloneShort ? 'Đang tạo kịch bản dài và Short riêng từ cùng brief...' : 'Đang tạo kịch bản dài...');
       const scriptResponse = await api(`/api/projects/${state.studioProjectId}/script/draft`, {
         method: 'POST',
@@ -1242,6 +1640,8 @@
         }),
       });
       renderStudioScript(scriptResponse.script, response);
+      syncStudioNarrationLanguage(narrationLanguage);
+      await saveRenderSettings(state.studioProjectId, {quiet: true});
       if (scriptResponse.short) renderShortScriptState(scriptResponse.short);
       else if (scriptResponse.short_error) setMessage(`Kịch bản dài đã tạo, nhưng Short riêng chưa tạo được: ${scriptResponse.short_error}`, 'error');
       setStudioStep(3);
@@ -1277,14 +1677,39 @@
     return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   }
 
-  function updateStudioDurationHint() {
+  // The target duration box takes one shape only, hh:mm:ss, and the colons
+  // are the box's job rather than the user's: digits fill it left to right.
+  function studioClock(totalSeconds) {
+    const total = Math.max(0, Math.round(Number(totalSeconds) || 0));
+    return [Math.floor(total / 3600), Math.floor((total % 3600) / 60), total % 60]
+      .map((part) => String(part).padStart(2, '0')).join(':');
+  }
+
+  function maskStudioDurationInput() {
     const input = $('studioTargetDurationSeconds');
-    const hint = $('studioDurationHint');
-    if (!input || !hint) return;
-    const seconds = parseStudioDuration(input.value);
-    if (!input.value.trim()) { hint.textContent = 'Nhập giờ : phút : giây, phút : giây, hoặc chữ. Ví dụ: 01:12:30 · 12:00 · 12 phút 30 giây.'; return; }
-    if (!seconds) { hint.textContent = 'Chưa hiểu định dạng. Ví dụ hợp lệ: 00:12:00 · 12:00 · 12 phút · 720 giây.'; return; }
-    hint.textContent = seconds >= 30 && seconds <= 1800 ? `AI sẽ tạo khoảng ${formatStudioDuration(seconds)} (${seconds} giây).` : 'Thời lượng cần từ 00:00:30 đến 00:30:00.';
+    if (!input) return;
+    const digits = input.value.replace(/\D/g, '').slice(0, 6);
+    input.value = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4, 6)].filter(Boolean).join(':');
+  }
+
+  // A part-typed value is completed with zeros on the right, so what was on
+  // screen is what is kept: "00:12" becomes 00:12:00, not twelve seconds.
+  function normaliseStudioDurationInput() {
+    const input = $('studioTargetDurationSeconds');
+    if (!input || !input.value.trim()) return;
+    const padded = input.value.replace(/\D/g, '').slice(0, 6).padEnd(6, '0');
+    input.value = `${padded.slice(0, 2)}:${padded.slice(2, 4)}:${padded.slice(4, 6)}`;
+  }
+
+  // A value saved before the box had one format ("12:00", "12 phút") is read
+  // the way it was meant and rewritten, rather than re-read digit by digit.
+  function restoreStudioDurationInput(value) {
+    const input = $('studioTargetDurationSeconds');
+    const text = String(value || '').trim();
+    if (!input || !text) return;
+    if (/^\d{2}:\d{2}:\d{2}$/.test(text)) { input.value = text; return; }
+    const seconds = parseStudioDuration(text);
+    input.value = seconds ? studioClock(seconds) : '';
   }
 
   function inferStudioDurationFromPrompt() {
@@ -1295,7 +1720,7 @@
     const seconds = prompt.match(/\b(\d{2,4})\s*(?:giây|giay|secs?|seconds?)\b/i);
     const clock = prompt.match(/\b(\d{1,2})\s*:\s*(\d{2})\b/);
     const inferred = minutes ? Number(minutes[1]) * 60 : seconds ? Number(seconds[1]) : clock ? Number(clock[1]) * 60 + Number(clock[2]) : 0;
-    if (inferred >= 30 && inferred <= 1800) { input.value = formatStudioDuration(inferred); updateStudioDurationHint(); }
+    if (inferred >= 30 && inferred <= 1800) input.value = studioClock(inferred);
   }
 
   function studioScriptPayload(status = null) {

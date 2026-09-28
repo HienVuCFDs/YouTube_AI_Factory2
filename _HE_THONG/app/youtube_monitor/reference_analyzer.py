@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import languages, operations
+from . import languages, operations, orchestrator_runtime
 from .llm_client import (
     LlmError,
     call_antigravity_json,
@@ -139,7 +139,8 @@ def _chunks(text: str, size: int = _CHUNK_CHARS, lines: int = _CHUNK_LINES) -> l
 
 
 def _call(provider: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-    name = str(provider or "codex_cli").strip().lower()
+    # An agent name reaches its runtime through the one shared mapping.
+    name = orchestrator_runtime.runtime_id(str(provider or "codex_cli"))
     callers = {
         "codex_cli": call_codex_json,
         "openai_gpt": call_openai_json,

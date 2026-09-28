@@ -200,6 +200,20 @@ class AgentSystemTests(unittest.TestCase):
         correlation_ids = {task["correlation_id"] for task in tasks}
         self.assertEqual(len(correlation_ids), 1)
 
+    def test_external_chatgpt_pipeline_is_not_enqueued_for_cli_worker(self):
+        worker = AgentTaskWorker(
+            self.database,
+            assignment_resolver=self._assignment,
+            availability_resolver=lambda _agent: True,
+        )
+        pipeline = AgentPipeline(self.database, worker, external_agent="chatgpt_app")
+        project = self.database.create_idea_project("ChatGPT dieu phoi video")
+        task = pipeline.start(int(project["id"]), "ChatGPT dieu phoi video")
+
+        self.assertEqual(task["assigned_agent"], "chatgpt_app")
+        self.assertEqual(self.database.list_queued_agent_task_ids(), [])
+        self.assertTrue(worker._jobs.empty())
+
     def test_failed_cross_review_is_retried_then_failed(self):
         worker = AgentTaskWorker(
             self.database,

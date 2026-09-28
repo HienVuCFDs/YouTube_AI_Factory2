@@ -707,8 +707,8 @@ async function runAgentInTab(tabId, goal, { maxSteps = 30, referenceImage = null
 }
 
 function buildAgentGoal(provider, job, hasReference) {
-  if (provider === 'gemini_web_image' || provider === 'chatgpt_web_image') {
-    const site = provider === 'gemini_web_image' ? 'Gemini' : 'ChatGPT';
+  if (provider === 'gemini_web_image' || provider === 'chatgpt_web_image' || provider === 'meta_ai_image') {
+    const site = provider === 'gemini_web_image' ? 'Gemini' : provider === 'meta_ai_image' ? 'Meta AI' : 'ChatGPT';
     return [
       `Tao MOT ANH TINH bang ${site} (giao dien chat web).`,
       '',

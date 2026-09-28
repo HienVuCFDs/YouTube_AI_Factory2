@@ -1,0 +1,13 @@
+{
+  "name": "youtube-factory-scene-graphics",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {"render": "node render.cjs"},
+  "dependencies": {
+    "@remotion/bundler": "4.0.484",
+    "@remotion/renderer": "4.0.484",
+    "remotion": "4.0.484",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

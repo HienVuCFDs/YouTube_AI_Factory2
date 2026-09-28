@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -222,6 +223,106 @@ def _parse_json_output(stdout: str) -> dict[str, Any]:
     return parsed
 
 
+def downloaded_media_path(stdout: str) -> Path | None:
+    """The file gflow says it already downloaded, if it did.
+
+    gflow 0.79 downloads the finished video and then moves it to `-o`, and a
+    failure in that move crashed the run after the generation had been paid
+    for: a real 1.9 MB mp4 sat in the working directory while the job was
+    marked failed and queued for a retry that would spend another one.
+    """
+    newest: tuple[float, Path] | None = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"path"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or not int(event.get("bytes") or 0):
+            continue
+        candidate = Path(str(event.get("path") or ""))
+        if not candidate.is_file() or candidate.stat().st_size == 0:
+            continue
+        stamp = candidate.stat().st_mtime
+        if newest is None or stamp > newest[0]:
+            newest = (stamp, candidate)
+    return newest[1] if newest else None
+
+
+def result_local_path(payload: dict[str, Any]) -> Path | None:
+    """The file gflow says it wrote, wherever it chose to say it.
+
+    Two things defeated reading `-o` back: gflow reports the path inside
+    `results[]` rather than at the top level, and it renames the file to the
+    format it actually got - a `.png` asked for comes back as `.jpg`. The
+    generation had been paid for both times, and the job was failed with
+    "không tìm thấy ảnh đã tải" while the picture sat on disk.
+    """
+    candidates: list[str] = []
+    direct = str(payload.get("local_path") or "").strip()
+    if direct:
+        candidates.append(direct)
+    for key in ("results", "images", "outputs", "files"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                value = str(item.get("local_path") or item.get("path") or "").strip()
+                if value:
+                    candidates.append(value)
+    for value in candidates:
+        path = Path(value)
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+def _last_download_beside(output_path: Path) -> Path | None:
+    """A file gflow just wrote into the working directory instead of `-o`.
+
+    Only files younger than this run are considered, and only where the name
+    is the cli's own uuid form, so an unrelated mp4 sitting in the folder is
+    never mistaken for the result.
+    """
+    import re
+    import time
+
+    pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.\w+$", re.I)
+    newest: tuple[float, Path] | None = None
+    for folder in {Path.cwd(), output_path.parent}:
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            if not item.is_file() or not pattern.match(item.name) or item.stat().st_size == 0:
+                continue
+            age = time.time() - item.stat().st_mtime
+            if age > 900:
+                continue
+            stamp = item.stat().st_mtime
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, item)
+    return newest[1] if newest else None
+
+
+def _rescue_download(error: GFlowCliError, output_path: Path) -> Path | None:
+    """Keep a file the run already produced, whatever happened afterwards."""
+    produced = downloaded_media_path(getattr(error, "stdout", "") or "")
+    if produced is None:
+        return None
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(produced), str(output_path))
+        return output_path
+    except OSError:
+        # Still better than nothing: the caller gets the file where it landed.
+        return produced
+
+
 def _classify_failure(exit_code: int, payload: dict[str, Any], stderr: str) -> GFlowCliError:
     detail = str(
         payload.get("detail") or payload.get("error_message") or payload.get("title")
@@ -306,7 +407,10 @@ def run_gflow_json(
             if process.returncode == 0:
                 raise
     if process.returncode != 0:
-        raise _classify_failure(int(process.returncode or 1), payload, stderr)
+        failure = _classify_failure(int(process.returncode or 1), payload, stderr)
+        # Carried so a caller can still claim media the run already produced.
+        failure.stdout = stdout
+        raise failure
     if not payload:
         raise GFlowCliError(
             f"gflow-cli hoàn tất nhưng không có kết quả JSON: {stderr[-800:]}",
@@ -379,8 +483,20 @@ def generate_gflow_image(
     )
     if result.get("succeeded") is False or str(result.get("status") or "").lower() in {"failed", "error"}:
         raise _classify_failure(1, result, "")
-    result_path = Path(str(result.get("local_path") or output_path))
+    result_path = result_local_path(result) or Path(str(result.get("local_path") or output_path))
     if not result_path.is_file() or result_path.stat().st_size == 0:
+        # Same shape as the video path: gflow downloads the picture and then
+        # moves it, and the move is what fails. The generation has been paid
+        # for by then, so the file is claimed rather than left on disk while
+        # the job is failed and queued to spend another one.
+        rescued = downloaded_media_path(str(result.get("stdout") or "")) or _last_download_beside(output_path)
+        if rescued is not None:
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(rescued), str(output_path))
+                return str(output_path)
+            except OSError:
+                return str(rescued)
         raise GFlowCliError("Flow báo thành công nhưng không tìm thấy ảnh đã tải", kind="download", retryable=True)
     return str(result_path)
 
@@ -418,14 +534,20 @@ def generate_gflow_video(
     if gflow_project_id.strip():
         args.extend(["--project", gflow_project_id.strip()])
     args.extend(_profile_args())
-    result = run_gflow_json(
-        args,
-        timeout_seconds=max(60, int(os.getenv("GFLOW_GENERATION_TIMEOUT_SECONDS", "1800"))),
-        heartbeat=heartbeat,
-    )
+    try:
+        result = run_gflow_json(
+            args,
+            timeout_seconds=max(60, int(os.getenv("GFLOW_GENERATION_TIMEOUT_SECONDS", "1800"))),
+            heartbeat=heartbeat,
+        )
+    except GFlowCliError as exc:
+        rescued = _rescue_download(exc, output_path)
+        if rescued is None:
+            raise
+        return str(rescued)
     if result.get("succeeded") is False or str(result.get("status") or "").lower() in {"failed", "error"}:
         raise _classify_failure(1, result, "")
-    result_path = Path(str(result.get("local_path") or output_path))
+    result_path = result_local_path(result) or Path(str(result.get("local_path") or output_path))
     if not result_path.is_file() or result_path.stat().st_size == 0:
         raise GFlowCliError("Flow báo thành công nhưng không tìm thấy MP4 đã tải", kind="download", retryable=True)
     return str(result_path)

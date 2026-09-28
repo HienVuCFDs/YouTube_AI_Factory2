@@ -58,10 +58,12 @@ class TheSplitIsAMoveNotARewriteTests(unittest.TestCase):
 
     def test_the_document_loads_them_in_order(self) -> None:
         markup = TEMPLATE.read_text(encoding="utf-8")
-        loaded = re.findall(r'<script src="/static/([^"]+)"', markup)
+        # The `?v=` a release appends to break browser caches is not part of
+        # which files load or in what order, which is what this pins.
+        loaded = [name.split("?", 1)[0] for name in re.findall(r'<script src="/static/([^"]+)"', markup)]
 
         self.assertEqual(tuple(loaded), MODULES)
-        self.assertIn('<link rel="stylesheet" href="/static/app.css" />', markup)
+        self.assertIn('<link rel="stylesheet" href="/static/app.css', markup)
 
 
 class TheModulesAreServedTests(unittest.TestCase):

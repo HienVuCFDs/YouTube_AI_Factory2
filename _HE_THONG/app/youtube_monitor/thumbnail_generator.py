@@ -149,12 +149,40 @@ def generate_frame_thumbnails(
 
 
 def compose_thumbnail(source: Path, target: Path, *, vertical: bool = False, title: str = "") -> Path:
-    """Export a correctly shaped JPEG with editable, faithfully spelled cover text."""
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    """Turn a video still into an intentional cover, with reliable text.
+
+    AI images are better when an image provider is available.  This local
+    route must still look designed rather than like an arbitrary video frame:
+    a softened full-bleed background retains the scene while the sharp centre
+    subject and high-contrast title survive at phone size.
+    """
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
     size = (720, 1280) if vertical else (1280, 720)
     with Image.open(source) as original:
-        cover = ImageOps.fit(ImageOps.exif_transpose(original).convert("RGB"), size, Image.Resampling.LANCZOS)
+        original = ImageOps.exif_transpose(original).convert("RGB")
+        cover = ImageOps.fit(original, size, Image.Resampling.LANCZOS)
+        # A slightly enlarged sharp layer makes the subject read separately
+        # from the atmospheric background, without pretending to invent it.
+        focus = ImageOps.fit(original, size, Image.Resampling.LANCZOS)
+    cover = cover.filter(ImageFilter.GaussianBlur(radius=7 if vertical else 5))
+    focus_mask = Image.new("L", size, 0)
+    mask_draw = ImageDraw.Draw(focus_mask)
+    inset_x = int(size[0] * (0.025 if vertical else 0.08))
+    inset_y = int(size[1] * 0.04)
+    mask_draw.rounded_rectangle(
+        (inset_x, inset_y, size[0] - inset_x, size[1] - inset_y),
+        radius=int(size[0] * 0.035), fill=235,
+    )
+    cover.paste(focus, (0, 0), focus_mask)
+    # A black-to-transparent lower gradient protects copy over any footage.
+    shade = Image.new("RGBA", size, (0, 0, 0, 0))
+    overlay = ImageDraw.Draw(shade)
+    start = int(size[1] * (0.30 if vertical else 0.42))
+    for y in range(start, size[1]):
+        strength = int(210 * ((y - start) / max(1, size[1] - start)) ** 1.35)
+        overlay.line((0, y, size[0], y), fill=(4, 8, 18, strength))
+    cover = Image.alpha_composite(cover.convert("RGBA"), shade)
     words = title.strip().split()
     if words:
         font_paths = [Path("C:/Windows/Fonts/arialbd.ttf"),
@@ -182,10 +210,10 @@ def compose_thumbnail(source: Path, target: Path, *, vertical: bool = False, tit
         y = int(size[1] * 0.16) if vertical else size[1] - margin - len(lines) * line_height
         shade = Image.new("RGBA", size)
         overlay = ImageDraw.Draw(shade)
-        overlay.rounded_rectangle((margin - 16, y - 16, size[0] - margin + 16, y + len(lines) * line_height + 12), radius=18, fill=(8, 14, 23, 205))
+        overlay.rounded_rectangle((margin - 16, y - 16, size[0] - margin + 16, y + len(lines) * line_height + 12), radius=18, fill=(8, 14, 23, 155))
         cover = Image.alpha_composite(cover.convert("RGBA"), shade)
         draw = ImageDraw.Draw(cover)
         for index, line in enumerate(lines):
-            draw.text((margin, y + index * line_height), line, font=font, fill="#ffe266" if index == 0 else "white", stroke_width=1, stroke_fill="#111111")
+            draw.text((margin, y + index * line_height), line, font=font, fill="#ffd83d" if index == 0 else "white", stroke_width=3, stroke_fill="#090d16")
     cover.convert("RGB").save(target, "JPEG", quality=92, optimize=True)
     return target

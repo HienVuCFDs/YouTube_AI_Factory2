@@ -182,8 +182,10 @@ def _find_subtitle_band(stack: np.ndarray) -> dict[str, Any] | None:
     # scene all sit just outside it, and a blur that stops at the ink leaves
     # legible edges - so the band is grown before it is used.
     pad = max((band[1] - band[0]) * 0.45, height * 0.018)
-    top = max(0.0, (band[0] - pad) / height)
+    top = max(floor / height, (band[0] - pad) / height)
     bottom = min(1.0, (band[1] + pad) / height)
+    if bottom <= top or (bottom - top) > 0.22:
+        return None
 
     # Horizontally the same: take the columns the lettering occupies rather
     # than the whole width, so the blur covers the line and not the picture

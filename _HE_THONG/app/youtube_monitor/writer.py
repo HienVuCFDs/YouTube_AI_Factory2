@@ -10,6 +10,7 @@ from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import codex_cli_status
 from .fidelity_guard import allowed_names, numbers
 from . import languages
+from . import orchestrator_runtime
 from . import settings
 
 
@@ -611,12 +612,42 @@ def revise_script(
     }
 
 
+def _assigned_writer() -> str:
+    """The writer the user assigned to the script stage, or "" for none.
+
+    The assignment names an agent (astra, claude); which runtime that is gets
+    decided in one place, orchestrator_runtime, not guessed again here. A
+    chat-only agent can be assigned but cannot be driven headlessly, so it is
+    treated as no choice rather than as a failure: the caller falls back to
+    the configured keys and CLIs and the script still gets written.
+    """
+    try:
+        assignment = settings.agent_assignment("script")
+    except Exception:
+        return ""
+    runtime = orchestrator_runtime.runtime_id(str(assignment.get("executor") or ""))
+    return runtime if runtime in orchestrator_runtime.CALLABLE_RUNTIMES else ""
+
+
 def resolve_writer(provider: str | None):
     """Return a writer instance. AI Writer needs an LLM — there is no free/local option.
 
     When provider is not specified, prefer whichever provider has an API key configured.
     """
-    name = provider
+    name = str(provider or "").strip().lower()
+    if name == "auto":
+        name = ""
+    # "astra"/"claude" are valid choices; which runtime they are is decided in
+    # one place, not re-guessed here.
+    name = orchestrator_runtime.runtime_id(name) if name else ""
+    if not name:
+        # Who writes the script is a choice the user makes per stage in the
+        # app. This function had its own private order - API keys, then
+        # whichever CLI answered first - and never read that choice, so the
+        # setting did nothing and the app quietly used a different AI. Worse,
+        # the review it saved afterwards was filed under the *assigned* name,
+        # so the record named a writer that had not written it.
+        name = _assigned_writer()
     if not name:
         anthropic_key, _ = settings.anthropic_config()
         openai_key, _ = settings.openai_config()

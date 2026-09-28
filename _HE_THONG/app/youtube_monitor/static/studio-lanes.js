@@ -5,25 +5,35 @@
 // order, so this is a move rather than a rewrite: the files
 // concatenated in order are byte for byte the block they came from,
 // which is what the test asserts.
+  // Every step that carries both videos shows one at a time behind two tabs.
+  // The choice is one for the whole wizard, not one per step: someone working
+  // on the Short walks from its script to its storyboard to its render and
+  // stays on the Short, instead of being sent back to the long video at each
+  // step. Without a Short there is nothing to switch to, so the bar goes too.
   function syncStudioLaneTabs() {
     const wanted = shortLaneWanted();
+    const active = wanted && state.studioLane === 'short' ? 'short' : 'long';
     SHORT_LANE_PANES.forEach((stepId) => {
-      const split = document.querySelector(`.studio-lane-split[data-lane-step="${stepId}"]`);
-      if (split) split.classList.toggle('is-split', wanted);
+      const tabs = document.querySelector(`.studio-lane-tabs[data-lane-step="${stepId}"]`);
+      if (tabs) tabs.hidden = !wanted;
+      tabs?.querySelectorAll('.studio-lane-tab').forEach((tab) => {
+        const on = tab.dataset.lane === active;
+        tab.classList.toggle('active', on);
+        tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      const long = document.querySelector(
+        `.studio-lane-pane[data-lane-step="${stepId}"][data-lane="long"]`);
       const short = document.querySelector(
         `.studio-lane-pane[data-lane-step="${stepId}"][data-lane="short"]`);
-      // Hidden rather than merely un-split: an unwanted short column must not
-      // stay on the page taking half the width off the long video.
-      if (short) short.hidden = !wanted;
+      if (long) long.hidden = active !== 'long';
+      if (short) short.hidden = active !== 'short';
     });
   }
 
-  const SHORT_LANE_STEPS = [
-    {key: 'script',  label: 'Kịch bản'},
-    {key: 'voice',   label: 'Giọng đọc'},
-    {key: 'visuals', label: 'Cảnh'},
-    {key: 'render',  label: 'Dựng'},
-  ];
+  function setStudioLaneTab(lane) {
+    state.studioLane = lane === 'short' ? 'short' : 'long';
+    syncStudioLaneTabs();
+  }
 
   // Read from the timeline rather than a status column, so a step that is
   // re-run reports honestly instead of staying green from last time.
@@ -32,16 +42,6 @@
     if (!projectId) { state.shortLane = null; syncStudioLaneTabs(); return; }
     try { renderShortLane(await api(`/api/projects/${projectId}/short-lane`)); }
     catch (_) { syncStudioLaneTabs(); }
-  }
-
-  function shortStepStrip(lane) {
-    const steps = lane?.steps || {};
-    return '<div class="studio-steps">' + SHORT_LANE_STEPS.map((step, index) => {
-      const done = Boolean(steps[step.key]);
-      return `<div class="studio-step-chip${done ? ' is-done' : ''}">`
-        + `<b>${done ? '✓' : String(index + 1).padStart(2, '0')}</b>`
-        + `<span>${step.label}</span></div>`;
-    }).join('') + '</div>';
   }
 
   function renderShortLane(lane) {
@@ -55,6 +55,8 @@
       button.getAttribute('onclick')?.includes('cutShortSourceScenes()'));
     const buildAction = [...document.querySelectorAll('button')].find((button) =>
       button.getAttribute('onclick')?.includes("queueShortVariantJob('source_visuals')"));
+    const renderAction = $('studioRenderShortButton');
+    const renderState = $('studioShortRenderReadiness');
     const isReup = state.studioWorkflow === 'reup';
     const readyToCut = Number(lane?.voiced || 0) === Number(scenes) && Number(scenes) > 0;
     if (sourceAction) {
@@ -75,12 +77,27 @@
         ? 'Cắt clip nguồn đúng theo độ dài của từng đoạn giọng Short.'
         : 'Tạo ảnh 9:16 theo storyboard riêng của Short.';
     }
+    if (renderAction) {
+      renderAction.disabled = !Boolean(lane?.can_render);
+      renderAction.textContent = lane?.can_render ? 'Dựng Short' : 'Dựng Short · chưa đủ dữ liệu';
+      renderAction.title = lane?.can_render
+        ? 'Dựng MP4 dọc từ chính timeline Short này.'
+        : (lane?.issues || []).join(' · ') || 'Short chưa có đủ hình và voice.';
+    }
+    if (renderState) {
+      const visualCount = Number(lane?.with_visuals || 0);
+      const voiceCount = Number(lane?.voiced || 0);
+      renderState.innerHTML = lane?.can_render
+        ? `<b>Sẵn sàng dựng.</b> Hình ${visualCount}/${scenes} · voice ${voiceCount}/${scenes}.`
+        : scenes
+          ? `<b>Chưa thể dựng:</b> ${esc((lane?.issues || []).join(' · ') || 'Short chưa hoàn chỉnh')}. Hình ${visualCount}/${scenes} · voice ${voiceCount}/${scenes}.`
+          : '<b>Chưa có cảnh Short.</b> Hãy tạo kịch bản Short trước.';
+    }
 
     const scriptView = $('studioShortScriptView');
     if (scriptView) {
       scriptView.innerHTML = script
-        ? shortStepStrip(lane)
-          + `<h4 style="margin:10px 0 4px">${esc(script.script_title || 'Bản Short')}</h4>`
+        ? `<h4 style="margin:0 0 4px">${esc(script.script_title || 'Bản Short')}</h4>`
           + `<div class="studio-model-note">Khoảng ${lane.estimated_seconds || 0} giây · ${scenes} cảnh</div>`
           + `<p style="margin:8px 0 0"><b>Hook:</b> ${esc(script.hook || '')}</p>`
           + `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(script.main_content || '')}</p>`
@@ -99,15 +116,13 @@
         // The same cards as the long video: picture, a player for the voice,
         // and the per-scene controls.
         renderStudioStoryboard(shots, lane.timeline || [], 'studioShortStoryboardCards');
-        storyboard.insertAdjacentHTML('afterbegin', shortStepStrip(lane));
       }
     }
 
     const voiceState = $('studioShortVoiceState');
     if (voiceState) {
       voiceState.innerHTML = scenes
-        ? shortStepStrip(lane)
-          + `<div class="studio-model-note" style="margin-top:8px">Đã có giọng cho `
+        ? `<div class="studio-model-note">Đã có giọng cho `
           + `${lane.voiced || 0}/${scenes} cảnh của Short.</div>`
         : '<div class="studio-empty">Chưa có cảnh nào để đọc.</div>';
     }
@@ -121,8 +136,7 @@
       lane?.output_path ? null : [lane?.with_visuals, scenes]]);
     if (output && output.dataset.renderKey !== outputKey) {
       output.dataset.renderKey = outputKey;
-      output.innerHTML = '<div class="studio-lane-head" style="display:block">Short</div>'
-        + (lane?.output_path
+      output.innerHTML = (lane?.output_path
           ? `<div class="studio-result"><video controls playsinline preload="metadata"`
             + ` style="max-width:320px;border-radius:8px;background:#000"`
             + ` src="/api/projects/${projectId}/short-video?v=${encodeURIComponent(lane?.render_version || '')}"></video>`
@@ -170,8 +184,7 @@
     const scenes = Number(lane?.scenes || 0);
     if (!target || !scenes) return;
     const voiced = Number(lane?.voiced || 0);
-    target.innerHTML = shortStepStrip(lane)
-      + `<div class="studio-model-note" style="margin-top:8px">Đã có giọng cho ${voiced}/${scenes} cảnh Short. Bạn có thể nghe từng cảnh tại Storyboard hoặc phát toàn bộ ở đây.</div>`
+    target.innerHTML = `<div class="studio-model-note">Đã có giọng cho ${voiced}/${scenes} cảnh Short. Bạn có thể nghe từng cảnh tại Storyboard hoặc phát toàn bộ ở đây.</div>`
       + `<div class="studio-actions" style="margin-top:8px;gap:6px"><button class="btn small primary" type="button" onclick="playShortVoiceSequence(${Number(projectId)})" ${voiced ? '' : 'disabled'}>▶ Nghe toàn bộ Short</button><button class="btn small ghost" type="button" onclick="stopShortVoiceSequence()">Dừng</button></div>`;
   }
 
@@ -213,6 +226,14 @@
       ? ($('studioVoiceProviderSelect')?.value || SHORT_JOB_PROVIDERS.voiceover)
       : SHORT_JOB_PROVIDERS[jobType];
     try {
+      if (jobType === 'render_short') {
+        const lane = await api(`/api/projects/${projectId}/short-lane`);
+        renderShortLane(lane);
+        if (!lane.can_render) {
+          throw new Error(`Short chưa thể dựng: ${(lane.issues || []).join(' · ') || 'chưa đủ hình và voice'}.`);
+        }
+      }
+      if (jobType === 'voiceover') await saveRenderSettings(projectId, {quiet: true});
       await api(`/api/projects/${projectId}/jobs`, {
         method: 'POST',
         body: JSON.stringify({job_type: jobType, provider, confirmed: true, variant: 'short'}),
@@ -493,10 +514,9 @@
 
   function shotStatusTag(status) {
     const map = {
-      planned: ['orange', 'KẾ HOẠCH'],
-      // Set by the edit plan when a scene's line talks about something the
-      // source footage never shows. The card below it already has the
-      // controls to draw or attach one.
+      planned: ['orange', 'ĐANG CHUẨN BỊ'],
+      // Set when a scene's line talks about something the source footage never
+      // shows. The card below it already has controls to draw or attach one.
       needs_visual: ['red', 'THIẾU HÌNH'],
       ready: ['cyan', 'SẴN SÀNG'],
       done: ['green', 'XONG'],
@@ -507,7 +527,7 @@
 
   function timelineStatusTag(status) {
     const map = {
-      planned: ['orange', 'KẾ HOẠCH'],
+      planned: ['orange', 'ĐANG CHUẨN BỊ'],
       voice_ready: ['cyan', 'ĐÃ CÓ VOICE'],
       asset_ready: ['cyan', 'ĐÃ CÓ ASSET'],
       ready: ['green', 'SẴN SÀNG'],
@@ -546,9 +566,6 @@
 
   async function loadHealth() {
     const health = await api('/api/health');
-    const status = $('apiStatus');
-    status.className = `status-pill ${health.api_key_configured ? 'ok' : 'warn'}`;
-    status.innerHTML = `<span class="dot"></span> ${health.api_key_configured ? 'API ĐÃ KẾT NỐI' : 'THIẾU API KEY'}`;
     renderRestartNotice(health.restart_needed);
   }
 
@@ -572,22 +589,9 @@
   }
 
   async function loadOAuthStatus() {
+    // Publishing reads this to decide what to offer; the top-bar pill that
+    // also displayed it is gone, and sign-in now happens per channel.
     state.oauth = await api('/api/oauth/youtube/status');
-    const status = $('oauthStatus');
-    const button = $('oauthConnectButton');
-    if (!state.oauth.configured) {
-      status.className = 'status-pill';
-      status.innerHTML = '<span class="dot"></span> OAUTH CHƯA CẤU HÌNH';
-      button.textContent = 'Kết nối YouTube OAuth';
-    } else if (state.oauth.connected) {
-      status.className = 'status-pill ok';
-      status.innerHTML = '<span class="dot"></span> OAUTH ĐÃ KẾT NỐI';
-      button.textContent = 'Ngắt kết nối OAuth';
-    } else {
-      status.className = 'status-pill warn';
-      status.innerHTML = '<span class="dot"></span> OAUTH CHƯA KẾT NỐI';
-      button.textContent = 'Kết nối YouTube OAuth';
-    }
   }
 
   async function toggleOAuthConnection() {
@@ -656,7 +660,7 @@
     $('toolStatusSummary').textContent = `${ready}/${state.toolStatus.length} SẴN SÀNG · ${configure} CẦN CẤU HÌNH`;
     $('toolStatusBody').innerHTML = `<div class="tool-status-grid">${state.toolStatus.map((item) => `
       <div class="tool-status-card ${esc(item.phase)}">
-        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : item.phase === 'configure' ? 'orange' : ''}">${item.ready ? 'SẴN SÀNG' : item.phase === 'configure' ? 'CẤU HÌNH' : 'KẾ HOẠCH'}</span></div>
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : item.phase === 'configure' ? 'orange' : ''}">${item.ready ? 'SẴN SÀNG' : item.phase === 'configure' ? 'CẤU HÌNH' : 'CHƯA TRIỂN KHAI'}</span></div>
         <div class="tool-status-detail">${esc(item.detail)}</div>
       </div>`).join('')}</div>`;
   }
@@ -777,6 +781,14 @@
         <div class="queue-controls"><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
       </div>`;
     }
+    if (item.connection === 'local_sidecar' && item.key === 'phantom_canvas') {
+      return `<div class="integration-card ${item.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${item.ready ? 'green' : 'orange'}">${item.ready ? 'SẴN SÀNG' : 'CẦN KHỞI ĐỘNG'}</span></div>
+        <div class="secondary-text">${esc(item.category)} · ${esc(item.detail)}</div>
+        <div class="secondary-text" style="margin-top:6px">Bấm mở đăng nhập đúng một lần trong Chrome profile riêng. Phiên đó được giữ lại cho cả ảnh và video.</div>
+        <div class="queue-controls"><button class="btn small primary" type="button" onclick="startPhantomCanvas()">Khởi động service</button><button class="btn small ghost" type="button" onclick="openPhantomCanvasLogin()">Mở Gemini để đăng nhập</button><button class="btn small ghost" type="button" onclick="reloadIntegrationsAndTools()">Kiểm tra lại</button></div>
+      </div>`;
+    }
     if (item.connection === 'cloud_subscription' && item.key === 'gflow_cli') {
       const stateLabel = item.ready ? 'ĐÃ ĐĂNG NHẬP' : item.installed ? 'CẦN ĐĂNG NHẬP' : 'CHƯA CÀI CLI';
       return `<div class="integration-card ${item.ready ? 'connected' : ''}">
@@ -818,7 +830,42 @@
     const cloud = state.integrations.filter((item) => item.connection === 'api_key').length;
     $('integrationSummary').textContent = `${connected}/${cloud} AI CLOUD ĐÃ KẾT NỐI`;
     $('integrationBody').innerHTML = renderIntegrationGroups(state.integrations);
+    renderConnectionQuickStart(state.integrations);
     updateStudioSceneGenerationAvailability();
+  }
+
+  function renderConnectionQuickStart(items) {
+    const box = $('connectionQuickBody');
+    if (!box) return;
+    const find = (key) => (items || []).find((item) => item.key === key) || {};
+    const phantom = find('phantom_canvas');
+    const youtube = find('youtube_oauth');
+    const gflow = find('gflow_cli');
+    const status = (item) => item.ready
+      ? '<span class="tag green">SẴN SÀNG</span>' : '<span class="tag orange">CẦN THIẾT LẬP</span>';
+    box.innerHTML = `<div class="studio-grid">
+      <div class="integration-card ${phantom.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>1 · Tạo ảnh & video Gemini Web</span>${status(phantom)}</div>
+        <div class="secondary-text">Dùng cho thumbnail và cảnh AI. ${esc(phantom.detail || '')}</div>
+        <div class="queue-controls" style="margin-top:10px"><button class="btn small primary" type="button" onclick="startPhantomCanvas()">Bật Gemini Web</button><button class="btn small ghost" type="button" onclick="openPhantomCanvasLogin()">Đăng nhập Gemini một lần</button></div>
+      </div>
+      <div class="integration-card ${youtube.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>2 · Đăng tự động lên YouTube</span>${status(youtube)}</div>
+        <div class="secondary-text">Chọn đúng kênh tại bước Xuất bản, rồi bấm “Đăng nhập kênh này”.</div>
+        <div class="queue-controls" style="margin-top:10px"><button class="btn small ghost" type="button" onclick="setWorkspace('production')">Mở dự án để xuất bản</button></div>
+      </div>
+      <div class="integration-card ${gflow.ready ? 'connected' : ''}">
+        <div class="tool-status-title"><span>3 · Google Flow</span>${status(gflow)}</div>
+        <div class="secondary-text">Phương án dự phòng để tạo cảnh AI bằng gói Flow bạn đã đăng nhập.</div>
+        <div class="queue-controls" style="margin-top:10px"><button class="btn small ghost" type="button" onclick="reloadGFlowStatus()">Kiểm tra Flow</button></div>
+      </div>
+    </div>`;
+  }
+
+  function showTechnicalSettings() {
+    $('toolStatusPanel').hidden = false;
+    $('modelCatalogPanel').hidden = false;
+    $('toolStatusPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
   }
 
   async function saveIntegration(provider) {
@@ -888,18 +935,70 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  async function startPhantomCanvas() {
+    setMessage('Đang khởi động Phantom Canvas trên máy...');
+    try {
+      const result = await api('/api/integrations/phantom-canvas/start', {method: 'POST'});
+      setMessage(result.integration.detail, 'success');
+      setTimeout(() => void reloadIntegrationsAndTools(), 2500);
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
+  async function openPhantomCanvasLogin() {
+    try {
+      const result = await api('/api/integrations/phantom-canvas/login', {method: 'POST'});
+      setMessage(result.integration.detail, 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+  }
+
   async function loadOrchestratorSettings() {
     const data = await api('/api/settings/orchestrator');
+    const labels = {astra: 'Astra · Codex CLI', chatgpt_app: 'ChatGPT app', claude: 'Claude Code CLI'};
+    const optionTags = (selected) => (data.options || []).map((item) =>
+      `<option value="${esc(item.key)}" ${item.key === selected ? 'selected' : ''}>${esc(item.label || labels[item.key] || item.key)}</option>`
+    ).join('');
     const select = $('orchestratorProviderSelect');
-    if (select) select.value = data.provider;
+    if (select) {
+      select.innerHTML = optionTags(data.provider);
+      select.value = data.provider;
+    }
+    const fallbackSelect = $('orchestratorFallbackSelect');
+    if (fallbackSelect) {
+      fallbackSelect.innerHTML = optionTags(data.fallback_provider || 'claude');
+      fallbackSelect.value = data.fallback_provider || 'claude';
+    }
     const hint = $('orchestratorProviderHint');
     if (hint) {
-      const codex = data.options.find((item) => item.key === 'codex_cli');
-      const claude = data.options.find((item) => item.key === 'claude_code_cli');
-      const antigravity = data.options.find((item) => item.key === 'antigravity');
-      hint.innerHTML = `Codex: ${codex?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Claude: ${claude?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'} · Antigravity: ${antigravity?.logged_in ? '<span class="tag green">đã đăng nhập</span>' : '<span class="tag orange">chưa đăng nhập</span>'}`;
+      const status = (data.options || []).map((item) => {
+        const tag = item.ready ? '<span class="tag green">sẵn sàng</span>' : '<span class="tag orange">cần cấu hình</span>';
+        return `<span>${esc(item.label || labels[item.key] || item.key)}: ${tag}</span>`;
+      }).join(' · ');
+      hint.innerHTML = `${status || 'Chưa có trạng thái AI điều phối.'} · Auto ở từng bước sẽ để AI điều phối chọn provider/tool phù hợp.`;
     }
+    await loadOrchestratorRuntimes();
     await loadAgentAssignments();
+  }
+
+  // The selector above says who the user picked; this says who can actually
+  // run. They disagree often enough - a CLI signed out, a key never added, a
+  // chat tunnel declared but never used - that a run started on the first
+  // answer ends up done by a template.
+  async function loadOrchestratorRuntimes() {
+    const target = $('orchestratorRuntimeBody');
+    if (!target) return;
+    try {
+      const data = await api('/api/orchestrator/runtimes');
+      const rows = (data.runtimes || []).map((item) => {
+        const tag = item.ready ? '<span class="tag green">chạy được</span>' : '<span class="tag red">chưa chạy được</span>';
+        const serves = (item.serves || []).join(', ');
+        return `<tr><td class="primary-text">${esc(item.label || item.id)}${serves ? `<div class="secondary-text">thay mặt: ${esc(serves)}</div>` : ''}</td><td>${tag}</td><td>${esc(item.detail || '')}</td></tr>`;
+      }).join('');
+      const writer = (data.writer_order || []).join(' → ');
+      target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Runtime</th><th>Trạng thái</th><th>Chi tiết</th></tr></thead><tbody>${rows || '<tr><td colspan="3">Không có runtime nào.</td></tr>'}</tbody></table></div>`
+        + `<div class="secondary-text" style="margin-top:6px">Thứ tự viết kịch bản: ${esc(writer || 'chưa có runtime nào sẵn sàng')}</div>`;
+    } catch (error) {
+      target.innerHTML = `<div class="empty">Không kiểm tra được runtime: ${esc(error.message)}</div>`;
+    }
   }
 
   const POLICY_NUMBER_FIELDS = {
@@ -964,19 +1063,20 @@
   }
 
   async function saveOrchestratorProvider() {
-    const provider = $('orchestratorProviderSelect')?.value || 'codex_cli';
+    const provider = $('orchestratorProviderSelect')?.value || 'astra';
+    const fallback_provider = $('orchestratorFallbackSelect')?.value || 'claude';
     try {
-      await api('/api/settings/orchestrator', {method: 'POST', body: JSON.stringify({provider})});
-      setMessage('Đã lưu AI điều phối chính.', 'success');
+      await api('/api/settings/orchestrator', {method: 'POST', body: JSON.stringify({provider, fallback_provider})});
+      setMessage('Đã lưu AI điều phối chính và AI dự phòng.', 'success');
       await loadOrchestratorSettings();
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
   const AGENT_STAGE_LABELS = {
-    orchestration: 'Điều phối chính', script: 'Kịch bản', storyboard: 'Storyboard & kế hoạch',
+    orchestration: 'Điều phối chính', script: 'Kịch bản', storyboard: 'Storyboard',
     image_generation: 'Tạo ảnh', video_generation: 'Tạo video', quality_review: 'Nghiệm thu chất lượng',
   };
-  const AGENT_LABELS = {codex_cli: 'Codex CLI', claude_code_cli: 'Claude Code CLI', antigravity: 'Google Antigravity'};
+  let AGENT_LABELS = {astra: 'Astra · Codex CLI', chatgpt_app: 'ChatGPT app', claude: 'Claude Code CLI'};
 
   function agentOptions(selected, includeAuto = false, disableAntigravity = false) {
     const auto = includeAuto ? `<option value="auto" ${selected === 'auto' ? 'selected' : ''}>Tự chọn AI khác executor</option>` : '';
@@ -991,6 +1091,9 @@
     try {
       const data = await api('/api/settings/agent-assignments');
       state.agentAssignments = data;
+      if (Array.isArray(data.agents) && data.agents.length) {
+        AGENT_LABELS = Object.fromEntries(data.agents.map((agent) => [agent.key, agent.label || agent.key]));
+      }
       target.innerHTML = (data.stages || []).map((stage) => {
         const item = data.assignments?.[stage] || {};
         const reviewerDisabled = stage === 'quality_review';
@@ -1011,7 +1114,7 @@
     const stages = state.agentAssignments?.stages || Object.keys(AGENT_STAGE_LABELS);
     const assignments = {};
     stages.forEach((stage) => {
-      const executor = $(`agentExecutor-${stage}`)?.value || 'codex_cli';
+      const executor = $(`agentExecutor-${stage}`)?.value || 'astra';
       const fallback = $(`agentFallback-${stage}`)?.value || '';
       assignments[stage] = {
         mode: $(`agentMode-${stage}`)?.value || 'auto', executor,
@@ -1029,21 +1132,36 @@
 
   async function loadAnalysisProviders() {
     const providers = await api('/api/analysis-providers');
-    const providerLabel = (item) => ({local_metadata: 'Local · không cần API key', anthropic_claude: 'Claude · AI cloud', openai_gpt: 'GPT · AI cloud', codex_cli: 'Codex CLI · tài khoản đã đăng nhập', claude_code_cli: 'Claude Code CLI · tài khoản đã đăng nhập', antigravity: 'Antigravity · tài khoản đã đăng nhập'}[item.provider] || item.label || item.provider);
+    // The server names the models now, so Astra is not called Antigravity in
+    // one list and Codex in another. A model that cannot run says why right
+    // in the option, instead of a blanket "chưa cấu hình" that was wrong for
+    // anything blocked by quota rather than by configuration.
+    const providerLabel = (item) => String(item.label || item.provider || '');
+    const optionFor = (item) => {
+      const note = item.available ? '' : ` · ${item.detail || item.blocked_reason || 'chưa dùng được'}`;
+      return `<option value="${esc(item.provider)}" ${item.available ? '' : 'disabled'} title="${esc(item.detail || '')}">`
+        + `${esc(providerLabel(item))}${esc(note)}</option>`;
+    };
     const select = $('analysisProviderSelect');
-    const selected = select.value;
-    select.innerHTML = providers.map((item) => `<option value="${esc(item.provider)}" ${item.available ? '' : 'disabled'}>${esc(providerLabel(item))}${item.available ? '' : ' · chưa cấu hình'}</option>`).join('');
-    if (providers.some((item) => item.provider === selected && item.available)) select.value = selected;
+    if (select) {
+      const selected = select.value;
+      select.innerHTML = providers.map(optionFor).join('');
+      if (providers.some((item) => item.provider === selected && item.available)) select.value = selected;
+      else {
+        const preferred = providers.find((item) => item.provider === 'auto' && item.available) || providers.find((item) => item.provider === 'local_metadata' && item.available) || providers.find((item) => item.available);
+        if (preferred) select.value = preferred.provider;
+      }
+    }
     const writerProviders = providers.filter((item) => item.provider !== 'local_metadata');
     ['studioAnalysisProviderSelect', 'studioWriterProviderSelect', 'studioChatProviderSelect'].forEach((id) => {
       const target = $(id);
       if (!target) return;
       const previous = target.value;
       const source = writerProviders;
-      target.innerHTML = source.map((item) => `<option value="${esc(item.provider)}" ${item.available ? '' : 'disabled'}>${esc(providerLabel(item))}${item.available ? '' : ' · chưa cấu hình'}</option>`).join('');
+      target.innerHTML = source.map(optionFor).join('');
       if (source.some((item) => item.provider === previous && item.available)) target.value = previous;
       else {
-        const preferred = source.find((item) => item.provider === 'codex_cli' && item.available) || source.find((item) => item.available);
+        const preferred = source.find((item) => item.provider === 'auto' && item.available) || source.find((item) => item.provider === 'codex_cli' && item.available) || source.find((item) => item.available);
         if (preferred) target.value = preferred.provider;
       }
     });
@@ -1057,6 +1175,53 @@
     const source = String(video?.local_media_path || video?.video_url || '').split('?')[0].toLowerCase();
     const extension = source.split('.').pop() || '';
     return AUDIO_SOURCE_EXTENSIONS.has(extension);
+  }
+
+  function youtubeEmbedUrl(video) {
+    const candidates = [String(video?.youtube_video_id || ''), String(video?.video_url || '')];
+    for (const candidate of candidates) {
+      const value = candidate.trim();
+      if (!value || value.startsWith('local-')) continue;
+      if (/^[A-Za-z0-9_-]{6,}$/.test(value) && !value.includes('/')) {
+        return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(value)}`;
+      }
+      try {
+        const url = new URL(value);
+        const host = url.hostname.replace(/^www\./, '');
+        let id = '';
+        if (host === 'youtu.be') id = url.pathname.split('/').filter(Boolean)[0] || '';
+        else if (host.endsWith('youtube.com')) {
+          id = url.searchParams.get('v') || '';
+          if (!id) {
+            const parts = url.pathname.split('/').filter(Boolean);
+            const keyed = ['embed', 'shorts', 'live'].includes(parts[0]) ? parts[1] : '';
+            id = keyed || '';
+          }
+        }
+        if (/^[A-Za-z0-9_-]{6,}$/.test(id)) return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}`;
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  function sourcePreviewPlayer(video) {
+    if (!video) return '';
+    const videoId = encodeURIComponent(String(video.youtube_video_id || ''));
+    const localReady = String(video.media_status || '') === 'downloaded_for_editing' && String(video.local_media_path || '').trim();
+    if (localReady) {
+      const source = `/api/videos/${videoId}/source-preview`;
+      return studioSourceIsAudio(video)
+        ? `<audio class="studio-source-audio" controls preload="metadata" src="${source}"></audio>`
+        : `<video class="studio-source-video" controls preload="metadata" src="${source}"></video>`;
+    }
+    const embed = youtubeEmbedUrl(video);
+    if (embed) {
+      return `<iframe class="studio-source-embed" src="${esc(embed)}" title="Xem video nguồn trong app" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>`;
+    }
+    const url = String(video.video_url || '').trim();
+    return url
+      ? `<div class="studio-empty">Nguồn này không nhúng được trực tiếp. <a href="${esc(url)}" target="_blank" rel="noreferrer">Mở video gốc</a></div>`
+      : '<div class="studio-empty">Nguồn này chưa có đường dẫn preview.</div>';
   }
 
   function normalizeStudioWorkflowForSource() {
@@ -1121,24 +1286,38 @@
     container.hidden = false;
     const sourceDuration = Number(video.duration_seconds || 0);
     const durationLabel = sourceDuration ? ` · Video gốc: ${formatStudioDuration(sourceDuration)}` : '';
-    container.innerHTML = `<img src="${esc(video.thumbnail_url || '')}" alt=""><div><div class="primary-text">${esc(video.title || video.youtube_video_id)}</div><div class="secondary-text">${esc(channelName(video.youtube_channel_id))} · ${date(video.published_at)}${durationLabel}</div><div class="secondary-text">${video.analysis_status === 'completed' ? 'Đã có phân tích trước đó' : 'Chưa phân tích'}</div></div>`;
+    const localReady = String(video.media_status || '') === 'downloaded_for_editing' && String(video.local_media_path || '').trim();
+    const mode = localReady
+      ? (studioSourceIsAudio(video) ? 'File audio trên máy' : 'File video trên máy')
+      : (youtubeEmbedUrl(video) ? 'Xem trực tiếp qua YouTube nhúng' : 'Nguồn ngoài');
+    container.innerHTML = `
+      <div class="studio-source-player">${sourcePreviewPlayer(video)}</div>
+      <div class="studio-source-meta">
+        <div class="primary-text">${esc(video.title || video.youtube_video_id)}</div>
+        <div class="secondary-text">${esc(channelName(video.youtube_channel_id))} · ${date(video.published_at)}${durationLabel}</div>
+        <div class="secondary-text">${esc(mode)} · ${video.analysis_status === 'completed' ? 'Đã có phân tích trước đó' : 'Chưa phân tích'}</div>
+      </div>`;
   }
 
   function setStudioStep(step) {
     normalizeStudioWorkflowForSource();
     const next = Math.max(1, Math.min(7, Number(step) || 1));
-    const flow = currentWorkflow();
-    const labels = Object.fromEntries((flow.steps || []).map((label, index) => [index + 1, label.toUpperCase()]));
+    // Each step gets its own tab. Folding voice and the build workshop into
+    // the storyboard tab hid two steps behind a label that named neither, so
+    // the only way to learn they existed was to press a button inside a
+    // different step.
+    const stepLabels = {
+      1: 'Nguồn',
+      2: 'Kế hoạch',
+      3: 'Kịch bản',
+      4: 'Giọng đọc',
+      5: 'Storyboard & Edit',
+      6: 'Xưởng dựng',
+      7: 'Render & Xuất bản',
+    };
     state.studioStep = next;
     renderStudioShortWorkflowNote();
-    if (next === 3 && $('studioScriptInstructionInput') && !$('studioScriptInstructionInput').value.trim()) $('studioScriptInstructionInput').value = $('studioCreativeDirectionInput')?.value || '';
-    if (next === 3 && $('studioTargetDurationSeconds') && !$('studioTargetDurationSeconds').value.trim()) {
-      const sourceDuration = Number(studioSelectedVideo()?.duration_seconds || 0);
-      if (sourceDuration >= 30 && $('studioDurationHint')) $('studioDurationHint').textContent = `Để trống: AI sẽ bám gần thời lượng video gốc ${formatStudioDuration(sourceDuration)} (${sourceDuration} giây).`;
-    }
-    // The original panels were created in storyboard/voice order. Keep their
-    // stable DOM ids while presenting the human workflow as voice then storyboard.
-    const visiblePanelStep = next === 4 ? 5 : next === 5 ? 4 : next;
+    const visiblePanelStep = next;
     // The publish step is reached after rendering, so the bundle loaded when
     // the project was opened no longer describes it: without this the panel
     // still says there is no video and offers nothing to publish.
@@ -1149,7 +1328,7 @@
       tab.classList.toggle('active', value === next);
       tab.classList.toggle('done', value < next);
       const label = tab.querySelector('strong');
-      if (label && flow.steps?.[value - 1]) label.textContent = flow.steps[value - 1];
+      if (label && stepLabels[value]) label.textContent = stepLabels[value];
     });
     // Hang nao khong gan data-wf thi thuoc ca hai quy trinh.
     document.querySelectorAll('[data-wf]').forEach((row) => {
@@ -1163,14 +1342,19 @@
       downloadButton.hidden = alreadyLocal;
       const cut = $('studioCutByDialogueButton');
       const exported = $('studioCutSourceScenesButton');
-      if (cut) cut.textContent = `${alreadyLocal ? 1 : 2}. Cắt cảnh theo lời thoại`;
-      if (exported) exported.textContent = `${alreadyLocal ? 2 : 3}. Xuất clip từ video gốc`;
+      if (cut) cut.textContent = `${alreadyLocal ? 1 : 2}. Tạo mốc cắt theo lời thoại`;
+      if (exported) exported.textContent = `${alreadyLocal ? 2 : 3}. Xuất clip theo mốc cắt`;
     }
-    if ($('studioStatusTag')) $('studioStatusTag').textContent = labels[next] || 'TẠO VIDEO';
     if (next === 4) {
       syncStudioVoiceModelOptions();
       syncStudioSubtitleOptions();
       void hydrateStudioVoiceSettings();
+    }
+    if (next === 6 && state.studioProjectId) {
+      // Rendering depends only on the media actually attached to each scene.
+      // Recheck it whenever the user enters the workshop so stale UI state
+      // cannot enable a render that is missing voice or visuals.
+      void refreshStudioRenderReadiness();
     }
     saveStudioSession();
   }
@@ -1241,6 +1425,7 @@
         modelSelect.value = modelValue;
       }
       if ($('studioVoiceRateSelect')) $('studioVoiceRateSelect').value = settings.voice_rate || $('studioVoiceRateSelect').value;
+      if ($('studioPublishLanguageSelect')) $('studioPublishLanguageSelect').value = settings.publish_language || 'vi';
       if ($('studioVoicePromptText')) $('studioVoicePromptText').value = settings.voice_prompt_text || '';
       if ($('studioSubtitleModelSelect')) $('studioSubtitleModelSelect').value = settings.subtitle_model || 'timeline';
       syncStudioVoiceModelOptions();
@@ -1332,7 +1517,9 @@
   }
 
   function syncStudioVoiceModelOptions() {
+    ensureStudioNarrationVoices();
     const provider = $('studioVoiceProviderSelect')?.value || 'edge_tts';
+    const language = ($('studioPublishLanguageSelect')?.value || 'vi').split('-')[0];
     const select = $('studioVoiceModelSelect');
     if (!select) return;
     document.querySelectorAll('[data-voice-provider-panel]').forEach((panel) => {
@@ -1353,6 +1540,9 @@
     [...select.options].forEach((option) => {
       const providers = option.parentElement?.dataset?.voiceProviders || '';
       option.hidden = Boolean(providers) && !providers.split(/\s+/).includes(provider);
+      if (['edge_tts', 'pyvideotrans'].includes(provider) && /Neural$/.test(option.value)) {
+        option.hidden ||= !option.value.toLowerCase().startsWith(`${language.toLowerCase()}-`);
+      }
     });
     if (select.selectedOptions[0]?.hidden) {
       const available = [...select.options].find((option) => !option.hidden);
@@ -1460,10 +1650,8 @@
     renderStudioVideoPreview();
     if ($('studioGenerateStoryboardButton')) $('studioGenerateStoryboardButton').disabled = true;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = true;
-    if ($('studioGenerateTimelineButton')) $('studioGenerateTimelineButton').disabled = true;
     if ($('studioQueueRenderButton')) $('studioQueueRenderButton').disabled = true;
     if ($('studioGenerateImagesButton')) $('studioGenerateImagesButton').disabled = true;
-    $('studioOrchestrateButton')?.addEventListener('click', () => void runStudioOrchestrate());
     if ($('studioGenerateVideosButton')) $('studioGenerateVideosButton').disabled = true;
     if ($('studioProjectSummary')) $('studioProjectSummary').textContent = 'Chưa tạo';
     if ($('studioScriptSummary')) $('studioScriptSummary').textContent = 'Chưa có';
@@ -1523,14 +1711,15 @@
       renderStudioPublish(bundle);
       if ((bundle.latest_shots || []).length) {
         state.shots = bundle.latest_shots || [];
-        renderStudioStoryboard(bundle.latest_shots, bundle.latest_timeline || []);
+        state.timeline = bundle.latest_timeline || [];
+        state.projectAssets = bundle.project_assets || [];
+        renderStudioStoryboard(state.shots, state.timeline);
         if ($('studioShotSummary')) $('studioShotSummary').textContent = `${bundle.latest_shots.length} cảnh`;
         if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
         updateStudioSceneGenerationAvailability();
         nextStep = 4;
       }
       if ((bundle.latest_timeline || []).length) {
-        if ($('studioGenerateTimelineButton')) $('studioGenerateTimelineButton').disabled = false;
         if ($('studioQueueRenderButton')) $('studioQueueRenderButton').disabled = false;
         nextStep = (bundle.latest_timeline || []).some((segment) => String(segment.audio_path || '').trim()) ? 5 : 4;
       }
@@ -1554,10 +1743,8 @@
     populateStudioVideoSelect();
     if ($('studioVideoSelect')) $('studioVideoSelect').value = videoId;
     const fields = [
-      ['studioCreativeDirectionInput', saved.creativeDirection],
       ['studioScriptInstructionInput', saved.scriptInstruction],
       ['studioTargetDurationSeconds', saved.targetDuration],
-      ['studioRemakeModeSelect', saved.remakeMode],
       ['studioAnalysisLanguage', saved.analysisLanguage],
       ['studioScriptLanguage', saved.scriptLanguage],
       ['studioManagedChannelSelect', saved.managedChannelId],
@@ -1570,7 +1757,8 @@
     ];
     fields.forEach(([id, value]) => { if (value && $(id)) $(id).value = value; });
     if (typeof saved.createStandaloneShort === 'boolean' && $('studioCreateStandaloneShort')) $('studioCreateStandaloneShort').checked = saved.createStandaloneShort;
-    if (saved.standaloneShortSeconds && $('studioInitialShortSeconds')) $('studioInitialShortSeconds').value = saved.standaloneShortSeconds;
+    if (saved.standaloneShortSeconds && $('studioShortScriptSeconds')) $('studioShortScriptSeconds').value = saved.standaloneShortSeconds;
+    restoreStudioDurationInput(saved.targetDuration);
     await selectStudioVideo(savedProject?.id || saved.projectId || null);
     const availableStep = state.studioStep;
     const savedStep = Number(saved.studioStep || 0);

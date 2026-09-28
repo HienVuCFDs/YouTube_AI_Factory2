@@ -8,6 +8,8 @@ _HE_THONG/data/logs/
 # Server output captured when the app is launched from a wrapper script
 _HE_THONG/app/*.log
 _HE_THONG/data/oauth_token.json
+# Per-channel OAuth tokens and the OAuth state file are credentials too
+_HE_THONG/data/oauth_*.json
 _HE_THONG/data/backups/
 
 # web_video_sidecar.py Playwright browser profiles — real login session

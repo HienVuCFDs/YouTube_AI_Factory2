@@ -71,6 +71,61 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertEqual(timeline[0]["visual_path"], str(Path(directory) / "scene.mp4"))
             self.assertEqual(timeline[0]["status"], "asset_ready")
 
+    def test_edit_beat_generation_never_replaces_the_storyboard_source_clip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            source_clip = Path(directory) / "source-scene.mp4"
+            source_clip.write_bytes(b"source")
+            database.update_project_timeline_segment(segment["id"], visual_path=str(source_clip))
+            beats = database.replace_timeline_edit_beats(
+                segment["id"],
+                [
+                    {"source_kind": "primary", "visual_path": str(source_clip), "duration_seconds": 2},
+                    {"source_kind": "ai_image", "prompt": "A detailed insert", "duration_seconds": 3, "status": "needs_asset"},
+                ],
+            )
+            insert = beats[1]
+            job = database.create_scene_generation_job(
+                project["id"], segment["id"], "gemini_web_image", "A detailed insert",
+                job_kind="image", edit_beat_id=insert["id"],
+            )
+            generated_path = Path(directory) / "generated-insert.png"
+            generated_path.write_bytes(b"png")
+            asset = database.create_project_asset(
+                project["id"], "image", generated_path.name, str(generated_path),
+                mime_type="image/png", file_size=generated_path.stat().st_size,
+            )
+            database.finish_scene_generation_job(
+                job["id"], "completed", output_path=str(generated_path), output_asset_id=asset["id"],
+            )
+
+            updated_segment = database.get_project_timeline_segment(segment["id"])
+            updated_insert = database.get_timeline_edit_beat(insert["id"])
+            self.assertEqual(updated_segment["visual_path"], str(source_clip))
+            self.assertEqual(updated_insert["visual_path"], str(generated_path))
+            self.assertEqual(updated_insert["asset_id"], asset["id"])
+            self.assertEqual(updated_insert["source_kind"], "ai_image")
+            self.assertEqual(updated_insert["status"], "ready")
+
+    def test_project_bundle_loads_edit_beats_with_the_storyboard_timeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            source_clip = Path(directory) / "source-scene.mp4"
+            source_clip.write_bytes(b"source")
+            database.update_project_timeline_segment(segment["id"], visual_path=str(source_clip))
+            beats = database.replace_timeline_edit_beats(
+                segment["id"],
+                [
+                    {"source_kind": "primary", "visual_path": str(source_clip), "duration_seconds": 2},
+                    {"source_kind": "source_frame", "visual_path": str(source_clip), "duration_seconds": 3},
+                ],
+            )
+
+            bundle = database.get_production_project_bundle(project["id"])
+            timeline = bundle["latest_timeline"]
+            self.assertEqual(len(timeline[0]["edit_beats"]), 2)
+            self.assertEqual(bundle["edit_beats"][str(segment["id"])][1]["id"], beats[1]["id"])
+
     def test_external_sidecar_providers_are_isolated_from_each_other_and_the_worker_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             database, project, segment = self._project_with_timeline(directory)
@@ -253,6 +308,44 @@ class SceneGenerationDatabaseTests(unittest.TestCase):
             self.assertTrue(video_job["requires_reference_image"])
             self.assertIsNone(video_job["reference_asset_id"])
             self.assertEqual(video_job["timeline_segment_id"], segment["id"])
+
+    def test_a_scene_planned_as_video_is_not_quietly_made_a_still(self):
+        """Motion is made only when a video provider is in the list, and the
+        scenes that wanted it used to fall through to a still without a word.
+        A whole film came back as stills - matching nothing the director had
+        planned - and the first sign of it was watching the result.
+        """
+        from fastapi import HTTPException
+
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(segment["id"], "video")
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_image", variant="long", confirmed=True,
+            )
+            with patch.object(main_module, "database", database):
+                with self.assertRaises(HTTPException) as raised:
+                    main_module.queue_scene_generation_batch(project["id"], payload)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("chỉ tạo được ảnh tĩnh", raised.exception.detail)
+
+    def test_scenes_planned_as_stills_still_run_on_an_image_provider(self):
+        """The refusal is about a plan going unmet, not about image providers."""
+        from youtube_monitor import main as main_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            database, project, segment = self._project_with_timeline(directory)
+            database.set_segment_visual_kind(segment["id"], "image")
+            payload = main_module.BatchSceneGenerationRequest(
+                provider="flow_image", variant="long", confirmed=True,
+            )
+            with patch.object(main_module, "database", database):
+                result = main_module.queue_scene_generation_batch(project["id"], payload)
+
+        self.assertEqual(result["queued_count"], 1)
 
     def test_batch_can_target_the_standalone_short_timeline(self):
         """Content Shorts must generate their own vertical scenes, not long ones."""

@@ -28,6 +28,7 @@ from .gflow_bridge import (
     generate_gflow_video,
 )
 from .project_layout import ensure_project_layout
+from .phantom_canvas_bridge import generate_scene as generate_phantom_canvas_scene
 from .motion_graphics import generate_motion_graphics_scene
 from .stock_footage import generate_stock_footage_scene
 from .providers import (
@@ -513,6 +514,24 @@ def build_scene_provider_gateway() -> ProviderGateway:
         (
             FunctionSceneProviderAdapter(
                 ProviderDescriptor(
+                    "phantom_canvas_image", "Gemini Web qua Phantom Canvas", frozenset({SCENE_IMAGE}),
+                    priority=18, quality_score=88, billing_mode="subscription",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    fallback_keys=("gflow_image", "gemini_image"),
+                ),
+                lambda database, job, root: generate_phantom_canvas_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
+                    "phantom_canvas_video", "Gemini Web video qua Phantom Canvas", frozenset({SCENE_VIDEO}),
+                    priority=18, quality_score=88, billing_mode="subscription",
+                    estimated_unit_cost=SUBSCRIPTION_SCENE_COST_USD,
+                    fallback_keys=("gflow_cli", "gemini_veo"),
+                ),
+                lambda database, job, root: generate_phantom_canvas_scene(database, job, root),
+            ),
+            FunctionSceneProviderAdapter(
+                ProviderDescriptor(
                     "runway", "Runway", frozenset({SCENE_VIDEO}),
                     priority=90, quality_score=88, billing_mode="api",
                     estimated_unit_cost=ESTIMATED_SCENE_COST_USD["runway"],
@@ -612,6 +631,7 @@ def build_scene_provider_gateway() -> ProviderGateway:
         "flow_veo": ("Google Flow web (video, legacy)", {SCENE_VIDEO}, 95, 88, True),
         "flow_image": ("Google Flow web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 35, 84, True),
         "meta_ai_video": ("Meta AI web (video)", {SCENE_VIDEO}, 100, 70, False),
+        "meta_ai_image": ("Meta AI web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 40, 80, True),
         "gemini_web_image": ("Google Gemini web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 30, 84, True),
         "chatgpt_web_image": ("ChatGPT web (image)", {SCENE_IMAGE, SCENE_ANIMATED_IMAGE}, 20, 87, True),
     }
@@ -651,8 +671,16 @@ class SceneGenerationWorker:
         self._stop = Event()
         self._lock = Lock()
         self._paused = False
-        self._thread: Thread | None = None
+        self._threads: list[Thread] = []
         self._watchdog_thread: Thread | None = None
+        # One picture at a time meant a six scene batch took six times one
+        # provider's round trip - about five minutes of a thirteen minute run
+        # spent waiting in a line of one. Several jobs can now be in flight,
+        # but only one per provider: the web providers drive a single Chrome
+        # profile each, and two jobs sharing a profile fight over it.
+        self._provider_locks: dict[str, Lock] = {}
+        self._provider_locks_guard = Lock()
+        self.max_workers = max(1, min(int(os.getenv("SCENE_WORKER_COUNT", "3")), 8))
         self._completion_callback: Callable[[int], None] | None = None
         self._failure_router: Callable[[dict[str, Any], str, str], str | None] | None = None
         # Writing a scene's prompt takes a CLI round trip, so it happens when
@@ -679,17 +707,30 @@ class SceneGenerationWorker:
         """Choose another adapter after a bounded provider failure."""
         self._failure_router = callback
 
+    def _provider_lock(self, provider: str) -> Lock:
+        key = str(provider or "").strip() or "unknown"
+        with self._provider_locks_guard:
+            lock = self._provider_locks.get(key)
+            if lock is None:
+                lock = Lock()
+                self._provider_locks[key] = lock
+            return lock
+
     def start(self) -> None:
         with self._lock:
-            if self._thread and self._thread.is_alive():
+            if any(thread.is_alive() for thread in self._threads):
                 return
             self._stop.clear()
             self._paused = False
             self.database.requeue_interrupted_scene_generation_jobs()
             for job_id in self.database.list_queued_scene_generation_job_ids():
                 self._jobs.put(job_id)
-            self._thread = Thread(target=self._run, name="scene-generation-worker", daemon=True)
-            self._thread.start()
+            self._threads = [
+                Thread(target=self._run, name=f"scene-generation-worker-{index + 1}", daemon=True)
+                for index in range(self.max_workers)
+            ]
+            for thread in self._threads:
+                thread.start()
             self._watchdog_thread = Thread(
                 target=self._watchdog_loop,
                 name="scene-generation-watchdog",
@@ -699,14 +740,18 @@ class SceneGenerationWorker:
 
     def stop(self) -> None:
         self._stop.set()
-        self._jobs.put(None)
-        thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout=5)
+        threads = list(self._threads)
+        # One sentinel per waiting thread, or the last ones block on the queue
+        # for the full poll timeout while shutdown waits on them.
+        for _ in threads:
+            self._jobs.put(None)
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=5)
         watchdog = self._watchdog_thread
         if watchdog and watchdog.is_alive():
             watchdog.join(timeout=5)
-        self._thread = None
+        self._threads = []
         self._watchdog_thread = None
 
     def enqueue(self, job_id: int) -> None:
@@ -732,7 +777,8 @@ class SceneGenerationWorker:
         return {
             **self.database.scene_generation_queue_status(),
             "paused": paused,
-            "worker_running": bool(self._thread and self._thread.is_alive()),
+            "worker_running": any(thread.is_alive() for thread in self._threads),
+            "worker_count": sum(1 for thread in self._threads if thread.is_alive()),
             "watchdog_running": bool(self._watchdog_thread and self._watchdog_thread.is_alive()),
             "stale_seconds": self.stale_seconds,
         }
@@ -755,7 +801,11 @@ class SceneGenerationWorker:
                     break
             if self._stop.is_set():
                 return
-            self._process(job_id)
+            job = self.database.get_scene_generation_job(job_id)
+            # Serialised per provider, not globally: two scenes on different
+            # providers run side by side, two on the same one take turns.
+            with self._provider_lock(str((job or {}).get("provider") or "")):
+                self._process(job_id)
 
     def _watchdog_loop(self) -> None:
         while not self._stop.wait(self.watchdog_interval_seconds):

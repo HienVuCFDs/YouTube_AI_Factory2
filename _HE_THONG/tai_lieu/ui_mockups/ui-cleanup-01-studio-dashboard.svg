@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <defs>
+    <style>
+      .bg{fill:#0c1016}.panel{fill:#141922;stroke:#2a3340;stroke-width:1}.panel2{fill:#10151d;stroke:#2a3340;stroke-width:1}.muted{fill:#8f9baa}.text{fill:#eef2f6}.soft{fill:#cbd5df}.accent{fill:#f59e0b}.cyan{fill:#22d3ee}.green{fill:#34d399}.red{fill:#fb7185}.btn{fill:#f59e0b}.btn2{fill:#202938;stroke:#384354}.line{stroke:#2a3340;stroke-width:1}.h1{font:700 30px Arial, sans-serif}.h2{font:700 18px Arial, sans-serif}.h3{font:700 14px Arial, sans-serif}.body{font:400 13px Arial, sans-serif}.small{font:400 11px Arial, sans-serif}.tiny{font:700 10px Arial, sans-serif;text-transform:uppercase;letter-spacing:.08em}.mono{font:400 12px Consolas, monospace}
+    </style>
+  </defs>
+  <rect class="bg" width="1440" height="900"/>
+  <rect x="24" y="24" width="220" height="852" rx="8" class="panel"/>
+  <text x="44" y="61" class="h2 text">YouTube AI Factory</text>
+  <text x="44" y="85" class="small muted">Studio thủ công</text>
+  <rect x="44" y="124" width="160" height="34" rx="7" class="btn"/>
+  <text x="62" y="146" class="h3 bg">Tạo video</text>
+  <text x="44" y="194" class="body soft">Video tham khảo</text>
+  <text x="44" y="232" class="body soft">Dự án</text>
+  <text x="44" y="270" class="body soft">Workflow</text>
+  <text x="44" y="308" class="body soft">Điều phối AI</text>
+  <text x="44" y="346" class="body soft">Cài đặt</text>
+  <line x1="44" y1="390" x2="204" y2="390" class="line"/>
+  <text x="44" y="420" class="tiny muted">Workflow đang dùng</text>
+  <rect x="44" y="438" width="160" height="58" rx="8" class="panel2"/>
+  <text x="58" y="464" class="h3 text">WF Content</text>
+  <text x="58" y="484" class="small muted">AI tạo cảnh</text>
+  <rect x="268" y="24" width="828" height="852" rx="8" class="panel"/>
+  <text x="300" y="65" class="tiny accent">Wizard 7 bước</text>
+  <text x="300" y="102" class="h1 text">Tạo một video mới</text>
+  <text x="300" y="130" class="body muted">Chỉ hiện bước cần thao tác. Các model/provider nằm trong thiết lập nâng cao của từng bước.</text>
+  <g transform="translate(300 174)">
+    <rect x="0" y="0" width="744" height="72" rx="8" class="panel2"/>
+    <text x="22" y="30" class="h3 text">1. Nguồn</text><text x="22" y="52" class="small green">Sẵn sàng</text>
+    <text x="142" y="30" class="h3 text">2. Phân tích</text><text x="142" y="52" class="small green">Đã xong</text>
+    <text x="282" y="30" class="h3 text">3. Kịch bản</text><text x="282" y="52" class="small green">Cần duyệt</text>
+    <text x="422" y="30" class="h3 text">4. Giọng đọc</text><text x="422" y="52" class="small muted">Chưa làm</text>
+    <text x="562" y="30" class="h3 text">5. Storyboard</text><text x="562" y="52" class="small muted">Chưa làm</text>
+  </g>
+  <rect x="300" y="286" width="744" height="390" rx="8" class="panel2"/>
+  <text x="330" y="326" class="h2 text">Bước 3: Kịch bản</text>
+  <text x="330" y="352" class="body muted">Duyệt nội dung trước khi tạo giọng và storyboard. Có thể dán kịch bản thủ công hoặc để AI viết.</text>
+  <rect x="330" y="386" width="684" height="176" rx="8" fill="#0c1016" stroke="#2a3340"/>
+  <text x="354" y="420" class="h3 soft">Bản nháp kịch bản</text>
+  <text x="354" y="452" class="body text">Mở đầu: Vì sao một thói quen nhỏ có thể cứu cả dự án...</text>
+  <text x="354" y="480" class="body muted">Cảnh 1: Nêu vấn đề. Cảnh 2: Ví dụ thật. Cảnh 3: Cách làm...</text>
+  <text x="354" y="508" class="body muted">CTA: Theo dõi để nhận checklist sao lưu dữ liệu.</text>
+  <rect x="330" y="586" width="164" height="42" rx="7" class="btn2"/><text x="354" y="612" class="h3 soft">Sửa thủ công</text>
+  <rect x="510" y="586" width="170" height="42" rx="7" class="btn"/><text x="535" y="612" class="h3 bg">Duyệt kịch bản</text>
+  <rect x="696" y="586" width="210" height="42" rx="7" class="btn2"/><text x="721" y="612" class="h3 soft">Tạo lại bằng AI</text>
+  <rect x="330" y="704" width="744" height="118" rx="8" class="panel2"/>
+  <text x="354" y="738" class="h3 text">Thiết lập nâng cao</text>
+  <text x="354" y="766" class="body muted">AI viết kịch bản: Codex CLI</text>
+  <text x="604" y="766" class="body muted">Ngôn ngữ: Tiếng Việt</text>
+  <text x="824" y="766" class="body muted">Độ dài: 90 giây</text>
+  <text x="354" y="795" class="small muted">Khối này có thể thu gọn để UI gọn, nhưng người dùng vẫn luôn chọn được model.</text>
+  <rect x="1120" y="24" width="296" height="852" rx="8" class="panel"/>
+  <text x="1148" y="65" class="h2 text">Trạng thái</text>
+  <rect x="1148" y="96" width="240" height="86" rx="8" class="panel2"/>
+  <text x="1168" y="128" class="tiny muted">Project</text>
+  <text x="1168" y="156" class="h3 text">#42 Sao lưu dữ liệu</text>
+  <rect x="1148" y="206" width="240" height="152" rx="8" class="panel2"/>
+  <text x="1168" y="238" class="h3 text">Việc cần làm tiếp</text>
+  <text x="1168" y="270" class="body soft">Duyệt kịch bản</text>
+  <text x="1168" y="300" class="body muted">Sau đó tạo giọng đọc</text>
+  <text x="1168" y="330" class="body muted">Rồi tạo storyboard</text>
+  <rect x="1148" y="382" width="240" height="172" rx="8" class="panel2"/>
+  <text x="1168" y="414" class="h3 text">Preflight</text>
+  <text x="1168" y="446" class="body green">Kịch bản: có</text>
+  <text x="1168" y="476" class="body red">Voice: thiếu 8 cảnh</text>
+  <text x="1168" y="506" class="body red">Visual: thiếu 8 cảnh</text>
+  <rect x="1148" y="588" width="240" height="42" rx="7" class="btn"/>
+  <text x="1188" y="614" class="h3 bg">Tiếp tục bước sau</text>
+  <rect x="1148" y="652" width="240" height="120" rx="8" class="panel2"/>
+  <text x="1168" y="686" class="h3 text">Job gần đây</text>
+  <text x="1168" y="718" class="mono muted">script_writer completed</text>
+  <text x="1168" y="746" class="mono muted">analysis completed</text>
+</svg>

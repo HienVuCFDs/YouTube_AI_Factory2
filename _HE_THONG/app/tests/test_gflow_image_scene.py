@@ -18,7 +18,18 @@ class _FakeDatabase:
         self.beats: list[str] = []
 
     def get_production_project(self, project_id: int) -> dict[str, object]:
-        return {"id": project_id, "title": "Test", "gflow_project_id": "cloud-1", "gflow_profile": "default"}
+        # The profile is read from live settings, so the fixture follows it:
+        # pinning "default" made the test pass or fail on which Flow profile
+        # the machine happened to be configured for.
+        from youtube_monitor import settings
+
+        return {
+            "id": project_id, "title": "Test", "gflow_project_id": "cloud-1",
+            "gflow_profile": str(settings.gflow_config().get("profile") or "default"),
+        }
+
+    def update_production_project_gflow(self, project_id: int, gflow_project_id: str, profile: str) -> None:
+        self.beats.append(f"gflow_project:{gflow_project_id}@{profile}")
 
     def get_project_asset(self, asset_id: int) -> dict[str, object] | None:
         return None

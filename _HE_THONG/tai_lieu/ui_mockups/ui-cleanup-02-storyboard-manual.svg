@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <defs>
+    <style>
+      .bg{fill:#0c1016}.panel{fill:#141922;stroke:#2a3340;stroke-width:1}.panel2{fill:#10151d;stroke:#2a3340;stroke-width:1}.muted{fill:#8f9baa}.text{fill:#eef2f6}.soft{fill:#cbd5df}.accent{fill:#f59e0b}.cyan{fill:#22d3ee}.green{fill:#34d399}.red{fill:#fb7185}.btn{fill:#f59e0b}.btn2{fill:#202938;stroke:#384354}.line{stroke:#2a3340;stroke-width:1}.h1{font:700 28px Arial, sans-serif}.h2{font:700 18px Arial, sans-serif}.h3{font:700 14px Arial, sans-serif}.body{font:400 13px Arial, sans-serif}.small{font:400 11px Arial, sans-serif}.tiny{font:700 10px Arial, sans-serif;text-transform:uppercase;letter-spacing:.08em}
+    </style>
+  </defs>
+  <rect class="bg" width="1440" height="900"/>
+  <rect x="28" y="28" width="1384" height="844" rx="8" class="panel"/>
+  <text x="62" y="71" class="tiny accent">Storyboard thủ công</text>
+  <text x="62" y="107" class="h1 text">Mỗi cảnh là một đơn vị có thể sửa, tạo lại, preview riêng</text>
+  <rect x="62" y="136" width="1316" height="80" rx="8" class="panel2"/>
+  <text x="88" y="169" class="h3 text">Tóm tắt</text>
+  <text x="88" y="196" class="body green">8 cảnh</text>
+  <text x="170" y="196" class="body green">5 sẵn sàng</text>
+  <text x="286" y="196" class="body red">2 thiếu hình</text>
+  <text x="410" y="196" class="body red">1 thiếu tiếng</text>
+  <rect x="1052" y="155" width="140" height="38" rx="7" class="btn"/><text x="1074" y="179" class="h3 bg">Preflight</text>
+  <rect x="1208" y="155" width="140" height="38" rx="7" class="btn2"/><text x="1230" y="179" class="h3 soft">Fallback</text>
+  <rect x="62" y="244" width="1316" height="574" rx="8" class="panel2"/>
+  <g transform="translate(88 276)">
+    <rect x="0" y="0" width="1240" height="150" rx="8" fill="#0c1016" stroke="#2a3340"/>
+    <rect x="18" y="18" width="202" height="114" rx="8" fill="#1f2937" stroke="#384354"/>
+    <text x="54" y="78" class="body muted">preview ảnh/video</text>
+    <text x="244" y="31" class="tiny green">Sẵn sàng</text>
+    <text x="244" y="60" class="h2 text">Cảnh 1 · 6.5 giây</text>
+    <text x="244" y="88" class="body soft">Lời đọc: Sao lưu dữ liệu không phải việc phụ, nó là bảo hiểm cho công việc của bạn.</text>
+    <text x="244" y="116" class="body muted">Visual: cận cảnh ổ cứng, cloud sync, overlay checklist.</text>
+    <rect x="850" y="24" width="110" height="34" rx="7" class="btn2"/><text x="877" y="46" class="small soft">Sửa cảnh</text>
+    <rect x="972" y="24" width="128" height="34" rx="7" class="btn2"/><text x="992" y="46" class="small soft">Tạo lại voice</text>
+    <rect x="1112" y="24" width="100" height="34" rx="7" class="btn"/><text x="1132" y="46" class="small bg">Preview</text>
+    <text x="850" y="92" class="small muted">Provider ảnh: Auto</text>
+    <text x="850" y="118" class="small muted">Loại visual: video</text>
+  </g>
+  <g transform="translate(88 448)">
+    <rect x="0" y="0" width="1240" height="150" rx="8" fill="#0c1016" stroke="#3b2630"/>
+    <rect x="18" y="18" width="202" height="114" rx="8" fill="#26141a" stroke="#69303d"/>
+    <text x="64" y="78" class="body red">thiếu hình</text>
+    <text x="244" y="31" class="tiny red">Cần xử lý</text>
+    <text x="244" y="60" class="h2 text">Cảnh 2 · 8.0 giây</text>
+    <text x="244" y="88" class="body soft">Lời đọc: Khi laptop hỏng, bản sao lưu quyết định bạn mất một giờ hay mất một tuần.</text>
+    <text x="244" y="116" class="body muted">Visual prompt đã có nhưng chưa sinh asset.</text>
+    <rect x="840" y="24" width="128" height="34" rx="7" class="btn"/><text x="865" y="46" class="small bg">Tạo ảnh</text>
+    <rect x="980" y="24" width="148" height="34" rx="7" class="btn2"/><text x="1003" y="46" class="small soft">Gắn file thủ công</text>
+    <rect x="1140" y="24" width="72" height="34" rx="7" class="btn2"/><text x="1157" y="46" class="small soft">Bỏ qua</text>
+    <text x="840" y="92" class="small muted">Ảnh: ChatGPT web</text>
+    <text x="840" y="118" class="small muted">Video: gflow-cli</text>
+  </g>
+  <g transform="translate(88 620)">
+    <rect x="0" y="0" width="1240" height="150" rx="8" fill="#0c1016" stroke="#2a3340"/>
+    <rect x="18" y="18" width="202" height="114" rx="8" fill="#182034" stroke="#334155"/>
+    <text x="52" y="78" class="body cyan">motion graphics</text>
+    <text x="244" y="31" class="tiny cyan">Đang chạy</text>
+    <text x="244" y="60" class="h2 text">Cảnh 3 · 7.0 giây</text>
+    <text x="244" y="88" class="body soft">Lời đọc: Quy tắc 3-2-1 giúp bạn có ba bản sao trên hai thiết bị và một bản ngoài máy.</text>
+    <text x="244" y="116" class="body muted">Visual: biểu đồ 3-2-1, icon thiết bị, thanh tiến trình.</text>
+    <rect x="840" y="24" width="138" height="34" rx="7" class="btn2"/><text x="864" y="46" class="small soft">Xem job</text>
+    <rect x="990" y="24" width="114" height="34" rx="7" class="btn2"/><text x="1016" y="46" class="small soft">Hủy</text>
+    <rect x="1116" y="24" width="96" height="34" rx="7" class="btn2"/><text x="1138" y="46" class="small soft">Retry</text>
+    <text x="840" y="92" class="small muted">Engine: motion_graphics</text>
+    <text x="840" y="118" class="small muted">Không tốn credit</text>
+  </g>
+</svg>

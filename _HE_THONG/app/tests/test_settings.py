@@ -50,10 +50,18 @@ class AgentAssignmentTests(unittest.TestCase):
             clear=False,
         ):
             assignments = settings.agent_assignments()
-        self.assertEqual(assignments["orchestration"]["executor"], "codex_cli")
+        self.assertEqual(assignments["orchestration"]["executor"], "astra")
+        self.assertEqual(assignments["orchestration"]["fallback_agents"], ["claude"])
         self.assertEqual(assignments["video_generation"]["mode"], "auto")
 
     def test_valid_stage_assignment_is_normalized(self) -> None:
+        """A saved choice written under the old CLI names is still honoured.
+
+        The agents used to be named after the CLI behind them. Treating those
+        names as malformed silently narrowed a stage to whichever id happened
+        to survive, so a stage the user had pointed at three AIs would refuse
+        with "every assigned AI failed" while two of them were idle.
+        """
         configured = {
             "video_generation": {
                 "mode": "fallback",
@@ -73,10 +81,27 @@ class AgentAssignmentTests(unittest.TestCase):
         ):
             assignment = settings.agent_assignment("video_generation")
         self.assertEqual(assignment["mode"], "fallback")
-        self.assertEqual(assignment["executor"], "claude_code_cli")
-        self.assertEqual(assignment["allowed_agents"], ["claude_code_cli", "codex_cli"])
-        self.assertEqual(assignment["fallback_agents"], ["codex_cli"])
-        self.assertEqual(assignment["reviewer"], "codex_cli")
+        self.assertEqual(assignment["executor"], "claude")
+        self.assertEqual(assignment["allowed_agents"], ["claude", "astra"])
+        self.assertEqual(assignment["fallback_agents"], ["astra"])
+        self.assertEqual(assignment["reviewer"], "astra")
+
+    def test_a_name_nothing_recognises_is_still_dropped(self) -> None:
+        configured = {"storyboard": {"executor": "gpt5_web", "allowed_agents": ["nope"]}}
+        with mock.patch.dict(
+            os.environ, {"AI_STAGE_ASSIGNMENTS_JSON": json.dumps(configured)}, clear=False,
+        ):
+            assignment = settings.agent_assignment("storyboard")
+        self.assertEqual(assignment["executor"], "astra")
+        self.assertEqual(assignment["allowed_agents"], list(settings.AGENT_IDS))
+
+    def test_orchestrator_defaults_are_astra_with_claude_fallback(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            # Defaults only: the machine's .env would otherwise answer.
+            os.environ.pop("AI_ORCHESTRATOR_PROVIDER", None)
+            os.environ.pop("AI_ORCHESTRATOR_FALLBACK_PROVIDER", None)
+            self.assertEqual(settings.orchestrator_provider(), "astra")
+            self.assertEqual(settings.orchestrator_fallback_provider(), "claude")
 
 
 if __name__ == "__main__":

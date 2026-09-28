@@ -191,6 +191,9 @@ def _adopt_signed_in_channel() -> str:
 
 
 @router.post("/api/oauth/youtube/disconnect")
-def youtube_oauth_disconnect() -> dict[str, Any]:
+def youtube_oauth_disconnect(
+    managed_channel_id: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Disconnect only the account the user selected, not every channel."""
     oauth_disconnect(managed_channel_id)
-    return oauth_status()
+    return oauth_status(managed_channel_id)

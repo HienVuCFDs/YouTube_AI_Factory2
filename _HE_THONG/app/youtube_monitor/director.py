@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import orchestrator_runtime
 from .codex_bridge import CodexBridgeError, call_codex_json
 from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_openai_json
 
@@ -92,7 +93,8 @@ def _director_prompt(bundle: dict[str, Any]) -> str:
 
 
 def _call(provider: str, prompt: str) -> dict[str, Any]:
-    name = str(provider or "codex_cli").strip().lower()
+    # An agent name (astra, claude) arrives here as readily as a runtime name.
+    name = orchestrator_runtime.runtime_id(str(provider or "codex_cli"))
     try:
         if name == "codex_cli":
             return call_codex_json(_SYSTEM_PROMPT, prompt, DIRECTOR_SCHEMA, timeout_seconds=600)

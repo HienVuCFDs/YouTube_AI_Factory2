@@ -59,5 +59,47 @@ class WriterTests(unittest.TestCase):
         self.assertIn("không có khung hình", prompt)
 
 
+class WhoWritesTheScriptTests(unittest.TestCase):
+    """The app lets the user assign an AI to the script stage.
+
+    `resolve_writer` kept its own private order - API keys first, then
+    whichever CLI answered - and never read that assignment, so the setting
+    did nothing and the script was written by a different AI than the one the
+    record named.
+    """
+
+    def test_the_assigned_agent_is_the_one_that_writes(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import writer
+
+        with mock.patch.object(
+            writer.settings, "agent_assignment", return_value={"executor": "claude"},
+        ):
+            self.assertEqual(writer._assigned_writer(), "claude_code_cli")
+
+    def test_an_agent_that_cannot_be_driven_headlessly_is_no_choice(self) -> None:
+        """A chat-only agent must not block the script; the caller falls back
+        to the configured keys and CLIs and the script still gets written."""
+        from unittest import mock
+
+        from youtube_monitor import writer
+
+        with mock.patch.object(
+            writer.settings, "agent_assignment", return_value={"executor": "chatgpt_app"},
+        ):
+            self.assertEqual(writer._assigned_writer(), "")
+
+    def test_an_explicit_request_still_wins_over_the_assignment(self) -> None:
+        from unittest import mock
+
+        from youtube_monitor import writer
+
+        with mock.patch.object(writer, "_assigned_writer") as assigned:
+            writer.resolve_writer("antigravity")
+
+        assigned.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,11 +67,25 @@ class ProductionWorkerTests(unittest.TestCase):
             self.assertEqual(database.list_project_timeline(project["id"])[0]["audio_path"], "")
             self.assertTrue(any("hoàn tất" in event["message"].lower() for event in database.list_project_job_events(voice_job["id"])))
 
+            segment = database.list_project_timeline(project["id"])[0]
+            visual = Path(directory) / "source.mp4"
+            visual.write_bytes(b"source")
+            database.update_project_timeline_segment(int(segment["id"]), visual_path=str(visual))
+            database.replace_timeline_edit_beats(
+                int(segment["id"]),
+                [
+                    {"source_kind": "primary", "visual_path": str(visual), "duration_seconds": 4},
+                    {"source_kind": "source_frame", "visual_path": str(visual), "duration_seconds": 4},
+                ],
+            )
+
             render_job = worker.enqueue(project["id"], script["id"], "render", "dry_run")
             worker._process(render_job["id"])
             finished_render = database.get_project_job(render_job["id"])
             self.assertEqual(finished_render["status"], "completed")
             self.assertTrue(Path(finished_render["output_path"]).is_file())
+            manifest = json.loads(Path(finished_render["output_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["segments"][0]["edit_beats"]), 2)
 
             premiere_job = worker.enqueue(project["id"], script["id"], "premiere_draft", "dry_run")
             worker._process(premiere_job["id"])

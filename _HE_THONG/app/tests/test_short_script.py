@@ -292,7 +292,10 @@ class TheShortsPanelIsReachableTests(unittest.TestCase):
     def test_the_writing_step_offers_a_standalone_short_option(self) -> None:
         self.assertIn('id="studioCreateStandaloneShort"', self.page)
         self.assertIn('id="studioShortWorkflowNote"', self.page)
-        self.assertIn('id="studioInitialShortSeconds"', self.page)
+        # The short's length has one control, in the Short tab: the first
+        # script and every rewrite read the same box.
+        self.assertNotIn('id="studioInitialShortSeconds"', self.page)
+        self.assertIn("const shortSeconds = Number($('studioShortScriptSeconds')", self.page)
         self.assertIn("create_standalone_short: createStandaloneShort", self.page)
         self.assertIn("short_seconds: shortSeconds", self.page)
 
@@ -324,42 +327,36 @@ class TheShortsPanelIsReachableTests(unittest.TestCase):
         self.assertIn('onchange="syncStudioLaneTabs()"', self.page)
         self.assertIn("createStandaloneShort", self.page)
 
-    def test_each_step_shows_both_lanes_side_by_side(self) -> None:
-        """Beside each other, not one behind the other.
+    def test_every_step_with_both_videos_switches_between_them(self) -> None:
+        """One video at a time, behind two tabs, on every step that has both.
 
-        Tabs made the two lanes take turns, so the short was only ever seen
-        by leaving the long video. Split columns keep both in view, which is
-        the point of writing them together.
+        Side-by-side columns gave each video half the width - two scripts,
+        two storyboards, two players squeezed next to each other - so each
+        step now shows the long video or the Short, and a tab switches.
         """
-        for step in ("studioStep3", "studioStep4", "studioStep5", "studioStep6"):
+        for step in ("studioStep3", "studioStep4", "studioStep5", "studioStep6", "studioStep7"):
             with self.subTest(step=step):
                 self.assertIn(f'<div class="studio-lane-split" data-lane-step="{step}">', self.page)
+                self.assertIn(f'<div class="studio-lane-tabs" role="tablist" data-lane-step="{step}" hidden>', self.page)
                 self.assertIn(f'data-lane-step="{step}" data-lane="long"', self.page)
-                self.assertIn(f'data-lane-step="{step}" data-lane="short"', self.page)
+                self.assertIn(f'data-lane-step="{step}" data-lane="short" hidden', self.page)
+        self.assertEqual(self.page.count('class="studio-lane-tabs"'), 5)
+        self.assertIn("setStudioLaneTab('long')", self.page)
+        self.assertIn("setStudioLaneTab('short')", self.page)
 
-    def test_nothing_is_left_of_the_tab_switching(self) -> None:
-        self.assertNotIn("setStudioLane", self.page)
-        self.assertNotIn("studio-lane-tab", self.page)
+    def test_the_short_tab_is_there_only_when_there_is_a_short(self) -> None:
+        """Without a Short there is nothing to switch to, so the bar goes too."""
+        self.assertIn("if (tabs) tabs.hidden = !wanted;", self.page)
+        self.assertIn("const active = wanted && state.studioLane === 'short' ? 'short' : 'long';", self.page)
 
-    def test_the_short_column_is_hidden_until_the_box_is_ticked(self) -> None:
-        """Un-splitting is not enough; the column has to go.
+    def test_the_choice_of_video_holds_across_steps(self) -> None:
+        """Working on the Short, the next step opens on the Short too."""
+        self.assertIn("state.studioLane = lane === 'short' ? 'short' : 'long';", self.page)
+        self.assertNotIn("studioLaneTabs", self.page)
 
-        Left in the grid it would still take half the width away from the
-        long video on a project that is not making a short.
-        """
-        self.assertIn('data-lane="short" hidden', self.page)
-        self.assertIn("if (short) short.hidden = !wanted;", self.page)
-        self.assertIn("split.classList.toggle('is-split', wanted)", self.page)
-
-    def test_the_columns_are_labelled_only_when_there_are_two(self) -> None:
-        self.assertIn('<div class="studio-lane-head">Video dài</div>', self.page)
-        self.assertIn('<div class="studio-lane-head">Short</div>', self.page)
-        self.assertIn(".studio-lane-head { display: none;", self.page)
-        self.assertIn(".studio-lane-split.is-split .studio-lane-head { display: block; }", self.page)
-
-    def test_the_split_stacks_rather_than_squeezing_on_a_narrow_screen(self) -> None:
-        """Two columns of storyboard in 500px is unusable."""
-        self.assertIn("@media (max-width: 1180px)", self.page)
+    def test_nothing_is_left_of_the_side_by_side_columns(self) -> None:
+        self.assertNotIn("is-split", self.page)
+        self.assertNotIn("studio-lane-head", self.page)
 
     def test_the_page_still_parses_with_the_panes_wrapped_around_each_step(self) -> None:
         """Wrapping a step's contents is where this breaks if it breaks."""
@@ -447,6 +444,73 @@ class TheShortRunsWithoutTheLongVideoTests(unittest.TestCase):
             'database.get_latest_project_script(project_id) or build_script_draft(bundle)',
             source,
         )
+
+
+class ShortRenderReadinessTests(unittest.TestCase):
+    def test_stale_paths_do_not_make_the_short_look_renderable(self) -> None:
+        from youtube_monitor import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "voice.wav"
+            visual = root / "scene.png"
+            audio.write_bytes(b"voice")
+            visual.write_bytes(b"image")
+            timeline = [
+                {"id": 1, "segment_index": 1, "audio_path": str(audio), "visual_path": str(visual)},
+                {"id": 2, "segment_index": 2, "audio_path": str(root / "lost.wav"), "visual_path": str(root / "lost.png")},
+            ]
+            with patch.object(main.database, "get_latest_project_script", return_value={"id": 9, "hook": "", "intro": "", "main_content": "x", "cta": ""}), \
+                 patch.object(main.database, "list_project_shots", return_value=[]), \
+                 patch.object(main.database, "list_project_timeline", return_value=timeline), \
+                 patch.object(main.database, "list_project_jobs", return_value=[]):
+                result = main._short_lane_progress(1)
+
+        self.assertEqual(result["voiced"], 1)
+        self.assertEqual(result["with_visuals"], 1)
+        self.assertEqual(result["missing_audio"], 1)
+        self.assertEqual(result["missing_visual"], 1)
+        self.assertFalse(result["can_render"])
+        self.assertEqual(result["steps"]["voice"], False)
+        self.assertEqual(result["steps"]["visuals"], False)
+
+    def test_api_refuses_to_queue_an_incomplete_short_render(self) -> None:
+        from youtube_monitor import main
+
+        payload = main.CreateProductionJobRequest(
+            job_type="render_short", provider="ffmpeg_builtin",
+            confirmed=True, variant="short",
+        )
+        with patch.object(main.database, "get_production_project", return_value={"id": 1}), \
+             patch.object(main.database, "get_latest_project_script", return_value={"id": 9}), \
+             patch.object(main.database, "list_project_timeline", return_value=[{"id": 1}]), \
+             patch.object(main, "_short_lane_progress", return_value={
+                 "can_render": False, "issues": ["1 cảnh thiếu hình", "1 cảnh thiếu tiếng"],
+             }):
+            with self.assertRaises(main.HTTPException) as raised:
+                main.queue_project_job(1, payload)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("Short chưa thể dựng", str(raised.exception.detail))
+        self.assertIn("thiếu hình", str(raised.exception.detail))
+
+    def test_api_refuses_to_queue_an_incomplete_long_render(self) -> None:
+        from youtube_monitor import main
+
+        payload = main.CreateProductionJobRequest(
+            job_type="render", provider="ffmpeg_builtin", confirmed=True,
+        )
+        with patch.object(main.database, "get_production_project", return_value={"id": 1}), \
+             patch.object(main.database, "get_latest_project_script", return_value={"id": 8}), \
+             patch.object(main.database, "list_project_timeline", return_value=[{"id": 1}]), \
+             patch.object(main, "_render_readiness", return_value={
+                 "can_render": False, "issues": ["1 cảnh thiếu tiếng"],
+             }):
+            with self.assertRaises(main.HTTPException) as raised:
+                main.queue_project_job(1, payload)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("Video chưa thể dựng", str(raised.exception.detail))
 
 
 class TheShortStoryboardIsTheSameStoryboardTests(unittest.TestCase):

@@ -63,6 +63,21 @@ def test_a_relative_reset_is_read_too() -> None:
     assert reset == now + timedelta(hours=4)
 
 
+def test_the_plural_reset_wording_is_read_as_well() -> None:
+    """Antigravity says "Resets in 8h47m2s", and the singular-only pattern
+    read that as no reset time at all - so a model that was coming back in
+    nine hours looked like one that might never come back."""
+    now = datetime(2026, 9, 23, 10, 0, tzinfo=timezone.utc)
+
+    reset = usage_limits.parse_reset_at(
+        "error: Individual quota reached. Please upgrade your subscription "
+        "to increase your limits. Resets in 8h47m2s.",
+        now=now,
+    )
+
+    assert reset == now + timedelta(hours=8)
+
+
 def test_a_clock_only_reset_uses_the_named_zone_and_next_occurrence() -> None:
     now = datetime(2026, 8, 28, 1, 0, tzinfo=timezone.utc)  # 08:00 in Bangkok
 

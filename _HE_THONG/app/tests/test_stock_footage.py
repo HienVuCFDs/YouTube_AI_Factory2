@@ -313,6 +313,7 @@ class StockProviderRoutingTests(unittest.TestCase):
     def test_it_takes_over_when_every_paid_video_route_is_out(self) -> None:
         states = {
             "gflow_cli": {"available": False, "reason": "gflow_not_logged_in"},
+            "phantom_canvas_video": {"available": False, "reason": "phantom_canvas_not_running"},
             "flow_veo": {"available": False, "reason": "browser_extension_not_connected"},
         }
         route = self.gateway.route(

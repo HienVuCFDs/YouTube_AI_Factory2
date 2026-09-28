@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
-from .. import settings
+from .. import chat_agent_presence, orchestrator_runtime, settings
 from ..antigravity_bridge import antigravity_cli_status
 from ..claude_code_bridge import ClaudeCodeBridgeError, call_claude_code_json, claude_code_cli_status
 from ..codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
@@ -160,8 +160,10 @@ def health() -> dict[str, Any]:
         "anthropic_model": anthropic_model,
         "runway_configured": bool(runway_key),
         "runway_model": runway_model,
+        # The scene worker runs several threads now, so health asks it rather
+        # than reaching for a thread handle that is no longer a single object.
         "scene_generation_worker_running": bool(
-            scene_generation_worker._thread and scene_generation_worker._thread.is_alive()
+            scene_generation_worker.status().get("worker_running")
         ),
         "codex_cli_installed": bool(codex["installed"]),
         "codex_cli_logged_in": bool(codex["logged_in"]),
@@ -223,13 +225,50 @@ def _integration_status() -> list[dict[str, Any]]:
     openai_key, openai_model = settings.openai_config()
     gemini_key, gemini_image_model, gemini_video_model = settings.gemini_config()
     anthropic_key, anthropic_model = settings.anthropic_config()
+    astra_tunnel_id = settings.integration_value("ASTRA_MCP_TUNNEL_ID")
+    chatgpt_tunnel_id = settings.integration_value("CHATGPT_MCP_TUNNEL_ID")
     runway_key, runway_model = settings.runway_config()
     codex = codex_cli_status()
     claude_code = claude_code_cli_status()
     antigravity = antigravity_cli_status()
     gflow = gflow_cli_status()
+    from .. import phantom_canvas_bridge
+    phantom_canvas = phantom_canvas_bridge.status()
     oauth = oauth_status()
     return [
+        {
+            "key": "astra_mcp",
+            "label": "Astra MCP Orchestrator",
+            "category": "AI điều phối chính · gọi tool của app qua MCP",
+            "ready": bool(astra_tunnel_id),
+            "connection": "mcp_tunnel",
+            "model": "Astra",
+            "detail": (
+                "Đã khai báo ASTRA_MCP_TUNNEL_ID; Astra có thể dùng MCP bridge nếu tunnel đang chạy."
+                if astra_tunnel_id else "Cần tạo MCP tunnel trỏ tới ai_desktop_mcp.py rồi lưu ASTRA_MCP_TUNNEL_ID"
+            ),
+        },
+        {
+            "key": "chatgpt_mcp",
+            "label": "ChatGPT app MCP",
+            "category": "AI phụ · specialist qua MCP",
+            "ready": bool(chatgpt_tunnel_id),
+            "connection": "mcp_tunnel",
+            "model": "ChatGPT app",
+            "detail": (
+                "Đã khai báo CHATGPT_MCP_TUNNEL_ID; ChatGPT app có thể gọi tool nếu tunnel đang chạy."
+                if chatgpt_tunnel_id else "Tuỳ chọn: lưu CHATGPT_MCP_TUNNEL_ID nếu muốn dùng ChatGPT app làm specialist."
+            ),
+        },
+        {
+            "key": "phantom_canvas",
+            "label": "Gemini Web qua Phantom Canvas",
+            "category": "Tạo ảnh và video qua Gemini Web · phiên đăng nhập bền vững",
+            "ready": bool(phantom_canvas.get("ready")),
+            "connection": "local_sidecar",
+            "model": "Gemini Web Image / Video",
+            "detail": str(phantom_canvas.get("detail") or ""),
+        },
         {
             "key": "openai_gpt",
             "label": "OpenAI GPT + Image API",
@@ -460,51 +499,173 @@ def refresh_gflow_status() -> dict[str, Any]:
     return {"status": "ready", "integration": gflow_cli_status(force=True)}
 
 
+@router.post("/api/integrations/phantom-canvas/start")
+def start_phantom_canvas() -> dict[str, Any]:
+    from .. import phantom_canvas_bridge
+    try:
+        return {"status": "started", "integration": phantom_canvas_bridge.start_service()}
+    except phantom_canvas_bridge.PhantomCanvasError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/integrations/phantom-canvas/login")
+def login_phantom_canvas() -> dict[str, Any]:
+    from .. import phantom_canvas_bridge
+    try:
+        return {"status": "login_opened", "integration": phantom_canvas_bridge.open_login()}
+    except phantom_canvas_bridge.PhantomCanvasError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/api/openmontage/status")
 def openmontage_status() -> dict[str, Any]:
     return openmontage_adapter.status()
 
 
-OrchestratorProvider = Literal["codex_cli", "claude_code_cli", "antigravity"]
+OrchestratorProvider = Literal["astra", "antigravity", "chatgpt_app", "claude_chat", "claude"]
 AssignmentMode = Literal["fixed", "auto", "fallback"]
-AgentProvider = Literal["codex_cli", "claude_code_cli", "antigravity"]
+AgentProvider = Literal["astra", "antigravity", "chatgpt_app", "claude_chat", "claude"]
 
 
 class OrchestratorSettingsRequest(BaseModel):
     provider: OrchestratorProvider
+    fallback_provider: OrchestratorProvider | None = None
 
 
 def _orchestrator_settings() -> dict[str, Any]:
+    # Astra is a Codex model - `codex exec` runs gpt-6-astra - so its
+    # readiness is the Codex CLI's sign-in, not an MCP tunnel that never
+    # existed for it.
+    codex = codex_cli_status()
+    antigravity = antigravity_cli_status()
+    chatgpt_tunnel_id = settings.integration_value("CHATGPT_MCP_TUNNEL_ID")
+    chatgpt_ready = chat_agent_presence.connected("chatgpt_app")
+    claude_chat_ready = chat_agent_presence.connected("claude_chat")
+    claude_api_key, claude_api_model = settings.anthropic_config()
+    claude_code = claude_code_cli_status()
+    claude_ready = bool(claude_api_key or claude_code.get("logged_in"))
     return {
         "provider": settings.orchestrator_provider(),
+        "fallback_provider": settings.orchestrator_fallback_provider(),
         "options": [
-            {"key": "codex_cli", "label": "Codex CLI", **codex_cli_status()},
-            {"key": "claude_code_cli", "label": "Claude Code CLI", **claude_code_cli_status()},
-            {"key": "antigravity", "label": "Google Antigravity", **antigravity_cli_status()},
+            {
+                "key": "astra",
+                "label": "Codex CLI (Astra · gpt-6-astra)",
+                "role": "primary",
+                "logged_in": bool(codex.get("logged_in")),
+                "ready": bool(codex.get("logged_in")),
+                "detail": (
+                    "Astra chạy bằng Codex CLI đã đăng nhập, model mặc định gpt-6-astra."
+                    if codex.get("logged_in")
+                    else str(codex.get("detail") or "Cần đăng nhập Codex CLI để dùng Astra.")
+                ),
+            },
+            {
+                "key": "antigravity",
+                "label": "Antigravity CLI (Gemini)",
+                "role": "secondary",
+                "logged_in": bool(antigravity.get("logged_in")),
+                "ready": bool(antigravity.get("logged_in")),
+                "detail": (
+                    "Antigravity CLI đã đăng nhập; model là Gemini/Claude theo gói Google."
+                    if antigravity.get("logged_in")
+                    else str(antigravity.get("detail") or "Cần đăng nhập Antigravity CLI (agy).")
+                ),
+            },
+            {
+                "key": "chatgpt_app",
+                "label": "ChatGPT Chat (MCP)",
+                "role": "secondary",
+                "logged_in": chatgpt_ready,
+                "ready": chatgpt_ready,
+                "detail": (
+                    "ChatGPT Chat vừa kết nối và gọi MCP. Tác vụ được giao sẽ chờ cuộc chat nhận."
+                    if chatgpt_ready
+                    else "Đã khai báo tunnel nhưng chưa có lần gọi MCP gần đây."
+                    if chatgpt_tunnel_id
+                    else "Cần kết nối ứng dụng ChatGPT với MCP bridge qua tunnel. Đây là app ChatGPT, không phải Codex CLI."
+                ),
+            },
+            {
+                "key": "claude_chat",
+                "label": "Claude Chat (MCP)",
+                "role": "secondary",
+                "logged_in": claude_chat_ready,
+                "ready": claude_chat_ready,
+                "detail": (
+                    "Claude Chat vừa kết nối và gọi MCP. Tác vụ được giao sẽ chờ cuộc chat nhận."
+                    if claude_chat_ready
+                    else "Cần kết nối Claude Desktop hoặc Claude web với MCP bridge. Claude Code CLI là lựa chọn riêng."
+                ),
+            },
+            {
+                "key": "claude",
+                "label": "Claude Code / API",
+                "role": "fallback",
+                "logged_in": bool(claude_code.get("logged_in")),
+                "ready": claude_ready,
+                "detail": (
+                    f"Sẵn sàng qua Claude API ({claude_api_model})."
+                    if claude_api_key
+                    else str(claude_code.get("detail") or "Claude fallback cần ANTHROPIC_API_KEY hoặc Claude Code CLI đã đăng nhập.")
+                ),
+            },
         ],
     }
 
 
 @router.get("/api/settings/orchestrator")
 def get_orchestrator_settings() -> dict[str, Any]:
-    """Which locally-logged-in CLI agent drives tasks like web_video_sidecar.py's
-    vision fallback (find an element on an unfamiliar page) — a CLI already
-    logged into the user's own Claude/Codex subscription, not a metered API key."""
+    """Return primary/fallback Orchestrator configuration."""
     return _orchestrator_settings()
+
+
+@router.get("/api/orchestrator/runtimes")
+def orchestrator_runtimes() -> dict[str, Any]:
+    """Which AI runtimes can actually execute a step right now.
+
+    The settings page answers "who did the user pick"; this answers "who can
+    run", which is the question an end-to-end run has to pass before it
+    starts. They disagree often enough that reading the first one as the
+    second is how a run ends up quietly done by a template.
+    """
+    readiness = orchestrator_runtime.runtime_readiness(database)
+    ready = [item for item in readiness if item["ready"]]
+    return {
+        "runtimes": readiness,
+        "ready_ids": [item["id"] for item in ready],
+        "writer_order": orchestrator_runtime.writer_order(readiness),
+        "agent_runtimes": dict(orchestrator_runtime.AGENT_RUNTIMES),
+        "can_orchestrate": [item["id"] for item in ready if item["can_orchestrate"]],
+        "blocked": [
+            {"runtime": item["id"], "reason": item["blocked_reason"], "detail": item["detail"]}
+            for item in readiness if not item["ready"]
+        ],
+    }
 
 
 @router.post("/api/settings/orchestrator")
 def save_orchestrator_settings(payload: OrchestratorSettingsRequest) -> dict[str, Any]:
-    assignments = settings.agent_assignments()
-    assignments["orchestration"] = {
-        **assignments["orchestration"],
-        "mode": "fixed",
-        "executor": payload.provider,
-    }
-    settings.save_integration_values({
+    fallback = payload.fallback_provider or settings.orchestrator_fallback_provider()
+    values = {
         "AI_ORCHESTRATOR_PROVIDER": payload.provider,
-        "AI_STAGE_ASSIGNMENTS_JSON": json.dumps(assignments, ensure_ascii=False, separators=(",", ":")),
-    })
+        "AI_ORCHESTRATOR_FALLBACK_PROVIDER": fallback,
+    }
+    # The `orchestration` stage is also who a step calls mid-way (reading the
+    # source, answering a question). A chat app directs from outside and
+    # cannot be called like that; writing it in there left the analysis step
+    # with no AI allowed to run it. So only a callable choice moves the stage.
+    if payload.provider not in settings.CHAT_AGENT_IDS:
+        assignments = settings.agent_assignments()
+        stage_fallback = fallback if fallback not in settings.CHAT_AGENT_IDS else ""
+        assignments["orchestration"] = {
+            **assignments["orchestration"],
+            "mode": "fallback" if stage_fallback and stage_fallback != payload.provider else "auto",
+            "executor": payload.provider,
+            "fallback_agents": [stage_fallback] if stage_fallback and stage_fallback != payload.provider else [],
+        }
+        values["AI_STAGE_ASSIGNMENTS_JSON"] = json.dumps(assignments, ensure_ascii=False, separators=(",", ":"))
+    settings.save_integration_values(values)
     return _orchestrator_settings()
 
 
@@ -513,7 +674,7 @@ class StageAgentAssignmentRequest(BaseModel):
     executor: AgentProvider
     allowed_agents: list[AgentProvider] = Field(default_factory=list)
     fallback_agents: list[AgentProvider] = Field(default_factory=list)
-    reviewer: Literal["auto", "codex_cli", "claude_code_cli", "antigravity"] = "auto"
+    reviewer: Literal["auto", "astra", "antigravity", "chatgpt_app", "claude_chat", "claude"] = "auto"
 
 
 class AgentAssignmentsRequest(BaseModel):
@@ -537,19 +698,25 @@ class AutomationPolicyRequest(BaseModel):
 
 
 def _agent_options() -> list[dict[str, Any]]:
+    orch = _orchestrator_settings()
+    by_key = {str(item["key"]): item for item in orch["options"]}
     return [
         {
-            "key": "codex_cli", "label": "Codex CLI", **codex_cli_status(),
-            "capabilities": ["structured_json", "vision", "code", "browser_control"],
-        },
-        {
-            "key": "claude_code_cli", "label": "Claude Code CLI", **claude_code_cli_status(),
-            "capabilities": ["structured_json", "vision", "code", "browser_control"],
-        },
-        {
-            "key": "antigravity", "label": "Google Antigravity", **antigravity_cli_status(),
-            "capabilities": ["structured_json", "image_generation", "mcp_tools"],
-        },
+            "key": key,
+            "label": str(by_key.get(key, {}).get("label") or key),
+            "role": str(by_key.get(key, {}).get("role") or "specialist"),
+            "logged_in": bool(by_key.get(key, {}).get("logged_in")),
+            "ready": bool(by_key.get(key, {}).get("ready")),
+            "detail": str(by_key.get(key, {}).get("detail") or ""),
+            "capabilities": (
+                ["director", "planning", "tool_selection", "review", "structured_json"]
+                if key in {"astra", "antigravity"}
+                else ["chat", "planning", "mcp_tools", "external_task_queue"]
+                if key in {"chatgpt_app", "claude_chat"}
+                else ["fallback_director", "text", "review", "structured_json"]
+            ),
+        }
+        for key in settings.AGENT_IDS
     ]
 
 
@@ -639,7 +806,10 @@ def locate_element(payload: LocateElementRequest) -> dict[str, Any]:
         "pixel, goc toa do (0,0) o tren-trai. Tim toa do pixel can bam theo yeu cau ben duoi. "
         "Neu khong thay phan tu phu hop, tra ve found=false va x=0, y=0."
     )
-    provider = settings.orchestrator_provider()
+    # The sidecar waits for these coordinates, so they come from the AI a step
+    # can call - not the orchestrator, which may be a chat app that cannot be.
+    provider = str(settings.agent_assignment("orchestration").get("executor") or "")
+    provider = orchestrator_runtime.runtime_id(provider)
     try:
         if provider == "claude_code_cli":
             result = call_claude_code_json(

@@ -564,7 +564,7 @@
             </select>
             <input id="shotDuration-${shot.id}" style="width:76px" type="number" min="1" max="3600" value="${esc(shot.duration_seconds)}" />
             <select id="shotStatus-${shot.id}" aria-label="Trạng thái cảnh">
-              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Đang chuẩn bị</option>
               <option value="ready" ${shot.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
               <option value="done" ${shot.status === 'done' ? 'selected' : ''}>Xong</option>
             </select>
@@ -596,7 +596,7 @@
             </select>
             <input id="shotDuration-${shot.id}" type="number" min="1" max="3600" value="${esc(shot.duration_seconds)}" title="Thời lượng (giây)">
             <select id="shotStatus-${shot.id}" aria-label="Trạng thái cảnh">
-              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="planned" ${shot.status === 'planned' ? 'selected' : ''}>Đang chuẩn bị</option>
               <option value="ready" ${shot.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
               <option value="done" ${shot.status === 'done' ? 'selected' : ''}>Xong</option>
             </select>
@@ -635,7 +635,7 @@
       const sceneStatus = sceneJob ? `${productionJobStatusTag(sceneJob.status)} · ${esc(sceneJob.provider)}${sceneJob.error ? ` · ${esc(sceneJob.error)}` : ''} ${sceneJobActions}` : 'Chưa tạo ảnh AI cho đoạn này.';
       const sceneControls = `
         <select id="sceneRatio-${segment.id}" aria-label="Tỷ lệ cảnh AI"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select>
-        <select id="sceneImageProvider-${segment.id}" aria-label="Engine tạo ảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select>
+        <select id="sceneImageProvider-${segment.id}" aria-label="Engine tạo ảnh AI"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="meta_ai_image">Meta AI · ảnh (gói đăng ký)</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select>
         <button class="btn small primary" onclick="generateSceneImage(${project.id}, ${segment.id})">Tạo ảnh AI</button>
         <select id="sceneVideoProvider-${segment.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select>
         <button class="btn small primary" onclick="generateSceneVideo(${project.id}, ${segment.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(String(segment.visual_path || '')) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button>`;
@@ -655,7 +655,7 @@
             <select id="timelineAudioAsset-${segment.id}" onchange="attachTimelineAsset(${segment.id}, this.value)" aria-label="Gắn audio local">${assetOptions(assets, 'audio', segment.audio_path)}</select>
             <select id="timelineVisualAsset-${segment.id}" onchange="attachTimelineAsset(${segment.id}, this.value)" aria-label="Gắn video hoặc ảnh local">${assetOptions(assets, ['video', 'image'], segment.visual_path)}</select>
             <select id="timelineStatus-${segment.id}" aria-label="Trạng thái timeline">
-              <option value="planned" ${segment.status === 'planned' ? 'selected' : ''}>Kế hoạch</option>
+              <option value="planned" ${segment.status === 'planned' ? 'selected' : ''}>Đang chuẩn bị</option>
               <option value="voice_ready" ${segment.status === 'voice_ready' ? 'selected' : ''}>Đã có voice</option>
               <option value="asset_ready" ${segment.status === 'asset_ready' ? 'selected' : ''}>Đã có asset</option>
               <option value="ready" ${segment.status === 'ready' ? 'selected' : ''}>Sẵn sàng</option>
@@ -669,7 +669,7 @@
       </div>`;
     }).join('') : '<div class="empty">Chưa có timeline. Hãy tạo sau khi đã có shot list.</div>';
     const batchSceneAction = timeline.length
-      ? `<select id="batchSceneRatio-${project.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="batchImageProvider-${project.id}" aria-label="Engine tạo tất cả ảnh"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select><button class="btn small primary" onclick="generateAllSceneImages(${project.id})">✦ Tạo tất cả ảnh AI</button><select id="batchVideoProvider-${project.id}" aria-label="Engine tạo tất cả video">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" onclick="generateAllSceneVideos(${project.id})">✦ Tạo tất cả video AI</button>`
+      ? `<select id="batchSceneRatio-${project.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="batchImageProvider-${project.id}" aria-label="Engine tạo tất cả ảnh"><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="meta_ai_image">Meta AI · ảnh (gói đăng ký)</option><option value="gemini_image" ${geminiReady ? 'selected' : ''}>Gemini Image</option>${openaiImageReady ? '<option value="openai_image">GPT Image</option>' : ''}</select><button class="btn small primary" onclick="generateAllSceneImages(${project.id})">✦ Tạo tất cả ảnh AI</button><select id="batchVideoProvider-${project.id}" aria-label="Engine tạo tất cả video">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" onclick="generateAllSceneVideos(${project.id})">✦ Tạo tất cả video AI</button>`
       : '';
     const timelineActions = shots.length ? `
       <button class="btn small primary" onclick="generateTimeline(${project.id}, ${timeline.length ? 'false' : 'true'})">${timeline.length ? 'Giữ timeline hiện tại' : 'Tạo timeline'}</button>
@@ -902,7 +902,7 @@
             <option value="faster-whisper-medium" ${selectedSubtitleModel === 'faster-whisper-medium' ? 'selected' : ''}>Faster-Whisper medium</option>
             <option value="faster-whisper-large-v3" ${selectedSubtitleModel === 'faster-whisper-large-v3' ? 'selected' : ''}>Faster-Whisper large-v3</option>
           </select>
-          <select id="renderPublishLanguage" aria-label="Ngôn ngữ xuất bản"><option value="vi" ${renderSettings.publish_language === 'vi' ? 'selected' : ''}>Tiếng Việt</option><option value="en" ${renderSettings.publish_language === 'en' ? 'selected' : ''}>English</option><option value="th" ${renderSettings.publish_language === 'th' ? 'selected' : ''}>ภาษาไทย</option><option value="pt-BR" ${renderSettings.publish_language === 'pt-BR' ? 'selected' : ''}>Português (Brasil)</option><option value="es" ${renderSettings.publish_language === 'es' ? 'selected' : ''}>Español</option><option value="fr" ${renderSettings.publish_language === 'fr' ? 'selected' : ''}>Français</option><option value="de" ${renderSettings.publish_language === 'de' ? 'selected' : ''}>Deutsch</option><option value="ja" ${renderSettings.publish_language === 'ja' ? 'selected' : ''}>日本語</option><option value="ko" ${renderSettings.publish_language === 'ko' ? 'selected' : ''}>한국어</option><option value="zh-CN" ${renderSettings.publish_language === 'zh-CN' ? 'selected' : ''}>中文</option><option value="id" ${renderSettings.publish_language === 'id' ? 'selected' : ''}>Bahasa Indonesia</option></select>
+          <select id="renderPublishLanguage" aria-label="Ngôn ngữ xuất bản"><option value="vi" ${renderSettings.publish_language === 'vi' ? 'selected' : ''}>Tiếng Việt</option><option value="en" ${renderSettings.publish_language === 'en' ? 'selected' : ''}>Tiếng Anh</option><option value="th" ${renderSettings.publish_language === 'th' ? 'selected' : ''}>Tiếng Thái</option><option value="pt-BR" ${renderSettings.publish_language === 'pt-BR' ? 'selected' : ''}>Tiếng Bồ Đào Nha (Brazil)</option><option value="es" ${renderSettings.publish_language === 'es' ? 'selected' : ''}>Tiếng Tây Ban Nha</option><option value="fr" ${renderSettings.publish_language === 'fr' ? 'selected' : ''}>Tiếng Pháp</option><option value="de" ${renderSettings.publish_language === 'de' ? 'selected' : ''}>Tiếng Đức</option><option value="ja" ${renderSettings.publish_language === 'ja' ? 'selected' : ''}>Tiếng Nhật</option><option value="ko" ${renderSettings.publish_language === 'ko' ? 'selected' : ''}>Tiếng Hàn</option><option value="zh-CN" ${renderSettings.publish_language === 'zh-CN' ? 'selected' : ''}>Tiếng Trung</option><option value="id" ${renderSettings.publish_language === 'id' ? 'selected' : ''}>Tiếng Indonesia</option></select>
           <button class="btn small ghost" onclick="saveRenderSettings(${project.id})">Lưu thiết lập</button>
         </div>
         <div class="queue-controls" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap">
@@ -1131,9 +1131,12 @@
 
   function sceneProviderLabel(provider) {
     return {
+      auto: 'Auto · AI điều phối tự chọn',
       antigravity_image: 'Antigravity', gflow_cli: 'Google Flow/Veo (gflow-cli)', gflow_image: 'Flow ảnh (gflow-cli)', flow_veo: 'Flow Extension (legacy)', meta_ai_video: 'Meta AI (Vibes)',
       gemini_image: 'Gemini Image', gemini_veo: 'Google Veo', openai_image: 'GPT Image', runway: 'Runway',
+      phantom_canvas_image: 'Gemini Web (Phantom Canvas)', phantom_canvas_video: 'Gemini Web video (Phantom Canvas)',
       gemini_web_image: 'Gemini (web)', chatgpt_web_image: 'ChatGPT (web)', flow_image: 'Flow (ảnh)', auto_parallel: 'nhiều AI song song',
+      motion_graphics: 'Motion graphics', stock_footage: 'Kho footage mở',
     }[provider] || provider || 'AI';
   }
 
@@ -1141,61 +1144,23 @@
   // Spreading a batch over several sites is what makes it run in parallel —
   // the extension already runs jobs concurrently, but scenes sent to one site
   // queue behind that site's single tab.
-  const PARALLEL_IMAGE_PROVIDERS = ['flow_image', 'chatgpt_web_image', 'gemini_web_image'];
+  const PARALLEL_IMAGE_PROVIDERS = ['phantom_canvas_image', 'flow_image', 'chatgpt_web_image', 'gemini_web_image'];
   const PARALLEL_VIDEO_PROVIDERS = ['gflow_cli'];
   function batchProviderPayload(provider, isVeo) {
     if (provider !== 'auto_parallel') return {provider};
     return {providers: isVeo ? PARALLEL_VIDEO_PROVIDERS : PARALLEL_IMAGE_PROVIDERS};
   }
 
-  // One place to hand the orchestrator an intent and see the steps it would
-  // run, rather than putting a CLI call behind every button. Costly steps
-  // only run after the plan has been shown and confirmed.
-  async function runStudioOrchestrate() {
-    const projectId = state.studioProjectId;
-    const intent = $('studioOrchestrateIntent')?.value?.trim();
-    const target = $('studioOrchestratePlan');
-    if (!projectId || !intent) return setMessage('Hãy chọn dự án và nhập việc cần giao.', 'error');
-    if (target) target.textContent = 'Đang hỏi AI điều phối...';
-    try {
-      const plan = await api(`/api/projects/${projectId}/orchestrate`, {
-        method: 'POST', body: JSON.stringify({intent, dry_run: true}),
-      });
-      const steps = (plan.steps || []).map((s, i) => `${i + 1}. ${s.action} — ${s.reason}`).join('\n');
-      if (target) target.textContent = `${plan.understanding}
-
-${steps}`;
-      if (!steps) return setMessage('AI điều phối không đề xuất bước nào.', 'success');
-      if (!confirm(`AI điều phối đề xuất:
-
-${steps}
-
-Chạy các bước này?`)) return;
-      if (target) target.textContent = 'Đang thực hiện...';
-      const done = await api(`/api/projects/${projectId}/orchestrate`, {
-        method: 'POST', body: JSON.stringify({intent, dry_run: false}),
-      });
-      if (target) {
-        target.textContent = (done.steps || [])
-          .map((s) => `${s.action}: ${s.result?.status || 'xong'}${s.result?.detail ? ` — ${s.result.detail}` : ''}`)
-          .join('\n');
-      }
-      setMessage('AI điều phối đã chạy xong các bước.', 'success');
-    } catch (error) {
-      if (target) target.textContent = '';
-      setMessage(`AI điều phối lỗi: ${error.message}`, 'error');
-    }
-  }
-  const VIDEO_SCENE_PROVIDERS = new Set(['gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
+  const VIDEO_SCENE_PROVIDERS = new Set(['phantom_canvas_video', 'gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
   const AUDIO_SOURCE_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
-  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
+  const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['phantom_canvas_image', 'phantom_canvas_video', 'antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'meta_ai_image', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);
   // This list is used by single-scene controls. `auto_parallel` belongs only
   // to batch generation; sending it to POST /scene-jobs is an invalid provider.
-  const IMAGE_PROVIDER_OPTIONS = '<option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
-  const VIDEO_PROVIDER_OPTIONS = '<option value="gflow_cli">Google Flow/Veo · gflow-cli (mặc định)</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo (API)</option>';
+  const IMAGE_PROVIDER_OPTIONS = '<option value="phantom_canvas_image">Gemini Web · Phantom Canvas (đề xuất)</option><option value="flow_image">Flow trong Cốc Cốc · 0 tín dụng</option><option value="gflow_image">Flow qua gflow-cli · profile riêng</option><option value="antigravity_image">Antigravity · ảnh theo gói</option><option value="meta_ai_image">Meta AI · ảnh (gói đăng ký)</option><option value="gemini_image">Gemini Image (API)</option><option value="openai_image">GPT Image (API)</option><option value="gemini_web_image">Gemini · web (gói đăng ký)</option><option value="chatgpt_web_image">ChatGPT · web (gói đăng ký)</option>';
+  const VIDEO_PROVIDER_OPTIONS = '<option value="phantom_canvas_video">Gemini Web video · Phantom Canvas (đề xuất)</option><option value="gflow_cli">Google Flow/Veo · gflow-cli</option><option value="flow_veo">Flow Extension · legacy</option><option value="gemini_veo">Google Veo (API)</option>';
 
   async function findReferenceImageAssetId(projectId, visualPath) {
     if (!visualPath) return null;

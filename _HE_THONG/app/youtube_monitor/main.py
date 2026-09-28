@@ -14,13 +14,15 @@ import shutil
 import subprocess
 import threading
 import tempfile
+
+import httpx
 import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 from urllib.parse import urlparse
 
 from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -28,7 +30,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from pydantic import BaseModel, Field
 
 from .analysis_queue import AnalysisQueue
-from .agent_system import AgentPipeline, AgentTaskWorker, DEFAULT_AGENTS
+from .agent_system import ORCHESTRATOR_ROLE, AgentPipeline, AgentTaskWorker, DEFAULT_AGENTS
 from . import settings
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
@@ -36,11 +38,14 @@ from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_st
 from .database import Database
 from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
-from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available
+from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available, render_timeline_with_ffmpeg
 from .ffmpeg_renderer import video_frame_size
 from . import operations, usage_limits, workflows
 from . import languages
 from .fidelity_guard import unsourced_details
+from .graphic_overlays import normalize_graphic_overlays
+from .scene_direction import DIRECTION_SCHEMA, DIRECTOR_INSTRUCTIONS, normalize_direction, resolve_direction
+from .speech_timing import scene_speech_timing, audio_signature
 from .gif_generator import GFLOW_GIF_FRAME_COUNT, GifGenerationError, materialize_gif_asset
 from .gflow_bridge import cached_status as gflow_cached_status
 from .gflow_bridge import gflow_cli_status
@@ -53,6 +58,8 @@ from .oauth import disconnect as oauth_disconnect
 from .oauth import exchange_code as oauth_exchange_code
 from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
+from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge
+from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
 from .production_worker import (
     ProductionJobError,
     ProductionWorker,
@@ -61,6 +68,7 @@ from .production_worker import (
 )
 from .publisher import PublisherError, PublisherWorker, next_channel_schedule
 from .project_layout import ensure_project_layout
+from .project_context import build_project_context, build_source_package
 from .quality_check import build_quality_report
 from .scene_generator import SceneGenerationError, SceneGenerationWorker, build_scene_provider_gateway
 from .motion_graphics import (
@@ -142,6 +150,8 @@ from . import platform_copy
 from . import project_log
 from . import voice_library
 from . import thumbnail_prompt
+from . import chat_agent_presence
+from . import phantom_canvas_bridge
 from .providers import EXECUTION_EXTERNAL_SIDECAR
 from . import oauth as youtube_oauth
 from .publisher import oauth_status
@@ -158,7 +168,7 @@ from .transcriber import (
 )
 from .transcript import normalize_transcript
 from .transcript_queue import TranscriptQueue
-from .video_downloader import VideoDownloadError, delete_downloaded_video, download_video
+from .video_downloader import VideoDownloadError, delete_downloaded_video, download_preview_video, download_video
 from .writer import WriterError, resolve_target_duration_seconds, resolve_writer, revise_script, validate_voiceover_plan
 from .folklore_research import research_folklore_remake
 from .reference_analyzer import ReferenceAnalysisError, analyze_reference
@@ -172,32 +182,27 @@ database.set_event_publisher(event_bus.publish)
 
 
 def _agent_runtime_available(agent: str) -> bool:
-    usage_limit = database.get_provider_usage_limit(agent)
-    if usage_limit and not usage_limit.get("cleared_at"):
-        resets_at = str(usage_limit.get("resets_at") or "")
-        retry_anchor = str(
-            usage_limit.get("last_failure_at") or usage_limit.get("detected_at") or ""
-        )
-        try:
-            reset_has_passed = bool(resets_at and datetime.fromisoformat(resets_at) <= datetime.now(timezone.utc))
-        except ValueError:
-            reset_has_passed = False
-        try:
-            # Some subscription CLIs only say "weekly limit" and provide no
-            # reset date. Probe once per six hours in that case. A failed
-            # probe updates last_failure_at; a successful model call clears
-            # the outage through usage_limits.set_sink below.
-            unknown_reset_probe_due = bool(
-                not resets_at
-                and retry_anchor
-                and datetime.fromisoformat(retry_anchor) <= datetime.now(timezone.utc) - timedelta(hours=6)
-            )
-        except ValueError:
-            unknown_reset_probe_due = False
-        if reset_has_passed:
-            database.clear_provider_usage_limit(agent)
-        elif not unknown_reset_probe_due:
-            return False
+    """Whether the in-app worker can run this agent right now.
+
+    A chat app (GPT Work, Claude Cowork) is never run by this worker - it pulls
+    its own tasks over MCP - so for the worker it is not available. Saying yes
+    here once made chat apps look like executors and reviewers, and every such
+    "attempt" ended "Agent không được hỗ trợ".
+    """
+    if agent in settings.CHAT_AGENT_IDS:
+        return False
+    # Assignments speak agent names (astra, claude); quota rows and status
+    # probes speak runtimes (codex_cli, claude_code_cli). Without this every
+    # pipeline task died "astra: unavailable | claude: unavailable" while both
+    # CLIs were signed in and ready.
+    agent = orchestrator_runtime.runtime_id(agent)
+    # The same reading of a stored outage as readiness and the catalog use: a
+    # stale one is tried again after the cooldown instead of blocking forever.
+    quota = usage_limits.limit_state(database.get_provider_usage_limit(agent))
+    if quota["state"] == "reset_passed":
+        database.clear_provider_usage_limit(agent)
+    if quota["blocking"]:
+        return False
     status_calls = {
         "codex_cli": codex_cli_status,
         "claude_code_cli": claude_code_cli_status,
@@ -219,7 +224,12 @@ agent_task_worker = AgentTaskWorker(
     availability_resolver=_agent_runtime_available,
     policy_resolver=settings.automation_policy,
 )
-agent_pipeline = AgentPipeline(database, agent_task_worker, settings.automation_policy)
+agent_pipeline = AgentPipeline(
+    database,
+    agent_task_worker,
+    settings.automation_policy,
+    external_agent="",
+)
 
 # Running out of a subscription is a normal weekly event here, not a bug, and
 # it used to vanish into a job's error column while the orchestrator quietly
@@ -472,7 +482,7 @@ class ManagedChannelRequest(BaseModel):
     workflow_reference_channel_id: str = Field(default="", max_length=200)
     output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] = "youtube_landscape"
     language: str = Field(default="vi", max_length=20)
-    default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
+    default_voice_provider: Literal["edge_tts", "google_tts", "piper", "pyvideotrans", "voxcpm"] = "edge_tts"
     default_voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
     default_subtitle_provider: Literal["timeline_text", "faster_whisper_local"] = "timeline_text"
     default_subtitle_model: str = Field(default="timeline", min_length=1, max_length=120)
@@ -497,7 +507,7 @@ class ManagedChannelUpdateRequest(BaseModel):
     workflow_reference_channel_id: str | None = Field(default=None, max_length=200)
     output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] | None = None
     language: str | None = Field(default=None, max_length=20)
-    default_voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] | None = None
+    default_voice_provider: Literal["edge_tts", "google_tts", "piper", "pyvideotrans", "voxcpm"] | None = None
     default_voice_model: str | None = Field(default=None, min_length=1, max_length=120)
     default_subtitle_provider: Literal["timeline_text", "faster_whisper_local"] | None = None
     default_subtitle_model: str | None = Field(default=None, min_length=1, max_length=120)
@@ -642,7 +652,7 @@ class RenderSettingsRequest(BaseModel):
     music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
     transition_style: Literal["none", "fade"] = "fade"
     output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] = "youtube_landscape"
-    voice_provider: Literal["edge_tts", "pyvideotrans", "voxcpm"] = "edge_tts"
+    voice_provider: Literal["edge_tts", "google_tts", "piper", "pyvideotrans", "voxcpm"] = "edge_tts"
     voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
     voice_rate: Literal["-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"] = "+0%"
     voice_reference_asset_id: int | None = Field(default=None, ge=1)
@@ -907,6 +917,93 @@ class ImportVideoLinkRequest(BaseModel):
     group_name: str = Field(default="", max_length=120)
 
 
+def _page_identity(html: str, *, strict: bool) -> str:
+    """A title the page states about *itself*, or "".
+
+    `strict` is for marketplaces. Their script-only shell still carries a
+    <title>, and it is the site's own slogan - trusting it named the source
+    "Shopee Việt Nam | Mua và Bán Trên Ứng Dụng Di Động" instead of the
+    product. A listing that means to be understood publishes og:title or a
+    JSON-LD name; the shell does not, so a bare <title> there sends the caller
+    to the browser.
+
+    Ordinary sites are not held to that. A <title> is how most of the web
+    names a page, and refusing it turned a news section that imported fine
+    into a failure.
+    """
+    if not html:
+        return ""
+    named = str(page_source.product_from_ld(html).get("name") or "").strip()
+    stated = str(page_source.meta_tags(html).get("og:title") or "").strip()
+    title = named or stated or ("" if strict else page_source.page_title(html))
+    return "" if page_source.looks_like_bot_wall(title) else title
+
+
+def _probe_page_link(url: str) -> dict[str, Any] | None:
+    """Describe a page the way a video probe describes a video, or None.
+
+    Enough of the same shape that the row, the project and every later step
+    need no knowledge of which one it was; the analysis step works the kind
+    out from the URL and the row's own emptiness.
+    """
+    strict = page_source.looks_like_shop(url)
+    try:
+        html = page_source.fetch_static(url)
+    except page_source.PageSourceError:
+        html = ""
+    title = _page_identity(html, strict=strict)
+
+    if not title:
+        # Either the shell or a challenge came back. The browser is the next
+        # thing to try, not a refusal.
+        rendered = ""
+        try:
+            rendered, _text, final_url = page_source.fetch_rendered(
+                url, profile_dir=page_source.saved_profile(url),
+            )
+            # Being sent to the home page is how a marketplace refuses without
+            # refusing: the page loads, names itself honestly, and is not the
+            # page that was asked for.
+            if page_source.landed_elsewhere(url, final_url):
+                rendered = ""
+        except page_source.PageSourceError:
+            rendered = ""
+        title = _page_identity(rendered, strict=strict) if rendered else ""
+        html = rendered if title else html
+
+    if not title:
+        # Last resort, and a good one: a marketplace writes the listing's
+        # title into its own URL, so a page that will not load still says what
+        # it is selling. The source is created named after the product and the
+        # numbers are left to whoever can actually open the page - which, as
+        # the user demonstrated, the orchestrator can.
+        title = page_source.name_from_url(url)
+        html = ""
+    if not title:
+        return None
+
+    tags = page_source.meta_tags(html)
+    product = page_source.product_from_ld(html)
+    host = (urlparse(url).hostname or "page").lower()
+    return {
+        "video_id": f"web-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}",
+        "channel_id": f"site-{host}",
+        "uploader": host,
+        "uploader_url": f"https://{host}",
+        "webpage_url": url,
+        "platform": "shop" if page_source.looks_like_shop(url) else "web",
+        "native_id": url,
+        "title": title[:300],
+        "description": str(
+            product.get("description") or tags.get("og:description") or tags.get("description") or ""
+        )[:5000],
+        # No running time is what later marks this as a page rather than a film.
+        "duration_seconds": 0,
+        "thumbnail": page_source.article_images(html)[:1] and page_source.article_images(html)[0] or "",
+        "is_live": False,
+    }
+
+
 def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]:
     """Register a source video from any site yt-dlp can read.
 
@@ -917,7 +1014,31 @@ def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]
     try:
         details = probe_source_link(url)
     except SourceLinkError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # yt-dlp is asked first because a link is usually a video. When it is
+        # not - an article, a listing - the old behaviour was to refuse, so
+        # those sources could not be brought into the app at all even though
+        # the analysis step knows how to read them.
+        page = _probe_page_link(url)
+        if page is None:
+            # yt-dlp's "Unsupported URL" says nothing useful about a shop
+            # link, which was never going to be a video in the first place.
+            detail = str(exc)
+            if page_source.looks_like_shop(url):
+                # Nothing reads this page: not an HTTP client, not a headless
+                # browser, and not the CLI's own web reader either. Measured on
+                # Shopee and TikTok Shop, all three come back with a shell, a
+                # redirect or a captcha. Telling someone to sign in does not
+                # help - viewing a listing never required an account - so the
+                # message says the one thing that does.
+                host = (urlparse(url).hostname or "").lower()
+                detail = (
+                    f"{host} chặn mọi cách đọc tự động, kể cả trình đọc web của AI. "
+                    "Hãy mở trang trong trình duyệt của bạn rồi tạo dự án ý tưởng và dán "
+                    "tên sản phẩm, giá và mô tả vào đó — app sẽ dùng đúng những gì bạn dán "
+                    "và không tự nghĩ ra con số nào."
+                )
+            raise HTTPException(status_code=400, detail=detail) from exc
+        details = page
     if details["is_live"]:
         raise HTTPException(
             status_code=400,
@@ -1135,6 +1256,930 @@ def get_project(project_id: int) -> dict[str, Any]:
     return bundle
 
 
+@app.get("/api/projects/{project_id}/source-package")
+def get_project_source_package(project_id: int) -> dict[str, Any]:
+    package = build_source_package(database, project_id)
+    if not package:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return package
+
+
+@app.get("/api/projects/{project_id}/astra-context")
+def get_project_astra_context(project_id: int) -> dict[str, Any]:
+    context = build_project_context(database, project_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    return context
+
+
+# ---------------------------------------------------------------------------
+# One implementation per step
+#
+# The buttons, the automatic run and an AI orchestrator all come through here,
+# so a fix lands once instead of in two copies that drifted apart. Each runner
+# calls the same handler the endpoint calls - this layer adds the shared parts
+# the automatic run used to skip: the prerequisite check, the audit row, and
+# the rule that anything spending a paid generation needs confirming.
+# ---------------------------------------------------------------------------
+
+
+def _project_source_video_id(project: dict[str, Any]) -> str:
+    return str(project.get("youtube_video_id") or "").strip()
+
+
+def _steps_done(project_id: int) -> set[str]:
+    """Which steps this project has already got through.
+
+    Read from what actually exists - a script row, audio files on segments, a
+    final mp4 - rather than from a status column, so a step redone by hand
+    outside the app is still seen.
+    """
+    done: set[str] = set()
+    project = database.get_production_project(project_id)
+    if not project:
+        return done
+    video_id = _project_source_video_id(project)
+    if video_id and database.get_video_analysis(video_id, analysis_type="reference"):
+        done.add("analyze")
+    script = database.get_latest_project_script(project_id)
+    if script:
+        done.add("script")
+        script_id = int(script["id"])
+        if database.list_project_shots(project_id, script_id=script_id):
+            done.add("shots")
+        timeline = database.list_project_timeline(project_id, script_id=script_id)
+        if timeline:
+            done.add("timeline")
+            if any(str(item.get("audio_path") or "").strip() for item in timeline):
+                done.add("voice")
+            if any(str(item.get("visual_path") or "").strip() for item in timeline):
+                done.add("media")
+    plan = _current_project_edit_plan(project_id)
+    if plan and str(plan.get("status") or "") in {"approved", "ready", "applied"}:
+        done.add("edit_plan")
+    if _current_final_video_path(project_id):
+        done.add("render")
+    if database.list_project_publications(project_id):
+        done.add("publish")
+    return done
+
+
+def analysis_is_about_the_source(result: dict[str, Any], video: dict[str, Any], transcript: str) -> bool:
+    """Whether the topic named describes the video that was analysed.
+
+    An analysis once came back with the topic "com" - a fragment of the source
+    URL - and every later step believed it: the research, the script and nine
+    scenes of pictures were all made about nothing. A topic that shares no
+    word with the video's own title or its spoken words is not about it, and
+    catching that here costs seconds instead of a whole run.
+    """
+    topic = str(result.get("topic") or "").strip()
+    if len(topic) < 3:
+        return False
+    source_words = set(re.findall(
+        r"\w+", f"{video.get('title') or ''} {video.get('description') or ''} {transcript}".lower(),
+        flags=re.UNICODE,
+    ))
+    topic_words = {word for word in re.findall(r"\w+", topic.lower(), flags=re.UNICODE) if len(word) > 1}
+    return bool(topic_words & source_words)
+
+
+def _source_contact_sheet(video: dict[str, Any], project_id: int) -> Path | None:
+    """A sheet of frames from the source, so the analyst can see it.
+
+    Nothing about the source was ever looked at: the analysis was made from a
+    title and a description while the app held a transcript it had paid for
+    and no frames at all. A small temporary copy is fetched purely for this,
+    and deleted; downloading the real thing stays the explicit act it was.
+    """
+    if not contact_sheet.ffmpeg_available(FFMPEG_BINARY):
+        return None
+    local = Path(str(video.get("local_media_path") or ""))
+    workspace = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"] / "source-view"
+    workspace.mkdir(parents=True, exist_ok=True)
+    sheet = workspace / "source-sheet.jpg"
+    if sheet.is_file() and sheet.stat().st_size > 0:
+        # The source does not change, so neither does the sheet. Re-running
+        # the step should not re-download the video to make the same picture.
+        return sheet
+    preview: Path | None = None
+    try:
+        if not local.is_file():
+            preview = download_preview_video(
+                str(video.get("video_url") or ""), workspace,
+                max_height=source_brief.preview_height(video.get("duration_seconds") or 0),
+            )
+            local = preview
+        return contact_sheet.from_video(
+            local, sheet, ffmpeg=FFMPEG_BINARY, tiles=source_brief.SHEET_TILES,
+        )
+    except (VideoDownloadError, contact_sheet.ContactSheetError, OSError):
+        # Being unable to see the source is a limitation to report, not a
+        # reason to refuse to analyse it.
+        return None
+    finally:
+        if preview is not None and preview.is_file():
+            preview.unlink(missing_ok=True)
+
+
+def _sheet_from_remote_images(urls: list[str], project_id: int, folder: str) -> tuple[Path | None, int]:
+    """Download a page's own pictures and tile them into one sheet.
+
+    A listing's photographs and an article's photographs are the only thing
+    saying what the subject looks like. Analysing either as though it had no
+    pictures is how visual_style came back empty and the scene planner was
+    left with nothing to work from.
+    """
+    if not urls or not contact_sheet.ffmpeg_available(FFMPEG_BINARY):
+        return None, 0
+    workspace = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"] / folder
+    workspace.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    for index, url in enumerate(urls[: source_brief.SHEET_TILES], start=1):
+        try:
+            response = httpx.get(
+                url, headers=page_source.BROWSER_HEADERS, timeout=20.0, follow_redirects=True,
+            )
+            response.raise_for_status()
+            if not response.content:
+                continue
+            suffix = Path(str(url).split("?", 1)[0]).suffix.lower()
+            target = workspace / f"img-{index:02d}{suffix if suffix in {'.jpg', '.jpeg', '.png', '.webp'} else '.jpg'}"
+            target.write_bytes(response.content)
+            saved.append(target)
+        except (httpx.HTTPError, OSError, ValueError):
+            continue
+    if not saved:
+        return None, 0
+    try:
+        return _contact_sheet_for_review(saved, project_id), len(saved)
+    except Exception:
+        return None, 0
+
+
+ORCHESTRATOR_READ_TASK = "doc_trang_ban_hang"
+
+
+def ask_orchestrator_to_read(project_id: int, url: str, missing: list[str]) -> str:
+    """Queue the page for whoever can actually open it, and say it was queued.
+
+    Every reader the app can drive itself is refused by Shopee and TikTok
+    Shop, but the orchestrator reads them: asked in its own window, GPT Work
+    returned the listing's name, its price, the shop and its rating. So a page
+    the app cannot read is not the end of the road - it is work for the one
+    party that can, handed over through the queue it already pulls from.
+
+    One task per link: re-running the step must not pile up duplicates of a
+    job nobody has done yet.
+    """
+    pending = [
+        task for task in database.list_agent_tasks(limit=200)
+        if str(task.get("task_type") or "") == ORCHESTRATOR_READ_TASK
+        and str(task.get("status") or "") in {"queued", "running"}
+        and str(((task.get("input") or {}).get("url") or "")) == url
+    ]
+    if pending:
+        return str(pending[0].get("id") or "")
+    task = database.create_agent_task(
+        project_id,
+        "research",
+        ORCHESTRATOR_READ_TASK,
+        {
+            "url": url,
+            "missing": missing,
+            "huong_dan": (
+                "Mo link nay bang cong cu duyet web cua ban va ghi lai DUNG nhung gi trang hien ra: "
+                "ten san pham, gia dang ban, gia goc neu co, so sao, so danh gia, so da ban, ten shop, "
+                "danh muc. Khong suy doan, khong lam tron. Truong nao trang khong hien thi de trong. "
+                "Neu bi chan thi noi ro bi chan kieu gi. Tra ket qua qua youtube_factory_complete_task."
+            ),
+        },
+        # A chat agent, never a runtime the in-app worker executes. Assigning
+        # this to `astra` handed it straight back to the CLI that had already
+        # failed to read the page, and the task died with "astra: unavailable
+        # | claude: unavailable | antigravity: unavailable". What can open a
+        # marketplace is the desktop app, and the desktop app pulls its own
+        # work through MCP.
+        assigned_agent=_reading_chat_agent(),
+    )
+    return str((task or {}).get("id") or "")
+
+
+def _directing_chat_agent() -> str:
+    """The desktop chat app that should take the next run, or "" for none.
+
+    Both apps pull their own work, so a fallback cannot be "try the next one
+    when the first fails" - nothing here ever calls them. What it can mean is
+    handing the run to whichever chosen app is attached right now. With
+    neither attached, the run waits for the primary.
+    """
+    chosen = settings.orchestrator_chat_agents()
+    for agent in chosen:
+        if chat_agent_presence.connected(agent):
+            return agent
+    return chosen[0] if chosen else ""
+
+
+def _reading_chat_agent() -> str:
+    """Which desktop assistant to hand a page to: a connected one if there is."""
+    for agent in ("chatgpt_app", "claude_chat"):
+        if chat_agent_presence.connected(agent):
+            return agent
+    # Nobody attached right now. Queue it for the one measured reading these
+    # pages, so the work is waiting when its app is next opened.
+    return "chatgpt_app"
+
+
+def extract_source(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> source_brief.Extraction:
+    """Gather what there is to analyse. Mechanical: no model is called here."""
+    video_id = _project_source_video_id(project)
+    video = (database.get_video(video_id) or {}) if video_id else {}
+    images = [
+        asset for asset in database.list_project_assets(project_id)
+        if str(asset.get("asset_type")) == "image" and Path(str(asset.get("file_path") or "")).is_file()
+    ]
+    kind = str(options.get("source_kind") or "") or source_brief.detect_kind(project, video, images)
+    metadata = {
+        "title": video.get("title") or project.get("title") or "",
+        "description": video.get("description") or "",
+        "duration_seconds": video.get("duration_seconds") or "",
+        "url": video.get("video_url") or "",
+    }
+    notes = [note for note in [str(project.get("notes") or "").strip()] if note]
+
+    if kind == "video":
+        text = str((database.get_transcript(video_id, transcript_format="txt") or {}).get("content_text") or "").strip()
+        silent = ""
+        if not text:
+            try:
+                whisper_result = _transcribe_video_source(video, video_id)
+            except Exception as exc:
+                whisper_result = {"text": ""}
+                silent = f"Không lấy được tiếng của video nguồn: {str(exc)[:200]}"
+            if whisper_result["text"]:
+                text = str(save_transcript_result(database, video_id, whisper_result).get("content_text") or "")
+            else:
+                # A music video, a timelapse, gameplay or plain b-roll has
+                # pictures and no words - the same situation as a folder of
+                # images, not a failure. Refusing here stopped the whole run
+                # on a source the frames alone could have carried.
+                silent = silent or "Video nguồn không có lời nói nào nhận ra được."
+        # The timed version when there is one: handed the flat text, the
+        # analyst can only report the whole thing as a single unattributed
+        # turn, and the workflow that cuts scenes where a line is spoken then
+        # has nothing to cut on.
+        timed = str((database.get_transcript(video_id, transcript_format="srt") or {}).get("content_text") or "").strip()
+        sheet = _source_contact_sheet(video, project_id)
+        if not text and sheet is None:
+            # Neither words nor pictures got through - the video may be
+            # geo-blocked, removed, or behind a sign-in. What is left is the
+            # title and the description, which is exactly what an idea project
+            # has, so it is analysed as one rather than refused. Everything
+            # downstream then sees has_story false and a limitation saying the
+            # content itself was never reached.
+            return source_brief.Extraction(
+                kind="idea",
+                text=str(metadata.get("description") or "").strip(),
+                text_label="Mo ta cua nguon (khong lay duoc noi dung that)",
+                metadata=metadata,
+                notes=notes + [
+                    silent or "Không lấy được lời nói của video nguồn.",
+                    "Không lấy được khung hình nào của video nguồn.",
+                ],
+            )
+        return source_brief.Extraction(
+            kind="video",
+            text=timed or text,
+            text_label="Loi thoai da phien am (co moc thoi gian)" if timed else "Loi thoai da phien am",
+            image_sheet=sheet, image_count=source_brief.SHEET_TILES if sheet else 0,
+            metadata=metadata, notes=notes + ([silent] if silent else []),
+        )
+
+    if kind == "product":
+        try:
+            product = page_source.read_product(
+                str(metadata["url"]), profile_dir=str(options.get("browser_profile") or ""),
+            )
+        except page_source.PageSourceError as exc:
+            return source_brief.Extraction(
+                kind="idea", text=str(metadata.get("title") or "").strip(),
+                text_label="Tieu de trang ban hang (khong doc duoc noi dung)",
+                metadata=metadata, notes=notes + [f"Không đọc được trang bán hàng: {str(exc)[:200]}"],
+            )
+        # Anything the caller supplies wins: the marketplaces do not hand over
+        # a price to an automated fetch, and a figure typed in by the person
+        # who can see the page is worth more than one nobody could read.
+        for field in ("price", "currency", "name", "brand", "description"):
+            supplied = str(options.get(field) or "").strip()
+            if supplied:
+                product[field] = supplied
+        warnings: list[str] = []
+        if not str(product.get("price") or "").strip():
+            warnings.append(
+                "Không đọc được giá từ trang bán hàng này. Kịch bản không được nêu bất kỳ con số "
+                "giá nào; nếu cần giá, hãy nhập tay qua options.price."
+            )
+            # Handed to the orchestrator, which can open what the app cannot.
+            task_id = ask_orchestrator_to_read(
+                project_id, str(metadata["url"]),
+                [key for key in ("price", "rating", "review_count", "sold_count")
+                 if not str(product.get(key) or "").strip()],
+            )
+            if task_id:
+                warnings.append(
+                    f"Đã giao cho AI điều phối đọc trang này (task {task_id[:18]}). "
+                    "Bảo nó lấy việc tiếp theo, rồi chạy lại bước phân tích."
+                )
+        sheet, count = _sheet_from_remote_images(
+            list(product.get("images") or []), project_id, "product-view",
+        )
+        return source_brief.Extraction(
+            kind="product",
+            text=page_source.describe(product),
+            text_label="Du lieu trang ban hang",
+            image_sheet=sheet, image_count=count,
+            metadata={**metadata, "title": product.get("name") or metadata.get("title") or ""},
+            notes=notes + [f"Đọc trang qua đường: {product.get('route')}"],
+            warnings=warnings,
+            facts={key: product.get(key) for key in (
+                "name", "brand", "category", "sku", "price", "currency",
+                "availability", "url", "route", "captured_at",
+            ) if product.get(key)},
+        )
+
+    if kind == "article":
+        body = source_brief.article_text(
+            str(options.get("text") or "") or str(video.get("description") or "")
+        )
+        if not body and metadata["url"]:
+            body = source_brief.article_text(web_research.read_page(str(metadata["url"]), max_chars=24_000))
+        if not body:
+            # The page would not open, or it had nothing readable in it. The
+            # title is still a subject, so the run continues on that footing
+            # with the gap stated rather than stopping here.
+            return source_brief.Extraction(
+                kind="idea",
+                text=str(metadata.get("title") or "").strip(),
+                text_label="Tieu de bai viet (khong doc duoc noi dung)",
+                metadata=metadata,
+                notes=notes + ["Không đọc được nội dung bài viết từ đường dẫn này."],
+            )
+        picture_urls: list[str] = []
+        if metadata["url"]:
+            try:
+                picture_urls = page_source.article_images(page_source.fetch_static(str(metadata["url"])))
+            except page_source.PageSourceError:
+                picture_urls = []
+        sheet, count = _sheet_from_remote_images(picture_urls, project_id, "article-view")
+        return source_brief.Extraction(
+            kind="article", text=body, text_label="Noi dung bai viet",
+            image_sheet=sheet, image_count=count,
+            metadata=metadata, notes=notes,
+        )
+
+    if kind == "images":
+        chosen = images[: source_brief.SHEET_TILES]
+        if not chosen:
+            raise HTTPException(status_code=422, detail="Dự án chưa có ảnh nào để phân tích")
+        try:
+            sheet = _contact_sheet_for_review([Path(str(item["file_path"])) for item in chosen], project_id)
+        except Exception as exc:
+            # The pictures exist but could not be assembled - a broken file, or
+            # no ffmpeg. Their names and the project's own notes still say
+            # something, so that is analysed instead of refusing outright.
+            return source_brief.Extraction(
+                kind="idea",
+                text=" ".join(str(item.get("original_name") or "") for item in chosen).strip(),
+                text_label="Ten cac file anh (khong xem duoc noi dung anh)",
+                metadata=metadata,
+                notes=notes + [f"Không ghép được ảnh để xem: {str(exc)[:200]}"],
+            )
+        extra = (
+            [f"Chỉ xem {len(chosen)} trên {len(images)} ảnh của dự án."]
+            if len(images) > len(chosen) else []
+        )
+        return source_brief.Extraction(
+            kind="images", image_sheet=sheet, image_count=len(chosen),
+            metadata=metadata, notes=notes + extra,
+        )
+
+    goal = str(options.get("text") or project.get("notes") or project.get("title") or "").strip()
+    return source_brief.Extraction(
+        kind="idea", text=goal, text_label="Y tuong cua nguoi dung", metadata=metadata, notes=notes,
+    )
+
+
+def _step_analyze(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Read the source once, with eyes, and write the brief everything else uses.
+
+    This used to be two analyses that never met: one asked a model for SEO
+    notes from the title alone, and a second - the one that actually reads the
+    spoken content - was not part of the flow and had never run. Now there is
+    one call, it is given the transcript and the frames, and its answer is the
+    brief the writer and the director both read.
+    """
+    extraction = extract_source(project_id, project, options)
+    video_id = _project_source_video_id(project)
+    video = (database.get_video(video_id) or {}) if video_id else {}
+
+    parsed = _call_orchestrator_json(
+        source_brief.SYSTEM_PROMPT,
+        source_brief.build_prompt(extraction),
+        source_brief.BRIEF_SCHEMA,
+        stage="orchestration",
+        project_id=project_id,
+        step="Phan tich nguon",
+        image_path=extraction.image_sheet,
+    )
+    brief = source_brief.finalise(parsed, extraction, str(parsed.get("provider") or ""))
+
+    if extraction.kind == "product" and not str(brief.get("topic") or "").strip():
+        # The page gave little more than its name, so the model had little to
+        # name. The name is a fact the app holds; using it beats refusing the
+        # step over a field the source never supplied.
+        brief["topic"] = str(extraction.facts.get("name") or extraction.metadata.get("title") or "")
+    if extraction.has_story and not analysis_is_about_the_source(brief, video, extraction.text):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Ket qua phan tich khong khop voi nguon (chu de: "
+                f"{str(brief.get('topic') or '(trong)')[:60]!r}). Hay chay lai buoc nay va "
+                f"chi dinh mot AI cu the qua options.provider."
+            ),
+        )
+
+    if video_id:
+        title = str(video.get("title") or project.get("title") or "")
+        database.save_video_analysis(
+            video_id, brief, analysis_type="reference",
+            provider=str(brief.get("provider") or ""), source_type=extraction.kind,
+        )
+        database.save_video_analysis(
+            video_id, source_brief.metadata_row(brief, title),
+            analysis_type="metadata", provider=str(brief.get("provider") or ""), source_type="metadata",
+        )
+    return {"status": "analyzed", "source": extraction.as_dict(), "result": brief}
+
+
+def _step_research(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Look the subject up and keep what came back with the project.
+
+    Stored rather than returned and forgotten: the writer two steps later
+    should be able to see what was actually found, instead of being told to
+    research and then trusted not to invent.
+    """
+    queries = options.get("queries")
+    if isinstance(queries, str):
+        queries = [queries]
+    if not isinstance(queries, list) or not queries:
+        subject = str(
+            options.get("query")
+            or project.get("title")
+            or project.get("source_title")
+            or project.get("notes")
+            or ""
+        ).strip()
+        if not subject:
+            raise HTTPException(status_code=400, detail="Chưa có chủ đề để nghiên cứu")
+        queries = [subject]
+
+    limit = max(1, min(int(options.get("limit") or 5), 10))
+    # The top few results are opened and read, not just listed. Titles and
+    # snippets are a table of contents: a writer handed only those still has
+    # to invent the substance, which is the thing this step exists to prevent.
+    read_pages = max(0, min(int(options.get("read_pages") or 3), limit))
+    findings = [
+        web_research.summarise(
+            str(query), web_research.search(str(query), limit=limit, read_pages=read_pages),
+        )
+        for query in queries[:5]
+    ]
+    total = sum(int(item["count"]) for item in findings)
+    artifact = database.save_director_artifact(project_id, "research", {"findings": findings})
+    return {
+        "queries": [item["query"] for item in findings],
+        "result_count": total,
+        "findings": findings,
+        "artifact_id": (artifact or {}).get("id"),
+        # An empty lookup is reported as empty. A step that quietly passed
+        # would let the writer present its own memory as researched fact.
+        "researched": bool(total),
+    }
+
+
+def _step_media(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Queue the pictures for every scene that still needs one."""
+    return queue_scene_generation_batch(
+        project_id,
+        BatchSceneGenerationRequest(
+            provider=str(options.get("provider") or "auto"),
+            variant=str(options.get("variant") or "long"),
+            confirmed=True,
+        ),
+    )
+
+
+def _step_publish(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Run the pre-publish checks, and publish only when told to in words.
+
+    Publishing is the one step that cannot be undone from inside the app, so
+    the default is to check and stop. `confirmed_publish` is deliberately not
+    the same flag the other steps use: nothing should reach a channel because
+    a caller passed the confirmation that unlocks spending.
+    """
+    checklist = project_publish_checklist(
+        project_id,
+        PublishChecklistRequest(
+            video_variant=str(options.get("variant") or "long"),
+            managed_channel_id=options.get("managed_channel_id"),
+            platform=str(options.get("platform") or "youtube"),
+            output_profile=str(options.get("output_profile") or "youtube_landscape"),
+        ),
+    )
+    if not bool(options.get("confirmed_publish")):
+        return {"status": "checked", "published": False, "checklist": checklist}
+    publication = queue_project_publication(
+        project_id,
+        CreatePublicationRequest(
+            confirmed=True,
+            video_variant=str(options.get("variant") or "long"),
+            **{key: value for key, value in options.items() if key in {"title", "description", "tags"}},
+        ),
+    )
+    return {"status": "queued", "published": True, "checklist": checklist, "publication": publication}
+
+
+def _step_script(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Save the project's script, whoever wrote it.
+
+    An agent that has already written one passes it in `draft`; anything else
+    goes through the writer the buttons use. Either way the row is created
+    here, so there is one place that decides what a saved script looks like.
+    """
+    draft = options.get("draft")
+    if isinstance(draft, dict) and str(draft.get("main_content") or "").strip():
+        script = database.create_project_script(
+            project_id,
+            script_title=str(draft.get("script_title") or draft.get("title") or project.get("title") or ""),
+            hook=str(draft.get("hook") or ""),
+            intro=str(draft.get("intro") or ""),
+            main_content=str(draft.get("main_content") or ""),
+            cta=str(draft.get("cta") or ""),
+            status=str(draft.get("status") or "review"),
+        )
+        if not script:
+            raise HTTPException(status_code=404, detail="Không lưu được kịch bản")
+        return {"script_id": int(script["id"]), "script": script}
+
+    # Nobody handed one over, so it has to be written. The draft endpoint only
+    # assembles what the writer already produced: called on its own it returns
+    # in no time at all, having quietly turned the analysis notes into
+    # "narration" - SEO advice where the spoken words should be.
+    video_id = _project_source_video_id(project)
+    if video_id and not (database.get_video_analysis(video_id, analysis_type="writer") or {}).get("result"):
+        generate_video_writer_content(
+            video_id,
+            WriterRequest(
+                provider=str(options.get("provider") or "") or None,
+                creative_direction=str(options.get("creative_direction") or ""),
+                remake_mode=str(options.get("remake_mode") or "new_angle_same_topic"),
+                output_language=str(options.get("language") or languages.DEFAULT_LANGUAGE),
+                target_duration_text=str(options.get("target_duration") or ""),
+            ),
+        )
+    return create_project_script_draft(
+        project_id,
+        ScriptDraftRequest(
+            create_standalone_short=bool(options.get("create_standalone_short", False)),
+            short_direction=str(options.get("short_direction") or ""),
+        ),
+    )
+
+
+def _step_script_review(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    return review_project_script(project_id)
+
+
+def _step_shots(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Save the scene list, whether an agent wrote it or the planner did."""
+    supplied = options.get("shots")
+    if isinstance(supplied, list) and supplied:
+        script = database.get_latest_project_script(project_id)
+        if not script:
+            raise HTTPException(status_code=400, detail="Chưa có kịch bản để chia cảnh")
+        saved = database.create_project_shots(
+            project_id, int(script["id"]), supplied, force=bool(options.get("force", True)),
+        ) or []
+        return {"status": "saved", "script_id": int(script["id"]), "shots": saved}
+    return generate_project_shots(project_id, GenerateShotsRequest(force=bool(options.get("force", False))))
+
+
+def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    supplied = options.get("segments")
+    if isinstance(supplied, list) and supplied:
+        script = database.get_latest_project_script(project_id)
+        if not script:
+            raise HTTPException(status_code=400, detail="Chưa có kịch bản để dựng timeline")
+        timeline = database.create_project_timeline(
+            project_id, int(script["id"]), supplied, force=bool(options.get("force", True)),
+        ) or []
+        return {"status": "saved", "script_id": int(script["id"]), "timeline": timeline}
+    return generate_project_timeline(
+        project_id,
+        GenerateTimelineRequest(
+            force=bool(options.get("force", False)),
+            variant=str(options.get("variant") or "long"),
+        ),
+    )
+
+
+def _step_voice(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    return queue_project_job(
+        project_id,
+        CreateProductionJobRequest(
+            job_type="voiceover",
+            provider=str(options.get("provider") or "edge_tts"),
+            confirmed=True,
+            variant=str(options.get("variant") or "long"),
+        ),
+    )
+
+
+def _step_voice_review(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    return review_project_voice(project_id)
+
+
+def _refuse_a_script_that_failed_review(project_id: int) -> None:
+    """A score that blocks nothing is a note.
+
+    The reviewer gives the script a mark and the policy carries a minimum, but
+    nothing read them: a script the app had itself judged unfit went on to be
+    voiced, illustrated and rendered. The one place worth stopping is before
+    the spending starts. A script nobody reviewed is allowed through - review
+    is not compulsory - but one that was reviewed and failed is not.
+    """
+    script = database.get_latest_project_script(project_id)
+    # An unreviewed script carries a score of 0, which is not a failing mark -
+    # it is the absence of one. Reading it as failure would block every normal
+    # run, so what counts is whether a reviewer is named.
+    if not script or not str(script.get("review_agent") or "").strip():
+        return
+    minimum = max(0, min(int(settings.automation_policy().get("min_review_score") or 0), 10))
+    score = int(script.get("review_score") or 0)
+    if minimum and score < minimum:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Kịch bản bị chấm {score}/10, dưới mức tối thiểu {minimum}. "
+                f"Sửa kịch bản rồi duyệt lại, hoặc hạ min_review_score trong Automation Policy. "
+                f"Nhận xét: {str(script.get('review_note') or '')[:200]}"
+            ),
+        )
+
+
+def _step_edit_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    _refuse_a_script_that_failed_review(project_id)
+    planned = plan_project_edit(project_id, motion_policy=str(options.get("motion_policy") or "balanced"))
+    if not options.get("apply", True):
+        return planned
+    approve_project_edit_plan(project_id)
+    return {**planned, "applied": apply_project_edit_plan(project_id)}
+
+
+def _step_render(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    return queue_project_job(
+        project_id,
+        CreateProductionJobRequest(
+            job_type="render",
+            provider=str(options.get("provider") or "ffmpeg_builtin"),
+            confirmed=True,
+            variant=str(options.get("variant") or "long"),
+        ),
+    )
+
+
+_STEP_RUNNERS: dict[str, Any] = {
+    "analyze": _step_analyze,
+    "research": _step_research,
+    "media": _step_media,
+    "publish": _step_publish,
+    "script": _step_script,
+    "script_review": _step_script_review,
+    "shots": _step_shots,
+    "timeline": _step_timeline,
+    "voice": _step_voice,
+    "voice_review": _step_voice_review,
+    "edit_plan": _step_edit_plan,
+    "render": _step_render,
+}
+
+
+def run_project_step(project_id: int, step: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Perform one step, for whoever asked - a button, a run, an orchestrator."""
+    options = dict(options or {})
+    definition = steps.get(step)
+    if definition is None or definition.key not in _STEP_RUNNERS:
+        known = ", ".join(sorted(_STEP_RUNNERS))
+        raise HTTPException(status_code=400, detail=f"Bước không chạy được: {step}. Đang có: {known}")
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+
+    def refuse(status_code: int, detail: str) -> HTTPException:
+        # A refusal belongs in the log as much as a failure does: an
+        # orchestrator reads it to learn what to do first, and a person reads
+        # it to see why the run stopped where it did.
+        _record_orchestrator_step(
+            project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
+            status="refused", why=f"run_step({definition.key})", error=detail[:1500],
+        )
+        _announce_step(
+            "step.refused", project_id, definition.key, definition.label, error=detail[:500],
+        )
+        return HTTPException(status_code=status_code, detail=detail)
+
+    missing = steps.unmet_requirements(definition.key, _steps_done(project_id))
+    if missing and not options.get("force"):
+        labels = ", ".join((steps.get(name).label if steps.get(name) else name) for name in missing)
+        raise refuse(409, f"Chưa làm xong bước trước: {labels}")
+
+    # Spending is exactly what the automatic run used to do without asking,
+    # because it wrote to the database instead of calling the endpoint that
+    # enforces this.
+    if definition.spends and not bool(options.get("confirmed", True)):
+        raise refuse(400, f"Bước {definition.label} tiêu lượt, cần xác nhận")
+
+    started = time.monotonic()
+    _announce_step("step.started", project_id, definition.key, definition.label)
+    try:
+        result = _STEP_RUNNERS[definition.key](project_id, project, options)
+    except HTTPException as exc:
+        _record_orchestrator_step(
+            project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
+            status="failed", why=f"run_step({definition.key})", error=str(exc.detail)[:1500],
+        )
+        _announce_step(
+            "step.failed", project_id, definition.key, definition.label,
+            seconds=round(time.monotonic() - started, 1), error=str(exc.detail)[:500],
+        )
+        raise
+    _record_orchestrator_step(
+        project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
+        status="success", why=f"run_step({definition.key})",
+        output_ref=f"{time.monotonic() - started:.1f}s",
+    )
+    _announce_step(
+        "step.finished", project_id, definition.key, definition.label,
+        seconds=round(time.monotonic() - started, 1),
+    )
+    return {"step": definition.key, "label": definition.label, "result": result}
+
+
+@app.get("/api/research/search")
+def search_the_web(
+    query: str = Query(min_length=2, max_length=300),
+    limit: int = Query(default=5, ge=1, le=10),
+) -> dict[str, Any]:
+    """Look something up, for whoever is directing.
+
+    Of the tools an orchestrator could reach, none searched for anything: it
+    was expected to research from memory and then asked not to invent. This
+    returns pointers only - titles, snippets, links - and says so plainly when
+    it finds nothing, because an empty result quietly filled from memory is
+    the failure worth preventing.
+    """
+    results = web_research.search(query, limit=limit)
+    return web_research.summarise(query, results)
+
+
+@app.get("/api/timeline/{segment_id}/speech-timing")
+def get_segment_speech_timing(segment_id: int) -> dict[str, Any]:
+    """Where each word falls inside a scene's narration.
+
+    The app already measures this with Whisper to size scenes, but kept it to
+    itself, so a director could not cut on a stressed word or hold through a
+    pause - the thing that separates an edit from a slideshow.
+    """
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    timing = scene_speech_timing(segment)
+    words = timing.get("words") or []
+    return {
+        "segment_id": segment_id,
+        "segment_index": segment.get("segment_index"),
+        "duration_seconds": timing.get("duration_seconds"),
+        "timing_basis": timing.get("timing_basis"),
+        "warning": timing.get("warning"),
+        "word_count": len(words),
+        "words": words,
+        # Gaps are where a cut can land without stepping on a word.
+        "pauses": [
+            {
+                "after_word": str(words[index].get("word") or ""),
+                "start": round(float(words[index].get("end") or 0), 3),
+                "end": round(float(words[index + 1].get("start") or 0), 3),
+                "seconds": round(float(words[index + 1].get("start") or 0) - float(words[index].get("end") or 0), 3),
+            }
+            for index in range(len(words) - 1)
+            if float(words[index + 1].get("start") or 0) - float(words[index].get("end") or 0) >= 0.25
+        ][:40],
+    }
+
+
+@app.get("/api/projects/{project_id}/contact-sheet")
+def get_project_contact_sheet(
+    project_id: int, tiles: int = Query(default=12, ge=1, le=24)
+) -> dict[str, Any]:
+    """One image of what this project looks like right now.
+
+    An orchestrator could queue every step and approve a plan without ever
+    seeing a frame. This is the cheapest way to let it look: frames sampled
+    across the finished video when there is one, otherwise the scenes as they
+    currently stand. The path is returned rather than the bytes, because the
+    readers of this - Claude Code, the ChatGPT app - open local files.
+    """
+    project = database.get_production_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    if not contact_sheet.ffmpeg_available(FFMPEG_BINARY):
+        raise HTTPException(status_code=400, detail="Chưa có FFmpeg để tạo ảnh tổng hợp")
+
+    layout = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)
+    output = Path(layout["work"]) / "contact-sheet.jpg"
+    final_video = _current_final_video_path(project_id)
+    try:
+        if final_video:
+            source = Path(final_video)
+            seconds = media_duration_seconds(source) or 0.0
+            contact_sheet.from_video(
+                source, output, ffmpeg=FFMPEG_BINARY, tiles=tiles, duration_seconds=float(seconds),
+            )
+            kind, origin = "render", str(source)
+        else:
+            script = database.get_latest_project_script(project_id)
+            timeline = database.list_project_timeline(
+                project_id, script_id=int(script["id"]) if script else None,
+            )
+            visuals = [Path(str(item.get("visual_path") or "")) for item in timeline]
+            contact_sheet.from_scene_visuals(visuals, output, ffmpeg=FFMPEG_BINARY)
+            kind, origin = "storyboard", f"{len(timeline)} cảnh"
+    except contact_sheet.ContactSheetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "kind": kind,
+        "source": origin,
+        "path": str(output),
+        "bytes": output.stat().st_size,
+    }
+
+
+@app.get("/api/projects/{project_id}/steps")
+def list_project_steps(project_id: int) -> dict[str, Any]:
+    """Where this project stands, one row per step."""
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    done = _steps_done(project_id)
+    rows = steps.describe(done)
+    for row in rows:
+        row["runnable"] = row["key"] in _STEP_RUNNERS
+    return {"project_id": project_id, "done": sorted(done), "steps": rows}
+
+
+class RunStepRequest(BaseModel):
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/api/projects/{project_id}/steps/{step}")
+def run_project_step_endpoint(
+    project_id: int, step: str, payload: RunStepRequest = RunStepRequest()
+) -> dict[str, Any]:
+    return run_project_step(project_id, step, payload.options)
+
+
+@app.get("/api/projects/{project_id}/orchestrator-report")
+def get_project_orchestrator_report(
+    project_id: int, limit: int = Query(default=200, ge=1, le=1000)
+) -> dict[str, Any]:
+    """What the AI actually did on this project, step by step.
+
+    The plan calls this the audit a run has to be able to produce: which model
+    was chosen for each step and why, what it returned, and where a template
+    stood in for it. A run that cannot fill this table did not happen the way
+    the finished video suggests.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    steps = database.list_orchestrator_steps(project_id, limit=limit)
+    return {
+        "project_id": project_id,
+        "steps": steps,
+        "summary": orchestrator_runtime.report_summary(steps),
+        "markdown": orchestrator_runtime.report_markdown(steps),
+    }
+
+
 @app.get("/api/projects/{project_id}/final-video")
 def stream_project_final_video(project_id: int) -> FileResponse:
     if not database.get_production_project(project_id):
@@ -1143,6 +2188,26 @@ def stream_project_final_video(project_id: int) -> FileResponse:
     if not final_path:
         raise HTTPException(status_code=404, detail="Dự án chưa có video hoàn chỉnh cho phiên kịch bản hiện tại; hãy tạo cảnh AI và render lại")
     return FileResponse(final_path, media_type="video/mp4")
+
+
+@app.get("/api/videos/{video_id}/source-preview")
+def stream_source_video_preview(video_id: str) -> FileResponse:
+    """Serve the local source media so the wizard can preview it in-app.
+
+    YouTube videos can be embedded directly by the browser.  This endpoint is
+    for files the app already has on disk: downloaded sources and local uploads.
+    """
+    video = database.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn")
+    source_path = Path(str(video.get("local_media_path") or ""))
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Video nguồn chưa có file trên máy. Hãy tải video nguồn hoặc dùng khung YouTube nhúng.",
+        )
+    media_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
+    return FileResponse(source_path, media_type=media_type, filename=source_path.name)
 
 
 @app.get("/api/projects/{project_id}/short-video")
@@ -1295,6 +2360,52 @@ def create_project_script_draft(
     }
 
 
+class ImportScriptRequest(BaseModel):
+    project_id: int | None = Field(default=None, ge=1)
+    video_id: str = Field(default="", max_length=200)
+    title: str = Field(default="", max_length=300)
+    text: str = Field(min_length=1, max_length=200_000)
+    variant: Literal["long", "short"] = "long"
+    language: str = Field(default="vi", max_length=12)
+    workflow: Literal["content", "reup"] = "content"
+
+
+@app.post("/api/scripts/import")
+def import_pasted_script(payload: ImportScriptRequest) -> dict[str, Any]:
+    """Save pasted narration as a new version, without rewriting it with AI."""
+    narration = payload.text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not narration:
+        raise HTTPException(status_code=400, detail="Hãy dán nội dung kịch bản trước khi lưu")
+    if payload.language not in languages.LANGUAGES:
+        raise HTTPException(status_code=400, detail="Ngôn ngữ kịch bản không hợp lệ")
+    if payload.project_id:
+        project = database.get_production_project(payload.project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    elif payload.video_id:
+        project = database.create_production_project(payload.video_id, title=payload.title)
+        if not project:
+            raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn")
+        project = database.set_project_workflow(int(project["id"]), payload.workflow) or project
+    else:
+        project = database.create_idea_project(
+            "Kịch bản nhập thủ công", title=payload.title.strip() or "Kịch bản đã dán", language=payload.language,
+        )
+    project_id = int(project["id"])
+    script = database.create_project_script(
+        project_id, script_title=payload.title.strip() or str(project.get("title") or "Kịch bản đã dán"),
+        hook="", intro="", main_content=narration, cta="", variant=payload.variant,
+    )
+    if not script:
+        raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
+    # New rows belong only to this script version; previous audio and visuals
+    # remain attached to their original script, never to the pasted words.
+    shots = database.create_project_shots(project_id, int(script["id"]), build_shot_plan(project, script)) or []
+    timeline = database.create_project_timeline(project_id, int(script["id"]), build_timeline(project, script, shots)) or []
+    _write_project_document(project_id, "kich-ban-short.md" if payload.variant == "short" else "kich-ban.md", script_to_markdown(script, project))
+    return {"status": "saved", "project": project, "script": script, "shots": shots, "timeline": timeline}
+
+
 @app.post("/api/projects/{project_id}/director-draft")
 def create_director_draft(
     project_id: int,
@@ -1355,7 +2466,9 @@ def create_director_draft(
         shots = database.create_project_shots(
             project_id,
             int(script["id"]),
-            build_shot_plan(bundle["project"], script, writer_content=creative),
+            # `creative` is the response that just produced this very script,
+            # so its scene list is this script's by construction.
+            build_shot_plan(bundle["project"], script, writer_content=creative, blueprints_verified=True),
             force=True,
         )
         if shots is None:
@@ -1519,11 +2632,25 @@ def generate_project_shots(
     # its updated timestamp moves past the analysis; reusing blueprints then
     # rebuilt the former (often Vietnamese) storyboard over the new English
     # script.  The saved script is authoritative after that point.
-    writer_content = (
-        writer_analysis.get("result")
-        if writer_analysis and str(script.get("updated_at") or "") <= str(writer_analysis.get("created_at") or "")
-        else None
-    )
+    #
+    # That "the script moved past the analysis" test used to compare against
+    # the moment the analysis was recorded. Writing a script records the
+    # analysis and then the script, milliseconds apart, so a brand new script
+    # always looked newer than its own blueprints and they were thrown away
+    # every single time - the app asked an AI to break the piece into scenes,
+    # discarded the answer, and chopped the prose by line instead. What marks
+    # an edit is the script changing after it was created, so that is what is
+    # compared now.
+    writer_content = None
+    blueprints_verified = False
+    if writer_analysis:
+        script_created = str(script.get("created_at") or "")
+        script_updated = str(script.get("updated_at") or "")
+        analysed_at = str(writer_analysis.get("created_at") or "")
+        untouched_since_written = script_updated <= script_created
+        analysis_came_first = analysed_at <= script_created
+        if untouched_since_written and analysis_came_first:
+            writer_content = writer_analysis.get("result")
     if isinstance(writer_content, dict):
         blueprints = writer_content.get("scene_blueprints")
         if isinstance(blueprints, list):
@@ -1542,13 +2669,17 @@ def generate_project_shots(
                 # Different-language or manually rewritten blueprints are not
                 # a plan for this script.  Rebuild from the visible script.
                 writer_content = None
+            else:
+                blueprints_verified = True
     existing = database.list_project_shots(project_id, script_id=int(script["id"]))
     # Editing a script in place leaves its old storyboard attached to the same
     # script ID.  Reusing it would make the voice job read yesterday's words.
     # Never silently regenerate (it can discard reviewed media); tell callers
     # exactly when they need to explicitly rebuild instead.
     script_updated = str(script.get("updated_at") or "")
-    expected = build_shot_plan(project, script, writer_content=writer_content)
+    expected = build_shot_plan(
+        project, script, writer_content=writer_content, blueprints_verified=blueprints_verified,
+    )
     narration_mismatch = len(existing) != len(expected) or any(
         str(shot.get("narration") or "").strip() != str(planned.get("narration") or "").strip()
         for shot, planned in zip(existing, expected)
@@ -1908,9 +3039,56 @@ class UpdateScenePlanRequest(BaseModel):
 
     visual_kind: Literal["image", "gif", "video"] | None = None
     visual_fps: int | None = Field(default=None, ge=0, le=24)
+    visual_strategy: str | None = Field(default=None, max_length=80)
+    visual_provider: str | None = Field(default=None, max_length=80)
+    source_dependency: Literal["none", "low", "medium", "high"] | None = None
+    risk_level: Literal["low", "medium", "high"] | None = None
+    content_dna: dict[str, Any] | None = None
+    transform_actions: list[dict[str, Any]] | None = Field(default=None, max_length=12)
+    required_assets: list[dict[str, Any]] | None = Field(default=None, max_length=12)
+    overlays: list[dict[str, Any]] | None = Field(default=None, max_length=12)
+    sound_cues: list[dict[str, Any]] | None = Field(default=None, max_length=8)
+    direction: dict[str, Any] | None = None
     transition: Literal["cut", "fade"] | None = None
     effect: Literal["zoom_in", "zoom_out", "static"] | None = None
     note: str | None = Field(default=None, max_length=400)
+
+
+class ApplyVisualFallbackRequest(BaseModel):
+    confirmed: bool = False
+
+
+class EditBeatRequest(BaseModel):
+    """One visual beat inside a narrated storyboard scene."""
+
+    asset_id: int | None = Field(default=None, ge=1)
+    visual_path: str = Field(default="", max_length=1000)
+    source_kind: Literal["primary", "source_frame", "asset", "ai_image", "ai_video"] = "primary"
+    duration_seconds: float = Field(default=1.0, ge=0.15, le=120.0)
+    effect: Literal["zoom_in", "zoom_out", "static"] = "static"
+    transition: Literal["cut", "fade"] = "cut"
+    prompt: str = Field(default="", max_length=5000)
+    status: Literal["ready", "needs_asset", "generating", "error"] = "ready"
+
+
+class ReplaceEditBeatsRequest(BaseModel):
+    beats: list[EditBeatRequest] = Field(default_factory=list, max_length=24)
+
+
+class PlanEditBeatsRequest(BaseModel):
+    max_beats: int = Field(default=4, ge=1, le=8)
+
+
+class ApplyEditBeatsRequest(BaseModel):
+    image_provider: str = Field(default="gemini_web_image", min_length=2, max_length=80)
+    ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
+    confirmed: bool = False
+
+
+class GenerateEditBeatRequest(BaseModel):
+    image_provider: str = Field(default="gemini_web_image", min_length=2, max_length=80)
+    ratio: Literal["1280:720", "720:1280", "1024:1024"] = "1280:720"
+    confirmed: bool = False
 
 
 @app.patch("/api/timeline/{segment_id}/plan")
@@ -1948,7 +3126,100 @@ def update_timeline_segment_plan(segment_id: int, payload: UpdateScenePlanReques
             payload.note if payload.note is not None else str(segment.get("edit_note") or ""),
         )
         segment = database.get_project_timeline_segment(segment_id) or segment
+    if payload.overlays is not None or payload.sound_cues is not None or payload.direction is not None:
+        duration = max(0.1, float(segment.get("duration_seconds") or 1))
+        try:
+            overlays = normalize_graphic_overlays(payload.overlays, duration) if payload.overlays is not None else None
+            sound_cues = _normalise_sound_cues(payload.sound_cues, duration) if payload.sound_cues is not None else None
+            direction = normalize_direction(payload.direction, duration) if payload.direction is not None else None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Kế hoạch lớp dựng không hợp lệ: {exc}") from exc
+        segment = database.save_segment_edit_layers(
+            segment_id,
+            overlays=overlays,
+            sound_cues=sound_cues,
+            direction=direction,
+        ) or segment
     return {"status": "saved", "segment": segment}
+
+
+@app.get("/api/timeline/{segment_id}/edit-beats")
+def get_timeline_edit_beats(segment_id: int) -> dict[str, Any]:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
+    return {"segment": segment, "beats": database.list_timeline_edit_beats(segment_id)}
+
+
+@app.put("/api/timeline/{segment_id}/edit-beats")
+def replace_timeline_edit_beats(segment_id: int, payload: ReplaceEditBeatsRequest) -> dict[str, Any]:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy segment timeline")
+    total = sum(float(item.duration_seconds) for item in payload.beats)
+    duration = float(segment.get("duration_seconds") or 0)
+    if payload.beats and abs(total - duration) > 0.35:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tổng nhịp dựng ({total:.1f}s) phải khớp lời đọc của cảnh ({duration:.1f}s)",
+        )
+    beats = database.replace_timeline_edit_beats(
+        segment_id, [item.model_dump() for item in payload.beats]
+    )
+    return {"status": "saved", "beats": beats}
+
+
+@app.post("/api/timeline/{segment_id}/edit-beats/{beat_index}/extract-frame")
+def extract_edit_beat_frame(segment_id: int, beat_index: int) -> dict[str, Any]:
+    """Materialise a source-frame insert as a reusable project asset."""
+    return _extract_edit_beat_frame(segment_id, beat_index)
+
+
+def _extract_edit_beat_frame(segment_id: int, beat_index: int) -> dict[str, Any]:
+    segment = database.get_project_timeline_segment(segment_id)
+    beats = database.list_timeline_edit_beats(segment_id)
+    beat = next((item for item in beats if int(item.get("beat_index") or 0) == beat_index), None)
+    if not segment or not beat:
+        raise HTTPException(status_code=404, detail="Không tìm thấy nhịp dựng")
+    source = Path(str(beat.get("visual_path") or segment.get("visual_path") or ""))
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="Nhịp này chưa có clip nguồn để trích frame")
+    executable = resolve_ffmpeg(FFMPEG_BINARY)
+    if not executable:
+        raise HTTPException(status_code=400, detail="Không tìm thấy FFmpeg")
+    project_id = int(segment["project_id"])
+    output_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "edit_frames"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"segment-{segment_id}-beat-{beat_index}.png"
+    seek = max(0.0, float(beat.get("start_seconds") or 0) + float(beat.get("duration_seconds") or 1) / 2)
+    result = subprocess.run([executable, "-y", "-ss", f"{seek:.3f}", "-i", str(source), "-frames:v", "1", str(output)], capture_output=True, timeout=60, check=False)
+    if result.returncode != 0 or not output.is_file():
+        raise HTTPException(status_code=500, detail="Không trích được frame từ clip nguồn")
+    asset = database.create_project_asset(project_id, "image", output.name, str(output), "image/png", output.stat().st_size)
+    attached = database.attach_asset_to_edit_beat(
+        int(beat["id"]), int(asset["id"]), source_kind="source_frame"
+    )
+    if not attached:
+        raise HTTPException(status_code=500, detail="Không gắn được frame vào nhịp dựng")
+    saved = database.list_timeline_edit_beats(segment_id)
+    return {"status": "extracted", "asset": asset, "beats": saved}
+
+
+@app.get("/api/timeline/{segment_id}/edit-beats/{beat_index}/preview")
+def preview_edit_beat(segment_id: int, beat_index: int) -> FileResponse:
+    segment = database.get_project_timeline_segment(segment_id)
+    beat = next(
+        (item for item in database.list_timeline_edit_beats(segment_id)
+         if int(item.get("beat_index") or 0) == beat_index),
+        None,
+    )
+    if not segment or not beat:
+        raise HTTPException(status_code=404, detail="Không tìm thấy nhịp dựng")
+    path = Path(str(beat.get("visual_path") or ""))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Nhịp dựng chưa có media")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.get("/api/projects/{project_id}/timeline/manifest")
@@ -1961,6 +3232,12 @@ def export_project_timeline_manifest(project_id: int) -> dict[str, Any]:
         project_id,
         script_id=int(script["id"]) if script else None,
     ) if script else []
+    if script:
+        timeline = database.attach_edit_beats_to_timeline(
+            project_id,
+            timeline,
+            script_id=int(script["id"]),
+        )
     return timeline_to_manifest(project, script, timeline)
 
 
@@ -1974,6 +3251,12 @@ def export_project_timeline_markdown(project_id: int) -> PlainTextResponse:
         project_id,
         script_id=int(script["id"]) if script else None,
     ) if script else []
+    if script:
+        timeline = database.attach_edit_beats_to_timeline(
+            project_id,
+            timeline,
+            script_id=int(script["id"]),
+        )
     return PlainTextResponse(
         timeline_to_markdown(project, script, timeline),
         media_type="text/markdown; charset=utf-8",
@@ -2064,9 +3347,17 @@ _EDGE_TTS_VOICES = {
     "th-TH-PremwadeeNeural",
     "pt-BR-FranciscaNeural",
     "pt-BR-AntonioNeural",
+    "de-DE-KatjaNeural", "de-DE-ConradNeural", "de-DE-AmalaNeural", "de-DE-KillianNeural",
+    "de-DE-FlorianMultilingualNeural", "de-DE-SeraphinaMultilingualNeural",
+    "es-ES-ElviraNeural", "es-ES-AlvaroNeural", "es-ES-XimenaNeural",
 }
 _EDGE_PREVIEW_RATES = {"-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"}
 _EDGE_PREVIEW_TEXT = "Đây là bản nghe thử giọng đọc. Câu chuyện sẽ được kể rõ ràng, tự nhiên và giàu cảm xúc."
+_EDGE_PREVIEW_TEXTS = {
+    "de": "Dies ist eine Hörprobe. Die Geschichte wird klar, natürlich und mit Gefühl erzählt.",
+    "es": "Esta es una muestra de voz. La historia se contará con claridad, naturalidad y emoción.",
+    "en": "This is a voice preview. The story will be told clearly, naturally, and with feeling.",
+}
 
 
 def _voice_library_entry(key: str) -> dict[str, str]:
@@ -2132,7 +3423,8 @@ def stream_edge_voice_preview(voice: str, rate: str = Query(default="+0%")) -> F
     if not output.is_file() or output.stat().st_size == 0:
         output.parent.mkdir(parents=True, exist_ok=True)
         text_file = output.with_suffix(".txt")
-        text_file.write_text(_EDGE_PREVIEW_TEXT, encoding="utf-8")
+        preview_language = voice.split("-")[0]
+        text_file.write_text(_EDGE_PREVIEW_TEXTS.get(preview_language, _EDGE_PREVIEW_TEXT), encoding="utf-8")
         values = {
             "text_file": text_file,
             "output_file": output,
@@ -2140,7 +3432,7 @@ def stream_edge_voice_preview(voice: str, rate: str = Query(default="+0%")) -> F
             "voice_rate": rate,
             "srt_file": text_file.with_suffix(".srt"),
             "output_dir": output.parent,
-            "language": "vi",
+            "language": preview_language,
         }
         try:
             rendered = EDGE_TTS_COMMAND.format(**{key: str(value) for key, value in values.items()})
@@ -2448,7 +3740,9 @@ def analyze_reference_images(
         + (f" (ghep thanh mot bang de xem cung luc)." if len(chosen) > 1 else ".")
     )
     assignment = settings.agent_assignment("storyboard")
-    executor = str(assignment.get("executor") or settings.orchestrator_provider())
+    # The assignment says "astra"/"claude"; compared against runtime names as
+    # it was, the user's choice never matched and was skipped without a word.
+    executor = orchestrator_runtime.runtime_id(str(assignment.get("executor") or settings.orchestrator_provider()))
     errors: list[str] = []
     for agent in dict.fromkeys([executor, "claude_code_cli", "codex_cli"]):
         if agent not in {"codex_cli", "claude_code_cli"}:
@@ -2785,6 +4079,9 @@ def _image_provider_blocked(key: str, *, probe: bool = True) -> str:
         return "cần sidecar/trình duyệt đang chạy"
     if key == "openai_image" and not OPENAI_API_KEY:
         return "chưa có OPENAI_API_KEY"
+    if key in {"phantom_canvas_image", "phantom_canvas_video"}:
+        result = phantom_canvas_bridge.status()
+        return "" if result.get("ready") else str(result.get("detail") or "Phantom Canvas chưa chạy")
     if key in {"gflow_image", "gflow_cli"}:
         # Rendering a list must not wait on a network probe. Unknown is
         # offered rather than hidden: trying it returns the real answer.
@@ -3043,6 +4340,8 @@ _STAGE_AGENT_PREFERENCES = {
 
 def _auto_agent_order(stage: str, executor: str, allowed: list[str]) -> list[str]:
     """Rank allowed subscription agents by readiness and stage fit."""
+    executor = _orchestrator_runtime_id(executor)
+    allowed = [_orchestrator_runtime_id(agent) for agent in allowed]
     status_calls = {
         "codex_cli": codex_cli_status,
         "claude_code_cli": claude_code_cli_status,
@@ -3067,26 +4366,104 @@ def _auto_agent_order(stage: str, executor: str, allowed: list[str]) -> list[str
     )
 
 
+def _orchestrator_runtime_id(agent: str) -> str:
+    """Map the product-level coordinator choice to the local callable runtime.
+
+    The UI stores the user's intent as Astra / ChatGPT app / Claude; only
+    orchestrator_runtime knows which concrete runtime executes each of those.
+    """
+    return orchestrator_runtime.runtime_id(agent)
+
+
+def _record_orchestrator_step(**values: Any) -> None:
+    """Write one audit row, never at the cost of the call it describes."""
+    try:
+        database.record_orchestrator_step(**values)
+    except Exception:
+        pass
+
+
+def _announce_step(event_type: str, project_id: int, step: str, label: str, **values: Any) -> None:
+    """Say out loud that a step started or finished.
+
+    The audit row goes to a table only this app reads. Anything watching from
+    outside - the page itself, and later a chat channel relaying a request -
+    polls the event log, and step progress was not in it. A run driven from
+    elsewhere went silent for the three minutes the planner takes, with no way
+    to tell work from a hang.
+
+    The app deliberately knows nothing about who is listening; it only says
+    what it is doing.
+    """
+    try:
+        database.emit_domain_event(
+            event_type,
+            project_id=project_id,
+            aggregate_type="project_step",
+            aggregate_id=step,
+            # Everything a reader needs travels in the payload: the bus takes
+            # a fixed set of keyword arguments and rejects anything else, and
+            # passing details as loose keywords raised a TypeError that this
+            # function's own catch then swallowed - so the announcement went
+            # nowhere while the app looked like it was announcing.
+            payload={"step": step, "label": label, **values},
+        )
+    except Exception:
+        # Never at the cost of the step it describes.
+        pass
+
+
 def _call_orchestrator_json(
     system_prompt: str,
     user_prompt: str,
     schema: dict[str, Any],
     *,
     stage: str = "orchestration",
+    project_id: int | None = None,
+    step: str = "",
+    image_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Route a structured task through the user's per-stage agent policy."""
-    calls = {
-        "codex_cli": call_codex_json,
-        "claude_code_cli": call_claude_code_cli_json,
-        "antigravity": call_antigravity_json,
-    }
+    """Route a structured task through the user's per-stage agent policy.
+
+    With `image_path` the task is one the model must look at, and only the
+    runtimes that accept an image can take it. Falling back to a text-only
+    runtime there would not fail - it would answer confidently about a picture
+    it never saw, which is worse than having no answer.
+
+    Readiness is measured, not assumed: a runtime that cannot execute right
+    now is tried last rather than first, and if nothing runs the error names
+    the missing sign-in instead of saying no AI was allowed. Every attempt is
+    recorded, because the only way to know an AI really made a decision is to
+    be able to read back which one did and what it answered.
+    """
+    looking = image_path is not None and Path(image_path).is_file()
+    calls: dict[str, Any] = (
+        {
+            "codex_cli": lambda system, user, sch: call_codex_vision_json(
+                system, user, sch, image_path=str(image_path),
+            ),
+            "claude_code_cli": lambda system, user, sch: call_claude_code_cli_json(
+                system, user, sch, image_path=str(image_path),
+            ),
+        }
+        if looking
+        else {
+            "codex_cli": call_codex_json,
+            "claude_code_cli": call_claude_code_cli_json,
+            "antigravity": call_antigravity_json,
+        }
+    )
     assignment = settings.agent_assignment(stage)
-    executor = str(assignment.get("executor") or settings.orchestrator_provider())
+    executor = _orchestrator_runtime_id(str(assignment.get("executor") or settings.orchestrator_provider()))
     mode = str(assignment.get("mode") or "auto")
-    allowed = [str(item) for item in assignment.get("allowed_agents", []) if str(item) in calls]
+    allowed = [
+        _orchestrator_runtime_id(str(item))
+        for item in assignment.get("allowed_agents", [])
+        if _orchestrator_runtime_id(str(item)) in calls
+    ]
     fallbacks = [
-        str(item) for item in assignment.get("fallback_agents", [])
-        if str(item) in calls and str(item) != executor
+        _orchestrator_runtime_id(str(item)) for item in assignment.get("fallback_agents", [])
+        if _orchestrator_runtime_id(str(item)) in calls and _orchestrator_runtime_id(str(item)) != executor
     ]
     if mode == "fixed":
         order = [executor]
@@ -3100,19 +4477,74 @@ def _call_orchestrator_json(
             [agent for agent in auto_candidates if agent in calls],
         )
     order = list(dict.fromkeys(agent for agent in order if agent in calls and (not allowed or agent in allowed)))
+    label = step or stage
     if not order:
-        raise LlmError(f"Không có AI được phép thực hiện công đoạn {stage}")
+        detail = f"Không có AI được phép thực hiện công đoạn {stage}"
+        _record_orchestrator_step(
+            project_id=project_id, stage=stage, step=label, status="failed",
+            why="Chính sách công đoạn không cho phép runtime nào chạy được", error=detail,
+        )
+        raise LlmError(detail)
+
+    readiness = orchestrator_runtime.runtime_readiness(
+        database,
+        statuses={
+            "codex_cli": codex_cli_status,
+            "claude_code_cli": claude_code_cli_status,
+            "antigravity": antigravity_cli_status,
+        },
+    )
+    gated = orchestrator_runtime.gate(readiness, order)
+    blocked_detail = {str(item["runtime"]): str(item.get("detail") or "") for item in gated["blocked"]}
+    # A blocked runtime is still attempted, last: a probe can be wrong in both
+    # directions, and refusing to try would turn a stale status into an
+    # outage. What changes is the order, and that the reason is on the record.
+    attempt_order = [*gated["ready"], *[item["runtime"] for item in gated["blocked"]]]
+
+    attempts: list[dict[str, Any]] = []
     errors: list[str] = []
     first_error: LlmError | None = None
-    for agent in order:
+    for agent in attempt_order:
+        why = (
+            "Được gán làm executor của công đoạn" if agent == executor
+            else "Fallback theo chính sách" if agent in fallbacks
+            else "Auto: hợp công đoạn và được phép"
+        )
+        if agent in blocked_detail:
+            why += f" (thử cuối vì kiểm tra sẵn sàng báo: {blocked_detail[agent]})"
         try:
-            return calls[agent](system_prompt, user_prompt, schema)
-        except LlmError as exc:
-            first_error = first_error or exc
+            result = calls[agent](system_prompt, user_prompt, schema)
+        except (LlmError, CodexBridgeError) as exc:
+            first_error = first_error or (exc if isinstance(exc, LlmError) else LlmError(str(exc)))
             errors.append(f"{agent}: {exc}")
-    raise LlmError(
-        f"Các AI được gán cho công đoạn {stage} đều thất bại. " + " | ".join(errors)
-    ) from first_error
+            attempts.append({"runtime": agent, "status": "failed", "error": str(exc)[:600]})
+            continue
+        attempts.append({"runtime": agent, "status": "success", "error": ""})
+        _record_orchestrator_step(
+            project_id=project_id, stage=stage, step=label, status="success",
+            runtime=agent, agent=agent, why=why,
+            input_summary=" ".join(user_prompt.split())[:400],
+            output_ref=", ".join(sorted(str(key) for key in result)) if isinstance(result, dict) else "",
+            attempts=attempts,
+        )
+        return result
+
+    summary = " | ".join(errors)
+    if gated["blocked"]:
+        summary += (
+            (" | " if summary else "")
+            + "Chưa sẵn sàng: "
+            + orchestrator_runtime.blocked_summary(gated["blocked"])
+        )
+    detail = f"Các AI được gán cho công đoạn {stage} đều thất bại. {summary}"
+    _record_orchestrator_step(
+        project_id=project_id, stage=stage, step=label, status="failed",
+        runtime=attempt_order[0] if attempt_order else "",
+        why="Đã thử toàn bộ runtime được phép",
+        input_summary=" ".join(user_prompt.split())[:400],
+        error=detail, attempts=attempts,
+    )
+    raise LlmError(detail) from first_error
 
 
 def _scene_prompt_context(timeline: list[dict[str, Any]], position: int) -> str:
@@ -3392,6 +4824,21 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
     this app) decides one action at a time, so it can react to whatever the
     site actually shows instead of following a fixed script.
     """
+    # Typing a prompt into a chat box and pressing send is the same every
+    # time, so a model is not asked to work it out. It is asked only when the
+    # page shows something this does not recognise - which is also what kept
+    # happening when no model was reachable at all: ten runs on ChatGPT web
+    # died on "Không có AI được phép thực hiện công đoạn orchestration".
+    planned = browser_recipes.next_action(
+        goal=payload.goal,
+        url=payload.url,
+        elements=[element.model_dump() for element in payload.elements],
+        history=payload.history,
+        step=payload.step,
+    )
+    if planned is not None:
+        return _browser_action_response(planned)
+
     lines = []
     for element in payload.elements[:80]:
         parts = [f"[{element.i}] <{element.tag}>"]
@@ -3469,14 +4916,43 @@ def decide_browser_action(payload: BrowserActionRequest) -> dict[str, Any]:
         result = _call_orchestrator_json(system_prompt, user_prompt, _BROWSER_ACTION_SCHEMA)
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _browser_action_response(result)
+
+
+_BROWSER_ACTIONS = {"type", "click", "attach_image", "wait", "reload", "done", "fail"}
+_BROWSER_FOLLOW_UP_ACTIONS = {"type", "click", "attach_image", "wait"}
+
+
+def _browser_action_response(result: dict[str, Any]) -> dict[str, Any]:
+    """One shape for the extension, whichever side decided the step.
+
+    `then` used to be dropped here although both the schema and the extension
+    carry it, so the batching that exists to save a round trip per step never
+    reached the browser at all.
+    """
     action = str(result.get("action") or "").strip()
-    if action not in {"type", "click", "attach_image", "wait", "reload", "done", "fail"}:
+    if action not in _BROWSER_ACTIONS:
         raise HTTPException(status_code=502, detail=f"Orchestrator tra ve hanh dong khong hop le: {action}")
+    follow_ups: list[dict[str, Any]] = []
+    for item in (result.get("then") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("action") or "").strip()
+        if name not in _BROWSER_FOLLOW_UP_ACTIONS:
+            continue
+        follow_ups.append({
+            "action": name,
+            "index": item.get("index"),
+            "text": str(item.get("text") or ""),
+        })
     return {
         "action": action,
         "index": result.get("index"),
         "text": str(result.get("text") or ""),
         "reason": str(result.get("reason") or ""),
+        "then": follow_ups,
+        # Which side answered, so a run can be read back without guessing.
+        "decided_by": str(result.get("decided_by") or "model"),
     }
 
 
@@ -3560,8 +5036,11 @@ def _review_scene_asset(file_path: Path, scene_prompt: str, kind: str) -> dict[s
                     "Hãy kiểm tra cả tính nhất quán giữa bốn ô, không chỉ ô đầu tiên."
                 )
         assignment = settings.agent_assignment("quality_review")
+        # Agent names from the assignment, runtime names below: map at the
+        # boundary or the chosen reviewer is silently never first.
         reviewer = str(assignment.get("reviewer") or "auto")
-        executor = str(assignment.get("executor") or settings.orchestrator_provider())
+        reviewer = reviewer if reviewer == "auto" else orchestrator_runtime.runtime_id(reviewer)
+        executor = orchestrator_runtime.runtime_id(str(assignment.get("executor") or settings.orchestrator_provider()))
         vision_agents = ["codex_cli", "claude_code_cli"]
         if reviewer in vision_agents:
             order = [reviewer, *[agent for agent in vision_agents if agent != reviewer]]
@@ -3691,77 +5170,17 @@ def plan_timeline_visuals(
     project_id: int,
     motion_policy: Literal["balanced", "gif_only"] = "balanced",
 ) -> dict[str, Any]:
-    """Decides per scene whether it wants a still, a short loop, or a clip.
-
-    A talking point that holds one diagram on screen doesn't need a rendered
-    clip, while a scene whose whole meaning is a number counting up or a bar
-    growing reads as broken when frozen. Making that call per scene — rather
-    than one setting for the whole project — is what keeps motion where it
-    carries meaning and avoids paying for it where it doesn't.
-    """
-    script = database.get_latest_project_script(project_id)
-    if not database.get_production_project(project_id) or not script:
-        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
-    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
-    if not timeline:
-        raise HTTPException(status_code=400, detail="Cần tạo timeline trước")
-
-    lines = []
-    for segment in timeline:
-        lines.append(
-            f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s) "
-            f"Loi thoai: {str(segment.get('voice_text') or '')[:180]} || "
-            f"Hinh anh: {str(segment.get('visual_prompt') or '')[:260]}"
-        )
-    gif_policy = (
-        "\nCHINH SACH BAT BUOC CUA PROJECT NAY: KHONG dung video. Moi canh can chuyen dong, ke ca canh "
-        "co nhieu buoc, phai chon 'gif'. AI tao anh se lo phan chuyen dong (co the tra thang mot file GIF "
-        "dong, hoac bon khung hinh lien tiep de App ghep lai). "
-        "Tuyet doi khong tra ve kind='video'.\n"
-        if motion_policy == "gif_only"
-        else ""
-    )
-    system_prompt = (
-        "Ban la dao dien hinh anh cho video YouTube. Voi TUNG canh duoi day, hay quyet dinh nen dung:\n"
-        "- 'image': anh TINH — khi canh chi can mot hinh minh hoa giu nguyen tren man hinh\n"
-        "- 'gif': vong lap ngan khong tieng — khi chi co MOT chuyen dong lap lai don gian "
-        "(banh rang quay, mui ten chay, so nhay). Kem 'fps' hop ly (8-15 cho hoat hoa vector phang)\n"
-        "- 'video': clip that — khi canh co nhieu buoc chuyen dong noi tiep nhau, hoac chuyen dong "
-        "chinh la NOI DUNG cua canh (so dem tang dan, bieu do lon len, so sanh hai trang thai)\n\n"
-        "Nguyen tac: chuyen dong ton kem, chi dung khi no MANG Y NGHIA. Canh chi giai thich mot so lieu "
-        "tinh thi dung 'image'. Tra ve dung so canh, moi canh mot muc, kem 'reason' ngan bang tieng Viet."
-        + gif_policy
-    )
-    try:
-        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _PLAN_VISUALS_SCHEMA, stage="storyboard")
-    except LlmError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    by_index = {int(segment.get("segment_index") or 0): segment for segment in timeline}
-    planned: list[dict[str, Any]] = []
-    for entry in result.get("scenes") or []:
-        segment = by_index.get(int(entry.get("segment_index") or -1))
-        if not segment:
-            continue
-        kind = str(entry.get("kind") or "image")
-        if motion_policy == "gif_only" and kind == "video":
-            kind = "gif"
-        fps = int(entry.get("fps") or 0) if kind in {"gif", "video"} else 0
-        updated = database.set_segment_visual_kind(
-            int(segment["id"]), kind, fps=fps, reason=str(entry.get("reason") or "")
-        )
-        if updated:
-            planned.append({
-                "segment_id": updated["id"],
-                "segment_index": updated["segment_index"],
-                "kind": updated["visual_kind"],
-                "fps": updated["visual_fps"],
-                "reason": updated["visual_kind_reason"],
-            })
+    """Compatibility endpoint backed by the single unified edit plan."""
+    unified = plan_project_edit(project_id, motion_policy=motion_policy)
+    planned = unified.get("scenes") or []
     counts: dict[str, int] = {}
     for item in planned:
         counts[item["kind"]] = counts.get(item["kind"], 0) + 1
-    return {"status": "planned", "scenes": planned, "by_kind": counts, "total_segments": len(timeline)}
+    return {
+        **unified,
+        "by_kind": counts,
+        "total_segments": len(planned),
+    }
 
 
 _EDIT_PLAN_SCHEMA = {
@@ -3775,6 +5194,88 @@ _EDIT_PLAN_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "segment_index": {"type": "integer"},
+                    "kind": {"type": "string", "enum": ["image", "gif", "video"]},
+                    "fps": {"type": "integer"},
+                    "reason": {"type": "string"},
+                    "content_dna": {
+                        "type": "object",
+                        "properties": {
+                            "core_point": {"type": "string"},
+                            "must_keep": {"type": "array", "items": {"type": "string"}},
+                            "characters": {"type": "array", "items": {"type": "string"}},
+                            "facts": {"type": "array", "items": {"type": "string"}},
+                            "emotion": {"type": "string"},
+                            "source_cue": {"type": "string"},
+                        },
+                    },
+                    "visual_strategy": {
+                        "type": "string",
+                        "enum": [
+                            "source_clip_short", "source_freeze_frame", "ai_image",
+                            "ai_video_from_image", "stock_footage", "motion_graphics",
+                            "text_card", "map_chart", "manual_asset", "fallback_draft",
+                        ],
+                    },
+                    "provider": {"type": "string"},
+                    "source_dependency": {"type": "string", "enum": ["none", "low", "medium", "high"]},
+                    "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "transform_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["type", "description"],
+                        },
+                    },
+                    "required_assets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "provider": {"type": "string"},
+                                "prompt": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["kind", "prompt"],
+                        },
+                    },
+                    "overlays": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["title", "callout", "label", "text"]},
+                                "text": {"type": "string"},
+                                "position": {"type": "string", "enum": ["top_left", "top_center", "top_right", "center"]},
+                                "style": {"type": "string", "enum": ["clean", "neon", "card"]},
+                                "animation": {"type": "string", "enum": ["fade", "pop", "slide_up"]},
+                                "start_seconds": {"type": "number"},
+                                "end_seconds": {"type": "number"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["kind", "text", "position", "style", "animation", "start_seconds", "end_seconds"],
+                        },
+                    },
+                    "sound_cues": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["whoosh", "pop", "hit", "ambient", "music_duck"]},
+                                "start_seconds": {"type": "number"},
+                                "end_seconds": {"type": "number"},
+                                "intensity": {"type": "string", "enum": ["low", "medium", "high"]},
+                                "asset_id": {"type": "integer"},
+                                "asset_path": {"type": "string"},
+                                "reason": {"type": "string"}
+                            },
+                            "required": ["type", "start_seconds", "end_seconds"],
+                        },
+                    },
                     "transition": {"type": "string", "enum": ["cut", "fade"]},
                     "effect": {"type": "string", "enum": ["zoom_in", "zoom_out", "static"]},
                     # Dead air and a redundant lead-in are the commonest reason
@@ -3809,7 +5310,7 @@ _EDIT_PLAN_SCHEMA = {
                     "extra_visual_note": {"type": "string"},
                     "note": {"type": "string"},
                 },
-                "required": ["segment_index", "transition", "effect"],
+                "required": ["segment_index", "kind", "transition", "effect"],
             },
         },
     },
@@ -3817,8 +5318,571 @@ _EDIT_PLAN_SCHEMA = {
 }
 
 
+_EDIT_PLAN_SCHEMA["properties"]["scenes"]["items"]["properties"]["direction"] = DIRECTION_SCHEMA
+
+_SOUND_CUE_TYPES = {"whoosh", "pop", "hit", "ambient", "music_duck"}
+
+
+def _normalise_sound_cues(raw: Any, duration: float) -> list[dict[str, Any]]:
+    from .sound_effects import normalize_sound_cues
+    return normalize_sound_cues(raw, duration)
+
+
+_VISUAL_STRATEGIES = {
+    "source_clip_short", "source_freeze_frame", "ai_image", "ai_video_from_image",
+    "stock_footage", "motion_graphics", "text_card", "map_chart", "manual_asset",
+    "fallback_draft",
+}
+_SOURCE_DEPENDENCY_LEVELS = {"none", "low", "medium", "high"}
+_RISK_LEVELS = {"low", "medium", "high"}
+
+
+def _workflow_for_edit_plan(project: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
+    if any(str(item.get("asset_type") or "") == "source_clip" for item in timeline):
+        return "reup"
+    key = str(project.get("workflow") or "").strip()
+    if key in set(workflows.keys()):
+        return key
+    return workflows.DEFAULT_KEY
+
+
+def _plan_list_of_objects(value: Any, limit: int = 12) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[:limit] if isinstance(item, dict)]
+
+
+def _normalise_visual_transform_fields(entry: dict[str, Any], segment: dict[str, Any]) -> dict[str, Any]:
+    timing = segment.get("_speech_timing") or {}
+    duration = max(.15, float(timing.get("duration_seconds") or segment.get("duration_seconds") or 1))
+    direction = normalize_direction(entry.get("direction"), duration)
+    if direction:
+        direction["audio_signature"] = timing.get("audio_signature", "")
+        direction["timing_basis"] = timing.get("timing_basis", "estimated")
+        if timing.get("warning"):
+            direction["warnings"].append(timing["warning"])
+        direction = resolve_direction(direction, duration, timing.get("words"))
+    asset_type = str(segment.get("asset_type") or "")
+    strategy = str(entry.get("visual_strategy") or "").strip()
+    if strategy not in _VISUAL_STRATEGIES:
+        if asset_type == "source_clip":
+            strategy = "source_clip_short"
+        else:
+            strategy = "ai_video_from_image" if str(entry.get("kind") or "") == "video" else "ai_image"
+    dependency = str(entry.get("source_dependency") or "").strip()
+    if dependency not in _SOURCE_DEPENDENCY_LEVELS:
+        dependency = "medium" if strategy.startswith("source_") else "low"
+    risk = str(entry.get("risk_level") or "").strip()
+    if risk not in _RISK_LEVELS:
+        duration = float(segment.get("duration_seconds") or 0)
+        risk = "high" if dependency == "high" or (strategy == "source_clip_short" and duration >= 12) else "low"
+    content_dna = entry.get("content_dna") if isinstance(entry.get("content_dna"), dict) else {}
+    if not content_dna:
+        content_dna = {
+            "core_point": str(segment.get("voice_text") or "").strip()[:500],
+            "must_keep": [],
+            "characters": [],
+            "facts": [],
+            "emotion": "",
+            "source_cue": str(segment.get("visual_prompt") or "").strip()[:300],
+        }
+    return {
+        "content_dna": content_dna,
+        "visual_strategy": strategy,
+        "provider": str(entry.get("provider") or entry.get("visual_provider") or "").strip()[:80],
+        "source_dependency": dependency,
+        "risk_level": risk,
+        "transform_actions": _plan_list_of_objects(entry.get("transform_actions")),
+        "required_assets": _plan_list_of_objects(entry.get("required_assets")),
+        "direction": direction,
+        "overlays": normalize_graphic_overlays(
+            entry.get("overlays") or [], max(0.1, float(segment.get("duration_seconds") or 1))
+        ),
+        "sound_cues": _normalise_sound_cues(
+            entry.get("sound_cues") or [], max(0.1, float(segment.get("duration_seconds") or 1))
+        ),
+    }
+
+
+def _edit_plan_input_lines(
+    project: dict[str, Any],
+    source_video: dict[str, Any],
+    source_analysis: dict[str, Any],
+    render_settings: dict[str, Any],
+    timeline: list[dict[str, Any]],
+    workflow_key: str,
+) -> list[str]:
+    flow = workflows.get(workflow_key)
+    if workflow_key == "reup" or any(str(item.get("asset_type") or "") == "source_clip" for item in timeline):
+        header = [
+            "WORKFLOW: WF Reup - ke lai noi dung nguon bang loi binh moi.",
+            "NGUON: cac canh asset_type=source_clip co the cat tu MOT video goc, nhung ke hoach dung "
+            "khong duoc mac dinh dung clip goc cho moi canh.",
+            f"- Tieu de goc: {str(source_video.get('title') or 'khong ro')[:200]}",
+            f"- Hinh anh video goc: {str(source_analysis.get('visual_style') or 'chua mo ta')[:600]}",
+            f"- Ngon ngu se xuat ban: {render_settings.get('publish_language') or 'vi'}",
+            "- Muc tieu: giu ADN noi dung, nhan vat, su kien, thu tu va cam xuc; tao them visual moi "
+            "khi co the de video tong khac dang ke so voi nguon.",
+            "",
+            "CAC CANH:",
+        ]
+    else:
+        header = [
+            f"WORKFLOW: {flow.label} - {flow.summary}",
+            "NGUON: canh co the la AI scene, stock, motion graphics, anh/file local hoac asset thu cong; "
+            "khong gia dinh moi canh cat tu video goc.",
+            f"- Tieu de tham chieu: {str(source_video.get('title') or project.get('title') or 'khong ro')[:200]}",
+            f"- Goi y phong cach/tham chieu: {str(source_analysis.get('visual_style') or 'chua mo ta')[:600]}",
+            f"- Ngon ngu se xuat ban: {render_settings.get('publish_language') or 'vi'}",
+            "- Muc tieu: chon hinh thuc visual phu hop voi tung y - AI image/video, stock footage, "
+            "motion graphics, text card hoac asset thu cong.",
+            "",
+            "CAC CANH:",
+        ]
+    for segment in timeline:
+        header.append(
+            f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s, "
+            f"asset_type: {segment.get('asset_type') or 'chua ro'}, "
+            f"loai hinh: {segment.get('visual_kind') or 'chua ro'}) "
+            f"Loi thoai: {str(segment.get('voice_text') or '')} || "
+            f"Hinh: {str(segment.get('visual_prompt') or '')[:220]}"
+        )
+        timing = segment.get("_speech_timing") or {}
+        header.append(f"TIMING BASIS: {timing.get('timing_basis', 'estimated')}")
+        if timing.get("words"):
+            header.append("WORD TIMING: " + json.dumps(timing["words"], ensure_ascii=False))
+    return header
+
+
+def _edit_plan_workflow_instructions(workflow_key: str, motion_policy: str) -> str:
+    shared = (
+        DIRECTOR_INSTRUCTIONS + "\n" +
+        "Ban la dao dien hinh anh va nguoi dung phim cho video YouTube. "
+        "Tra ve MOT ke hoach thong nhat cho TUNG canh. Chon 'kind': image cho hinh tinh, "
+        "gif cho mot chuyen dong lap ngan, video khi chuyen dong la noi dung chinh; kem fps va reason. "
+        + (
+            "Project nay cam dung video: neu can chuyen dong phai chon gif. "
+            if motion_policy == "gif_only" else ""
+        )
+        + "Sau do quyet dinh cach vao canh va chuyen dong camera:\n"
+        "- 'transition': 'cut' hoac 'fade'.\n"
+        "- 'effect': 'zoom_in', 'zoom_out', hoac 'static'.\n"
+        "- 'note': ly do ngan bang tieng Viet.\n\n"
+        "MOI CANH BAT BUOC CO KE HOACH BIEN DOI VISUAL:\n"
+        "- 'content_dna': ADN noi dung phai giu gom core_point, must_keep, characters, facts, emotion, source_cue.\n"
+        "- 'visual_strategy': mot trong source_clip_short, source_freeze_frame, ai_image, ai_video_from_image, "
+        "stock_footage, motion_graphics, text_card, map_chart, manual_asset, fallback_draft.\n"
+        "- 'provider': provider goi y cho asset can tao, co the de rong neu chua can.\n"
+        "- 'source_dependency': none/low/medium/high.\n"
+        "- 'risk_level': low/medium/high.\n"
+        "- 'transform_actions': cac thao tac lam video moi khac nguon.\n"
+        "- 'required_assets': asset can tao them de apply ke hoach; neu khong can thi mang rong.\n"
+        "- 'overlays': toi da 2 lop chu ngan moi canh, chi khi loi binh can nhan manh y/chuyen buoc. "
+        "Moi lop co kind title/callout/label/text, text ngan, position top_left/top_center/top_right/center, "
+        "style clean/neon/card, animation fade/pop/slide_up, start_seconds/end_seconds theo thoi luong canh, "
+        "reason. Dong bo moc xuat hien voi cau doc; de khoang thoang cho mat nguoi va phu de. "
+        "Phong cach canh quyet dinh preset, khong lap lai mot kieu cho moi canh. "
+        "Khong che noi dung trong chu tu video nguon khi chua xac minh.\n"
+        "- 'sound_cues': cue am thanh ngan cho whoosh/pop/hit/ambient/music_duck, chi lap khi can nhan nhip overlay, chuyen y hoac CTA; moi cue co start_seconds/end_seconds, intensity va reason. Neu can file SFX rieng, them required_assets kind=sound_effect.\n\n"
+    )
+    if workflow_key == "reup":
+        return shared + (
+            "LUAT RIENG WF REUP:\n"
+            "- Giu ADN cau chuyen: nhan vat, su kien, so lieu, thu tu va cam xuc khong duoc bi thay doi.\n"
+            "- Khong mac dinh moi canh la source_clip. Chi dung source_clip_short khi can thay khoanh khac that "
+            "hoac hanh dong/nhan vat quan trong cua nguon.\n"
+            "- Khi loi binh noi ve y niem, nguyen nhan, bai hoc, so sanh, chu thich, hay uu tien motion_graphics, "
+            "text_card, stock_footage, source_freeze_frame + overlay, hoac ai_image/ai_video_from_image.\n"
+            "- Neu dung source_clip_short tren 10 giay, risk_level thuong la high tru khi co overlay/commentary/cleanup "
+            "lam bien doi ro.\n"
+            "- Lap required_assets cho moi canh can tao them anh/clip/frame/graphics.\n"
+            "- Cleanups chi dua vao bang chung ve video goc; neu co logo/phu de/watermark trong NGUON thi ap dung "
+            "cho MOI canh source_clip.\n\n"
+            "Ngoai ra tra ve 'pacing' va 'music_mood'."
+        )
+    return shared + (
+        "LUAT RIENG WF CONTENT/WORKFLOW KHONG PHAI REUP:\n"
+        "- Khong coi canh la clip nguon neu asset_type khong phai source_clip.\n"
+        "- Canh co so lieu/quy trinh/so sanh/khai niem uu tien motion_graphics hoac text_card.\n"
+        "- Canh doi song/thuc dia uu tien stock_footage neu khop, neu khong dung ai_image/ai_video_from_image.\n"
+        "- Canh minh hoa nhan vat/boi canh tuong tuong uu tien ai_image/ai_video_from_image.\n"
+        "- source_dependency thuong la none hoac low.\n\n"
+        "Ngoai ra tra ve 'pacing' va 'music_mood'."
+    )
+
+
+def _fallback_scene_transform(segment: dict[str, Any], workflow_key: str, motion_policy: str) -> dict[str, Any]:
+    index = int(segment.get("segment_index") or 1)
+    duration = float(segment.get("duration_seconds") or 0)
+    voice = " ".join(str(segment.get("voice_text") or "").split())
+    prompt = str(segment.get("visual_prompt") or "").strip()
+    content_dna = {
+        "core_point": voice[:500],
+        "must_keep": [voice[:160]] if voice else [],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": prompt[:300],
+    }
+    if workflow_key == "reup":
+        if index % 3 == 1:
+            strategy = "source_clip_short"
+            kind = "gif" if motion_policy == "gif_only" else "video"
+            provider = ""
+            dependency = "medium"
+            risk = "high" if duration >= 10 else "medium"
+            actions = [
+                {"type": "shorten_source_clip", "description": "Chỉ dùng khoảnh khắc gốc thật cần thiết."},
+                {"type": "add_overlay", "description": "Thêm callout/subtitle mới để làm rõ góc kể lại."},
+            ]
+            required_assets: list[dict[str, Any]] = [{"kind": "sound_effect", "provider": "manual_sfx", "prompt": "soft whoosh accent for text overlay", "reason": "Nhấn nhịp chữ xuất hiện"}]
+            overlays = [{"kind": "callout", "text": voice[:80], "position": "top_center", "style": "card", "animation": "pop", "start_seconds": 0.2, "end_seconds": min(duration, 2.4), "reason": "Thêm lớp bình luận mới"}] if voice else []
+        elif index % 3 == 2:
+            strategy = "source_freeze_frame"
+            kind = "image"
+            provider = ""
+            dependency = "low"
+            risk = "medium"
+            actions = [
+                {"type": "freeze_frame", "description": "Lấy một frame đại diện thay vì phát lại clip dài."},
+                {"type": "pan_zoom", "description": "Tạo chuyển động nhẹ trên frame và thêm overlay."},
+            ]
+            required_assets = [{"kind": "source_frame", "prompt": prompt or voice[:160], "reason": "Cần frame đại diện từ nguồn"}]
+            overlays = [{"kind": "label", "text": (voice or "Điểm chính")[:80], "position": "top_center", "style": "clean", "animation": "slide_up", "start_seconds": 0.3, "end_seconds": min(duration, 2.8), "reason": "Dẫn mắt vào ý chính"}]
+        else:
+            strategy = "motion_graphics"
+            kind = "gif" if motion_policy == "gif_only" else "video"
+            provider = "motion_graphics"
+            dependency = "none"
+            risk = "low"
+            actions = [{"type": "replace_with_graphics", "description": "Biến ý chính thành thẻ chữ/biểu đồ động thay cho hình nguồn."}]
+            required_assets = [{"kind": "motion_graphics", "provider": "motion_graphics", "prompt": prompt or voice[:220], "reason": "Tạo visual mới giữ ý nhưng không dùng lại khung hình gốc"}]
+            overlays = []
+    else:
+        if index % 3 == 1:
+            strategy = "motion_graphics"
+            kind = "image"
+            provider = "motion_graphics"
+            visual_label = "MYTH / FACT"
+        elif index % 3 == 2:
+            strategy = "text_card"
+            kind = "image"
+            provider = "motion_graphics"
+            visual_label = "ĐIỂM MẤU CHỐT"
+        else:
+            strategy = "ai_image"
+            kind = "image"
+            provider = "auto_parallel"
+            visual_label = "HÌNH MINH HOẠ"
+        dependency = "none"
+        risk = "low"
+        actions = [
+            {"type": "replace_or_cover_source", "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."},
+            {"type": "add_kinetic_text", "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."},
+        ]
+        required_assets = [{
+            "kind": "motion_graphics" if provider == "motion_graphics" else kind,
+            "provider": provider,
+            "prompt": prompt or voice[:220],
+            "reason": "Cần visual khác nguồn để WF Content không trở thành reup.",
+        }]
+        headline = (voice or prompt or visual_label).strip()[:52]
+        overlays = [
+            {
+                "kind": "title",
+                "text": visual_label,
+                "position": "top_center",
+                "style": "neon" if index % 2 else "card",
+                "animation": "pop",
+                "start_seconds": 0.15,
+                "end_seconds": min(duration, 1.6),
+                "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok.",
+            },
+            {
+                "kind": "callout",
+                "text": headline,
+                "position": "center",
+                "style": "card",
+                "animation": "slide_up",
+                "start_seconds": min(duration, 1.0),
+                "end_seconds": min(duration, 3.6),
+                "reason": "Nhấn ý chính thay vì chỉ nghe voice.",
+            },
+        ]
+    return {
+        "segment_index": index,
+        "kind": kind,
+        "fps": 12 if kind == "gif" else (24 if kind == "video" else 0),
+        "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+        "content_dna": content_dna,
+        "visual_strategy": strategy,
+        "provider": provider,
+        "source_dependency": dependency,
+        "risk_level": risk,
+        "transform_actions": actions,
+        "required_assets": required_assets,
+        "overlays": overlays,
+        "sound_cues": [
+            {"type": "whoosh", "start_seconds": 0.15, "end_seconds": min(duration, 0.7), "intensity": "medium", "reason": "Nhấn nhịp chữ mở cảnh"},
+            {"type": "pop", "start_seconds": min(duration, 1.0), "end_seconds": min(duration, 1.35), "intensity": "low", "reason": "Nhấn callout chính"},
+        ] if overlays else [],
+        "transition": "cut" if index % 2 else "fade",
+        "effect": ["zoom_in", "zoom_out", "static", "zoom_in"][index % 4],
+        "trim_head_seconds": 0,
+        "trim_tail_seconds": 0,
+        "cleanups": [],
+        "needs_extra_visual": bool(required_assets),
+        "extra_visual_note": prompt or voice[:220],
+        "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+    }
+
+
+def _json_list_field(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _storyboard_required_jobs_from_timeline(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe the next media work without spending quota or queueing it."""
+    jobs: list[dict[str, Any]] = []
+    for segment in timeline:
+        segment_id = int(segment.get("id") or 0)
+        segment_index = int(segment.get("segment_index") or 0)
+        visual_path = Path(str(segment.get("visual_path") or ""))
+        has_visual = visual_path.is_file()
+        strategy = str(segment.get("visual_strategy") or "").strip()
+        provider = str(segment.get("visual_provider") or "").strip()
+        prompt = str(segment.get("visual_prompt") or segment.get("voice_text") or "").strip()
+        required_assets = _json_list_field(segment.get("required_assets"))
+        if required_assets:
+            for index, asset in enumerate(required_assets, start=1):
+                kind = str(asset.get("kind") or "").strip() or "image"
+                jobs.append({
+                    "segment_id": segment_id,
+                    "segment_index": segment_index,
+                    "asset_index": index,
+                    "job_kind": kind,
+                    "provider": str(asset.get("provider") or provider or _default_provider_for_required_kind(kind)).strip(),
+                    "prompt": str(asset.get("prompt") or prompt).strip(),
+                    "reason": str(asset.get("reason") or segment.get("visual_kind_reason") or "").strip(),
+                    "visual_strategy": strategy,
+                    "status": "needed",
+                    "spends_quota": kind in {"image", "video", "gif"} and str(asset.get("provider") or provider) not in {"", "motion_graphics", "stock_footage"},
+                })
+            continue
+        if not has_visual:
+            kind = _job_kind_for_visual_strategy(strategy, str(segment.get("visual_kind") or ""))
+            jobs.append({
+                "segment_id": segment_id,
+                "segment_index": segment_index,
+                "asset_index": 1,
+                "job_kind": kind,
+                "provider": provider or _default_provider_for_required_kind(kind),
+                "prompt": prompt,
+                "reason": "Cảnh chưa có visual sau khi áp dụng kế hoạch.",
+                "visual_strategy": strategy or "fallback_draft",
+                "status": "needed",
+                "spends_quota": kind in {"image", "video", "gif"} and (provider or _default_provider_for_required_kind(kind)) not in {"motion_graphics", "stock_footage"},
+            })
+    return jobs
+
+
+def _job_kind_for_visual_strategy(strategy: str, visual_kind: str) -> str:
+    if strategy == "source_freeze_frame":
+        return "source_frame"
+    if strategy == "source_clip_short":
+        return "source_visuals"
+    if strategy == "motion_graphics":
+        return "motion_graphics"
+    if strategy == "stock_footage":
+        return "stock_footage"
+    if strategy == "fallback_draft":
+        return "fallback"
+    if strategy == "ai_video_from_image":
+        return "video"
+    return visual_kind if visual_kind in {"image", "gif", "video"} else "image"
+
+
+def _default_provider_for_required_kind(kind: str) -> str:
+    if kind in {"source_frame", "source_visuals"}:
+        return "ffmpeg_builtin"
+    if kind == "motion_graphics":
+        return "motion_graphics"
+    if kind == "stock_footage":
+        return "stock_footage"
+    if kind == "sound_effect":
+        return "manual_sfx"
+    if kind == "video":
+        return "gflow_cli"
+    if kind == "fallback":
+        return "ffmpeg_builtin"
+    return "auto_parallel"
+
+
+def _scene_plan_effect_sequence(effect: str) -> list[str]:
+    base = str(effect or "static").strip()
+    if base == "zoom_in":
+        return ["zoom_in", "static", "zoom_out", "zoom_in"]
+    if base == "zoom_out":
+        return ["zoom_out", "static", "zoom_in", "zoom_out"]
+    return ["static", "zoom_in", "zoom_out", "static"]
+
+
+def _scene_plan_to_edit_beats(segment: dict[str, Any], scene: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compile semantic beats only. No duration-based cuts or forced zooms."""
+    visual_path = str(segment.get("visual_path") or "").strip()
+    direction = scene.get("direction") or {}
+    beats = []
+    for beat in direction.get("visual_beats") or []:
+        asset_id = int(beat.get("asset_id") or 0)
+        path = visual_path
+        if beat["source_kind"] == "asset":
+            asset = database.get_project_asset(asset_id)
+            if not asset or int(asset["project_id"]) != int(segment["project_id"]):
+                raise ValueError(f"Asset {asset_id} không thuộc dự án của cảnh")
+            path = str(asset.get("file_path") or "")
+            if not Path(path).is_file():
+                raise ValueError(f"Asset {asset_id} chưa có file để dựng")
+        beats.append({"source_kind": beat["source_kind"], "asset_id": asset_id or None,
+                      "visual_path": path, "start_seconds": beat["start_seconds"],
+                      "duration_seconds": beat["end_seconds"] - beat["start_seconds"],
+                      "effect": beat["effect"], "transition": "cut", "prompt": beat["reason"],
+                      "status": "ready" if path else "needs_asset"})
+    return beats
+
+
+def _edit_plan_source_revision(
+    script: dict[str, Any],
+    timeline: list[dict[str, Any]],
+) -> str:
+    """Fingerprint only inputs whose change can make an edit proposal wrong."""
+    source = {
+        "script": {
+            "id": script.get("id"),
+            "updated_at": script.get("updated_at"),
+            "title": script.get("script_title"),
+            "hook": script.get("hook"),
+            "intro": script.get("intro"),
+            "main_content": script.get("main_content"),
+            "cta": script.get("cta"),
+        },
+        "timeline": [
+            {
+                "id": item.get("id"),
+                "shot_id": item.get("shot_id"),
+                "segment_index": item.get("segment_index"),
+                "voice_text": item.get("voice_text"),
+                "visual_prompt": item.get("visual_prompt"),
+                "asset_type": item.get("asset_type"),
+                "duration_seconds": item.get("duration_seconds"),
+                "visual_kind": item.get("visual_kind"),
+                "content_dna": item.get("content_dna"),
+                "visual_strategy": item.get("visual_strategy"),
+                "visual_provider": item.get("visual_provider"),
+                "source_dependency": item.get("source_dependency"),
+                "risk_level": item.get("risk_level"),
+                "transform_actions": item.get("transform_actions"),
+                "required_assets": item.get("required_assets"),
+                "overlays": item.get("overlays"),
+            "sound_cues": item.get("sound_cues"),
+            "edit_direction": item.get("edit_direction"),
+                "scene_direction": item.get("scene_direction"),
+                "audio_path": item.get("audio_path"),
+                "audio_signature": audio_signature(Path(item["audio_path"]))
+                if item.get("audio_path") and Path(item["audio_path"]).is_file() else "",
+                "visual_path": item.get("visual_path"),
+                "edit_transition": item.get("edit_transition"),
+                "edit_effect": item.get("edit_effect"),
+                "edit_trim_head": item.get("edit_trim_head"),
+                "edit_trim_tail": item.get("edit_trim_tail"),
+                "edit_cleanups": item.get("edit_cleanups"),
+            }
+            for item in timeline
+        ],
+    }
+    payload = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _current_project_edit_plan(project_id: int) -> dict[str, Any] | None:
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        return None
+    plan = database.get_project_edit_plan(project_id, int(script["id"]))
+    if not plan:
+        return None
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    current_revision = _edit_plan_source_revision(script, timeline)
+    if (
+        plan.get("source_revision") != current_revision
+        and plan.get("status") in {"draft", "approved", "ready"}
+    ):
+        plan = database.set_project_edit_plan_status(int(plan["id"]), "stale") or plan
+    plan["current_source_revision"] = current_revision
+    plan["stale"] = plan.get("status") == "stale"
+    return plan
+
+
+@app.get("/api/projects/{project_id}/edit-plan")
+def get_project_edit_plan(project_id: int) -> dict[str, Any]:
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    plan = _current_project_edit_plan(project_id)
+    return {"status": "missing", "plan": None} if not plan else {"status": plan["status"], "plan": plan}
+
+
+# A scene shorter than this is allowed to simply sit there; past it, a still
+# frame with nothing happening reads as a slideshow rather than an edit.
+FLAT_SCENE_SECONDS = 10.0
+
+
+def plan_is_flat(scenes: list[dict[str, Any]], timeline: list[dict[str, Any]]) -> bool:
+    """True when a plan asks for no movement and no graphics anywhere.
+
+    The planner has everything it needs - the picture's description, the kind
+    of scene, word timing measured from the voice - and still returns a plan
+    of nothing but static frames on some runs, while producing a fully worked
+    one on others. That is the model varying, not data going missing, and the
+    app's job is to not accept the empty answer in silence.
+    """
+    durations = {
+        int(segment.get("segment_index") or 0): float(segment.get("duration_seconds") or 0)
+        for segment in timeline
+    }
+    long_enough = False
+    for entry in scenes:
+        if not isinstance(entry, dict):
+            continue
+        if durations.get(int(entry.get("segment_index") or -1), 0.0) >= FLAT_SCENE_SECONDS:
+            long_enough = True
+        if str(entry.get("effect") or "").strip() not in {"", "static"}:
+            return False
+        if entry.get("overlays") or entry.get("transform_actions"):
+            return False
+    return long_enough
+
+
+_ASK_FOR_AN_EDIT = (
+    "\n\nLUU Y: ban ke hoach truoc do khong co bat ky chuyen dong hay do hoa nao - "
+    "moi canh deu la khung hinh tinh. Day la mot video giai thich, khong phai trinh chieu anh. "
+    "Voi moi canh tu 10 giay tro len, hay chon mot chuyen dong may (effect) phu hop voi y cua canh, "
+    "va dat it nhat mot moc do hoa bam theo word timing da do. Neu mot canh that su nen dung yen, "
+    "hay noi ro ly do trong truong 'reason'."
+)
+
+
 @app.post("/api/projects/{project_id}/edit-plan")
-def plan_project_edit(project_id: int) -> dict[str, Any]:
+def plan_project_edit(
+    project_id: int,
+    motion_policy: Literal["balanced", "gif_only"] = "balanced",
+) -> dict[str, Any]:
     """Plans the cut before rendering: per-scene transition and camera move.
 
     The renderer applied one blanket transition and the same gentle push-in
@@ -3846,53 +5910,54 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         str(project.get("youtube_video_id") or ""), analysis_type="reference"
     ) or {}).get("result", {})
     render_settings = database.get_project_render_settings(project_id) or {}
-    lines = [
-        "NGUON: tat ca cac canh duoi day deu cat tu MOT video goc.",
-        f"- Tieu de goc: {str(source_video.get('title') or 'khong ro')[:200]}",
-        f"- Hinh anh video goc: {str(source_analysis.get('visual_style') or 'chua mo ta')[:600]}",
-        f"- Ngon ngu se xuat ban: {render_settings.get('publish_language') or 'vi'}",
-        "",
-        "CAC CANH:",
-    ]
+    workflow_key = _workflow_for_edit_plan(project, timeline)
+    # The model receives the whole spoken content and actual voice timing.
+    # These enriched rows are not written to the live timeline until Apply.
+    timeline = [{**segment, "_speech_timing": scene_speech_timing(segment)} for segment in timeline]
     for segment in timeline:
-        lines.append(
-            f"[{segment.get('segment_index')}] ({segment.get('duration_seconds') or 0}s, "
-            f"loai hinh: {segment.get('visual_kind') or 'chua ro'}) "
-            f"Loi thoai: {str(segment.get('voice_text') or '')[:160]} || "
-            f"Hinh: {str(segment.get('visual_prompt') or '')[:200]}"
-        )
-    system_prompt = (
-        "Ban la nguoi dung phim (editor) cho video YouTube. "
-        "Voi TUNG canh, hay quyet dinh cach vao canh va chuyen dong camera:\n"
-        "- 'transition': 'cut' (cat thang, dung khi doi y dot ngot hoac so sanh hai trang thai) "
-        "hoac 'fade' (mem, dung khi mach y chay lien tuc)\n"
-        "- 'effect': 'zoom_in' (day vao dan, tao cam giac tap trung), 'zoom_out' (keo lui, mo rong boi canh), "
-        "hoac 'static' (dung yen hoan toan — dung khi nguoi xem can DOC noi dung tren man hinh)\n"
-        "- 'note': ly do ngan bang tieng Viet\n\n"
-        "Luu y: canh loai 'video'/'gif' da co chuyen dong san, nen thuong de 'static' de khong chong chuyen dong.\n\n"
-        "VOI CANH CAT TU VIDEO NGUON (asset_type = source_clip), quyet dinh them:\n"
-        "- 'trim_head_seconds' / 'trim_tail_seconds': cat bo phan thua o dau/cuoi canh - khoang lang, "
-        "canh dan nhap, doan lap lai y da noi. De 0 neu khong can cat.\n"
-        "- 'cleanups': nhung gi tren man hinh thuoc ve NGUON chu khong thuoc video nay:\n"
-        "    kind='logo' / 'watermark': logo kenh goc, watermark chim goc man hinh;\n"
-        "    kind='subtitle': phu de chay san trong hinh - thuong la tieng nuoc ngoai, nguoi xem cua "
-        "ta khong doc duoc va no da duoc thay bang loi doc moi;\n"
-        "    'position': vung no nam ('top_left', 'bottom_center'...);\n"
-        "    'method': 'blur' (lam mo - an toan nhat), 'delogo' (xoa va noi lai nen - hop voi logo nho "
-        "tren nen deu), 'crop' (cat bo canh hinh - chi khi no sat mep).\n"
-        "  De mang rong neu canh do khong co gi can xu ly. Bang chung nam o phan NGUON dau input: "
-        "no mo ta hinh anh cua video goc. Neu mo ta do noi video goc co phu de chay san - nhat la "
-        "phu de tieng nuoc ngoai khac voi ngon ngu xuat ban - hoac co logo/watermark, thi dieu do "
-        "dung cho MOI canh, vi moi canh deu cat tu video ay: hay ke no ra o tung canh. Nguoc lai, "
-        "dung bia ra thu ma phan NGUON khong nhac toi.\n"
-        "- 'needs_extra_visual' + 'extra_visual_note': dat true khi canh nay thieu hinh minh hoa - vi du "
-        "loi thoai noi ve mot thu ma video goc khong cho thay - va noi ro can them gi.\n\n"
-        "Ngoai ra tra ve 'pacing' (nhip tong the) va 'music_mood' (khong khi nhac nen) cho ca video."
+        segment["duration_seconds"] = segment["_speech_timing"]["duration_seconds"]
+    lines = _edit_plan_input_lines(
+        project, source_video, source_analysis, render_settings, timeline, workflow_key
     )
+    available_assets = database.list_project_assets(project_id)
+    lines.append("ASSETS CO SAN: " + json.dumps([
+        {"asset_id": item["id"], "name": Path(str(item.get("file_path") or "")).name,
+         "kind": item.get("asset_type", "")}
+        for item in available_assets if Path(str(item.get("file_path") or "")).is_file()
+    ], ensure_ascii=False))
+    system_prompt = _edit_plan_workflow_instructions(workflow_key, motion_policy)
     try:
-        result = _call_orchestrator_json(system_prompt, "\n".join(lines), _EDIT_PLAN_SCHEMA, stage="storyboard")
+        result = _call_orchestrator_json(
+            system_prompt, "\n".join(lines), _EDIT_PLAN_SCHEMA,
+            stage="storyboard", project_id=project_id, step="Kế hoạch dựng (AI Đạo diễn)",
+        )
+        planner_error = ""
+        # Which side made this plan is the difference between an AI-directed
+        # edit and a template, and only this function can still tell them
+        # apart - by the time it is saved, both are the same shape.
+        planned_by = "ai"
+        if plan_is_flat(result.get("scenes") or [], timeline):
+            # Asked once more, saying plainly what was missing. One retry, not
+            # a loop: this call costs minutes, and a planner that answers flat
+            # twice is answering, not failing.
+            retried = _call_orchestrator_json(
+                system_prompt, "\n".join(lines) + _ASK_FOR_AN_EDIT, _EDIT_PLAN_SCHEMA,
+                stage="storyboard", project_id=project_id,
+                step="Kế hoạch dựng (hỏi lại vì không có nhịp)",
+            )
+            if not plan_is_flat(retried.get("scenes") or [], timeline):
+                result = retried
     except LlmError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        result = {
+            "pacing": "fallback",
+            "music_mood": "",
+            "scenes": [
+                _fallback_scene_transform(segment, workflow_key, motion_policy)
+                for segment in timeline
+            ],
+        }
+        planner_error = str(exc)
+        planned_by = "fallback"
 
     # The planner is asked about the source's own marks, but it is asked in
     # words - it holds the scene's dialogue and a sentence of style, never a
@@ -3914,40 +5979,39 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
         segment = by_index.get(int(entry.get("segment_index") or -1))
         if not segment:
             continue
+        if (
+            (workflow_key == "reup" or str(segment.get("asset_type") or "") == "source_clip")
+            and str(entry.get("visual_strategy") or "").strip() not in _VISUAL_STRATEGIES
+        ):
+            fallback = _fallback_scene_transform(segment, workflow_key, motion_policy)
+            entry = {**fallback, **entry}
         transition = str(entry.get("transition") or "fade")
         effect = str(entry.get("effect") or "zoom_in")
-        cleanups = measured or [
+        kind = str(entry.get("kind") or "image")
+        if motion_policy == "gif_only" and kind == "video":
+            kind = "gif"
+        fps = int(entry.get("fps") or 0) if kind in {"gif", "video"} else 0
+        uses_source_visual = str(entry.get("visual_strategy") or "").strip() in {"source_clip_short", "source_freeze_frame"}
+        cleanups = (measured if (workflow_key == "reup" or uses_source_visual) else []) or [
             item for item in (entry.get("cleanups") or []) if isinstance(item, dict)
         ]
-        database.save_segment_edit(
-            int(segment["id"]), transition, effect, str(entry.get("note") or ""),
-            trim_head_seconds=float(entry.get("trim_head_seconds") or 0),
-            trim_tail_seconds=float(entry.get("trim_tail_seconds") or 0),
-            cleanups=cleanups,
-        )
-        # A scene short of pictures is a storyboard fact, not an edit one: the
-        # storyboard is where what-is-on-screen is decided, and its cards
-        # already carry the controls to draw or attach a visual. Reported only
-        # in the edit-plan table, the note was a dead end - nothing could act
-        # on it. Send it back to the card it belongs to.
         needs_visual = bool(entry.get("needs_extra_visual"))
         extra_note = str(entry.get("extra_visual_note") or "").strip()
-        if segment.get("shot_id"):
-            shot = database.get_project_shot(int(segment["shot_id"]))
-            if shot and needs_visual:
-                database.update_project_shot(
-                    int(segment["shot_id"]),
-                    visual_prompt=extra_note or str(shot["visual_prompt"] or ""),
-                    status="needs_visual",
-                )
-            elif shot and str(shot["status"] or "") == "needs_visual":
-                # The plan no longer asks for it. Only this one status is
-                # withdrawn - a card someone has since filled in keeps its own.
-                database.update_project_shot(int(segment["shot_id"]), status="planned")
+        try:
+            transform = _normalise_visual_transform_fields(entry, segment)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Kế hoạch đồ họa cảnh {segment['segment_index']} không hợp lệ: {exc}",
+            ) from exc
         planned.append({
             "segment_id": segment["id"],
             "shot_id": segment.get("shot_id"),
             "segment_index": segment["segment_index"],
+            "kind": kind,
+            "fps": max(0, min(fps, 60)),
+            "reason": str(entry.get("reason") or ""),
+            **transform,
             "transition": transition,
             "effect": effect,
             "note": str(entry.get("note") or ""),
@@ -3957,12 +6021,362 @@ def plan_project_edit(project_id: int) -> dict[str, Any]:
             "needs_extra_visual": needs_visual,
             "extra_visual_note": extra_note,
         })
-    return {
-        "status": "planned",
+    proposal = {
+        "motion_policy": motion_policy,
+        "workflow": workflow_key,
         "pacing": str(result.get("pacing") or ""),
         "music_mood": str(result.get("music_mood") or ""),
+        "planner_error": planner_error,
+        "planned_by": planned_by,
+        "is_fallback": planned_by == "fallback",
         "scenes": planned,
     }
+    if planned_by == "fallback":
+        _record_orchestrator_step(
+            project_id=project_id, stage="storyboard", step="Kế hoạch dựng (bản dự phòng)",
+            status="fallback", runtime="app_template", fallback_used=True,
+            why="AI lập kế hoạch thất bại nên app dùng mẫu dựng sẵn",
+            output_ref=f"{len(planned)} cảnh theo mẫu", error=planner_error,
+        )
+    saved = database.save_project_edit_plan(
+        project_id,
+        int(script["id"]),
+        _edit_plan_source_revision(script, database.list_project_timeline(project_id, script_id=int(script["id"]))),
+        proposal,
+        status="draft",
+    )
+    return {
+        **proposal,
+        "id": saved["id"] if saved else None,
+        "status": "draft",
+        "source_revision": saved["source_revision"] if saved else "",
+        "stale": False,
+    }
+
+
+@app.post("/api/projects/{project_id}/edit-plan/approve")
+def approve_project_edit_plan(project_id: int) -> dict[str, Any]:
+    plan = _current_project_edit_plan(project_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Chưa có kế hoạch dựng để duyệt")
+    if plan.get("status") == "stale":
+        raise HTTPException(status_code=409, detail="Kế hoạch đã lỗi thời; hãy lập lại trước khi duyệt")
+    if plan.get("status") != "draft":
+        raise HTTPException(status_code=409, detail="Chỉ có thể duyệt kế hoạch đang ở trạng thái bản nháp")
+    timeline = database.list_project_timeline(project_id, script_id=int(plan["script_id"]))
+    durations = {int(item["id"]): max(0.1, float(item.get("duration_seconds") or 1)) for item in timeline}
+    for scene in (plan.get("plan") or {}).get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        duration = durations.get(int(scene.get("segment_id") or 0))
+        if duration is None:
+            continue
+        try:
+            normalize_graphic_overlays(scene.get("overlays") or [], duration)
+            direction = scene.get("direction") or {}
+            normalize_direction(direction, float(direction.get("duration_seconds") or duration))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Overlay cảnh {scene.get('segment_index')} không hợp lệ: {exc}") from exc
+    approved = database.set_project_edit_plan_status(int(plan["id"]), "approved")
+    return {"status": "approved", "plan": approved}
+
+
+@app.patch("/api/projects/{project_id}/edit-plan/scenes/{segment_id}")
+def update_project_edit_plan_scene(
+    project_id: int,
+    segment_id: int,
+    payload: UpdateScenePlanRequest,
+) -> dict[str, Any]:
+    plan = _current_project_edit_plan(project_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Chưa có kế hoạch dựng")
+    if plan.get("status") != "draft":
+        raise HTTPException(status_code=409, detail="Chỉ sửa được kế hoạch đang ở trạng thái bản nháp")
+    proposal = dict(plan.get("plan") or {})
+    scenes = [dict(item) for item in (proposal.get("scenes") or []) if isinstance(item, dict)]
+    scene = next((item for item in scenes if int(item.get("segment_id") or 0) == segment_id), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Cảnh không nằm trong kế hoạch dựng")
+    changes = payload.model_dump(exclude_none=True)
+    if "overlays" in changes or "direction" in changes or "sound_cues" in changes:
+        timeline = database.list_project_timeline(project_id, script_id=int(plan["script_id"]))
+        segment = next((item for item in timeline if int(item["id"]) == segment_id), None)
+        if not segment:
+            raise HTTPException(status_code=404, detail="Không tìm thấy cảnh trong timeline")
+        duration = max(0.1, float(segment.get("duration_seconds") or 1))
+        try:
+            if "overlays" in changes:
+                changes["overlays"] = normalize_graphic_overlays(changes["overlays"], duration)
+            if "direction" in changes:
+                measured = scene.get("direction", {}).get("duration_seconds") or duration
+                changes["direction"] = normalize_direction(changes["direction"], measured)
+            if "sound_cues" in changes:
+                changes["sound_cues"] = _normalise_sound_cues(changes["sound_cues"], duration)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Overlay không hợp lệ: {exc}") from exc
+    if "visual_kind" in changes:
+        scene["kind"] = changes.pop("visual_kind")
+    if "visual_fps" in changes:
+        scene["fps"] = changes.pop("visual_fps")
+    if "visual_provider" in changes:
+        scene["provider"] = changes.pop("visual_provider")
+    scene.update(changes)
+    proposal["scenes"] = scenes
+    saved = database.save_project_edit_plan(
+        project_id,
+        int(plan["script_id"]),
+        str(plan["source_revision"]),
+        proposal,
+        status="draft",
+    )
+    return {"status": "draft", "plan": saved}
+
+
+@app.post("/api/projects/{project_id}/edit-plan/apply")
+def apply_project_edit_plan(project_id: int) -> dict[str, Any]:
+    plan = _current_project_edit_plan(project_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Chưa có kế hoạch dựng để áp dụng")
+    if plan.get("status") == "stale":
+        raise HTTPException(status_code=409, detail="Kế hoạch đã lỗi thời; hãy lập lại trước khi áp dụng")
+    if plan.get("status") != "approved":
+        raise HTTPException(status_code=409, detail="Kế hoạch phải được duyệt trước khi áp dụng")
+
+    script = database.get_project_script(int(plan["script_id"]))
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản của kế hoạch")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    try:
+        scenes = [item for item in (plan.get("plan") or {}).get("scenes") or [] if isinstance(item, dict)]
+        segments_by_id = {int(item["id"]): item for item in timeline}
+        for scene in scenes:
+            segment = segments_by_id[int(scene["segment_id"])]
+            direction = scene.get("direction") or {}
+            scene["direction"] = normalize_direction(direction, float(direction.get("duration_seconds") or segment["duration_seconds"]))
+            from .sound_effects import resolve_sound_assets
+            try:
+                scene["sound_cues"] = resolve_sound_assets(
+                    database, project_id, scene.get("sound_cues") or [], float(segment["duration_seconds"]),
+                    ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["audio"] / "sfx")
+            except ValueError as exc:
+                # A cue the library cannot supply - the planner is free to ask
+                # for an ambient bed nobody has imported - used to take the
+                # whole apply down with it, losing the transitions, camera
+                # moves and overlays that were perfectly usable. The cut is
+                # worth more than the sound it could not find.
+                scene["sound_cues"] = []
+                scene["sound_cue_warning"] = str(exc)[:300]
+            scene["compiled_beats"] = _scene_plan_to_edit_beats(segment, scene)
+        database.set_project_edit_plan_status(int(plan["id"]), "applying")
+        applied = database.apply_project_edit_plan_scenes(
+            project_id,
+            int(script["id"]),
+            scenes,
+        )
+    except Exception as exc:
+        database.set_project_edit_plan_status(int(plan["id"]), "error", error=str(exc))
+        raise
+
+    refreshed_timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    edit_beats_created = sum(len(scene["compiled_beats"]) for scene in scenes)
+    refreshed_timeline = database.attach_edit_beats_to_timeline(
+        project_id, refreshed_timeline, script_id=int(script["id"])
+    )
+    ready = database.set_project_edit_plan_status(
+        int(plan["id"]),
+        "ready",
+        source_revision=_edit_plan_source_revision(script, refreshed_timeline),
+    )
+    required_jobs = _storyboard_required_jobs_from_timeline(refreshed_timeline)
+    return {
+        "status": "ready",
+        "applied_scenes": applied,
+        "edit_beats_created": edit_beats_created,
+        "plan": ready,
+        "required_jobs": required_jobs,
+        "required_jobs_count": len(required_jobs),
+    }
+
+
+def _render_readiness(project_id: int) -> dict[str, Any]:
+    """Report only facts that determine whether the current timeline renders.
+
+    This deliberately has no dependency on the retired edit-plan workflow:
+    readiness is derived from the files actually attached to each scene.
+    """
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    scenes: list[dict[str, Any]] = []
+    for segment in timeline:
+        visual_path = Path(str(segment.get("visual_path") or ""))
+        audio_path = Path(str(segment.get("audio_path") or ""))
+        has_visual = visual_path.is_file()
+        has_audio = audio_path.is_file()
+        is_fallback = str(segment.get("asset_type") or "") == "fallback"
+        is_draft = "director_draft_visuals" in str(visual_path).replace("\\", "/").lower()
+        scenes.append({
+            "segment_id": segment["id"],
+            "segment_index": segment["segment_index"],
+            "has_visual": has_visual,
+            "has_audio": has_audio,
+            "fallback": is_fallback,
+            "draft_visual": is_draft,
+            "ready": has_visual and has_audio and not is_draft,
+        })
+    missing_visual = sum(not item["has_visual"] for item in scenes)
+    missing_audio = sum(not item["has_audio"] for item in scenes)
+    draft_visual = sum(item["draft_visual"] for item in scenes)
+    fallback = sum(item["fallback"] for item in scenes)
+    creative_scenes = []
+    for segment in timeline:
+        overlays = _json_list_field(segment.get("overlays"))
+        sound_cues = _json_list_field(segment.get("sound_cues"))
+        effect = str(segment.get("edit_effect") or "").strip()
+        transition = str(segment.get("edit_transition") or "").strip()
+        required_assets = _json_list_field(segment.get("required_assets"))
+        visual_strategy = str(segment.get("visual_strategy") or "").strip()
+        has_creative_layers = bool(overlays or sound_cues or effect or transition or required_assets or visual_strategy)
+        creative_scenes.append({
+            "segment_id": segment["id"],
+            "segment_index": segment["segment_index"],
+            "overlays": len(overlays),
+            "sound_cues": len(sound_cues),
+            "effect": effect,
+            "transition": transition,
+            "visual_strategy": visual_strategy,
+            "required_assets": len(required_assets),
+            "creative_ready": has_creative_layers,
+        })
+    creative_ready_count = sum(item["creative_ready"] for item in creative_scenes)
+    missing_creative = len(creative_scenes) - creative_ready_count
+    issues = []
+    if missing_visual:
+        issues.append(f"{missing_visual} cảnh thiếu hình")
+    if missing_audio:
+        issues.append(f"{missing_audio} cảnh thiếu tiếng")
+    if draft_visual:
+        issues.append(f"{draft_visual} cảnh còn dùng visual nháp")
+    creative_issues = []
+    if missing_creative:
+        creative_issues.append(f"{missing_creative} cảnh chưa có kế hoạch dựng sáng tạo")
+    return {
+        "status": "ready" if not issues else "needs_attention",
+        "total": len(scenes),
+        "ready": sum(item["ready"] for item in scenes),
+        "missing_visual": missing_visual,
+        "missing_audio": missing_audio,
+        "draft_visual": draft_visual,
+        "fallback": fallback,
+        "can_render": bool(scenes) and not missing_visual and not missing_audio and not draft_visual,
+        "creative_status": "ready" if creative_scenes and not missing_creative else "needs_edit_plan",
+        "creative_ready": bool(creative_scenes) and not missing_creative,
+        "creative_ready_count": creative_ready_count,
+        "missing_creative": missing_creative,
+        "creative_issues": creative_issues,
+        "issues": issues,
+        "required_jobs": _storyboard_required_jobs_from_timeline(timeline),
+        "scenes": scenes,
+        "creative_scenes": creative_scenes,
+    }
+
+
+def _edit_preflight(project_id: int) -> dict[str, Any]:
+    """Compatibility alias for integrations using the former function name."""
+    return _render_readiness(project_id)
+
+
+@app.get("/api/projects/{project_id}/render-readiness")
+def get_project_render_readiness(project_id: int) -> dict[str, Any]:
+    return _render_readiness(project_id)
+
+
+@app.get("/api/projects/{project_id}/edit-plan/preflight")
+def get_project_edit_preflight(project_id: int) -> dict[str, Any]:
+    """Backward-compatible route; the active app uses render-readiness."""
+    return _render_readiness(project_id)
+
+
+@app.get("/api/projects/{project_id}/storyboard/required-jobs")
+def list_project_storyboard_required_jobs(project_id: int) -> dict[str, Any]:
+    project = database.get_production_project(project_id)
+    script = database.get_latest_project_script(project_id)
+    if not project or not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    jobs = _storyboard_required_jobs_from_timeline(timeline)
+    return {"status": "ok", "total": len(jobs), "required_jobs": jobs}
+
+
+@app.post("/api/projects/{project_id}/edit-plan/fallback")
+def apply_project_visual_fallbacks(
+    project_id: int,
+    payload: ApplyVisualFallbackRequest,
+) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Cần confirmed=true để tạo hình dự phòng")
+    if not ffmpeg_available(FFMPEG_BINARY):
+        raise HTTPException(status_code=400, detail="Không tìm thấy FFmpeg để tạo hình dự phòng")
+    script = database.get_latest_project_script(project_id)
+    if not script:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    missing = [item for item in timeline if not Path(str(item.get("visual_path") or "")).is_file()]
+    if not missing:
+        return {"status": "unchanged", "applied": 0, "preflight": _edit_preflight(project_id)}
+    output = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "fallback-background.png"
+    if not output.is_file():
+        result = subprocess.run(
+            [
+                FFMPEG_BINARY, "-y", "-f", "lavfi", "-i",
+                "color=c=0x111827:s=1280x720", "-frames:v", "1", str(output),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0 or not output.is_file():
+            raise HTTPException(status_code=500, detail="Không tạo được hình dự phòng bằng FFmpeg")
+    for segment in missing:
+        database.update_project_timeline_segment(
+            int(segment["id"]),
+            visual_path=str(output),
+            asset_type="fallback",
+        )
+    plan = database.get_project_edit_plan(project_id, int(script["id"]))
+    if plan and plan.get("status") == "ready":
+        refreshed = database.list_project_timeline(project_id, script_id=int(script["id"]))
+        database.set_project_edit_plan_status(
+            int(plan["id"]),
+            "ready",
+            source_revision=_edit_plan_source_revision(script, refreshed),
+        )
+    return {"status": "applied", "applied": len(missing), "preflight": _edit_preflight(project_id)}
+
+
+@app.post("/api/projects/{project_id}/timeline/{segment_id}/edit-preview")
+def render_timeline_segment_preview(project_id: int, segment_id: int) -> FileResponse:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment or int(segment.get("project_id") or 0) != project_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    if not Path(str(segment.get("visual_path") or "")).is_file():
+        raise HTTPException(status_code=400, detail="Cảnh chưa có hình để preview")
+    work = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"] / "edit-previews" / str(segment_id)
+    try:
+        output = render_timeline_with_ffmpeg(
+            database.attach_edit_beats_to_timeline(project_id, [segment]),
+            work,
+            output_filename="preview.mp4",
+            binary=FFMPEG_BINARY,
+            width=640,
+            height=360,
+            fit="cover",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Không dựng được preview: {exc}") from exc
+    return FileResponse(output, media_type="video/mp4", filename=f"scene-{segment.get('segment_index')}-preview.mp4")
 
 
 class OrchestrateRequest(BaseModel):
@@ -3970,6 +6384,17 @@ class OrchestrateRequest(BaseModel):
     # Costly steps stay behind an explicit confirmation: the plan is shown
     # first so nothing spends generation quota before it has been read.
     dry_run: bool = True
+    # "plan": one model call proposes a tool list, run once (the page's
+    # button). "agent": an agent works the goal over the app's tools, reads
+    # every result, changes approach when something fails, and the app checks
+    # the project before calling it done.
+    mode: Literal["plan", "agent"] = "plan"
+    target_steps: list[str] = Field(default_factory=list, max_length=12)
+    allow_spend: bool = False
+    # `force` rebuilds over what exists, possibly after a person edited it.
+    allow_overwrite: bool = False
+    max_rounds: int = Field(default=4, ge=1, le=8)
+    tool_budget: int = Field(default=40, ge=5, le=120)
 
 
 # The orchestrator's tools, as data rather than a hand-written enum.
@@ -4004,6 +6429,22 @@ _ORCHESTRATOR_TOOLS: dict[str, dict[str, str]] = {
         "description": "Lap ke hoach dung phim tung canh: cat hay mo, day vao / keo lui / dung yen.",
         "args": "khong co",
         "cost": "mien phi (chi goi AI dieu phoi)",
+    },
+    "plan_scene_edits": {
+        "description": (
+            "Lap ke hoach dung CHI TIET cho tung scene: visual beats, chu dong hien/an, "
+            "graphic overlay va sound cues. Day la buoc chinh de edit chuyen nghiep truoc render."
+        ),
+        "args": "limit (tuy chon): so canh toi da; max_beats (tuy chon): 1-8",
+        "cost": "mien phi (chi goi AI dieu phoi), chua tao asset AI",
+    },
+    "apply_scene_edits": {
+        "description": (
+            "Ap dung ke hoach dung chi tiet da lap: trich frame, tao preset SFX, "
+            "queue anh AI phu neu co beat ai_image."
+        ),
+        "args": "limit (tuy chon): so canh toi da; image_provider (tuy chon, mac dinh auto)",
+        "cost": "co the ton quota neu can tao anh AI phu",
     },
     "create_scene_jobs": {
         "description": (
@@ -4063,6 +6504,8 @@ _ORCHESTRATE_SCHEMA = {
                     "tool": {"type": "string", "enum": sorted(_ORCHESTRATOR_TOOLS)},
                     "kind": {"type": "string"},
                     "motion_policy": {"type": "string"},
+                    "max_beats": {"type": "integer"},
+                    "image_provider": {"type": "string"},
                     "job_id": {"type": "integer"},
                     "limit": {"type": "integer"},
                     "providers": {"type": "array", "items": {"type": "string"}},
@@ -4084,6 +6527,7 @@ def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, A
         timeline = database.list_project_timeline(
             project_id, script_id=int(script["id"]) if script else None
         )
+        timeline = database.attach_edit_beats_to_timeline(project_id, timeline)
         return {
             "status": "ok",
             "scenes": [
@@ -4092,6 +6536,9 @@ def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, A
                     "visual_kind": segment.get("visual_kind") or "",
                     "has_visual": bool(str(segment.get("visual_path") or "").strip()),
                     "edit_transition": segment.get("edit_transition") or "",
+                    "edit_beats": len(segment.get("edit_beats") or []),
+                    "overlays": len(_json_list_field(segment.get("overlays"))),
+                    "sound_cues": len(_json_list_field(segment.get("sound_cues"))),
                 }
                 for segment in timeline
             ],
@@ -4101,6 +6548,71 @@ def _run_orchestrator_tool(project_id: int, step: dict[str, Any]) -> dict[str, A
         return plan_timeline_visuals(project_id, motion_policy=policy)
     if tool == "plan_edit":
         return plan_project_edit(project_id)
+    if tool == "plan_scene_edits":
+        script = database.get_latest_project_script(project_id)
+        timeline = database.list_project_timeline(
+            project_id, script_id=int(script["id"]) if script else None
+        )
+        limit = max(0, min(int(step.get("limit") or 0), 500))
+        max_beats = max(1, min(int(step.get("max_beats") or 4), 8))
+        selected = timeline[:limit] if limit else timeline
+        results: list[dict[str, Any]] = []
+        for segment in selected:
+            try:
+                results.append(plan_timeline_edit_beats(
+                    int(segment["id"]),
+                    PlanEditBeatsRequest(max_beats=max_beats),
+                ))
+            except HTTPException as exc:
+                results.append({
+                    "status": "error",
+                    "segment_id": int(segment["id"]),
+                    "detail": str(exc.detail),
+                })
+        return {
+            "status": "planned",
+            "planned": sum(1 for item in results if item.get("status") == "planned"),
+            "failed": sum(1 for item in results if item.get("status") == "error"),
+            "results": results,
+        }
+    if tool == "apply_scene_edits":
+        script = database.get_latest_project_script(project_id)
+        timeline = database.list_project_timeline(
+            project_id, script_id=int(script["id"]) if script else None
+        )
+        limit = max(0, min(int(step.get("limit") or 0), 500))
+        selected = timeline[:limit] if limit else timeline
+        provider = str(step.get("image_provider") or "auto").strip()
+        if provider == "auto":
+            try:
+                route = scene_provider_gateway.route(
+                    SCENE_IMAGE,
+                    provider_states=_provider_runtime_states(),
+                    policy=_billing_route_policy(),
+                )
+                provider = route.selected.key
+            except Exception as exc:
+                return {"status": "error", "detail": f"Auto không chọn được image provider: {exc}"}
+        results = []
+        for segment in selected:
+            try:
+                results.append(apply_timeline_edit_beats(
+                    int(segment["id"]),
+                    ApplyEditBeatsRequest(image_provider=provider, confirmed=True),
+                ))
+            except HTTPException as exc:
+                results.append({
+                    "status": "error",
+                    "segment_id": int(segment["id"]),
+                    "detail": str(exc.detail),
+                })
+        return {
+            "status": "applied",
+            "provider": provider,
+            "applied": sum(1 for item in results if item.get("status") in {"ready", "generating"}),
+            "failed": sum(1 for item in results if item.get("status") == "error"),
+            "results": results,
+        }
     if tool == "cancel_pending_jobs":
         return cancel_pending_scene_jobs(project_id)
     if tool == "review_scene":
@@ -4171,6 +6683,52 @@ def _project_state_summary(project_id: int) -> str:
     )
 
 
+def _queue_orchestrator_goal(project_id: int, payload: OrchestrateRequest) -> dict[str, Any]:
+    """Hand a goal to an orchestrating agent through the existing task queue.
+
+    It can take many minutes, so it runs on the agent worker rather than inside
+    this request; the caller follows the task and the step log.
+    """
+    targets = [str(name).strip().lower() for name in payload.target_steps if str(name).strip()]
+    unknown = [name for name in targets if steps.get(name) is None]
+    if not targets or unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Chế độ agent cần target_steps: các bước phải đạt để coi là xong, "
+                f"chọn trong {', '.join(steps.STEP_KEYS)}"
+                + (f". Không có bước: {', '.join(unknown)}" if unknown else "")
+            ),
+        )
+    task = database.create_agent_task(
+        project_id,
+        ORCHESTRATOR_ROLE,
+        "orchestrate.goal",
+        {
+            "goal": payload.intent.strip(),
+            "target_steps": targets,
+            "allow_spend": bool(payload.allow_spend),
+            "allow_overwrite": bool(payload.allow_overwrite),
+            "max_rounds": int(payload.max_rounds),
+            "tool_budget": int(payload.tool_budget),
+        },
+        requested_by="user",
+        assigned_agent="",
+        max_attempts=1,
+    )
+    agent_task_worker.enqueue(str(task["id"]))
+    return {
+        "status": "queued",
+        "mode": "agent",
+        "task": task,
+        "follow": {
+            "task": f"/api/agent-tasks/{task['id']}",
+            "steps": f"/api/projects/{project_id}/steps",
+            "log": f"/api/projects/{project_id}/orchestrator-report",
+        },
+    }
+
+
 @app.post("/api/projects/{project_id}/orchestrate")
 def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[str, Any]:
     """Turns a plain-language request into an ordered run of the app's tools.
@@ -4184,6 +6742,8 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
     """
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    if payload.mode == "agent":
+        return _queue_orchestrator_goal(project_id, payload)
 
     catalogue = "\n".join(
         f"- {name}: {spec['description']}\n  Tham so: {spec['args']}\n  Chi phi: {spec['cost']}"
@@ -4197,6 +6757,8 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         "mot quy trinh co san. Neu can biet ro hon truoc khi quyet dinh, goi 'read_scenes' truoc.\n\n"
         "NGUYEN TAC:\n"
         "- Khong tao lai thu da co va dang dung duoc.\n"
+        "- Neu nguoi dung muon edit chuyen nghiep, chu dong hien/an, hieu ung do hoa hoac SFX: "
+        "goi 'plan_scene_edits' truoc; sau khi da xem/chap nhan thi goi 'apply_scene_edits'.\n"
         "- Chua co ke hoach loai hinh ma nguoi dung muon tao hang loat: goi 'plan_scene_kinds' truoc.\n"
         "- Chi tao video khi that su can vi no TON TIEN. Neu nguoi dung muon GIF thay video: "
         "'plan_scene_kinds' voi motion_policy='gif_only', roi 'create_scene_jobs' voi kind='gif'.\n"
@@ -4214,7 +6776,10 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
         f"TINH TRANG DU AN:\n{_project_state_summary(project_id)}"
     )
     try:
-        result = _call_orchestrator_json(system_prompt, user_prompt, _ORCHESTRATE_SCHEMA)
+        result = _call_orchestrator_json(
+            system_prompt, user_prompt, _ORCHESTRATE_SCHEMA,
+            project_id=project_id, step="Điều phối theo yêu cầu người dùng",
+        )
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -4224,7 +6789,7 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
             "reason": str(step.get("reason") or ""),
             **{
                 key: step[key]
-                for key in ("kind", "motion_policy", "job_id", "limit", "providers")
+                for key in ("kind", "motion_policy", "max_beats", "image_provider", "job_id", "limit", "providers")
                 if step.get(key) not in (None, "", [])
             },
         }
@@ -4451,6 +7016,14 @@ def _require_scene_provider_config(provider: str) -> None:
             raise HTTPException(status_code=400, detail="Chưa cài gflow-cli; mở Kết nối AI để cài/kiểm tra lại")
         if not gflow.get("logged_in"):
             raise HTTPException(status_code=400, detail="Google Flow chưa đăng nhập; mở Kết nối AI và bấm Đăng nhập Google Flow")
+    elif provider in {"phantom_canvas_image", "phantom_canvas_video"}:
+        phantom = phantom_canvas_bridge.status()
+        if not phantom.get("ready"):
+            raise HTTPException(
+                status_code=400,
+                detail=(str(phantom.get("detail") or "Phantom Canvas chưa chạy")
+                        + " Mở Kết nối AI và bấm ‘Chạy Phantom Canvas’, rồi thử lại."),
+            )
 
 
 _SCENE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -4571,6 +7144,372 @@ def _record_scene_job_estimate(job: dict[str, Any] | None, *, reason: str = "que
     )
 
 
+_EDIT_BEATS_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "beats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_kind": {"type": "string", "enum": ["primary", "source_frame", "ai_image"]},
+                    "duration_seconds": {"type": "number"},
+                    "effect": {"type": "string", "enum": ["static", "zoom_in", "zoom_out"]},
+                    "sound_cues": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["whoosh", "pop", "hit", "ambient", "music_duck"]},
+                                "start_seconds": {"type": "number"},
+                                "end_seconds": {"type": "number"},
+                                "intensity": {"type": "string", "enum": ["low", "medium", "high"]},
+                                "asset_id": {"type": "integer"},
+                                "asset_path": {"type": "string"},
+                                "reason": {"type": "string"}
+                            },
+                            "required": ["type", "start_seconds", "end_seconds"],
+                        },
+                    },
+                    "transition": {"type": "string", "enum": ["cut", "fade"]},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["source_kind", "duration_seconds", "effect", "transition", "prompt"],
+            },
+        },
+        "overlays": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["title", "callout", "label", "text"]},
+                    "text": {"type": "string"},
+                    "position": {"type": "string", "enum": ["top_left", "top_center", "top_right", "center"]},
+                    "style": {"type": "string", "enum": ["clean", "neon", "card"]},
+                    "animation": {"type": "string", "enum": ["fade", "pop", "slide_up"]},
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["kind", "text", "position", "style", "animation", "start_seconds", "end_seconds"],
+            },
+        },
+        "sound_cues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["whoosh", "pop", "hit", "ambient", "music_duck"]},
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "intensity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "asset_id": {"type": "integer"},
+                    "asset_path": {"type": "string"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["type", "start_seconds", "end_seconds"],
+            },
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["beats", "reason"],
+}
+
+
+def _normalise_scene_edit_beats(
+    segment: dict[str, Any], raw_beats: list[dict[str, Any]], max_beats: int
+) -> list[dict[str, Any]]:
+    duration = max(0.15, float(segment.get("duration_seconds") or 1))
+    visual_path = str(segment.get("visual_path") or "").strip()
+    cleaned: list[dict[str, Any]] = []
+    for raw in raw_beats[:max_beats]:
+        kind = str(raw.get("source_kind") or "primary")
+        if kind not in {"primary", "source_frame", "ai_image"}:
+            kind = "primary"
+        effect = str(raw.get("effect") or "static")
+        transition = str(raw.get("transition") or "cut")
+        cleaned.append({
+            "source_kind": kind,
+            "visual_path": visual_path if kind in {"primary", "source_frame"} else "",
+            "duration_seconds": max(0.15, float(raw.get("duration_seconds") or 1)),
+            "effect": effect if effect in {"static", "zoom_in", "zoom_out"} else "static",
+            "transition": transition if transition in {"cut", "fade"} else "cut",
+            "prompt": str(raw.get("prompt") or "").strip()[:5000],
+            "status": "ready" if kind == "primary" and visual_path else "needs_asset",
+        })
+    if not cleaned:
+        cleaned = [{
+            "source_kind": "primary",
+            "visual_path": visual_path,
+            "duration_seconds": duration,
+            "effect": "static",
+            "transition": "cut",
+            "prompt": "",
+            "status": "ready" if visual_path else "needs_asset",
+        }]
+    total_weight = sum(float(item["duration_seconds"]) for item in cleaned) or 1.0
+    elapsed = 0.0
+    for index, item in enumerate(cleaned):
+        if index == len(cleaned) - 1:
+            item["duration_seconds"] = round(max(0.15, duration - elapsed), 3)
+        else:
+            value = round(max(0.15, duration * float(item["duration_seconds"]) / total_weight), 3)
+            remaining_minimum = 0.15 * (len(cleaned) - index - 1)
+            value = min(value, max(0.15, duration - elapsed - remaining_minimum))
+            item["duration_seconds"] = value
+            elapsed += value
+    # The renderer expects one exact timeline, including very short scenes.
+    delta = duration - sum(float(item["duration_seconds"]) for item in cleaned)
+    cleaned[-1]["duration_seconds"] = round(float(cleaned[-1]["duration_seconds"]) + delta, 3)
+    return cleaned
+
+
+def _short_overlay_text(segment: dict[str, Any], limit: int = 72) -> str:
+    text = " ".join(str(segment.get("voice_text") or segment.get("visual_prompt") or "").split())
+    if not text:
+        return ""
+    text = text.strip(" .,:;!?-")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].strip(" .,:;!?-") or text[:limit].strip()
+
+
+def _fallback_storyboard_edit_layers(segment: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    duration = max(0.15, float(segment.get("duration_seconds") or 1))
+    text = _short_overlay_text(segment)
+    if not text or duration < 1.2:
+        return [], []
+    overlay = {
+        "kind": "callout",
+        "text": text,
+        "position": "top_center",
+        "style": "card",
+        "animation": "pop",
+        "start_seconds": 0.2,
+        "end_seconds": round(min(duration, max(1.2, min(2.8, duration * 0.55))), 3),
+        "reason": "Nhấn ý chính của cảnh bằng chữ động.",
+    }
+    cue = {
+        "type": "whoosh",
+        "start_seconds": 0.2,
+        "end_seconds": round(min(duration, 0.75), 3),
+        "intensity": "low",
+        "reason": "Đệm nhẹ cho chữ xuất hiện.",
+    }
+    return [overlay], [cue]
+
+
+def _normalise_storyboard_edit_layers(
+    segment: dict[str, Any],
+    plan_result: dict[str, Any],
+    *,
+    force_fallback: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    duration = max(0.15, float(segment.get("duration_seconds") or 1))
+    raw_overlays = plan_result.get("overlays") if isinstance(plan_result, dict) else []
+    raw_sound_cues = plan_result.get("sound_cues") if isinstance(plan_result, dict) else []
+    if force_fallback:
+        raw_overlays, raw_sound_cues = _fallback_storyboard_edit_layers(segment)
+    warning = ""
+    try:
+        overlays = normalize_graphic_overlays(raw_overlays or [], duration)
+    except ValueError as exc:
+        overlays = []
+        warning = f"Overlay AI không hợp lệ: {exc}"
+    try:
+        sound_cues = _normalise_sound_cues(raw_sound_cues or [], duration)
+    except ValueError as exc:
+        sound_cues = []
+        warning = f"{warning}; " if warning else ""
+        warning += f"SFX AI không hợp lệ: {exc}"
+    return overlays, sound_cues, warning
+
+
+@app.post("/api/timeline/{segment_id}/edit-beats/plan")
+def plan_timeline_edit_beats(segment_id: int, payload: PlanEditBeatsRequest) -> dict[str, Any]:
+    """Use the storyboard AI to design the edit inside one narrated scene."""
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh storyboard")
+    duration = float(segment.get("duration_seconds") or 1)
+    system_prompt = (
+        "Ban la editor video. Hay chia MOT canh storyboard thanh cac nhip hinh lien tuc de minh hoa loi doc. "
+        "Dung primary cho clip goc, source_frame khi can dong bang mot khoanh khac, ai_image chi khi clip goc "
+        "khong du minh hoa. Tong duration_seconds phai bang dung thoi luong canh. Toi da mot nhip AI image de "
+        "tranh cat vu qua day. Prompt ai_image viet bang tieng Anh, cu the, khong chen chu. "
+        "Ngoai beats, lap them overlays va sound_cues cap canh neu can tao cam giac dung chuyen nghiep: "
+        "overlays la 0-2 lop chu ngan nhu title/callout/label/text, co style clean/neon/card, "
+        "animation fade/pop/slide_up, thoi diem start/end nam trong canh. "
+        "sound_cues la whoosh/pop/hit/music_duck ngan de nhan nhip chu, chuyen canh hoac CTA; dung tiet che. "
+        "Khong giai thich ngoai JSON."
+    )
+    user_prompt = (
+        f"Thoi luong: {duration:.3f} giay; toi da {payload.max_beats} nhip.\n"
+        f"Loi AI doc: {str(segment.get('voice_text') or '')[:3000]}\n"
+        f"Mo ta hinh: {str(segment.get('visual_prompt') or '')[:3000]}\n"
+        f"Clip goc hien co: {'co' if str(segment.get('visual_path') or '').strip() else 'khong'}."
+    )
+    ai_error = ""
+    result: dict[str, Any] = {}
+    force_layer_fallback = False
+    try:
+        result = _call_orchestrator_json(
+            system_prompt, user_prompt, _EDIT_BEATS_PLAN_SCHEMA, stage="storyboard",
+            project_id=int(segment.get("project_id") or 0) or None,
+            step=f"Nhịp dựng cảnh {segment.get('segment_index')}",
+        )
+        raw_beats = [dict(item) for item in (result.get("beats") or []) if isinstance(item, dict)]
+        reason = str(result.get("reason") or "AI đã lập kế hoạch cho cảnh.")
+        planned_by = "ai"
+    except LlmError as exc:
+        ai_error = str(exc)
+        force_layer_fallback = True
+        planned_by = "fallback"
+        raw_beats = [{
+            "source_kind": "primary",
+            "duration_seconds": duration,
+            "effect": "zoom_in",
+            "transition": "cut",
+            "prompt": "",
+        }]
+        reason = "AI lập kế hoạch tạm thời không phản hồi; đã giữ clip gốc an toàn để bạn vẫn tiếp tục dựng."
+    cleaned_beats = _normalise_scene_edit_beats(segment, raw_beats, payload.max_beats)
+    overlays, sound_cues, layer_warning = _normalise_storyboard_edit_layers(
+        segment, result, force_fallback=force_layer_fallback,
+    )
+    first = cleaned_beats[0] if cleaned_beats else {}
+    database.save_segment_edit(
+        segment_id,
+        str(first.get("transition") or "cut"),
+        str(first.get("effect") or "static"),
+        reason[:400],
+    )
+    database.save_segment_edit_layers(segment_id, overlays=overlays, sound_cues=sound_cues)
+    beats = database.replace_timeline_edit_beats(
+        segment_id, cleaned_beats
+    )
+    if layer_warning:
+        ai_error = f"{ai_error}; {layer_warning}" if ai_error else layer_warning
+    if planned_by == "fallback":
+        _record_orchestrator_step(
+            project_id=int(segment.get("project_id") or 0) or None, stage="storyboard",
+            step=f"Nhịp dựng cảnh {segment.get('segment_index')} (bản dự phòng)",
+            status="fallback", runtime="app_template", fallback_used=True,
+            why="AI lập nhịp dựng thất bại nên app giữ nguyên clip gốc",
+            output_ref=f"{len(beats)} nhịp", error=ai_error,
+        )
+    segment = database.get_project_timeline_segment(segment_id) or segment
+    return {
+        "status": "planned",
+        "segment": segment,
+        "beats": beats,
+        "overlays": overlays,
+        "sound_cues": sound_cues,
+        "reason": reason,
+        "ai_error": ai_error,
+        "planned_by": planned_by,
+        "is_fallback": planned_by == "fallback",
+    }
+
+
+def _queue_edit_beat_image(
+    segment: dict[str, Any], beat: dict[str, Any], provider: str, ratio: str
+) -> dict[str, Any]:
+    project_id = int(segment["project_id"])
+    for active in database.list_scene_generation_jobs(project_id, limit=500):
+        if int(active.get("edit_beat_id") or 0) == int(beat["id"]) and str(active.get("status") or "") in {"waiting", "queued", "running"}:
+            return active
+    prompt = str(beat.get("prompt") or segment.get("visual_prompt") or segment.get("voice_text") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail=f"Nhịp {beat.get('beat_index')} chưa có prompt tạo ảnh")
+    job = database.create_scene_generation_job(
+        project_id,
+        int(segment["id"]),
+        provider,
+        prompt,
+        duration_seconds=max(1, min(30, int(math.ceil(float(beat.get("duration_seconds") or 1))))),
+        ratio=ratio,
+        job_kind="image",
+        prompt_pending=False,
+        edit_beat_id=int(beat["id"]),
+    )
+    if not job:
+        raise HTTPException(status_code=400, detail="Không tạo được job cho nhịp dựng")
+    database.set_timeline_edit_beat_status(int(beat["id"]), "generating")
+    _record_scene_job_estimate(job, reason="storyboard_edit_beat")
+    if provider not in database.EXTERNAL_SIDECAR_PROVIDERS:
+        scene_generation_worker.enqueue(int(job["id"]))
+    return database.get_scene_generation_job(int(job["id"])) or job
+
+
+@app.post("/api/timeline/{segment_id}/edit-beats/{beat_index}/generate")
+def generate_edit_beat_image(segment_id: int, beat_index: int, payload: GenerateEditBeatRequest) -> dict[str, Any]:
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Tạo ảnh AI có thể dùng hạn mức; cần confirmed=true")
+    if payload.image_provider not in _IMAGE_CAPABLE_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Provider này không tạo ảnh")
+    _require_scene_provider_config(payload.image_provider)
+    segment = database.get_project_timeline_segment(segment_id)
+    beat = next((item for item in database.list_timeline_edit_beats(segment_id) if int(item.get("beat_index") or 0) == beat_index), None)
+    if not segment or not beat:
+        raise HTTPException(status_code=404, detail="Không tìm thấy nhịp dựng")
+    _enforce_provider_billing_policy(payload.image_provider, int(segment["project_id"]))
+    job = _queue_edit_beat_image(segment, beat, payload.image_provider, payload.ratio)
+    return {"status": "delegated" if payload.image_provider in database.EXTERNAL_SIDECAR_PROVIDERS else "queued", "job": job}
+
+
+@app.post("/api/timeline/{segment_id}/edit-beats/apply")
+def apply_timeline_edit_beats(segment_id: int, payload: ApplyEditBeatsRequest) -> dict[str, Any]:
+    segment = database.get_project_timeline_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cảnh storyboard")
+    beats = database.list_timeline_edit_beats(segment_id)
+    if not beats:
+        beats = database.replace_timeline_edit_beats(
+            segment_id, _normalise_scene_edit_beats(segment, [], 1)
+        )
+    needs_ai = [item for item in beats if str(item.get("source_kind") or "") == "ai_image" and not Path(str(item.get("visual_path") or "")).is_file()]
+    if needs_ai:
+        if not payload.confirmed:
+            raise HTTPException(status_code=400, detail="Kế hoạch có ảnh AI; cần confirmed=true")
+        if payload.image_provider not in _IMAGE_CAPABLE_PROVIDERS:
+            raise HTTPException(status_code=400, detail="Provider này không tạo ảnh")
+        _require_scene_provider_config(payload.image_provider)
+        _enforce_provider_billing_policy(payload.image_provider, int(segment["project_id"]))
+    extracted: list[dict[str, Any]] = []
+    queued: list[dict[str, Any]] = []
+    resolved_sound_cues: list[dict[str, Any]] = []
+    raw_sound_cues = segment.get("sound_cues") or []
+    try:
+        if isinstance(raw_sound_cues, str):
+            raw_sound_cues = json.loads(raw_sound_cues)
+        if raw_sound_cues:
+            from .sound_effects import resolve_sound_assets
+            resolved_sound_cues = resolve_sound_assets(
+                database,
+                int(segment["project_id"]),
+                raw_sound_cues,
+                max(0.15, float(segment.get("duration_seconds") or 1)),
+                ensure_project_layout(PRODUCTION_ARTIFACT_DIR, int(segment["project_id"]))["audio"] / "sfx",
+            )
+            database.save_segment_edit_layers(segment_id, sound_cues=resolved_sound_cues)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Sound cue của cảnh không hợp lệ: {exc}") from exc
+    for beat in beats:
+        kind = str(beat.get("source_kind") or "primary")
+        if kind == "source_frame" and not beat.get("asset_id"):
+            extracted.append(_extract_edit_beat_frame(segment_id, int(beat["beat_index"])))
+        elif kind == "ai_image" and not Path(str(beat.get("visual_path") or "")).is_file():
+            queued.append(_queue_edit_beat_image(segment, beat, payload.image_provider, payload.ratio))
+    return {
+        "status": "generating" if queued else "ready",
+        "extracted_count": len(extracted),
+        "queued_jobs": queued,
+        "beats": database.list_timeline_edit_beats(segment_id),
+        "sound_cues": resolved_sound_cues,
+    }
+
+
 @app.post("/api/projects/{project_id}/scene-jobs")
 def queue_scene_generation_job(
     project_id: int,
@@ -4662,6 +7601,26 @@ def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationR
         raise HTTPException(status_code=400, detail="Cần tạo timeline trước khi tạo cảnh AI")
     image_pool = [p for p in providers if p in _IMAGE_CAPABLE_PROVIDERS]
     video_pool = [p for p in providers if p in _VIDEO_CAPABLE_PROVIDERS]
+    if not video_pool and not payload.motion_as_gif:
+        # Scenes the plan calls for as video used to fall through to a still
+        # without a word, because the branch that makes video is entered only
+        # when a video provider is present. The whole film came back as
+        # stills - matching nothing the director had planned - and the first
+        # sign of it was watching the result.
+        wanted_motion = [
+            segment for segment in database.list_project_timeline(project_id, script_id=int(script["id"]))
+            if str(segment.get("visual_kind") or "") == "video"
+            and Path(str(segment.get("visual_path") or "")).suffix.lower() not in _SCENE_VIDEO_EXTENSIONS
+        ]
+        if wanted_motion:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{len(wanted_motion)} cảnh được lên kế hoạch là video, nhưng provider đang chọn "
+                    f"({', '.join(providers)}) chỉ tạo được ảnh tĩnh. Hãy thêm một provider video "
+                    f"(ví dụ gflow_cli) hoặc đổi kế hoạch các cảnh này sang ảnh."
+                ),
+            )
     active_segment_ids = {
         int(job["timeline_segment_id"])
         for job in database.list_scene_generation_jobs(project_id, limit=500)
@@ -4872,6 +7831,14 @@ def _materialize_scene_job_asset(job: dict[str, Any], asset: dict[str, Any]) -> 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+def _attach_scene_job_asset(job: dict[str, Any], asset_id: int) -> dict[str, Any] | None:
+    """Keep storyboard inserts inside their beat; ordinary jobs still replace a scene visual."""
+    beat_id = int(job.get("edit_beat_id") or 0)
+    if beat_id:
+        return database.attach_asset_to_edit_beat(beat_id, asset_id)
+    return database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
+
+
 @app.post("/api/antigravity/scene-jobs/{job_id}/complete")
 def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]:
     job = database.get_scene_generation_job(job_id)
@@ -4882,7 +7849,7 @@ def complete_antigravity_scene_job(job_id: int, asset_id: int) -> dict[str, Any]
         raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
     asset = _materialize_scene_job_asset(job, asset)
     asset_id = int(asset["id"])
-    attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
+    attached = _attach_scene_job_asset(job, asset_id)
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(
@@ -4955,7 +7922,7 @@ def claim_browser_scene_job(provider: str) -> dict[str, Any]:
 # on purpose: it has no Playwright entry, so it is the one provider that
 # really does require the extension.
 PLAYWRIGHT_SIDECAR_PROVIDERS = frozenset(
-    {"flow_veo", "meta_ai_video", "gemini_web_image", "chatgpt_web_image"}
+    {"flow_veo", "meta_ai_video", "meta_ai_image", "gemini_web_image", "chatgpt_web_image"}
 )
 
 
@@ -5004,7 +7971,7 @@ def complete_browser_scene_job(job_id: int, asset_id: int, claim_token: str = ""
         raise HTTPException(status_code=400, detail="Asset không thuộc dự án của job")
     asset = _materialize_scene_job_asset(job, asset)
     asset_id = int(asset["id"])
-    attached = database.attach_asset_to_timeline_segment(int(job["timeline_segment_id"]), asset_id)
+    attached = _attach_scene_job_asset(job, asset_id)
     if not attached:
         raise HTTPException(status_code=400, detail="Không thể gắn asset vào cảnh")
     finished = database.finish_scene_generation_job(
@@ -5087,7 +8054,10 @@ def review_project_script(project_id: int) -> dict[str, Any]:
         "Viet bang tieng Viet."
     )
     try:
-        verdict = _call_orchestrator_json(system_prompt, body, _SCRIPT_REVIEW_SCHEMA, stage="script")
+        verdict = _call_orchestrator_json(
+            system_prompt, body, _SCRIPT_REVIEW_SCHEMA, stage="script",
+            project_id=project_id, step="Soát kịch bản",
+        )
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -5364,7 +8334,10 @@ def plan_timeline_source_cues(project_id: int) -> dict[str, Any]:
         f"CAC CANH BINH LUAN MOI:\n{scenes}"
     )
     try:
-        result = _call_orchestrator_json(system_prompt, body, _SOURCE_CUE_SCHEMA, stage="storyboard")
+        result = _call_orchestrator_json(
+            system_prompt, body, _SOURCE_CUE_SCHEMA, stage="storyboard",
+            project_id=project_id, step="Chọn đoạn nguồn cho từng cảnh",
+        )
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=f"AI không chọn được đoạn nguồn: {exc}") from exc
 
@@ -5545,29 +8518,27 @@ def cancel_all_operations() -> dict[str, Any]:
 
 @app.get("/api/usage-limits")
 def list_usage_limits() -> dict[str, Any]:
-    """Which models are out of quota right now, and when they come back."""
-    limits = database.list_active_usage_limits()
-    now = datetime.now(timezone.utc)
+    """Which models are out of quota right now, and when they come back.
+
+    `limits` is only what blocks now. An outage past its reset time, or old
+    enough to be tried again, is history: listed under `history` so it can be
+    shown for what it is, never as a warning that a working model is down.
+    """
     active: list[dict[str, Any]] = []
-    for item in limits:
-        resets_at = str(item.get("resets_at") or "")
-        if resets_at:
-            try:
-                # A provider that said when it would return, and has, is no
-                # longer worth warning about; the next successful call clears
-                # the row properly.
-                if datetime.fromisoformat(resets_at) <= now:
-                    continue
-            except ValueError:
-                pass
-        active.append({
+    history: list[dict[str, Any]] = []
+    for item in database.list_active_usage_limits():
+        quota = usage_limits.limit_state(item)
+        row = {
             "provider": item.get("provider"),
             "label": _PROVIDER_LABELS.get(str(item.get("provider")), str(item.get("provider"))),
             "message": item.get("message"),
             "detected_at": item.get("detected_at"),
-            "resets_at": resets_at or None,
-        })
-    return {"limits": active, "count": len(active)}
+            "resets_at": str(item.get("resets_at") or "") or None,
+            "state": quota["state"],
+            "retry_at": quota["retry_at"],
+        }
+        (active if quota["blocking"] else history).append(row)
+    return {"limits": active, "count": len(active), "history": history}
 
 
 @app.post("/api/usage-limits/{provider}/clear")
@@ -5657,7 +8628,8 @@ def check_script_fidelity(project_id: int) -> dict[str, Any]:
     body = f"NOI DUNG GOC:\n{source_text[:40000]}\n\nBAN KE LAI:\n{narration[:20000]}"
     try:
         verdict = _call_orchestrator_json(
-            system_prompt, body, _FIDELITY_SCHEMA, stage="quality_review"
+            system_prompt, body, _FIDELITY_SCHEMA, stage="quality_review",
+            project_id=project_id, step="Soát độ trung thành với nguồn",
         )
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=f"Không soát được độ chính xác: {exc}") from exc
@@ -5838,6 +8810,7 @@ _TRANSLATE_SEGMENT_SCHEMA = {
 }
 
 _LANGUAGE_NAMES = {
+    "de": "tieng Duc",
     "vi": "tieng Viet",
     "en": "tieng Anh",
     "zh": "tieng Trung",
@@ -6336,6 +9309,16 @@ def queue_project_job(
             status_code=400,
             detail="Job production thật cần confirmed=true vì có thể gọi TTS hoặc render tốn tài nguyên",
         )
+    if payload.job_type == "render_short":
+        readiness = _short_lane_progress(project_id)
+        if not readiness.get("can_render"):
+            detail = " · ".join(readiness.get("issues") or []) or "chưa đủ hình và voice"
+            raise HTTPException(status_code=400, detail=f"Short chưa thể dựng: {detail}")
+    if payload.job_type == "render" and provider not in {"dry_run", "preview", "mock"}:
+        readiness = _render_readiness(project_id)
+        if not readiness.get("can_render"):
+            detail = " · ".join(readiness.get("issues") or []) or "timeline chưa hoàn chỉnh"
+            raise HTTPException(status_code=400, detail=f"Video chưa thể dựng: {detail}")
     if provider in {"pyvideotrans", "py_video_trans"} and not PYVIDEOTRANS_COMMAND:
         raise HTTPException(status_code=400, detail="Chưa cấu hình PYVIDEOTRANS_COMMAND trong .env")
     if provider in {"pyvideotrans", "py_video_trans"} and not settings.pyvideotrans_runtime_status()[1]:
@@ -6366,7 +9349,7 @@ def queue_project_job(
         raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
     if provider == "ffmpeg_builtin" and not ffmpeg_available(FFMPEG_BINARY):
         raise HTTPException(status_code=400, detail=f"Không tìm thấy FFmpeg ({FFMPEG_BINARY}) trên máy")
-    if settings.GPU_ONLY and payload.job_type in {"source_visuals", "render", "director_production"} and provider not in {"dry_run", "preview", "mock"} and not nvenc_available(FFMPEG_BINARY):
+    if settings.GPU_ONLY and payload.job_type in {"source_visuals", "render", "render_short", "director_production"} and provider not in {"dry_run", "preview", "mock"} and not nvenc_available(FFMPEG_BINARY):
         raise HTTPException(
             status_code=400,
             detail="GPU-only mode đang bật nhưng FFmpeg/NVENC chưa sẵn sàng; job không được phép chạy bằng CPU",
@@ -6878,6 +9861,35 @@ def queue_project_publication(
             detail=f"Quality Check chưa đạt: {failed}. Sửa lỗi hoặc tạo/chọn thumbnail trước khi xuất bản.",
         )
 
+    # A valid Google token is not sufficient when the workspace contains more
+    # than one channel.  Verify the identity now, before a row enters the
+    # worker queue, so an upload can never quietly land on another channel.
+    if platform == "youtube":
+        if not managed_id or not channel:
+            raise HTTPException(status_code=400, detail="Hãy chọn một kênh YouTube để đăng tự động.")
+        account = oauth_status(int(managed_id))
+        if not account.get("configured"):
+            raise HTTPException(status_code=400, detail="Chưa cấu hình YouTube OAuth trong Cài đặt · Kết nối.")
+        if not account.get("connected"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Kênh “{channel.get('name') or managed_id}” chưa đăng nhập YouTube. Bấm “Đăng nhập kênh này” rồi thử lại.",
+            )
+        expected_id = str(channel.get("youtube_channel_id") or "").strip()
+        try:
+            authorized = publisher_worker.publisher.list_authorized_channels(int(managed_id))
+        except (OAuthError, PublisherError) as exc:
+            raise _api_error(exc) from exc
+        actual_ids = {str(item.get("id") or "").strip() for item in authorized}
+        if expected_id and expected_id not in actual_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Tài khoản đang đăng nhập không phải kênh “{channel.get('name') or managed_id}”. "
+                        "Bấm “Đăng nhập kênh này”, chọn đúng tài khoản/kênh Google, rồi đăng lại."),
+            )
+        if not actual_ids:
+            raise HTTPException(status_code=400, detail="Google không trả về kênh YouTube nào cho tài khoản đã đăng nhập.")
+
     managed_id = payload.managed_channel_id or project.get("managed_channel_id")
     channel = database.get_managed_channel(int(managed_id)) if managed_id else None
     if managed_id and not channel:
@@ -7252,6 +10264,16 @@ def save_video_transcript(video_id: str, payload: TranscriptRequest) -> dict[str
     return {"status": "saved", "youtube_video_id": video_id, "transcript": transcript}
 
 
+def _transcribe_video_source(
+    video: dict[str, Any], video_id: str, *, language: str | None = None,
+) -> dict[str, Any]:
+    """Prefer a source file already attached to the video over another download."""
+    local_media = Path(str(video.get("local_media_path") or ""))
+    if local_media.is_file():
+        return transcribe_local_file(str(local_media), video_id, language=language)
+    return transcribe_video(str(video["video_url"]), video_id, language=language)
+
+
 @app.post("/api/videos/{video_id}/transcript/auto")
 def auto_transcribe_video(
     video_id: str,
@@ -7273,15 +10295,8 @@ def auto_transcribe_video(
         )
 
     job_id = database.start_analysis_job(video_id, "transcript", "faster_whisper")
-    # An uploaded file has no URL to pull audio from, and a YouTube video that
-    # was already downloaded should not be fetched a second time. Either way
-    # the copy on disk is the better source.
-    local_media = Path(str(video.get("local_media_path") or ""))
     try:
-        if local_media.is_file():
-            result = transcribe_local_file(str(local_media), video_id, language=payload.language or None)
-        else:
-            result = transcribe_video(video["video_url"], video_id, language=payload.language or None)
+        result = _transcribe_video_source(video, video_id, language=payload.language or None)
         if not result["text"]:
             raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
 
@@ -7473,10 +10488,46 @@ def _analysis_transcript(video_id: str) -> str:
     return str((plain or {}).get("content_text") or "").strip()
 
 
+def _available_text_providers(*, include_local: bool = False) -> list[str]:
+    """Provider order used when a step-level selector is set to Auto."""
+    anthropic_key, _ = settings.anthropic_config()
+    openai_key, _ = settings.openai_config()
+    codex = codex_cli_status()
+    claude_code = claude_code_cli_status()
+    antigravity = antigravity_cli_status()
+    candidates: list[tuple[str, bool]] = [
+        ("codex_cli", bool(codex.get("logged_in"))),
+        ("claude_code_cli", bool(claude_code.get("logged_in"))),
+        ("antigravity", bool(antigravity.get("logged_in"))),
+        ("anthropic_claude", bool(anthropic_key)),
+        ("openai_gpt", bool(openai_key)),
+    ]
+    if include_local:
+        candidates.insert(0, ("local_metadata", True))
+    return [provider for provider, available in candidates if available]
+
+
+def _resolve_auto_text_provider(provider: str | None, *, include_local: bool = False) -> str:
+    name = str(provider or "").strip().lower()
+    if name and name != "auto":
+        # An agent name ("astra", "claude") is as valid a choice as a runtime
+        # name; resolved here once so no resolver downstream has to guess.
+        return orchestrator_runtime.runtime_id(name)
+    available = _available_text_providers(include_local=include_local)
+    if available:
+        return available[0]
+    if include_local:
+        return "local_metadata"
+    raise HTTPException(
+        status_code=400,
+        detail="Chưa có AI text nào sẵn sàng cho chế độ Auto. Hãy đăng nhập Astra/ChatGPT/Claude hoặc cấu hình API key.",
+    )
+
+
 @app.post("/api/videos/{video_id}/reference-analysis")
 def create_reference_analysis(
     video_id: str,
-    provider: str = Query(default="codex_cli"),
+    provider: str = Query(default="auto"),
     output_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
 ) -> dict[str, Any]:
     """Analyse structure and style as a remake reference, not a viewer-facing recap."""
@@ -7484,7 +10535,8 @@ def create_reference_analysis(
     if not video:
         raise HTTPException(status_code=404, detail="Không tìm thấy video")
     transcript_text = _analysis_transcript(video_id)
-    job_id = database.start_analysis_job(video_id, "reference", provider)
+    selected_provider = _resolve_auto_text_provider(provider, include_local=False)
+    job_id = database.start_analysis_job(video_id, "reference", selected_provider)
     try:
         # Do not rely solely on the browser to enforce this workflow.  Reference
         # analysis is also called from project actions and API clients; in all
@@ -7492,14 +10544,14 @@ def create_reference_analysis(
         # Existing transcripts are reused, so this never downloads audio twice.
         transcript_generated = False
         if not transcript_text:
-            whisper_result = transcribe_video(video["video_url"], video_id)
+            whisper_result = _transcribe_video_source(video, video_id)
             if not whisper_result["text"]:
                 raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
             transcript = save_transcript_result(database, video_id, whisper_result)
             transcript_text = str(transcript.get("content_text") or "").strip()
             transcript_generated = True
         with operations.track("reference", f"Phân tích nguồn: {str(video.get('title') or video_id)[:50]}"):
-            result = analyze_reference(video, transcript_text, provider, output_language=output_language)
+            result = analyze_reference(video, transcript_text, selected_provider, output_language=output_language)
         database.save_video_analysis(
             video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
         )
@@ -7529,7 +10581,8 @@ def analyze_video(
     if not video:
         raise HTTPException(status_code=404, detail="Không tìm thấy video")
     try:
-        active_analyzer = resolve_analyzer(provider)
+        selected_provider = _resolve_auto_text_provider(provider, include_local=True)
+        active_analyzer = resolve_analyzer(selected_provider)
     except LlmAnalysisError as exc:
         raise _api_error(exc) from exc
 
@@ -7541,7 +10594,7 @@ def analyze_video(
         transcript = database.get_transcript(video_id, transcript_format="txt")
         transcript_generated = False
         if not transcript or not str(transcript.get("content_text") or "").strip():
-            whisper_result = transcribe_video(video["video_url"], video_id)
+            whisper_result = _transcribe_video_source(video, video_id)
             if not whisper_result["text"]:
                 raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
             save_transcript_result(database, video_id, whisper_result)
@@ -7592,7 +10645,8 @@ def generate_video_writer_content(
     if not video:
         raise HTTPException(status_code=404, detail="Không tìm thấy video")
     try:
-        active_writer = resolve_writer(payload.provider)
+        selected_provider = _resolve_auto_text_provider(payload.provider, include_local=False)
+        active_writer = resolve_writer(selected_provider)
     except WriterError as exc:
         raise _api_error(exc) from exc
 
@@ -7657,39 +10711,37 @@ def generate_video_writer_content(
 
 @app.get("/api/analysis-providers")
 def list_analysis_providers() -> list[dict[str, Any]]:
-    anthropic_key, anthropic_model = settings.anthropic_config()
-    openai_key, openai_model = settings.openai_config()
-    codex = codex_cli_status()
-    claude_code = claude_code_cli_status()
-    antigravity = antigravity_cli_status()
-    return [
-        {"provider": "local_metadata", "label": "Local (không cần API key)", "available": True},
+    """The model list every step selector offers.
+
+    Built from the same readiness gate the router uses, so a model that is
+    signed in but out of quota is offered as unavailable with the reason
+    attached, instead of being picked and failing a minute later.
+    """
+    providers: list[dict[str, Any]] = [
         {
-            "provider": "anthropic_claude",
-            "label": f"Claude ({anthropic_model})",
-            "available": bool(anthropic_key),
+            "provider": "auto",
+            "label": "Auto · AI điều phối tự chọn",
+            "available": bool(_available_text_providers(include_local=True)),
+            "detail": "App chọn AI còn chạy được theo chính sách của công đoạn.",
+            "blocked_reason": "",
         },
         {
-            "provider": "openai_gpt",
-            "label": f"GPT ({openai_model})",
-            "available": bool(openai_key),
-        },
-        {
-            "provider": "codex_cli",
-            "label": "Codex CLI (tai khoan dang nhap)",
-            "available": bool(codex["logged_in"]),
-        },
-        {
-            "provider": "claude_code_cli",
-            "label": "Claude Code CLI (tai khoan dang nhap)",
-            "available": bool(claude_code["logged_in"]),
-        },
-        {
-            "provider": "antigravity",
-            "label": "Antigravity CLI (tai khoan dang nhap)",
-            "available": bool(antigravity["logged_in"]),
+            "provider": "local_metadata",
+            "label": "Local · không cần API key",
+            "available": True,
+            "detail": "Chạy trong máy, không gọi AI nào.",
+            "blocked_reason": "",
         },
     ]
+    providers.extend(orchestrator_runtime.text_providers(
+        database,
+        statuses={
+            "codex_cli": codex_cli_status,
+            "claude_code_cli": claude_code_cli_status,
+            "antigravity": antigravity_cli_status,
+        },
+    ))
+    return providers
 
 
 @app.get("/api/analysis-jobs")
@@ -7730,7 +10782,7 @@ def analysis_queue_status() -> dict[str, Any]:
 
 @app.post("/api/analysis-queue")
 def enqueue_analysis(payload: QueueAnalysisRequest) -> dict[str, Any]:
-    provider = payload.provider or "local_metadata"
+    provider = _resolve_auto_text_provider(payload.provider or "local_metadata", include_local=True)
     anthropic_key, _ = settings.anthropic_config()
     openai_key, _ = settings.openai_config()
     codex = codex_cli_status()
@@ -7754,7 +10806,7 @@ def enqueue_analysis(payload: QueueAnalysisRequest) -> dict[str, Any]:
         channel_id=payload.channel_id,
         limit=payload.limit,
         force=payload.force,
-        provider=payload.provider,
+        provider=provider,
         video_ids=payload.video_ids,
     )
     return {**result, "queue": metadata_queue.status()}
@@ -7927,9 +10979,10 @@ def _call_specific_agent_json(
         "claude_code_cli": call_claude_code_cli_json,
         "antigravity": call_antigravity_json,
     }
-    if agent not in calls:
+    runtime = orchestrator_runtime.runtime_id(agent)
+    if runtime not in calls:
         raise LlmError(f"Agent không được hỗ trợ: {agent}")
-    return calls[agent](system_prompt, user_prompt, schema)
+    return calls[runtime](system_prompt, user_prompt, schema)
 
 
 def _latest_scene_jobs_by_segment(scene_jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -7963,7 +11016,7 @@ def _provider_runtime_states() -> dict[str, dict[str, Any]]:
         available = not bool(state.get("circuit_open"))
         reason = str(state.get("last_error") or "")
         usage_limit = database.get_provider_usage_limit(descriptor.key)
-        if usage_limit and not usage_limit.get("cleared_at"):
+        if usage_limits.limit_state(usage_limit)["blocking"]:
             available = False
             reason = str(usage_limit.get("message") or "usage_limit")
         if descriptor.key == "runway" and not runway_key:
@@ -8224,6 +11277,147 @@ def _route_scene_failure(job: dict[str, Any], error: str, failure_kind: str) -> 
     return route.selected.key
 
 
+_FACTORY_URL = os.getenv("YOUTUBE_FACTORY_URL", "http://127.0.0.1:8787").rstrip("/")
+
+
+def _verify_goal(project_id: int, target_steps: Iterable[str], claimed: Iterable[str] = ()) -> dict[str, Any]:
+    """Whether a goal is reached, read from the project and not from anyone's report.
+
+    A tool answering "ok" and an agent answering "done" are both claims; this
+    looks for the things the steps leave behind - the script row, the scenes,
+    the timeline, the audio, the mp4 that actually plays. Anything the agent
+    said it finished that is not there comes back as a false claim.
+    """
+    done = _steps_done(project_id)
+    targets = [str(name) for name in target_steps]
+    missing = [name for name in targets if name not in done]
+    evidence: dict[str, Any] = {}
+    script = database.get_latest_project_script(project_id)
+    if script:
+        script_id = int(script["id"])
+        evidence["script"] = {"script_id": script_id, "version": script.get("version")}
+        if "shots" in done:
+            evidence["shots"] = {"count": len(database.list_project_shots(project_id, script_id=script_id))}
+        if "timeline" in done:
+            timeline = database.list_project_timeline(project_id, script_id=script_id)
+            evidence["timeline"] = {
+                "segments": len(timeline),
+                "with_voice": sum(1 for item in timeline if str(item.get("audio_path") or "").strip()),
+                "with_visual": sum(1 for item in timeline if str(item.get("visual_path") or "").strip()),
+            }
+    if "render" in done:
+        final = _current_final_video_path(project_id)
+        seconds = media_duration_seconds(Path(final)) if final else None
+        evidence["render"] = {"path": str(final or ""), "seconds": seconds}
+        # An mp4 that exists but will not play is not a finished video.
+        if "render" in targets and not seconds and "render" not in missing:
+            missing.append("render")
+    false_claims = sorted({str(name) for name in claimed if steps.get(str(name)) and str(name) not in done})
+    return {
+        "passed": not missing,
+        "missing": missing,
+        "done": sorted(done),
+        "false_claims": false_claims,
+        "evidence": evidence,
+    }
+
+
+def _goal_state(project_id: int) -> dict[str, Any]:
+    done = _steps_done(project_id)
+    return {"done": sorted(done), "steps": steps.describe(done)}
+
+
+def _run_codex_agent(prompt: str, mcp_env: dict[str, str]) -> agent_runtime.AgentRun:
+    return codex_agent_bridge.run(prompt, mcp_env, instructions=agent_loop.INSTRUCTIONS)
+
+
+def _run_claude_agent(prompt: str, mcp_env: dict[str, str]) -> agent_runtime.AgentRun:
+    return claude_agent_bridge.run(prompt, mcp_env, instructions=agent_loop.INSTRUCTIONS)
+
+
+# The runtimes that can direct a goal with the app's tools. Antigravity has no
+# agent runtime here; it stays a structured worker.
+_AGENT_RUNNERS: dict[str, Any] = {
+    "codex_cli": _run_codex_agent,
+    "claude_code_cli": _run_claude_agent,
+}
+
+
+def _agent_runtime_order(agent: str) -> tuple[str, ...]:
+    """Which runtimes may direct, the one the worker picked first, policy order after."""
+    assignment = settings.agent_assignment("orchestration")
+    names = [
+        agent,
+        assignment.get("executor"),
+        *(assignment.get("fallback_agents") or []),
+        *(assignment.get("allowed_agents") or []),
+    ]
+    order: list[str] = []
+    for name in names:
+        runtime = orchestrator_runtime.runtime_id(str(name or ""))
+        if runtime in _AGENT_RUNNERS and runtime not in order:
+            order.append(runtime)
+    return tuple(order)
+
+
+def _record_agent_round(project_id: int, goal: str, event: dict[str, Any]) -> None:
+    kind = str(event.get("event") or "")
+    status = {
+        "round.started": "running",
+        "round.runtime_failed": "failed",
+        "round.finished": "success" if event.get("passed") else "partial",
+        "run.finished": "success" if event.get("verified") else "failed",
+    }.get(kind, "info")
+    details = {key: value for key, value in event.items() if key != "event"}
+    step = "Agent kết thúc" if kind == "run.finished" else f"Agent vòng {event.get('round')}"
+    _record_orchestrator_step(
+        project_id=project_id, stage="orchestration", step=step,
+        status=status, runtime=str(event.get("runtime") or ""), agent=str(event.get("model") or event.get("runtime") or ""),
+        why=goal[:300], output_ref=json.dumps(details, ensure_ascii=False, default=str)[:500],
+        # A skipped runtime is a fallback decision; the row says so.
+        fallback_used=bool((event.get("decision") or {}).get("skipped")),
+        error=str(event.get("error") or event.get("reason") or "")[:1500],
+    )
+    _announce_step(f"agent.{kind}", project_id, "orchestrate", "Điều phối bằng agent", **details)
+
+
+def _run_orchestrator_goal(task: dict[str, Any], agent: str) -> dict[str, Any]:
+    """One goal, driven by an agent over the app's tools until verified or blocked."""
+    payload = dict(task.get("input") or {})
+    project_id = int(task.get("project_id") or 0)
+    runtimes = _agent_runtime_order(agent)
+    if not runtimes:
+        raise ValueError("Chính sách công đoạn điều phối không cho phép runtime agent nào (codex_cli, claude_code_cli)")
+    spec = agent_loop.GoalSpec(
+        project_id=project_id,
+        goal=str(payload.get("goal") or "").strip(),
+        target_steps=tuple(str(name) for name in payload.get("target_steps") or ()),
+        allow_spend=bool(payload.get("allow_spend", False)),
+        allow_overwrite=bool(payload.get("allow_overwrite", False)),
+        max_rounds=max(1, min(int(payload.get("max_rounds") or 4), 8)),
+        tool_budget=max(5, min(int(payload.get("tool_budget") or 40), 120)),
+        runtimes=runtimes,
+    )
+    log_path = Path(ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"]) / "agent_runs" / f"{task['id']}.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    result = agent_loop.run_goal(
+        spec,
+        runners=_AGENT_RUNNERS,
+        read_state=_goal_state,
+        verify=lambda goal, claimed: _verify_goal(goal.project_id, goal.target_steps, claimed),
+        mcp_env=lambda round_number: agent_runtime.mcp_environment(
+            run_log=log_path, round_number=round_number, project_id=project_id,
+            allow_spend=spec.allow_spend, tool_budget=spec.tool_budget, factory_url=_FACTORY_URL,
+            allow_overwrite=spec.allow_overwrite,
+        ),
+        log_path=log_path,
+        available=_agent_runtime_available,
+        record=lambda event: _record_agent_round(project_id, spec.goal, event),
+    )
+    result["run_log"] = str(log_path)
+    return result
+
+
 def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
     role = str(task.get("role") or "")
     project_id = int(task.get("project_id") or 0)
@@ -8231,12 +11425,24 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
     project = database.get_production_project(project_id)
     if not project:
         raise ValueError("Project của agent task không còn tồn tại")
+    if role == ORCHESTRATOR_ROLE:
+        return _run_orchestrator_goal(task, agent)
     goal = str(payload.get("goal") or project.get("notes") or project.get("title") or "").strip()
+    # A retry is told why the last attempt was turned back; asked the same
+    # thing again it returned the same fault (media, project 72, twice).
+    feedback = str(task.get("previous_error") or "").strip()
+
+    def ask(system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        if feedback:
+            user_prompt = (
+                f"{user_prompt}\n\nLẦN THỬ TRƯỚC BỊ NGHIỆM THU TRẢ VỀ VÌ:\n{feedback[:3000]}\n"
+                "Sửa đúng những điểm bị chê; phần không bị chê thì giữ."
+            )
+        return _call_specific_agent_json(agent, system_prompt, user_prompt, schema)
     previous = dict(payload.get("previous_result") or {})
 
     if role == "research":
-        return _call_specific_agent_json(
-            agent,
+        return ask(
             (
                 "Bạn là Research Agent cho video YouTube. Phân tích chủ đề, audience, góc nội dung, "
                 "keyword và khoảng trống nội dung. Không bịa dữ liệu thời gian thực: mọi số liệu hoặc "
@@ -8247,8 +11453,7 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         )
 
     if role == "script":
-        result = _call_specific_agent_json(
-            agent,
+        result = ask(
             (
                 "Bạn là Script Agent. Viết một kịch bản YouTube nguyên bản, hook rõ, mạch logic, "
                 "giữ chân tốt, không sao chép. main_content phải là lời kể hoàn chỉnh, không chỉ outline. "
@@ -8257,25 +11462,27 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             f"Yêu cầu:\n{goal}\n\nKết quả Research Agent:\n{json.dumps(previous, ensure_ascii=False)[:50000]}",
             _AGENT_SCRIPT_SCHEMA,
         )
-        script = database.create_project_script(
-            project_id,
-            script_title=str(result.get("title") or project.get("title") or ""),
-            hook=str(result.get("hook") or ""),
-            intro=str(result.get("intro") or ""),
-            main_content=str(result.get("main_content") or ""),
-            cta=str(result.get("cta") or ""),
-            status="review",
-        )
-        if not script:
+        # The agent wrote it; the shared step saves it, so a script created by
+        # the automatic run is the same row, with the same checks, as one
+        # created by the button.
+        saved = run_project_step(project_id, "script", {"draft": {
+            "script_title": str(result.get("title") or project.get("title") or ""),
+            "hook": str(result.get("hook") or ""),
+            "intro": str(result.get("intro") or ""),
+            "main_content": str(result.get("main_content") or ""),
+            "cta": str(result.get("cta") or ""),
+            "status": "review",
+        }})
+        script_id = int((saved.get("result") or {}).get("script_id") or 0)
+        if not script_id:
             raise RuntimeError("Script Agent không lưu được kịch bản")
-        return {**result, "script_id": int(script["id"]), "goal": goal, "pipeline": payload.get("pipeline") or {}}
+        return {**result, "script_id": script_id, "goal": goal, "pipeline": payload.get("pipeline") or {}}
 
     if role == "director":
         script = database.get_latest_project_script(project_id)
         if not script:
             raise ValueError("Director Agent cần kịch bản trước")
-        result = _call_specific_agent_json(
-            agent,
+        result = ask(
             (
                 "Bạn là Director Agent. Chia kịch bản thành scene độc lập. Mỗi scene phải có lời đọc, "
                 "visual prompt cụ thể, camera, motion, duration và media_type. Dùng image cho cảnh tĩnh, "
@@ -8304,7 +11511,8 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
                 "asset_type": "ai_scene",
                 "duration_seconds": max(2, min(int(scene.get("duration") or 8), 30)),
             })
-        saved_shots = database.create_project_shots(project_id, int(script["id"]), shots, force=True) or []
+        saved_shots = (run_project_step(project_id, "shots", {"shots": shots, "force": True})
+                       .get("result") or {}).get("shots") or []
         segments = [
             {
                 "shot_id": saved_shots[index - 1]["id"] if index <= len(saved_shots) else None,
@@ -8318,7 +11526,8 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             }
             for index, shot in enumerate(shots, start=1)
         ]
-        timeline = database.create_project_timeline(project_id, int(script["id"]), segments, force=True) or []
+        timeline = (run_project_step(project_id, "timeline", {"segments": segments, "force": True})
+                    .get("result") or {}).get("timeline") or []
         # Rebuilding replaced the rows the voice hung off. The files are
         # still there, so the scenes whose words are unchanged get theirs
         # back rather than being generated again.
@@ -8352,8 +11561,7 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         timeline = database.list_project_timeline(project_id, script_id=int(script["id"]) if script else None)
         if not timeline:
             raise ValueError("Media Agent cần timeline trước")
-        decision = _call_specific_agent_json(
-            agent,
+        decision = ask(
             (
                 "Bạn là Media Agent. Với từng scene, chọn 'kind' (image/gif/video) và 'treatment'. "
                 "Video tốn credit nên chỉ dùng khi chuyển động là phần thiết yếu; infographic hoặc thay đổi ngắn dùng gif; còn lại dùng image. "
@@ -8588,8 +11796,7 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
             }
             for segment in timeline
         ]
-        result = _call_specific_agent_json(
-            agent,
+        result = ask(
             (
                 "Bạn là QC Agent độc lập. Kiểm tra snapshot dự án, chỉ duyệt khi không thiếu visual/voice/subtitle, "
                 "không còn job chạy và không có scene review fail. Không được che giấu lỗi. Trả JSON đúng schema."
@@ -8738,6 +11945,7 @@ class AutomationPipelineRequest(BaseModel):
     language: str = Field(default="vi", max_length=20)
     auto_generate_media: bool = False
     auto_render: bool = False
+    chat_agent: Literal["chatgpt_app", "claude_chat"] | None = None
 
 
 class AutomationApprovalDecisionRequest(BaseModel):
@@ -8754,6 +11962,14 @@ class CreateAgentTaskRequest(BaseModel):
     assigned_agent: str = Field(default="", max_length=80)
     reviewer_agent: str = Field(default="", max_length=80)
     max_attempts: int = Field(default=2, ge=1, le=10)
+
+
+class ChatGPTTaskCompleteRequest(BaseModel):
+    output: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatGPTTaskFailRequest(BaseModel):
+    error: str = Field(min_length=1, max_length=4000)
 
 
 class AgentMessageRequest(BaseModel):
@@ -8857,7 +12073,9 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
         return {
             "script": None, "shots": [], "timeline": [], "estimated_seconds": 0,
             "steps": {"script": False, "voice": False, "visuals": False, "render": False},
-            "scenes": 0, "voiced": 0, "with_visuals": 0, "output_path": "",
+            "scenes": 0, "voiced": 0, "with_visuals": 0, "missing_audio": 0,
+            "missing_visual": 0, "draft_visual": 0, "can_render": False,
+            "issues": ["chưa có kịch bản Short"], "output_path": "",
         }
     # The shots too, not only the timeline: a storyboard card is a shot joined
     # to its segment, so without them the short could only be shown as a list
@@ -8865,8 +12083,24 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
     # the storyboard the rest of the app has.
     shots = database.list_project_shots(project_id, script_id=int(script["id"]))
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
-    voiced = sum(1 for item in timeline if str(item.get("audio_path") or "").strip())
-    with_visuals = sum(1 for item in timeline if str(item.get("visual_path") or "").strip())
+    has_audio = [Path(str(item.get("audio_path") or "")).is_file() for item in timeline]
+    has_visual = [Path(str(item.get("visual_path") or "")).is_file() for item in timeline]
+    draft_visual = sum(
+        1 for item, exists in zip(timeline, has_visual)
+        if exists and "director_draft_visuals" in str(item.get("visual_path") or "").replace("\\", "/").lower()
+    )
+    voiced = sum(has_audio)
+    with_visuals = sum(has_visual)
+    missing_audio = len(timeline) - voiced
+    missing_visual = len(timeline) - with_visuals
+    can_render = bool(timeline) and not missing_audio and not missing_visual and not draft_visual
+    issues: list[str] = []
+    if missing_visual:
+        issues.append(f"{missing_visual} cảnh thiếu hình")
+    if missing_audio:
+        issues.append(f"{missing_audio} cảnh thiếu tiếng")
+    if draft_visual:
+        issues.append(f"{draft_visual} cảnh còn dùng visual nháp")
     output_path = ""
     render_version = ""
     for job in database.list_project_jobs(project_id, limit=100):
@@ -8887,14 +12121,19 @@ def _short_lane_progress(project_id: int) -> dict[str, Any]:
         "scenes": len(timeline),
         "voiced": voiced,
         "with_visuals": with_visuals,
+        "missing_audio": missing_audio,
+        "missing_visual": missing_visual,
+        "draft_visual": draft_visual,
+        "can_render": can_render,
+        "issues": issues,
         "output_path": output_path,
         "render_version": render_version,
         "steps": {
             "script": bool(timeline),
             # Every scene, not any: a lane that says "done" with half its
             # scenes silent is how a short gets rendered with gaps in it.
-            "voice": bool(timeline) and voiced == len(timeline),
-            "visuals": bool(timeline) and with_visuals == len(timeline),
+            "voice": bool(timeline) and not missing_audio,
+            "visuals": bool(timeline) and not missing_visual and not draft_visual,
             "render": bool(output_path),
         },
     }
@@ -9076,7 +12315,13 @@ def agent_system_status() -> dict[str, Any]:
             for item in DEFAULT_AGENTS
         ],
         "runtimes": {
-            agent: {"available": _agent_runtime_available(agent)}
+            # Chat apps are reachable when they are attached, not when this
+            # worker could run them (it never can).
+            agent: {
+                "available": chat_agent_presence.connected(agent)
+                if agent in settings.CHAT_AGENT_IDS else _agent_runtime_available(agent),
+                "runtime": orchestrator_runtime.runtime_id(agent),
+            }
             for agent in settings.AGENT_IDS
         },
     }
@@ -9098,13 +12343,15 @@ def start_automation_pipeline(payload: AutomationPipelineRequest) -> dict[str, A
             title=payload.title,
             language=payload.language,
         )
+    selected_chat = payload.chat_agent or _directing_chat_agent()
     task = agent_pipeline.start(
         int(project["id"]),
         effective_goal,
         auto_generate_media=payload.auto_generate_media,
         auto_render=payload.auto_render,
+        external_agent=selected_chat,
     )
-    return {"status": "queued", "project": project, "task": task}
+    return {"status": "queued", "project": project, "task": task, "chat_agent": selected_chat or None}
 
 
 @app.get("/api/automation/projects")
@@ -9194,6 +12441,9 @@ def decide_automation_approval(
     elif payload.decision == "changes_requested":
         project = database.get_production_project(project_id) or {}
         policy = settings.automation_policy()
+        # Carried in the input as well: the hand-off to the next role reads it
+        # from there, and without it the rest of the rework went to the CLI.
+        chat_agent = _directing_chat_agent()
         task = database.create_agent_task(
             project_id,
             payload.resume_role,
@@ -9205,11 +12455,14 @@ def decide_automation_approval(
                     "auto_render": bool(policy.get("auto_render")),
                 },
                 "approval_id": approval_id,
+                "chat_agent": chat_agent,
             },
             requested_by="user",
+            assigned_agent=chat_agent,
             max_attempts=int(policy.get("max_attempts") or 2),
         )
-        agent_task_worker.enqueue(str(task["id"]))
+        if not chat_agent:
+            agent_task_worker.enqueue(str(task["id"]))
         database.update_production_project(project_id, status="review")
     event_bus.publish(
         "approval.decided",
@@ -9246,12 +12499,142 @@ def create_agent_task(payload: CreateAgentTaskRequest) -> dict[str, Any]:
         payload.role,
         payload.task_type,
         payload.input,
-        assigned_agent=payload.assigned_agent,
+        assigned_agent=payload.assigned_agent or _directing_chat_agent(),
         reviewer_agent=payload.reviewer_agent,
         max_attempts=payload.max_attempts,
     )
-    agent_task_worker.enqueue(str(task["id"]))
+    if str(task.get("assigned_agent") or "") not in {"chatgpt_app", "claude_chat"}:
+        agent_task_worker.enqueue(str(task["id"]))
     return {"status": "queued", "task": task}
+
+
+_CHAT_ROLE_INSTRUCTIONS = {
+    "research": (
+        "Nghiên cứu brief và trả về các insight, nguồn/tham chiếu cần thiết. "
+        "Sau đó hoàn tất task với output có goal, findings và recommendations."
+    ),
+    "script": (
+        "Viết kịch bản trong chính cuộc trò chuyện này. Gọi youtube_factory_save_script để lưu; "
+        "sau đó hoàn tất task với output chứa project_id và script_id vừa nhận."
+    ),
+    "director": (
+        "Gọi youtube_factory_get_storyboard, kiểm tra từng cảnh và dùng youtube_factory_update_shot "
+        "khi cần. Hoàn tất task với tóm tắt storyboard và các shot đã sửa."
+    ),
+    "media": (
+        "Tạo hoặc điều phối media cho từng cảnh bằng các tool generate/import. Không render nếu chưa "
+        "được người dùng xác nhận. Hoàn tất task với danh sách job/asset."
+    ),
+    "qc": (
+        "Đọc project, storyboard, job và render hiện có; kiểm tra tính đầy đủ. Hoàn tất task với score, "
+        "detected_issues và ready_for_render."
+    ),
+}
+
+
+_CHAT_AGENT_LABELS = {"chatgpt_app": "ChatGPT Chat", "claude_chat": "Claude Chat"}
+
+
+@app.post("/api/chat-agents/{chat_agent}/heartbeat")
+def chat_agent_heartbeat(chat_agent: str) -> dict[str, Any]:
+    chat_agent_presence.record_contact(_require_chat_agent(chat_agent))
+    return {"status": "connected", "chat_agent": chat_agent}
+
+
+def _chat_task_envelope(task: dict[str, Any], chat_agent: str) -> dict[str, Any]:
+    project_id = int(task.get("project_id") or 0)
+    project = database.get_production_project(project_id) if project_id else None
+    script = database.get_latest_project_script(project_id) if project_id else None
+    return {
+        "task": task,
+        "instruction": _CHAT_ROLE_INSTRUCTIONS.get(str(task.get("role") or ""), "Hoàn tất task bằng các tool của YouTube AI Factory."),
+        "project": project,
+        "latest_script": script,
+        "note": f"{_CHAT_AGENT_LABELS[chat_agent]} là executor của task này; không thay bằng Codex CLI, Claude Code CLI hoặc API.",
+        # The role instruction says what this hand-off wants; this says how
+        # the app is driven, so the chat directs through the same steps the
+        # buttons run instead of rebuilding them from lower-level tools.
+        "how_to_direct": (
+            "Bạn là AI điều phối của dự án này. Làm việc với app bằng tool youtube_factory_*, không bằng "
+            "cách bấm giao diện: xem bước nào đã xong, bước nào còn thiếu điều kiện bằng "
+            "youtube_factory_list_steps; chạy bước bằng youtube_factory_run_step - cùng đường với nút bấm. "
+            "Tool lỗi thì đọc lỗi rồi đổi cách (bước tiên quyết, provider khác); chỉ dùng giao diện hay "
+            "điều khiển máy khi không có tool nào làm được, và nói rõ vì sao. Bước tiêu lượt tạo media "
+            "hoặc render phải có xác nhận của người dùng; không bao giờ tự đăng video."
+        ),
+    }
+
+
+def _require_chat_agent(chat_agent: str) -> str:
+    if chat_agent not in _CHAT_AGENT_LABELS:
+        raise HTTPException(status_code=400, detail="Chat agent không hợp lệ")
+    return chat_agent
+
+
+@app.post("/api/chat-agents/{chat_agent}/tasks/next")
+def claim_next_chat_task(chat_agent: str) -> dict[str, Any]:
+    """Claim or resume the oldest durable task owned by one chat client."""
+    chat_agent = _require_chat_agent(chat_agent)
+    running = [
+        task for task in database.list_agent_tasks(status="running", limit=1000)
+        if str(task.get("assigned_agent") or "") == chat_agent
+    ]
+    if running:
+        return {"status": "resumed", **_chat_task_envelope(list(reversed(running))[0], chat_agent)}
+    queued = [
+        task for task in database.list_agent_tasks(status="queued", limit=1000)
+        if str(task.get("assigned_agent") or "") == chat_agent
+    ]
+    for pending in reversed(queued):
+        claimed = database.claim_agent_task(str(pending["id"]), chat_agent)
+        if claimed:
+            return {"status": "claimed", **_chat_task_envelope(claimed, chat_agent)}
+    return {"status": "idle", "task": None, "message": f"Không có task {_CHAT_AGENT_LABELS[chat_agent]} đang chờ."}
+
+
+@app.post("/api/chatgpt/tasks/next")
+def claim_next_chatgpt_task() -> dict[str, Any]:
+    return claim_next_chat_task("chatgpt_app")
+
+
+@app.post("/api/chat-agents/{chat_agent}/tasks/{task_id}/complete")
+def complete_chat_task(chat_agent: str, task_id: str, payload: ChatGPTTaskCompleteRequest) -> dict[str, Any]:
+    chat_agent = _require_chat_agent(chat_agent)
+    task = database.get_agent_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Không tìm thấy task")
+    if str(task.get("assigned_agent") or "") != chat_agent:
+        raise HTTPException(status_code=409, detail=f"Task này không thuộc {_CHAT_AGENT_LABELS[chat_agent]}")
+    if str(task.get("status") or "") not in {"running", "queued"}:
+        raise HTTPException(status_code=409, detail=f"Task đang ở trạng thái {task.get('status')}")
+    if str(task.get("status") or "") == "queued":
+        task = database.claim_agent_task(task_id, chat_agent) or task
+    completed = database.finish_agent_task(task_id, "completed", output=payload.output)
+    if completed:
+        _agent_pipeline_completed(completed)
+    return {"status": "completed", "task": completed}
+
+
+@app.post("/api/chatgpt/tasks/{task_id}/complete")
+def complete_chatgpt_task(task_id: str, payload: ChatGPTTaskCompleteRequest) -> dict[str, Any]:
+    return complete_chat_task("chatgpt_app", task_id, payload)
+
+
+@app.post("/api/chat-agents/{chat_agent}/tasks/{task_id}/fail")
+def fail_chat_task(chat_agent: str, task_id: str, payload: ChatGPTTaskFailRequest) -> dict[str, Any]:
+    chat_agent = _require_chat_agent(chat_agent)
+    task = database.get_agent_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Không tìm thấy task")
+    if str(task.get("assigned_agent") or "") != chat_agent:
+        raise HTTPException(status_code=409, detail=f"Task này không thuộc {_CHAT_AGENT_LABELS[chat_agent]}")
+    failed = database.finish_agent_task(task_id, "failed", error=payload.error)
+    return {"status": "failed", "task": failed}
+
+
+@app.post("/api/chatgpt/tasks/{task_id}/fail")
+def fail_chatgpt_task(task_id: str, payload: ChatGPTTaskFailRequest) -> dict[str, Any]:
+    return fail_chat_task("chatgpt_app", task_id, payload)
 
 
 @app.get("/api/agent-tasks/{task_id}")

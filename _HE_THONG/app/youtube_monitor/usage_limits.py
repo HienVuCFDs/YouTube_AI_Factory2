@@ -54,7 +54,7 @@ _RESET_AT = re.compile(
 )
 # "reset in 4 hours", "thử lại sau 30 phút"
 _RESET_IN = re.compile(
-    r"(?:reset|try again|thử lại|quay lại)\s*(?:in|after|sau)\s+"
+    r"(?:resets?|try again|thử lại|quay lại)\s*(?:in|after|sau)\s+"
     r"(?P<amount>\d{1,3})\s*(?P<unit>hours?|hrs?|h|minutes?|mins?|m|giờ|phút|ngày|days?)",
     re.IGNORECASE,
 )
@@ -153,6 +153,56 @@ def parse_reset_at(message: str, *, now: datetime | None = None) -> datetime | N
             reset += timedelta(days=1)
         return reset.astimezone(timezone.utc)
     return None
+
+
+# How long a recorded outage keeps a runtime out before it is tried again. The
+# provider's own reset time is honoured when it comes sooner. When it is later,
+# or was never stated, the runtime is still probed after this: stated reset
+# times have been wrong (Antigravity ran again two days before "its" reset), and
+# a runtime nobody is allowed to call can never prove it has recovered.
+PROBE_COOLDOWN = timedelta(hours=6)
+
+
+def _moment(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def limit_state(row: dict | None, *, now: datetime | None = None) -> dict:
+    """What one stored outage means right now - the only place that decides it.
+
+    Readiness, the task worker, the provider catalog and the warning banner
+    each used to read the same row their own way, so one said a model was out
+    while another was calling it. States:
+
+    - "none": nothing recorded;
+    - "recovered": a call succeeded since (history, not blocking);
+    - "reset_passed": the stated reset time is behind us (history, not blocking);
+    - "probe_due": still unconfirmed, but the cooldown is over - try it (not blocking);
+    - "active": out now; `retry_at` says when it will be tried again (blocking).
+    """
+    if not row:
+        return {"state": "none", "blocking": False, "retry_at": None}
+    if row.get("cleared_at"):
+        return {"state": "recovered", "blocking": False, "retry_at": None}
+    moment = now or datetime.now(timezone.utc)
+    resets = _moment(row.get("resets_at"))
+    if resets and resets <= moment:
+        return {"state": "reset_passed", "blocking": False, "retry_at": None}
+    last = _moment(row.get("last_failure_at") or row.get("detected_at"))
+    # With no time of failure there is no way to tell how old the outage is,
+    # so it stays in force until a reset time or a success says otherwise.
+    probe_at = (last + PROBE_COOLDOWN) if last else None
+    candidates = [when for when in (resets, probe_at) if when is not None]
+    if not candidates:
+        return {"state": "active", "blocking": True, "retry_at": None}
+    retry_at = min(candidates)
+    if retry_at <= moment:
+        return {"state": "probe_due", "blocking": False, "retry_at": None}
+    return {"state": "active", "blocking": True, "retry_at": retry_at.isoformat()}
 
 
 def describe(message: str) -> str:

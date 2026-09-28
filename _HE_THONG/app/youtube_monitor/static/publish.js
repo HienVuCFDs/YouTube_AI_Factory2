@@ -186,30 +186,6 @@
     }).join('');
   }
 
-  async function saveSegmentCut(segmentId) {
-    const start = $(`studioCutStart-${segmentId}`)?.value;
-    const payload = {
-      source_start_seconds: String(start ?? '').trim() === '' ? -1 : Number(start),
-      edit_trim_head: Number($(`studioTrimHead-${segmentId}`)?.value || 0),
-      edit_trim_tail: Number($(`studioTrimTail-${segmentId}`)?.value || 0),
-      recut: true,
-    };
-    setMessage('Đang cắt lại cảnh này từ video gốc...', '');
-    try {
-      const result = await api(`/api/timeline/${segmentId}/cut`, {
-        method: 'PATCH', body: JSON.stringify(payload),
-      });
-      if (result.recut_error) { setMessage(result.recut_error, 'error'); return; }
-      setMessage('Đã cắt lại cảnh. Xem trước ngay bên trên.', 'success');
-      // Redraw both lanes: the segment belongs to one of them and the caller
-      // does not know which.
-      const bundle = await api(`/api/projects/${state.studioProjectId}`);
-      state.narrationSource = bundle.narration_source || state.narrationSource;
-      renderStudioStoryboard(bundle.latest_shots || [], bundle.latest_timeline || []);
-      await loadShortLane();
-    } catch (error) { setMessage(error.message, 'error'); }
-  }
-
   // Reviewing a short means hearing it end to end, not pressing play on each
   // scene. The scenes are separate files, so they are queued rather than
   // concatenated - no render, nothing written to disk.
@@ -404,6 +380,36 @@
     if (!projectId) return;
     try { renderProjectLog(await api(`/api/projects/${projectId}/log`)); }
     catch (_) { /* a project with no history yet is not an error */ }
+    try { renderOrchestratorReport(await api(`/api/projects/${projectId}/orchestrator-report`)); }
+    catch (_) { /* the audit is additional detail, never the reason the log fails */ }
+  }
+
+  // The operational log says a step ran; this says which AI decided it, and
+  // where the app filled in for one that could not be reached. A render looks
+  // the same either way, which is why it is written down rather than inferred.
+  function renderOrchestratorReport(report) {
+    const body = $('studioAiAuditBody');
+    if (!body) return;
+    const steps = report?.steps || [];
+    if (!steps.length) {
+      body.innerHTML = '<div class="studio-empty">Chưa ghi nhận bước AI nào cho dự án này.</div>';
+      return;
+    }
+    const summary = report.summary || {};
+    const head = summary.ai_complete
+      ? '<div class="secondary-text">Mọi bước đã ghi nhận đều do AI thực hiện.</div>'
+      : `<div class="warning-text">${summary.fallback_steps || 0} bước dùng mẫu của app thay cho AI, ${summary.failed || 0} bước thất bại.</div>`;
+    const rows = steps.slice().reverse().map((step) => {
+      const tag = step.fallback_used
+        ? '<span class="tag red">mẫu app</span>'
+        : step.status === 'failed' ? '<span class="tag orange">thất bại</span>' : '<span class="tag green">AI</span>';
+      return `<tr><td class="primary-text">${esc(step.step || step.stage || '')}<div class="secondary-text">${esc(String(step.created_at || '').slice(0, 16).replace('T', ' '))}</div></td>`
+        + `<td>${esc(step.runtime || '')} ${tag}</td>`
+        + `<td>${esc(step.why || '')}${step.error ? `<br><small class="error-text">${esc(step.error)}</small>` : ''}</td>`
+        + `<td>${esc(step.output_ref || '')}</td></tr>`;
+    }).join('');
+    body.innerHTML = head
+      + `<div class="table-wrap" style="margin-top:6px"><table><thead><tr><th>Bước</th><th>Model/tool</th><th>Vì sao · lỗi</th><th>Kết quả</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function renderProjectLog(log) {
@@ -447,13 +453,15 @@
     const platform = first?.dataset.platform || 'youtube';
     const profile = document.querySelector(
       `.publish-target-profile[data-platform="${platform}"]`)?.value || 'youtube_landscape';
+    const channelId = Number(document.querySelector(
+      `.publish-target-channel[data-platform="${platform}"]`)?.value || 0) || null;
     const box = $('publishChecklistBox');
     if (box) box.innerHTML = '<div class="studio-model-note">Đang kiểm tra…</div>';
     try {
       const result = await api(`/api/projects/${project.id}/publish-checklist`, {
         method: 'POST',
         body: JSON.stringify({
-          video_variant: variant, platform, output_profile: profile,
+          video_variant: variant, platform, output_profile: profile, managed_channel_id: channelId,
           title: $('publishDialogTitleInput')?.value || '',
           description: $('publishDialogDescription')?.value || '',
           tags: String($('publishDialogTags')?.value || '').split(',').map((i) => i.trim()).filter(Boolean),
@@ -597,6 +605,10 @@
     state.thumbnailBusy = true;
     const variants = Number($('thumbnailVariants')?.value || 3);
     const provider = $('thumbnailProvider')?.value || 'gemini_image';
+    const providerInfo = (state.imageProviders || []).find((item) => item.key === provider);
+    if (mode === 'ai' && providerInfo && !providerInfo.ready) {
+      return setMessage(`Model này chưa sẵn sàng: ${providerInfo.reason || 'kiểm tra phần Tích hợp'}.`, 'error');
+    }
     setMessage(mode === 'ai'
       ? 'AI đang vẽ thumbnail theo câu chuyện của video...'
       : 'Đang cắt thumbnail từ video đã dựng...', '');
@@ -1478,18 +1490,25 @@
   $('queuePauseButton').addEventListener('click', toggleAnalysisQueue);
   $('queueTranscriptButton').addEventListener('click', queuePendingTranscripts);
   $('transcriptPauseButton').addEventListener('click', toggleTranscriptQueue);
-  $('oauthConnectButton').addEventListener('click', toggleOAuthConnection);
   $('sourceImportType').addEventListener('change', updateSourceImportForm);
   $('studioSourceChannelSelect').addEventListener('change', selectStudioSourceChannel);
   $('studioVideoSelect').addEventListener('change', selectStudioVideo);
-  $('studioAnalyzeButton').addEventListener('click', analyzeStudioVideo);
+  $('studioAnalyzeButton')?.addEventListener('click', analyzeStudioVideo);
   // Phần lớn trường hợp hai ngôn ngữ này giống nhau, nên chọn một lần là đủ;
   // vẫn đổi riêng được khi cần phân tích tiếng Anh mà viết kịch bản tiếng Việt.
   $('studioAnalysisLanguage')?.addEventListener('change', (event) => {
     const target = $('studioScriptLanguage');
     if (target && !target.dataset.touched) target.value = event.target.value;
   });
-  $('studioScriptLanguage')?.addEventListener('change', (event) => { event.target.dataset.touched = '1'; });
+  $('studioScriptLanguage')?.addEventListener('change', (event) => {
+    event.target.dataset.touched = '1';
+    syncStudioNarrationLanguage(event.target.value);
+    saveStudioSession();
+  });
+  $('studioPublishLanguageSelect')?.addEventListener('change', () => {
+    syncStudioVoiceModelOptions();
+    saveStudioSession();
+  });
   $('studioSourceUpload')?.addEventListener('change', (event) => { void uploadStudioSourceFile(event.target.files?.[0]); event.target.value = ''; });
   $('studioImageUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
   $('studioFolderUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
@@ -1499,8 +1518,6 @@
   $('studioGenerateStoryboardButton').addEventListener('click', generateStudioStoryboard);
   $('studioGenerateImagesButton').addEventListener('click', generateStudioSceneImagesBatch);
   $('studioGenerateVideosButton').addEventListener('click', generateStudioSceneVideosBatch);
-  $('studioPlanVisualsButton')?.addEventListener('click', () => void planStudioVisuals());
-  $('studioPlanEditButton')?.addEventListener('click', () => void planStudioEdit());
   $('studioDownloadSourceButton')?.addEventListener('click', () => void downloadStudioSource());
   const studioDialogueCutButton = $('studioCutByDialogueButton');
   if (studioDialogueCutButton) {
@@ -1509,24 +1526,26 @@
   }
   const studioSourceCutButton = $('studioCutSourceScenesButton');
   if (studioSourceCutButton) studioSourceCutButton.textContent = '3. Cắt clip theo các mốc đã chọn';
-  $('studioPlanSourceCuesButton')?.addEventListener('click', () => void planStudioSourceCues());
   $('studioCutSourceScenesButton')?.addEventListener('click', () => void cutStudioSourceScenes());
   $('studioRenderReupButton')?.addEventListener('click', () => void renderStudioReup());
   $('studioSceneImageProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioSceneVideoProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioScriptInstructionInput').addEventListener('input', inferStudioDurationFromPrompt);
-  $('studioTargetDurationSeconds').addEventListener('input', updateStudioDurationHint);
+  $('studioTargetDurationSeconds')?.addEventListener('input', maskStudioDurationInput);
+  $('studioTargetDurationSeconds')?.addEventListener('blur', () => { normaliseStudioDurationInput(); saveStudioSession(); });
   $('studioSaveVoiceButton').addEventListener('click', saveStudioVoiceSettings);
   $('studioGenerateVoiceoverButton').addEventListener('click', generateStudioVoiceover);
   $('studioReviewVoiceButton')?.addEventListener('click', () => void reviewStudioVoiceover());
-  $('studioGenerateTimelineButton').addEventListener('click', generateStudioTimeline);
   $('studioQueueRenderButton').addEventListener('click', queueStudioRender);
+  $('studioOutputProfileSelect')?.addEventListener('change', () => {
+    if (state.studioProjectId) void refreshStudioRenderReadiness();
+  });
   $('studioOpenProjectButton')?.addEventListener('click', openStudioProject);
   $('studioManagedChannelSelect').addEventListener('change', renderStudioManagedSummary);
-  ['studioCreativeDirectionInput', 'studioScriptInstructionInput', 'studioTargetDurationSeconds', 'studioChatMessage'].forEach((id) => {
+  ['studioScriptInstructionInput', 'studioTargetDurationSeconds', 'studioChatMessage'].forEach((id) => {
     $(id)?.addEventListener('input', saveStudioSession);
   });
-  ['studioRemakeModeSelect', 'studioManagedChannelSelect', 'studioWriterProviderSelect', 'studioCreateStandaloneShort', 'studioInitialShortSeconds', 'studioVoiceRateSelect', 'studioVoiceReferenceAsset', 'studioVoicePromptText'].forEach((id) => {
+  ['studioManagedChannelSelect', 'studioWriterProviderSelect', 'studioCreateStandaloneShort', 'studioShortScriptSeconds', 'studioVoiceRateSelect', 'studioVoiceReferenceAsset', 'studioVoicePromptText'].forEach((id) => {
     $(id)?.addEventListener('change', saveStudioSession);
   });
   $('studioVoiceProviderSelect')?.addEventListener('change', () => {

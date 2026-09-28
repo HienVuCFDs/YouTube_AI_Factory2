@@ -8,16 +8,40 @@ from typing import Any
 # and every line here becomes a scene. Half of one script was headings, so
 # half its scenes were the narrator reading a section label aloud: 26 scenes
 # and 102 seconds of "Cảnh 5 · main_content" inside a fourteen minute video.
+_SECTION_WORD = r"(?:cảnh|canh|scene|phần|phan|part|đoạn|doan)"
 _SECTION_HEADING = re.compile(
-    r"^(?:cảnh|canh|scene|phần|phan|part|đoạn|doan)\s*\d+\s*[·:.\-–—]?\s*"
-    r"(?:hook|intro|main_content|main|cta|outro|kết|ket)?\s*$",
+    rf"^{_SECTION_WORD}\s*\d+\s*[·:.\-–—]?\s*"
+    r"(?:hook|intro|main_content|main|body|cta|outro|kết|ket)?\s*$",
     re.IGNORECASE,
 )
+# A writer naming its own scenes - "Cảnh 3 · Các ngôi sao và nguyên tố" - is
+# writing a heading too, and that form got past a pattern that only knew the
+# section keywords. The narrator read the table of contents out loud.
+_TITLED_HEADING = re.compile(rf"^{_SECTION_WORD}\s*\d+\s*[·:\-–—]\s*(?P<title>\S.*)$", re.IGNORECASE)
+_HEADING_TITLE_WORDS = 12
 
 
 def is_section_heading(line: str) -> bool:
     """A line that only names a section is a label, not something to say."""
-    return bool(_SECTION_HEADING.match(str(line or "").strip()))
+    text = str(line or "").strip()
+    if _SECTION_HEADING.match(text):
+        return True
+    titled = _TITLED_HEADING.match(text)
+    if not titled:
+        return False
+    # A heading is a short name. A sentence that happens to open with
+    # "Cảnh 3 - " and then runs on, or ends in a full stop, is narration and
+    # is left alone: reading a label aloud is a smaller loss than dropping a
+    # line the writer meant to be heard.
+    title = titled.group("title").strip()
+    if title.endswith((".", "!", "?", "…")) or re.search(r"[.!?…]\s+\S", title):
+        return False
+    # A second separator means the label was written on the same line as the
+    # speech - "Cảnh 5 · main_content: Yvan bắt đầu đào" - and the speech is
+    # the part that matters.
+    if re.search(r":\s*\S", title):
+        return False
+    return len(re.findall(r"\S+", title)) <= _HEADING_TITLE_WORDS
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -48,7 +72,13 @@ def _visual_prompt(section: str, narration: str, project_title: str) -> str:
     return f"B-roll or generated visual for '{project_title}': illustrate this point with specific, useful imagery. {base}"
 
 
-def build_shot_plan(project: dict[str, Any], script: dict[str, Any], writer_content: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def build_shot_plan(
+    project: dict[str, Any],
+    script: dict[str, Any],
+    writer_content: dict[str, Any] | None = None,
+    *,
+    blueprints_verified: bool = False,
+) -> list[dict[str, Any]]:
     project_title = str(project.get("title") or script.get("script_title") or "Project").strip()
     # The blueprints belong to the script the writer produced them with, and
     # that is version 1. Returning them for every later script meant a rewrite
@@ -64,17 +94,45 @@ def build_shot_plan(project: dict[str, Any], script: dict[str, Any], writer_cont
         for field in ("hook", "intro", "main_content", "cta")
     )
     blueprints = (writer_content or {}).get("scene_blueprints") if isinstance(writer_content, dict) else None
-    if script_version > 1 and has_own_words:
+    # The version number is a stand-in for "this script was rewritten", used
+    # because this function cannot tell on its own. A caller that has checked
+    # the blueprints really do belong to this script - same words, recorded as
+    # the script was written, untouched since - knows better, and says so.
+    # Without that, a second script row was enough to discard a scene list the
+    # AI had already written, and the prose got chopped by line instead.
+    if not blueprints_verified and script_version > 1 and has_own_words:
         blueprints = None
     if isinstance(blueprints, list):
+        usable = [
+            item for item in blueprints
+            if isinstance(item, dict) and str(item.get("narration") or "").strip()
+            # The filter below guarded only the fallback path, so a writer that
+            # returned its own scene list - the path actually taken - still got
+            # its headings read aloud, each as a scene of its own.
+            and not is_section_heading(item.get("narration"))
+        ]
         ai_shots: list[dict[str, Any]] = []
-        for index, item in enumerate(blueprints, start=1):
-            if not isinstance(item, dict) or not str(item.get("narration") or "").strip():
-                continue
-            section = str(item.get("section") or "main").strip().lower()
-            if section not in {"hook", "intro", "main", "cta"}:
-                section = "main"
+        for index, item in enumerate(usable, start=1):
             narration = str(item.get("narration") or "").strip()
+            section = str(item.get("section") or "").strip().lower()
+            if section not in {"hook", "intro", "main", "cta"}:
+                # A writer naming its own sections - "Mở vấn đề", "Sự sống và
+                # tổng kết" - had every one of them flattened to "main", and
+                # with it the opening and closing treatment those names exist
+                # to select. Position says what the name no longer can.
+                if index == 1:
+                    section = "hook"
+                elif index == len(usable):
+                    section = "cta"
+                else:
+                    section = "main"
+            # The writer's own estimate is a guess made before a word was
+            # spoken, and it came back as a flat ten seconds for scenes whose
+            # lines take seventeen to read. A scene is never given less time
+            # than its own sentence needs; asking for more than that is a
+            # pacing choice and is honoured.
+            spoken = _duration(narration)
+            wanted = int(item.get("duration_seconds") or 0) or spoken
             ai_shots.append({
                 "shot_index": int(item.get("order") or index), "section": section, "narration": narration,
                 "speaker": str(item.get("speaker") or "").strip(),
@@ -83,7 +141,7 @@ def build_shot_plan(project: dict[str, Any], script: dict[str, Any], writer_cont
                 # sent the reup workflow - whose pictures are cut from its own
                 # source - into the image generators anyway.
                 "asset_type": str(item.get("asset_type") or "ai_scene").strip() or "ai_scene",
-                "duration_seconds": max(3, min(30, int(item.get("duration_seconds") or _duration(narration)))),
+                "duration_seconds": max(3, min(30, max(wanted, spoken))),
                 "status": "planned",
             })
         if ai_shots:

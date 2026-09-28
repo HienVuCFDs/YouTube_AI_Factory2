@@ -11,7 +11,7 @@ WORKFLOW = Workflow(
     summary="Tải video gốc về, kể lại lời bình theo cách khác, dịch, rồi cắt hình từ chính video đó.",
     steps=(
         "Nguồn", "Phân tích", "Lời bình + Short", "Giọng đọc + Short",
-        "Cảnh gốc", "Xưởng dựng + Short", "Xuất bản",
+        "Storyboard", "Xưởng dựng + Short", "Xuất bản",
     ),
     notes=(
         "Nội dung gốc giữ nguyên: nhân vật, tên riêng, số liệu, thứ tự sự việc, cái kết. "

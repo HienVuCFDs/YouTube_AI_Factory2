@@ -85,13 +85,17 @@ class TheReviewControlsAreOnTheCardTests(unittest.TestCase):
     def test_a_missing_waveform_does_not_leave_a_broken_image(self) -> None:
         self.assertIn('onerror="this.remove()"', self.page)
 
-    def test_a_scene_cut_from_the_source_can_be_re_cut_from_the_card(self) -> None:
-        self.assertIn("saveSegmentCut(", self.page)
-        self.assertIn("Cắt lại cảnh này", self.page)
+    def test_a_storyboard_card_does_not_duplicate_source_cutting_controls(self) -> None:
+        self.assertNotIn("saveSegmentCut(", self.page)
+        self.assertNotIn("Cắt lại cảnh này", self.page)
 
-    def test_the_cut_controls_only_appear_on_scenes_cut_from_a_source(self) -> None:
-        """A drawn scene has no point in the source to move."""
-        self.assertIn("String(segment?.visual_path || '').includes('source_clips')", self.page)
+    def test_source_cutting_stays_in_the_reup_preparation_flow(self) -> None:
+        """Storyboard is for review; selecting and cutting source clips is one
+        explicit operation before the cards are reviewed."""
+        self.assertIn('id="studioCutByDialogueButton"', self.page)
+        self.assertIn('id="studioCutSourceScenesButton"', self.page)
+        self.assertNotIn("studioCutStart-", self.page)
+        self.assertNotIn("studioTrimHead-", self.page)
 
     def test_the_whole_short_can_be_heard_end_to_end(self) -> None:
         self.assertIn("playWholeShortVoice()", self.page)

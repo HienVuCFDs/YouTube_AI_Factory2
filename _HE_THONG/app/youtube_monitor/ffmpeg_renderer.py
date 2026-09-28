@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from .settings import GPU_ONLY
 from .subtitle_builder import write_segment_srt
+from .graphic_overlays import graphic_overlay_filters, retime_graphic_overlays
+from .scene_direction import resolve_direction
+from .scene_compositor import composite_scene_direction
 
 
 class FfmpegRenderError(RuntimeError):
@@ -103,6 +108,179 @@ def _existing_path(value: Any, label: str, segment_index: int) -> Path | None:
 def _concat_line(path: Path) -> str:
     # concat demuxer expects a single-quoted path; escape embedded quotes.
     return "file '" + path.as_posix().replace("'", "'\\''") + "'"
+
+
+def _transition_name(value: Any) -> str:
+    transition = str(value or "").strip().lower()
+    if transition in {"", "none", "cut"}:
+        return "cut"
+    if transition in {"fade", "crossfade"}:
+        return "fade"
+    return "cut"
+
+
+def _boundary_transitions(timeline: list[dict[str, Any]], default_transition: str) -> list[str]:
+    """The transition into each next scene.
+
+    The timeline stores edit_transition on a scene row. For the final stitch,
+    that reads most naturally as "how this scene enters", so the boundary
+    between scene N and N+1 is controlled by scene N+1 when it has a value,
+    otherwise by the project default.
+    """
+    if len(timeline) < 2:
+        return []
+    return [
+        _transition_name(timeline[index].get("edit_transition") or default_transition)
+        for index in range(1, len(timeline))
+    ]
+
+
+def _has_final_crossfades(timeline: list[dict[str, Any]], default_transition: str) -> bool:
+    return "fade" in _boundary_transitions(timeline, default_transition)
+
+
+def _crossfade_seconds(left_duration: float, right_duration: float) -> float:
+    """A short editorial dissolve that cannot eat a whole tiny scene."""
+    return max(0.0, min(0.35, left_duration * 0.25, right_duration * 0.25))
+
+
+def _write_concat_final(
+    executable: str,
+    segment_outputs: list[Path],
+    concat_file: Path,
+    final_path: Path,
+    output_dir: Path,
+) -> None:
+    concat_file.write_text(
+        "\n".join(_concat_line(path) for path in segment_outputs) + "\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            executable,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(final_path),
+        ],
+        output_dir,
+    )
+
+
+def _render_final_with_transitions(
+    executable: str,
+    segment_outputs: list[Path],
+    segment_durations: list[float],
+    boundary_transitions: list[str],
+    final_path: Path,
+    output_dir: Path,
+    fps: int,
+    codec: str,
+) -> None:
+    """Join finished scenes, using real crossfades at scene boundaries.
+
+    Segment rendering owns per-scene effects, subtitles and overlays. The last
+    pass owns how scenes meet each other. A concat-copy pass cannot express a
+    dissolve, so when any boundary asks for fade this builds one filter graph
+    for both picture and audio.
+    """
+    if len(segment_outputs) == 1 or "fade" not in boundary_transitions:
+        _write_concat_final(executable, segment_outputs, output_dir / "concat.txt", final_path, output_dir)
+        return
+
+    args = [executable, "-y"]
+    for path in segment_outputs:
+        args += ["-i", str(path)]
+
+    graph: list[str] = []
+    normalized_video_labels: list[str] = []
+    normalized_audio_labels: list[str] = []
+    for input_index in range(len(segment_outputs)):
+        video_out = f"[v{input_index}n]"
+        audio_out = f"[a{input_index}n]"
+        graph.append(
+            f"[{input_index}:v]fps={fps},settb=AVTB,setpts=PTS-STARTPTS,"
+            f"format=yuv420p{video_out}"
+        )
+        graph.append(
+            f"[{input_index}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"asetpts=PTS-STARTPTS{audio_out}"
+        )
+        normalized_video_labels.append(video_out)
+        normalized_audio_labels.append(audio_out)
+
+    video_label = normalized_video_labels[0]
+    audio_label = normalized_audio_labels[0]
+    composed_duration = max(0.1, float(segment_durations[0]))
+    for index, next_path in enumerate(segment_outputs[1:], start=1):
+        next_duration = max(0.1, float(segment_durations[index]))
+        transition = boundary_transitions[index - 1] if index - 1 < len(boundary_transitions) else "cut"
+        next_video = normalized_video_labels[index]
+        next_audio = normalized_audio_labels[index]
+        out_video = f"[v{index}]"
+        out_audio = f"[a{index}]"
+        if transition == "fade":
+            fade = _crossfade_seconds(composed_duration, next_duration)
+            if fade >= 0.08:
+                offset = max(0.0, composed_duration - fade)
+                graph.append(
+                    f"{video_label}{next_video}xfade=transition=fade:duration={fade:.3f}:"
+                    f"offset={offset:.3f}{out_video}"
+                )
+                graph.append(
+                    f"{audio_label}{next_audio}acrossfade=d={fade:.3f}:c1=tri:c2=tri{out_audio}"
+                )
+                composed_duration += next_duration - fade
+            else:
+                graph.append(
+                    f"{video_label}{audio_label}{next_video}{next_audio}"
+                    f"concat=n=2:v=1:a=1{out_video}{out_audio}"
+                )
+                composed_duration += next_duration
+        else:
+            graph.append(
+                f"{video_label}{audio_label}{next_video}{next_audio}"
+                f"concat=n=2:v=1:a=1{out_video}{out_audio}"
+            )
+            composed_duration += next_duration
+        video_label = out_video
+        audio_label = out_audio
+
+    _run(
+        args + [
+            "-filter_complex",
+            ";".join(graph),
+            "-map",
+            video_label,
+            "-map",
+            audio_label,
+            "-r",
+            str(fps),
+            *_encoding_arguments(codec),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(final_path),
+        ],
+        output_dir,
+    )
 
 
 def _escape_drawtext(value: str) -> str:
@@ -213,6 +391,11 @@ def generate_local_visual_draft(
             }
         )
     return results
+
+
+# Bounded, and overridable, because the encoder sessions and the memory are
+# shared with everything else on the machine.
+RENDER_WORKERS = max(1, min(int(os.getenv("RENDER_WORKER_COUNT", "3")), 8))
 
 
 def _supports_nvenc(executable: str) -> bool:
@@ -484,6 +667,36 @@ def _motion_filters(effect: str, width: int, height: int, fps: int) -> list[str]
     ]
 
 
+def _sound_cue_inputs(raw: Any, segment_index: int) -> list[dict[str, Any]]:
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise FfmpegRenderError(f"Sound cue của cảnh {segment_index} không phải JSON hợp lệ") from exc
+    if not isinstance(raw, list):
+        return []
+    cues: list[dict[str, Any]] = []
+    for cue in raw[:8]:
+        if not isinstance(cue, dict):
+            continue
+        path_value = str(cue.get("asset_path") or cue.get("file_path") or "").strip()
+        if not path_value:
+            continue
+        path = Path(path_value).expanduser()
+        if not path.is_file():
+            raise FfmpegRenderError(f"Không tìm thấy sound cue của segment {segment_index}: {path}")
+        try:
+            start = max(0.0, float(cue.get("start_seconds") or 0))
+            end = float(cue.get("end_seconds") or start + 0.6)
+        except (TypeError, ValueError) as exc:
+            raise FfmpegRenderError(f"Thời điểm sound cue của segment {segment_index} không hợp lệ") from exc
+        length = max(0.05, min(20.0, end - start))
+        intensity = str(cue.get("intensity") or "medium").strip().lower()
+        volume = {"low": 0.18, "medium": 0.28, "high": 0.42}.get(intensity, 0.28)
+        cues.append({"path": path.resolve(), "start_seconds": start, "duration_seconds": length, "volume": volume})
+    return cues
+
+
 def _segment_arguments(
     executable: str,
     item: dict[str, Any],
@@ -504,7 +717,9 @@ def _segment_arguments(
     cleanups: list[dict[str, Any]] | None = None,
     trim_head: float = 0.0,
     trim_tail: float = 0.0,
+    overlays: list[dict[str, Any]] | None = None,
     fit: str = "pad",
+    sound_cues: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     if not visual:
         raise FfmpegRenderError(
@@ -533,6 +748,9 @@ def _segment_arguments(
         args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
     if background_music:
         args += ["-stream_loop", "-1", "-i", str(background_music)]
+    sfx_inputs = list(sound_cues or [])
+    for cue in sfx_inputs:
+        args += ["-i", str(cue["path"])]
 
     # Where the marks are is decided on the frame they are actually on: a
     # still has already been through zoompan and is at the output size, a clip
@@ -543,6 +761,19 @@ def _segment_arguments(
     filters: list[str] = []
     after: list[str] = []
     if visual.suffix.lower() in STILL_IMAGE_EXTENSIONS:
+        # zoompan's ``s=`` changes the output canvas but does not preserve the
+        # input aspect ratio by itself.  Fit the still first; otherwise a
+        # landscape AI insert becomes a tall, stretched figure in 9:16.
+        if str(fit or "pad").strip().lower() == "cover":
+            filters.extend([
+                f"scale={width}:{height}:force_original_aspect_ratio=increase",
+                f"crop={width}:{height}",
+            ])
+        else:
+            filters.extend([
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            ])
         # A still with no motion at all reads as a broken video, so the plan's
         # silence means a restrained push rather than nothing.
         filters.extend(_motion_filters(effect or "zoom_in", width, height, fps))
@@ -577,6 +808,13 @@ def _segment_arguments(
             f"fade=t=in:st=0:d={fade_seconds}",
             f"fade=t=out:st={max(0.0, duration - fade_seconds):.3f}:d={fade_seconds}",
         ])
+    try:
+        after.extend(graphic_overlay_filters(
+            overlays or [], duration, width, height, segment_output.parent,
+            segment_output.stem, WINDOWS_FONT,
+        ))
+    except ValueError as exc:
+        raise FfmpegRenderError(f"Overlay của cảnh {index} không hợp lệ: {exc}") from exc
     if subtitle_path and subtitle_path.is_file():
         # FFmpeg filter syntax treats ':' as a separator, including the drive
         # letter on Windows.  Escape the path and keep subtitles compact at the
@@ -594,19 +832,48 @@ def _segment_arguments(
         filters, blur_regions, after, frame_size=(mark_width, mark_height)
     )
     result = args + ["-map", "0:v:0"]
-    if background_music:
+    if background_music or sfx_inputs:
         music_level = max(0.0, min(float(music_volume), 0.5))
-        audio_filter = (
-            # Keep speech intelligible and prevent clipping in the final mix.
-            # The music stream is side-chained by the voice stream, so its
-            # level automatically drops while narration is present.
+        audio_parts = [
             f"[1:a]aresample=48000,highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11,"
-            f"afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, duration - 0.12):.3f}:d=0.12[voice];"
-            f"[2:a]aresample=48000,volume={music_level:.3f},afade=t=in:st=0:d=0.20[music];"
-            "[music][voice]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=250[ducked_music];"
-            "[voice][ducked_music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            f"afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, duration - 0.12):.3f}:d=0.12[voice]"
+        ]
+        mix_labels = ["[voice]"]
+        next_input = 2
+        if background_music:
+            audio_parts.append("[voice]asplit=2[voice_mix][voice_sidechain]")
+            mix_labels = ["[voice_mix]"]
+            ducks = item.get("sound_cues") or []
+            if isinstance(ducks, str):
+                ducks = json.loads(ducks)
+            envelope = "".join(
+                f",volume=0.35:enable='between(t,{float(cue['start_seconds']):.3f},{float(cue['end_seconds']):.3f})'"
+                for cue in ducks if cue.get("type") == "music_duck"
+            )
+            audio_parts.append(
+                f"[{next_input}:a]aresample=48000,volume={music_level:.3f}{envelope},afade=t=in:st=0:d=0.20[music]"
+            )
+            audio_parts.append(
+                "[music][voice_sidechain]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=250[ducked_music]"
+            )
+            mix_labels.append("[ducked_music]")
+            next_input += 1
+        for cue_index, cue in enumerate(sfx_inputs, start=1):
+            delay_ms = int(round(float(cue.get("start_seconds") or 0) * 1000))
+            cue_duration = max(0.05, float(cue.get("duration_seconds") or 0.5))
+            volume = max(0.0, min(float(cue.get("volume") or 0.28), 1.0))
+            label = f"[sfx{cue_index}]"
+            audio_parts.append(
+                f"[{next_input}:a]aresample=48000,atrim=0:{cue_duration:.3f},asetpts=PTS-STARTPTS,"
+                f"volume={volume:.3f},adelay={delay_ms}|{delay_ms}{label}"
+            )
+            mix_labels.append(label)
+            next_input += 1
+        audio_parts.append(
+            "".join(mix_labels)
+            + f"amix=inputs={len(mix_labels)}:duration=first:dropout_transition=0:normalize=0[aout]"
         )
-        result += ["-map", "[aout]", "-filter_complex", audio_filter, "-vf", video_filter]
+        result += ["-map", "[aout]", "-filter_complex", ";".join(audio_parts), "-vf", video_filter]
     else:
         result += [
             "-map", "1:a:0", "-vf", video_filter,
@@ -671,15 +938,19 @@ def render_timeline_with_ffmpeg(
     subtitles_dir = output_dir / "subtitles"
     subtitles_dir.mkdir(parents=True, exist_ok=True)
     segment_outputs: list[Path] = []
+    segment_durations: list[float] = []
+    execution_report: list[dict[str, Any]] = []
     if GPU_ONLY and not _supports_nvenc(executable):
         raise FfmpegRenderError(
             "GPU-only mode is enabled but FFmpeg has no h264_nvenc encoder. "
             "The app will not render with libx264/CPU."
         )
     preferred_codec = "h264_nvenc" if _supports_nvenc(executable) else "libx264"
+    final_transitions = _boundary_transitions(timeline, transition)
+    final_has_crossfades = "fade" in final_transitions
 
-    for item in timeline:
-        index = int(item.get("segment_index") or len(segment_outputs) + 1)
+    def _render_one(position: int, item: dict[str, Any]) -> tuple[Path, float, dict[str, Any]]:
+        index = int(item.get("segment_index") or position + 1)
         visual = _existing_path(item.get("visual_path"), "visual", index)
         audio = _existing_path(item.get("audio_path"), "audio", index)
         actual_audio_duration = media_duration_seconds(audio, executable) if audio else None
@@ -699,63 +970,159 @@ def render_timeline_with_ffmpeg(
         # default gentle push-in.
         segment_transition = str(item.get("edit_transition") or transition or "fade")
         segment_effect = str(item.get("edit_effect") or "")
+        render_transition = "cut" if final_has_crossfades and _transition_name(segment_transition) == "fade" else segment_transition
         try:
             segment_cleanups = json.loads(str(item.get("edit_cleanups") or "[]"))
         except (TypeError, ValueError):
             segment_cleanups = []
+        raw_overlays = item.get("overlays") or []
+        try:
+            segment_overlays = json.loads(raw_overlays) if isinstance(raw_overlays, str) else raw_overlays
+        except (TypeError, ValueError) as exc:
+            raise FfmpegRenderError(f"Overlay của cảnh {index} không phải JSON hợp lệ") from exc
+        if not isinstance(segment_overlays, list):
+            raise FfmpegRenderError(f"Overlay của cảnh {index} phải là danh sách")
+        try:
+            segment_overlays = retime_graphic_overlays(
+                segment_overlays, max(0.1, float(item.get("duration_seconds") or duration)), duration,
+            )
+        except ValueError as exc:
+            raise FfmpegRenderError(f"Overlay của cảnh {index} không hợp lệ: {exc}") from exc
+        raw_cues = item.get("sound_cues") or []
+        if isinstance(raw_cues, str):
+            raw_cues = json.loads(raw_cues)
+        cue_ratio = duration / max(.1, float(item.get("duration_seconds") or duration))
+        timed_cues = [{**cue, "start_seconds": float(cue.get("start_seconds") or 0) * cue_ratio,
+                      "end_seconds": float(cue.get("end_seconds") or .5) * cue_ratio} for cue in raw_cues]
+        item = {**item, "sound_cues": timed_cues}
+        segment_sound_cues = _sound_cue_inputs(timed_cues, index)
         trim_head = float(item.get("edit_trim_head") or 0)
         trim_tail = float(item.get("edit_trim_tail") or 0)
+
+        # A storyboard scene may contain several approved edit beats.  First
+        # turn them into one silent visual track, then apply the scene's voice
+        # exactly once below.  This avoids the old failure mode where splitting
+        # a scene into inserts also split or lost its narration.
+        beats = [beat for beat in (item.get("edit_beats") or []) if str(beat.get("visual_path") or "").strip()]
+        if beats:
+            beat_dir = segments_dir / f"beats-{index:03d}"
+            beat_dir.mkdir(parents=True, exist_ok=True)
+            beat_outputs: list[Path] = []
+            for beat_index, beat in enumerate(beats, start=1):
+                beat_visual = _existing_path(beat.get("visual_path"), "edit beat", beat_index)
+                beat_duration = max(0.15, float(beat.get("duration_seconds") or 0.15))
+                beat_output = beat_dir / f"beat-{beat_index:03d}.mp4"
+                # Consecutive primary beats must continue through the source
+                # clip.  Starting every beat at frame zero made the same first
+                # seconds repeat whenever the plan split one clip into several
+                # effects.  Inserted frames/AI stills are independent assets,
+                # so their timeline offset must not be used as an input seek.
+                source_kind = str(beat.get("source_kind") or "").strip().lower()
+                beat_trim_head = (
+                    max(0.0, float(beat.get("start_seconds") or 0.0))
+                    if source_kind == "primary" and beat_visual.suffix.lower() not in STILL_IMAGE_EXTENSIONS
+                    else 0.0
+                )
+                beat_args = _segment_arguments(
+                    executable, item, beat_visual, None, beat_output, beat_duration,
+                    width, height, fps, index, preferred_codec, None, None, 0.0,
+                    str(beat.get("transition") or "cut"), str(beat.get("effect") or "static"),
+                    [], beat_trim_head, 0.0, fit=fit,
+                )
+                _run(beat_args, output_dir)
+                beat_outputs.append(beat_output)
+            beat_concat = beat_dir / "concat.txt"
+            beat_concat.write_text("\n".join(_concat_line(path) for path in beat_outputs) + "\n", encoding="utf-8")
+            compound = beat_dir / "composition.mp4"
+            _run([executable, "-y", "-f", "concat", "-safe", "0", "-i", str(beat_concat), "-an", "-c:v", "copy", str(compound)], output_dir)
+            visual = compound
+            trim_head = trim_tail = 0.0
+            # The composition already carries each beat's movement and fade.
+            segment_effect = "static"
+            render_transition = "cut"
         args = _segment_arguments(
             executable, item, visual, audio, segment_output, duration,
             width, height, fps, index, preferred_codec, subtitle_path,
-            background_music, music_volume, segment_transition, segment_effect,
+            background_music, music_volume, render_transition, segment_effect,
             segment_cleanups, trim_head, trim_tail,
-            fit=fit,
+            fit=fit, overlays=segment_overlays, sound_cues=segment_sound_cues,
         )
+        segment_codec = preferred_codec
         try:
             _run(args, output_dir)
         except FfmpegRenderError:
             if preferred_codec != "h264_nvenc" or GPU_ONLY:
                 raise
+            segment_codec = "libx264"
             # Some FFmpeg builds expose NVENC although the active driver cannot use it.
             _run(
                 _segment_arguments(
                     executable, item, visual, audio, segment_output, duration,
                     width, height, fps, index, "libx264", subtitle_path,
-                    background_music, music_volume, segment_transition, segment_effect,
+                    background_music, music_volume, render_transition, segment_effect,
                     segment_cleanups, trim_head, trim_tail,
-                    fit=fit,
+                    fit=fit, overlays=segment_overlays, sound_cues=segment_sound_cues,
                 ),
                 output_dir,
             )
         if not segment_output.is_file():
             raise FfmpegRenderError(f"FFmpeg không tạo segment {index}: {segment_output}")
-        segment_outputs.append(segment_output)
+        raw_direction = item.get("edit_direction") or {}
+        if isinstance(raw_direction, str):
+            raw_direction = json.loads(raw_direction)
+        report = {"segment_id": item.get("id"), "segment_index": index,
+                  "overlays": len(segment_overlays), "sound_cues": len(segment_sound_cues)}
+        if raw_direction:
+            from .speech_timing import scene_speech_timing
+            timing = scene_speech_timing(item) if any(
+                layer.get("anchor_text") for layer in raw_direction.get("graphic_layers", [])
+            ) else {"words": [], "timing_basis": "estimated"}
+            resolved = resolve_direction(raw_direction, duration, timing.get("words"))
+            segment_output, applied = composite_scene_direction(
+                segment_output, resolved, executable, width, height, fps, segment_codec)
+            report.update(applied, timing_basis=timing.get("timing_basis"))
+        return segment_output, duration, report
 
-    concat_file = output_dir / "concat.txt"
-    concat_file.write_text(
-        "\n".join(_concat_line(path) for path in segment_outputs) + "\n",
-        encoding="utf-8",
-    )
+    # The scenes are independent - each writes its own file from its own
+    # visual and its own audio - but they were rendered strictly one after
+    # another, which on a machine with NVENC and several cores is time spent
+    # queueing rather than encoding. Order is restored from the position, so
+    # the cut is the same whichever finishes first.
+    rendered: list[tuple[Path, float, dict[str, Any]]] = [None] * len(timeline)  # type: ignore[list-item]
+    if RENDER_WORKERS > 1 and len(timeline) > 1:
+        with ThreadPoolExecutor(max_workers=min(RENDER_WORKERS, len(timeline))) as pool:
+            futures = {
+                pool.submit(_render_one, position, item): position
+                for position, item in enumerate(timeline)
+            }
+            for future in as_completed(futures):
+                # The first failure is raised, and the pool's context manager
+                # waits for the rest rather than leaving ffmpeg processes
+                # writing into a directory the caller is about to report on.
+                rendered[futures[future]] = future.result()
+    else:
+        for position, item in enumerate(timeline):
+            rendered[position] = _render_one(position, item)
+    for segment_output, duration, report in rendered:
+        segment_outputs.append(segment_output)
+        segment_durations.append(duration)
+        execution_report.append(report)
+
     final_path = output_dir / output_filename
-    _run(
-        [
-            executable,
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(final_path),
-        ],
-        output_dir,
-    )
+    try:
+        _render_final_with_transitions(
+            executable, segment_outputs, segment_durations, final_transitions,
+            final_path, output_dir, fps, preferred_codec,
+        )
+    except FfmpegRenderError:
+        if preferred_codec != "h264_nvenc" or GPU_ONLY:
+            raise
+        _render_final_with_transitions(
+            executable, segment_outputs, segment_durations, final_transitions,
+            final_path, output_dir, fps, "libx264",
+        )
     if not final_path.is_file():
         raise FfmpegRenderError(f"FFmpeg không tạo file cuối: {final_path}")
+    final_path.with_suffix(".execution.json").write_text(
+        json.dumps({"scenes": execution_report}, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(final_path)

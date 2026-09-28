@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import orchestrator_runtime
 from .analyzer import MetadataAnalyzer
 from .llm_client import LlmError, call_antigravity_json, call_claude_code_cli_json, call_claude_json, call_codex_json, call_openai_json
 
@@ -156,7 +157,12 @@ def resolve_analyzer(provider: str | None):
 
     Falls back to the free local_metadata analyzer when provider is empty.
     """
-    name = provider or _LOCAL_ANALYZER.provider
+    name = (
+        _LOCAL_ANALYZER.provider
+        if not provider or str(provider).strip().lower() == "auto"
+        # An agent name reaches its runtime through the one shared mapping.
+        else orchestrator_runtime.runtime_id(str(provider))
+    )
     if name == _LOCAL_ANALYZER.provider:
         return _LOCAL_ANALYZER
     if name not in _LLM_ANALYZERS:

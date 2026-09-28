@@ -203,7 +203,7 @@ def call_antigravity_json(
     Uses the CLI's existing login (Google account) rather than an API key,
     same pattern as call_codex_json / call_claude_code_json.
     """
-    status = antigravity_cli_status()
+    status = antigravity_cli_status(force=True)
     if not status["installed"]:
         raise AntigravityBridgeError("Khong tim thay Antigravity CLI; hay cai Antigravity")
     if not status["logged_in"]:
