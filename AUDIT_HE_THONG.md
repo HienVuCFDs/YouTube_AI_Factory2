@@ -96,7 +96,7 @@ Chi tiết đầy đủ ở `AI_CONNECTION_HANDOFF.md`. Tóm tắt:
 | GPT Work nạp MCP, thấy 45 tool | **VERIFIED** | log `~/.codex/logs_2.sqlite` 28/09 |
 | GPT Work gọi tool của app | **UNVERIFIED** | 0 lần trong `~/.codex/sessions`; nó bấm giao diện trong trình duyệt tích hợp `iab` |
 | Claude Cowork nạp MCP | **Chưa kết nối** | Claude Desktop ghi đè config lúc 17:18:46 28/09 ("Config file written"). Phải sửa khi Claude Desktop đã tắt hẳn |
-| **App tự điều phối bằng agent CLI qua MCP** | **VERIFIED** (Codex) | Mục 3.1 |
+| **App tự điều phối bằng agent CLI qua MCP** | **VERIFIED** (Codex và Claude) | Mục 3.1 |
 
 ### 3.1 Agent Orchestrator — đo thật (28/09)
 
@@ -182,7 +182,7 @@ Ghi lại vì chúng lặp thành mẫu.
 | Profile Chrome đã đăng nhập giúp đọc Shopee | Chưa ai đăng nhập; code có nhưng chưa thử |
 | ~~Claude in Chrome đọc được Shopee~~ | **VERIFIED 28/09:** đọc đủ, kể cả giá, trên Cốc Cốc của người dùng, trong phiên tương tác |
 | GPT Work / Claude Cowork làm được việc trong hàng đợi | Các việc vẫn `queued`; app không đánh thức được chúng |
-| Claude CLI làm Orchestrator Agent | Có lệnh và test, chưa lượt thật nào tới lượt Claude |
+| ~~Claude CLI làm Orchestrator Agent~~ | **VERIFIED 29/09:** dự án 61, `runtime=claude_code_cli`, 3 tool call, DB xác nhận timeline |
 | Đổi runtime giữa lượt khi não hỏng | Có test; chưa xảy ra thật |
 | Song song tạo ảnh giúp nhanh hơn | Chỉ nhanh khi trải qua **nhiều provider**; một provider vẫn tuần tự |
 
@@ -201,4 +201,4 @@ Không dính các sửa đổi trong đợt này:
 
 Lưu ý: `test_shot_planner` có hai test lúc đỏ lúc xanh khi chạy cả bộ, chạy riêng thì xanh — phụ thuộc thứ tự vì cả bộ dùng chung một database tạm.
 
-**Tổng (29/09, sau mốc Agent Orchestrator): 1476 đạt, 2 đỏ, 9 bỏ qua.** 48 test mới trong `tests/test_agent_orchestration.py`.
+**Tổng (29/09): 1477 đạt, 2 đỏ, 9 bỏ qua.** 49 test mới trong `tests/test_agent_orchestration.py`.

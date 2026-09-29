@@ -1,6 +1,6 @@
 # AI CONNECTION HANDOFF — YouTube AI Factory
 
-Cập nhật: **2026-09-29**, mốc "Agent Orchestrator". Bản trước (28/09) đã lỗi thời ở các điểm: pipeline CLI "unavailable", "chưa có agent loop", "fallback chưa hoạt động".
+Cập nhật: **2026-09-29**, mốc "Agent Orchestrator" + xác minh Claude CLI làm AI điều phối. Bản trước (28/09) đã lỗi thời ở các điểm: pipeline CLI "unavailable", "chưa có agent loop", "fallback chưa hoạt động".
 
 Nhãn trạng thái:
 
@@ -50,7 +50,7 @@ GOAL + target_steps
      2 vòng liền không đổi state → dừng "blocked"
 ```
 
-- **Kích hoạt:** `POST /api/projects/{id}/orchestrate` với `{"mode":"agent","intent":…,"target_steps":[…],"allow_spend":false,"allow_overwrite":false,"max_rounds":4,"tool_budget":40}`. App tạo task vai `orchestrator` trong **hàng đợi có sẵn**. Chế độ `plan` cũ vẫn giữ cho giao diện.
+- **Kích hoạt:** `POST /api/projects/{id}/orchestrate` với `{"mode":"agent","intent":…,"target_steps":[…],"runtime":"auto","allow_spend":false,"allow_overwrite":false,"max_rounds":4,"tool_budget":40}`. `runtime` (`auto` / `codex_cli` / `claude_code_cli` / `astra` / `claude`) chọn AI điều phối đi trước; các AI còn lại vẫn đứng sau làm dự phòng. App tạo task vai `orchestrator` trong **hàng đợi có sẵn**. Chế độ `plan` cũ vẫn giữ cho giao diện.
 - **Hoàn thành:** task chỉ `completed` khi `_verify_goal` xác nhận từ DB. Không có chấm chéo cho vai này, và không chạy lại y hệt khi hỏng.
 - **Hai loại retry:**
   - `llm_client._with_retry` chỉ lo lỗi kỹ thuật tạm thời (đợi 5/20/45 giây), giữ nguyên.
@@ -100,8 +100,8 @@ Có một lần gọi thành công thì bản ghi tự xoá (`note_success`). Ba
 | Mục | Trạng thái | Bằng chứng |
 |---|---|---|
 | Codex CLI làm Orchestrator Agent qua MCP | **VERIFIED** | Dự án 61 và 66 (28/09), xem mục 8 |
-| Claude CLI làm Orchestrator Agent qua MCP | **UNVERIFIED** | Lệnh và cờ có test; chưa lượt thật nào tới lượt Claude vì Codex luôn sẵn sàng |
-| Đổi runtime khi não hỏng (Codex → Claude) | **UNVERIFIED** (có test) | Chưa xảy ra thật |
+| Claude CLI làm Orchestrator Agent qua MCP | **VERIFIED** | Dự án 61 (29/09), task `agt_64ed…`, `runtime=claude_code_cli`: list_steps → run_step(timeline) → list_steps; model `claude-opus-5` + `claude-haiku-4-5`, 5 lượt, 22,7 giây; DB xác nhận 6 đoạn timeline. Agent tự **không** dùng `force` vì chưa có timeline để ghi đè |
+| Đổi runtime khi não hỏng (Codex → Claude) | **UNVERIFIED** (có test) | Chưa xảy ra thật. Khi xảy ra, log ghi `round.runtime_failed` cùng quyết định chọn runtime kế tiếp |
 | Pipeline 5 vai chạy bằng CLI | **PARTIAL** | Dự án 72: research, script, director đạt (`astra`, `claude` chấm chéo 8 điểm). `media` trượt 6/10 vì chất lượng, giữ nguyên. `qc` chưa tới |
 | GPT Work nạp MCP, thấy 45 tool | **VERIFIED** | log `~/.codex/logs_2.sqlite` |
 | GPT Work gọi tool `youtube_factory_*` | **UNVERIFIED** | 0 lần trong `~/.codex/sessions`; ngày 28/09 nó bấm giao diện. Chưa có bằng chứng GPT Work đọc `instructions` của MCP |

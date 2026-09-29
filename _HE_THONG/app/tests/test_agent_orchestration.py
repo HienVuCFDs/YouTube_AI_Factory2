@@ -405,6 +405,27 @@ class OrchestrateAgentModeTests(unittest.TestCase):
         self.assertEqual(response["task"]["max_attempts"], 1)
         enqueue.assert_called_once_with("agt_test")
 
+    def test_the_directing_ai_can_be_chosen(self) -> None:
+        def fake_create(project_id, role, task_type, payload, **kwargs):
+            return {"id": "agt_test", "role": role, "input": payload, **kwargs}
+
+        with mock.patch.object(main.database, "create_agent_task", side_effect=fake_create), \
+                mock.patch.object(main.agent_task_worker, "enqueue"):
+            chosen = main.orchestrate_project(
+                int(self.project["id"]),
+                main.OrchestrateRequest(intent="dựng timeline", mode="agent", target_steps=["timeline"],
+                                        runtime="claude_code_cli"),
+            )
+            with self.assertRaises(main.HTTPException) as caught:
+                main.orchestrate_project(
+                    int(self.project["id"]),
+                    main.OrchestrateRequest(intent="dựng timeline", mode="agent", target_steps=["timeline"],
+                                            runtime="antigravity"),
+                )
+        self.assertEqual(chosen["task"]["assigned_agent"], "claude")
+        self.assertEqual(chosen["task"]["input"]["runtime"], "claude_code_cli")
+        self.assertEqual(caught.exception.status_code, 400)  # no agent runtime for Antigravity
+
     def test_verification_reads_the_project_and_catches_false_claims(self) -> None:
         check = main._verify_goal(int(self.project["id"]), ["shots"], claimed=["script", "shots"])
         self.assertFalse(check["passed"])

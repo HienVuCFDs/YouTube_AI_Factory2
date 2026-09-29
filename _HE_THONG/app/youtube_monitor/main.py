@@ -6393,6 +6393,10 @@ class OrchestrateRequest(BaseModel):
     allow_spend: bool = False
     # `force` rebuilds over what exists, possibly after a person edited it.
     allow_overwrite: bool = False
+    # Which AI directs first: "auto" follows the orchestration assignment; an
+    # agent or runtime name (astra, claude, codex_cli, claude_code_cli) puts
+    # that one first. The others stay behind it as the fallback.
+    runtime: str = Field(default="auto", max_length=40)
     max_rounds: int = Field(default=4, ge=1, le=8)
     tool_budget: int = Field(default=40, ge=5, le=120)
 
@@ -6700,6 +6704,17 @@ def _queue_orchestrator_goal(project_id: int, payload: OrchestrateRequest) -> di
                 + (f". Không có bước: {', '.join(unknown)}" if unknown else "")
             ),
         )
+    preferred = str(payload.runtime or "auto").strip().lower()
+    first_agent = ""
+    if preferred != "auto":
+        if orchestrator_runtime.runtime_id(preferred) not in _AGENT_RUNNERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"runtime phải là auto hoặc một AI điều phối được: {', '.join(sorted(_AGENT_RUNNERS))}",
+            )
+        # Assigned to the agent, so the worker claims it with that one and
+        # the run log names the AI that actually directed.
+        first_agent = settings.canonical_agent_id(orchestrator_runtime.runtime_id(preferred))
     task = database.create_agent_task(
         project_id,
         ORCHESTRATOR_ROLE,
@@ -6711,9 +6726,10 @@ def _queue_orchestrator_goal(project_id: int, payload: OrchestrateRequest) -> di
             "allow_overwrite": bool(payload.allow_overwrite),
             "max_rounds": int(payload.max_rounds),
             "tool_budget": int(payload.tool_budget),
+            "runtime": preferred,
         },
         requested_by="user",
-        assigned_agent="",
+        assigned_agent=first_agent,
         max_attempts=1,
     )
     agent_task_worker.enqueue(str(task["id"]))

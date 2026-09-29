@@ -724,3 +724,15 @@ Chi tiết và bằng chứng: `AI_CONNECTION_HANDOFF.md` (mục 2–9), `AUDIT_
 **Kiểm thử**: 1476 đạt, 2 đỏ (hai lỗi cũ: `_segment_arguments`, `unmarked_reup`), 9 bỏ qua.
 
 **Dữ liệu thử chưa xoá:** dự án 61, 66 và 72 (`[TEST pipeline 5 vai CLI - có thể xoá]`). App không có endpoint xoá dự án; xoá dữ liệu để người dùng tự quyết.
+
+### 2026-09-29 — Xác minh Claude CLI làm AI điều phối
+
+- **Thêm:** `/orchestrate` với `mode=agent` nhận `runtime` để chọn AI điều phối đi trước. Task được giao cho agent đó, nên log ghi đúng AI đã lái.
+- **Chạy thật trên dự án 61, mục tiêu `timeline`, `runtime=claude_code_cli`:**
+  - 3 tool call: list_steps → run_step(timeline) → list_steps.
+  - Model `claude-opus-5` + `claude-haiku-4-5`, 22,7 giây.
+  - DB xác nhận 6 đoạn timeline; task `completed`.
+  - Lời dặn cố ý đòi `force`, nhưng lượt chạy cấm ghi đè. Agent tự chạy không kèm `force`, vì chưa có timeline nào để ghi đè, và nói rõ trong báo cáo.
+- **Còn UNVERIFIED:** đổi runtime giữa lượt khi não hỏng thật. Chỉ có test.
+
+**Kiểm thử**: 1477 đạt, 2 đỏ (hai lỗi cũ), 9 bỏ qua.
