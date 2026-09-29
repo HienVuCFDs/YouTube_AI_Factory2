@@ -376,7 +376,9 @@
   async function loadProjectLog() {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
     const panel = $('studioLogPanel');
-    if (panel) panel.hidden = !projectId;
+    // The workflow screen no longer shows the log; the rows stay on the server.
+    if (!panel) return;
+    panel.hidden = !projectId;
     if (!projectId) return;
     try { renderProjectLog(await api(`/api/projects/${projectId}/log`)); }
     catch (_) { /* a project with no history yet is not an error */ }

@@ -382,7 +382,7 @@ def test_studio_wizard_is_presented_as_seven_ai_steps(page: str) -> None:
     assert "AI STUDIO 5 BƯỚC" not in page
     assert "BƯỚC 1 / 5" not in page
     for number, label in enumerate(
-        ("Nguồn", "Kế hoạch", "Kịch bản", "Storyboard &amp; Edit",
+        ("Phân tích", "Kế hoạch", "Kịch bản", "Storyboard &amp; Edit",
          "Giọng đọc", "Xưởng dựng", "Render &amp; Xuất bản"), start=1,
     ):
         assert f'data-studio-tab="{number}" onclick="setStudioStep({number})"' in page

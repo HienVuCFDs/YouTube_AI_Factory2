@@ -46,7 +46,9 @@
       if (data.media_kind === 'audio' && state.studioWorkflow === 'reup') {
         setStudioWorkflow('content', false);
       }
-      setUploadStatus(`Đã nhận "${file.name}"${minutes ? ` · khoảng ${minutes} phút` : ''}. Bấm “1. Phân tích tham chiếu” để AI đọc nội dung.`, 'success');
+      setUploadStatus(`Đã nhận "${file.name}"${minutes ? ` · khoảng ${minutes} phút` : ''}. Mở Tạo video và bấm “Phân tích”.`, 'success');
+      setWorkspace('dashboard');
+      setStudioStep(1);
       if (data.media_kind === 'audio') {
         setUploadStatus(`Đã nạp audio "${file.name}". App sẽ dùng nội dung để phân tích/kịch bản; phần hình sẽ được tạo theo storyboard, không cắt từ audio.`, 'success');
       }
@@ -139,41 +141,391 @@
   // Bước đó tự lấy transcript, khung hình, nội dung bài hay trang sản phẩm tuỳ loại nguồn.
   async function analyzeStudioVideo() {
     if (!state.studioVideoId && !state.studioProjectId) return setMessage('Hãy chọn một nguồn trước.', 'error');
-    const provider = $('studioAnalysisProviderSelect').value || 'auto';
-    const button = $('studioAnalyzeButton');
-    button.disabled = true;
-    setStudioProgress(10, 'Đang đọc nguồn và phân tích (bước "Phân tích nguồn")...');
-    setMessage('Đang phân tích nguồn...');
+    // Nút "Phân tích lại" trong thông báo không bị khoá như nút chính.
+    if (state.studioAnalyzing) return;
+    const provider = $('studioAnalysisProviderSelect')?.value || 'auto';
+    state.studioAnalyzing = true;
+    state.studioAnalyzeError = '';
+    renderStudioVideoPreview();
+    setStudioProgress(10, 'Đang phân tích nguồn...');
+    let projectId = state.studioProjectId;
+    let following = false;
+    const current = () => Number(state.studioProjectId) === Number(projectId);
     try {
-      if (!state.studioProjectId) {
+      if (!projectId) {
         const created = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {
           method: 'POST', body: JSON.stringify({managed_channel_id: null}),
         });
-        state.studioProjectId = created.project?.id || created.id || null;
+        projectId = state.studioProjectId = created.project?.id || created.id || null;
       }
-      if (!state.studioProjectId) throw new Error('Không tạo được dự án cho nguồn này.');
+      if (!projectId) throw new Error('Không tạo được dự án cho nguồn này.');
       const options = provider && provider !== 'auto' ? {provider} : {};
-      const response = await api(`/api/projects/${state.studioProjectId}/steps/analyze`, {
+      state.studioAnalyzeRequest = projectId;
+      const response = await api(`/api/projects/${projectId}/steps/analyze`, {
         method: 'POST', body: JSON.stringify({options}),
       });
+      // Người dùng đã sang nguồn khác: kết quả đã lưu trên server, mở lại là thấy.
+      if (!current()) return;
       const brief = response.result?.result || {};
-      const analysis = {status: 'completed', provider: brief.provider || '', result: brief};
+      const analysis = {status: 'completed', provider: brief.provider || '', result: brief, created_at: new Date().toISOString()};
       state.studioAnalysis = analysis;
       state.studioReference = analysis;
       renderStudioAnalysis(analysis);
-      setStudioStep(2);
-      const warnings = response.result?.source?.warnings || [];
-      setStudioProgress(100, 'Phân tích nguồn đã hoàn tất.');
-      setMessage(
-        warnings.length ? `Phân tích xong, có lưu ý: ${warnings.join(' ')}` : 'Phân tích nguồn hoàn tất. Sang bước tiếp theo để tạo câu chuyện mới.',
-        warnings.length ? 'error' : 'success',
-      );
+      setStudioProgress(100, 'Đã phân tích.');
+      setMessage('Đã phân tích nguồn.', 'success');
       void Promise.all([loadSummary(), loadVideos(), loadProjects()]);
-    } catch (error) { setStudioProgress(0, `Phân tích thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
-    finally { button.disabled = false; }
+    } catch (error) {
+      state.studioAnalyzeRequest = null;
+      // Request kết thúc nhưng lượt phân tích vẫn chạy (mất kết nối, hoặc tab
+      // khác / AI điều phối đã chạy trước và server từ chối lượt thứ hai):
+      // theo dõi lượt server đang có.
+      if (!current()) return;
+      if (projectId && await followStudioAnalyze(projectId)) { following = true; return; }
+      state.studioAnalyzeError = studioAnalyzeErrorText(error);
+      setStudioProgress(0, 'Không phân tích được.', 'error');
+      setMessage(state.studioAnalyzeError, 'error');
+    } finally {
+      state.studioAnalyzeRequest = null;
+      if (!following && current()) {
+        state.studioAnalyzing = false;
+        renderStudioVideoPreview();
+      }
+    }
+  }
+
+  // Phân tích chạy vài phút trên server. Tải lại trang chỉ bỏ request, không
+  // bỏ việc, nên "đang chạy" đọc từ server (GET /api/projects/{id}/steps),
+  // không giữ trong bộ nhớ trang. Chỉ hỏi lại khi có lượt đang chạy mà trang
+  // này không còn chờ request của nó; tab đang ẩn hỏi thưa hơn và hỏi ngay
+  // khi được mở lại.
+  const STUDIO_ANALYZE_POLL_MS = 5000;
+  const STUDIO_ANALYZE_HIDDEN_POLL_MS = 30000;
+
+  document.addEventListener('visibilitychange', () => {
+    const watch = state.studioAnalyzeWatch;
+    if (document.hidden || !watch?.tick) return;
+    clearTimeout(watch.timer);
+    void watch.tick();
+  });
+
+  async function studioAnalyzeRun(projectId) {
+    const body = await api(`/api/projects/${projectId}/steps`);
+    return (body.steps || []).find((row) => row.key === 'analyze') || null;
+  }
+
+  function stopStudioAnalyzeWatch() {
+    clearTimeout(state.studioAnalyzeWatch?.timer);
+    state.studioAnalyzeWatch = null;
+  }
+
+  // true khi server đang phân tích dự án này; khi đó trang theo dõi tới lúc xong.
+  async function followStudioAnalyze(projectId) {
+    if (!projectId) return false;
+    let row = null;
+    try { row = await studioAnalyzeRun(projectId); } catch (_) { return false; }
+    if (Number(state.studioProjectId) !== Number(projectId) || row?.state !== 'running') return false;
+    state.studioAnalyzing = true;
+    state.studioAnalyzeError = '';
+    setStudioProgress(10, 'Đang phân tích nguồn...');
+    renderStudioVideoPreview();
+    // Request của chính trang này còn mở: câu trả lời của nó sẽ báo kết quả.
+    if (Number(state.studioAnalyzeRequest) === Number(projectId)) return true;
+    if (Number(state.studioAnalyzeWatch?.projectId) === Number(projectId)) return true;
+    stopStudioAnalyzeWatch();
+    const watch = {projectId, timer: null, tick: null};
+    state.studioAnalyzeWatch = watch;
+    const later = () => setTimeout(watch.tick, document.hidden ? STUDIO_ANALYZE_HIDDEN_POLL_MS : STUDIO_ANALYZE_POLL_MS);
+    watch.tick = async () => {
+      // Một lượt hỏi mỗi lúc: mở lại tab giữa chừng không sinh chuỗi hỏi thứ hai.
+      if (state.studioAnalyzeWatch !== watch || watch.busy) return;
+      watch.busy = true;
+      let now = null;
+      try { now = await studioAnalyzeRun(projectId); } catch (_) { /* app tạm không trả lời: hỏi lại sau */ }
+      watch.busy = false;
+      if (state.studioAnalyzeWatch !== watch) return;
+      if (!now || now.state === 'running') {
+        watch.timer = later();
+        return;
+      }
+      state.studioAnalyzeWatch = null;
+      await finishStudioAnalyze(projectId, now.last_run);
+    };
+    watch.timer = later();
+    return true;
+  }
+
+  async function finishStudioAnalyze(projectId, last) {
+    if (Number(state.studioProjectId) !== Number(projectId)) return;
+    if (last?.status === 'failed') {
+      state.studioAnalyzeError = studioAnalyzeErrorText({status: last.status_code, message: last.error});
+      setStudioProgress(0, 'Không phân tích được.', 'error');
+    } else {
+      try {
+        const bundle = await api(`/api/projects/${projectId}`);
+        const analysis = bundle.reference_analysis || bundle.metadata_analysis;
+        if (analysis?.result && Number(state.studioProjectId) === Number(projectId)) {
+          state.studioAnalysis = analysis;
+          state.studioReference = bundle.reference_analysis || null;
+          state.studioAnalyzing = false;
+          renderStudioAnalysis(analysis);
+          setStudioProgress(100, 'Đã phân tích.');
+        }
+      } catch (error) {
+        state.studioAnalyzeError = studioAnalyzeErrorText(error);
+      }
+      void Promise.all([loadSummary(), loadVideos(), loadProjects()]);
+    }
+    if (Number(state.studioProjectId) !== Number(projectId)) return;
+    state.studioAnalyzing = false;
+    renderStudioVideoPreview();
+  }
+
+  // Lỗi viết lại bằng lời thường: không mã HTTP, không tên phiên/extension,
+  // không mã task, không tham số kỹ thuật.
+  function studioPlainText(text) {
+    return String(text || '')
+      .replace(/HTTP\s*\d{3}\s*:?\s*/gi, '')
+      .replace(/\((?:task|agt_)[^)]*\)/gi, '')
+      .replace(/\b(?:agt_[0-9a-f]+|extension:[\w.-]+|profile:[\w.-]+|session:[\w:.-]+|options\.[\w.]+)\b/gi, '')
+      .replace(/\b(?:UNAVAILABLE|NEED_LOGIN|NEED_HUMAN_VERIFY|FAILED)\b:?\s*/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  function studioAnalyzeErrorText(error) {
+    const status = Number(error?.status || 0);
+    if (status === 400) return 'AI đã chọn không phân tích được loại nguồn này. Chọn AI khác trong Nâng cao.';
+    if (status === 502) return 'AI phân tích chưa chạy được lúc này. Thử lại sau, hoặc chọn AI khác trong Nâng cao.';
+    if (status === 422) return 'Kết quả chưa khớp với nguồn. Bấm Phân tích lại.';
+    if (status === 424) return 'Chưa đọc được trang nguồn. Kiểm tra kết nối trong Công cụ & kết nối.';
+    if (!status && /fetch|network/i.test(String(error?.message || ''))) return 'Không kết nối được app. Hãy mở lại app rồi thử lại.';
+    return studioPlainText(error?.message).slice(0, 200) || 'Có lỗi khi phân tích. Thử lại sau.';
+  }
+
+  // ---- Kết quả phân tích ngay trong Bước 1, dựng theo loại nguồn ----
+
+  function studioCard(title, body, extra = '') {
+    return body ? `<div class="studio-result-card ${extra}"><h3>${esc(title)}</h3>${body}</div>` : '';
+  }
+
+  // The AI's own prose sometimes repeats how the page was read ("qua
+  // session:extension:coccoc", a raw ISO time); the reader needs neither.
+  function studioProse(text) {
+    return String(text || '')
+      .replace(/\s*\([^()]*\b(?:session|extension|profile):[^()]*\)/gi, '')
+      .replace(/\b(?:session|extension|profile):[\w:.-]+/gi, '')
+      .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g, (stamp) => {
+        const at = new Date(stamp);
+        return Number.isNaN(at.getTime()) ? stamp
+          : at.toLocaleString('vi-VN', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric'});
+      })
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+  }
+
+  function studioLongText(text, limit = 420) {
+    const value = studioProse(text);
+    if (!value) return '';
+    if (value.length <= limit) return `<p>${esc(value)}</p>`;
+    return `<p>${esc(value.slice(0, limit).replace(/\s+\S*$/, ''))}…</p>
+      <details class="studio-more"><summary>Xem toàn bộ</summary><p>${esc(value)}</p></details>`;
+  }
+
+  function studioList(items, {ordered = true, limit = 6} = {}) {
+    const rows = (items || []).map((item) => studioProse(item)).filter(Boolean);
+    if (!rows.length) return '';
+    const tag = ordered ? 'ol' : 'ul';
+    const head = rows.slice(0, limit).map((item) => `<li>${esc(item)}</li>`).join('');
+    const rest = rows.slice(limit);
+    return `<${tag} class="studio-result-list">${head}</${tag}>`
+      + (rest.length ? `<details class="studio-more"><summary>Xem thêm ${rest.length}</summary><${tag} class="studio-result-list" start="${limit + 1}">${rest.map((item) => `<li>${esc(item)}</li>`).join('')}</${tag}></details>` : '');
+  }
+
+  function studioChips(items) {
+    const rows = (items || []).map((item) => String(item?.keyword || item || '').trim()).filter(Boolean);
+    return rows.length ? `<div class="keyword-list">${rows.slice(0, 16).map((item) => `<span class="keyword">${esc(item)}</span>`).join('')}</div>` : '';
+  }
+
+  function studioUncertain(result) {
+    const rows = (result.limitations || []).map((item) => studioPlainText(item)).filter(Boolean);
+    return rows.length
+      ? `<details class="studio-result-card studio-more-card"><summary>Chỗ chưa chắc chắn (${rows.length})</summary>${studioList(rows, {ordered: false, limit: 50})}</details>`
+      : '';
+  }
+
+  function studioMoney(value, text) {
+    // TikTok Shop writes "₫ 9.999"; show every price the same way.
+    if (text) return String(text).trim().replace(/^₫\s*(.+)$/, '$1₫');
+    const amount = Number(String(value || '').replace(/[^\d.]/g, ''));
+    return amount ? `${Math.round(amount).toLocaleString('vi-VN')}₫` : '';
+  }
+
+  function studioVideoSections(result) {
+    const summary = [result.topic ? `<p><b>${esc(result.topic)}</b></p>` : '', studioLongText(result.content_summary)].join('');
+    const transcript = String(result.source_text || '').trim();
+    const words = transcript ? transcript.split(/\s+/).length : 0;
+    const dialogue = (result.dialogue || []).map((item) => {
+      const at = Number.isFinite(Number(item.start_seconds)) && item.start_seconds !== undefined
+        ? `${formatStudioDuration(Number(item.start_seconds))} · ` : '';
+      return `${at}${item.speaker || 'Không rõ'}: ${item.line || ''}`;
+    });
+    return [
+      studioCard('Tóm tắt', summary),
+      studioCard('Transcript', transcript ? `<p>${words.toLocaleString('vi-VN')} từ</p>
+        <details class="studio-more"><summary>Xem transcript</summary><pre class="studio-transcript">${esc(transcript)}</pre></details>` : ''),
+      studioCard('Cấu trúc nội dung', studioList((result.scene_map || []).map((item) => item.what_happens))),
+      studioCard(`Lời thoại chính · ${dialogue.length} câu`, dialogue.length ? studioList(dialogue, {ordered: false, limit: 4}) : ''),
+      studioCard('Nhân vật', studioList((result.characters || []).map((item) => `${item.name || ''} — ${item.role || ''}`), {ordered: false})),
+      studioCard('Hình ảnh / phong cách', studioLongText(result.visual_style, 300)),
+      studioCard('Điểm đáng chú ý', studioChips(result.keywords)),
+    ];
+  }
+
+  function studioProductSections(result, video) {
+    const facts = result.source_facts || {};
+    const image = (facts.images || [])[0] || video?.thumbnail || '';
+    const price = studioMoney(facts.price, facts.price_text);
+    const original = studioMoney(facts.original_price, facts.original_price_text);
+    const read = facts.captured_at ? new Date(facts.captured_at) : null;
+    const standing = [
+      facts.rating ? `${esc(facts.rating)}★${facts.review_count ? ` (${esc(facts.review_count)})` : ''}` : '',
+      facts.sold_count ? `${esc(facts.sold_count)} đã bán` : '',
+    ].filter(Boolean).join(' · ');
+    const {platform} = studioSourceKind(video, result);
+    const link = facts.canonical_url || facts.url || video?.video_url || '';
+    const card = `<div class="studio-product-card">
+        ${image ? `<img src="${esc(image)}" alt="">` : ''}
+        <div>
+          <div class="primary-text">${esc(facts.name || result.topic || video?.title || '')}</div>
+          <div class="studio-price-row">${price ? `<span class="studio-price">${esc(price)}</span>` : '<span class="secondary-text">Chưa đọc được giá</span>'}
+            ${original ? `<span class="studio-price-old">${esc(original)}</span>` : ''}
+            ${facts.discount ? `<span class="tag orange">${esc(facts.discount)}</span>` : ''}</div>
+          ${facts.seller ? `<div class="secondary-text">Shop: ${esc(facts.seller)}</div>` : ''}
+          ${standing ? `<div class="secondary-text">${standing}</div>` : ''}
+          ${read && !Number.isNaN(read.getTime()) ? `<div class="secondary-text">Đọc giá lúc ${esc(read.toLocaleString('vi-VN', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric'}))}</div>` : ''}
+          ${link ? `<a class="studio-source-link" href="${esc(link)}" target="_blank" rel="noopener">Xem trên ${esc(platform || 'trang bán')} ↗</a>` : ''}
+        </div>
+      </div>`;
+    return [
+      studioCard('Sản phẩm', card, 'studio-wide'),
+      studioCard('Thông tin chính', [studioLongText(result.content_summary), studioList((result.scene_map || []).map((item) => item.what_happens), {ordered: false})].join('')),
+      studioCard('Từ khoá', studioChips(result.keywords)),
+    ];
+  }
+
+  function studioArticleSections(result, video) {
+    const host = studioSourceHost(video);
+    const head = `<p><b>${esc(video?.title || result.topic || '')}</b></p>${host ? `<p class="secondary-text">Nguồn: ${esc(host)}${video?.video_url ? ` · <a class="studio-source-link" href="${esc(video.video_url)}" target="_blank" rel="noopener">Mở bài ↗</a>` : ''}</p>` : ''}`;
+    return [
+      studioCard('Bài viết', head),
+      studioCard('Tóm tắt', studioLongText(result.content_summary)),
+      studioCard('Ý chính', studioList((result.scene_map || []).map((item) => item.what_happens))),
+      studioCard('Dữ kiện & từ khoá', studioChips(result.keywords)),
+      studioCard('Hình ảnh', studioLongText(result.visual_style, 300)),
+    ];
+  }
+
+  function studioImageSections(result) {
+    return [
+      studioCard('Ảnh đã xem', '<div id="studioResultImages" class="studio-thumbs"></div>'),
+      studioCard('Mô tả', studioLongText(result.content_summary)),
+      studioCard('Vật thể / nhân vật', studioList((result.characters || []).map((item) => `${item.name || ''} — ${item.role || ''}`), {ordered: false})),
+      studioCard('Phong cách', studioLongText(result.visual_style, 300)),
+      studioCard('Bố cục / màu sắc', studioList((result.scene_map || []).map((item) => item.what_happens), {ordered: false})),
+      studioCard('Yếu tố đáng chú ý', studioChips(result.keywords)),
+    ];
+  }
+
+  function studioIdeaSections(result) {
+    return [
+      studioCard('Tóm tắt', [result.topic ? `<p><b>${esc(result.topic)}</b></p>` : '', studioLongText(result.content_summary)].join('')),
+      studioCard('Ý chính', studioList((result.scene_map || []).map((item) => item.what_happens))),
+      studioCard('Từ khoá', studioChips(result.keywords)),
+    ];
+  }
+
+  // Khi trang bán hàng chưa đọc được: một dòng và việc cần làm, không chi tiết kỹ thuật.
+  function studioReadNotice(result, video) {
+    const facts = result.source_facts || {};
+    const status = String(facts.read_status || '');
+    if (!status || status === 'OK') return '';
+    const {platform} = studioSourceKind(video, result);
+    const name = platform || 'trang bán';
+    const line = status === 'NEED_HUMAN_VERIFY'
+      ? `${name} yêu cầu xác minh – mở ${name} trong trình duyệt và xác minh.`
+      : status === 'NEED_LOGIN'
+        ? `Chưa đọc được ${name} – cần kết nối tài khoản.`
+        : `Chưa đọc được trang ${name}.`;
+    return `<div class="studio-analyze-notice">⚠ ${esc(line)}
+      <div class="studio-actions" style="margin-top:8px"><button class="btn small ghost" type="button" onclick="setWorkspace('settings')">Mở Công cụ & kết nối</button>
+      <button class="btn small primary" type="button" onclick="analyzeStudioVideo()">Phân tích lại</button></div></div>`;
+  }
+
+  function studioResultNotes(result) {
+    const notes = [];
+    for (const raw of result.warnings || []) {
+      const text = String(raw || '');
+      if (/Đã giao cho AI điều phối|Chưa đọc được trang sản phẩm/.test(text)) continue;
+      if (/Không đọc được giá/.test(text)) { notes.push('Không đọc được giá – kịch bản sẽ không nêu giá.'); continue; }
+      const plain = studioPlainText(text);
+      if (plain) notes.push(plain);
+    }
+    return [...new Set(notes)];
+  }
+
+  function renderStudioStep1Result(payload) {
+    const box = $('studioStep1Result');
+    const next = $('studioStep1NextButton');
+    const json = $('studioAnalysisJson');
+    if (!box) return;
+    const result = payload?.result || payload || {};
+    const real = Boolean(result.content_summary || result.source_facts || (Array.isArray(result.scene_map) && result.scene_map.length));
+    if (!payload || !real) {
+      box.hidden = true;
+      box.innerHTML = '';
+      if (next) next.disabled = true;
+      if (json) json.hidden = true;
+      return;
+    }
+    const video = studioSelectedVideo();
+    const {kind, label} = studioSourceKind(video, result);
+    const sections = kind === 'product' ? studioProductSections(result, video)
+      : kind === 'article' ? studioArticleSections(result, video)
+        : kind === 'images' ? studioImageSections(result)
+          : kind === 'idea' ? studioIdeaSections(result)
+            : studioVideoSections(result);
+    const notes = studioResultNotes(result);
+    box.innerHTML = `
+      <div class="studio-result-head"><b>Kết quả phân tích</b><span class="secondary-text">${esc(label || '')}</span></div>
+      ${studioReadNotice(result, video)}
+      ${notes.length ? `<div class="studio-result-notes">${notes.map((item) => `<div>• ${esc(item)}</div>`).join('')}</div>` : ''}
+      <div class="studio-result-grid">${sections.join('')}</div>
+      ${studioUncertain(result)}`;
+    box.hidden = false;
+    if (next) next.disabled = false;
+    // The saved analysis arrives after the source card was drawn.
+    const button = $('studioAnalyzeButton');
+    if (button && !state.studioAnalyzing) button.textContent = 'Phân tích lại';
+    renderStudioAnalyzeState();
+    const media = document.querySelector('#studioVideoPreview .studio-source-media');
+    const picture = (result.source_facts?.images || [])[0];
+    if (media && picture && !media.querySelector('img, iframe, video')) media.innerHTML = `<img src="${esc(picture)}" alt="">`;
+    if (json) {
+      json.hidden = false;
+      json.querySelector('pre').textContent = JSON.stringify(result, null, 2);
+    }
+    if (kind === 'images' && state.studioProjectId) {
+      api(`/api/projects/${state.studioProjectId}/assets`).then((assets) => {
+        const target = $('studioResultImages');
+        if (!target) return;
+        target.innerHTML = (assets || []).filter((item) => item.asset_type === 'image').slice(0, 12)
+          .map((item) => `<img src="/api/assets/${item.id}/download" alt="${esc(item.original_name || '')}">`).join('');
+      }).catch(() => {});
+    }
   }
 
   function renderStudioAnalysis(payload) {
+    renderStudioStep1Result(payload);
     const result = payload?.result || payload || {};
     if (Array.isArray(result.scene_map)) return renderStudioReferenceAnalysis(result);
     const keywords = (result.keywords || []).map((item) => `<span class="keyword">${esc(item.keyword)} · ${esc(item.count)}</span>`).join('') || '<span class="secondary-text">Không có từ khóa</span>';

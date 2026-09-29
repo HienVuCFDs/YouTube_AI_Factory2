@@ -2066,6 +2066,25 @@ _STEP_RUNNERS: dict[str, Any] = {
 }
 
 
+# Analysing a source takes minutes and outlives the request that started it:
+# reloading the page drops the request, not the work. What is running is kept
+# here, in the process doing it, so a page asks instead of remembering - and
+# a second click, a second tab or an orchestrator cannot start the same work
+# twice. It goes with a restart, together with the work it describes.
+_SINGLE_RUN_STEPS = frozenset({"analyze"})
+_step_runs_lock = threading.Lock()
+_running_step_runs: dict[tuple[int, str], dict[str, Any]] = {}
+_last_step_runs: dict[tuple[int, str], dict[str, Any]] = {}
+
+
+def _step_runs(project_id: int, step: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The run of this step going on now, and the one that last finished."""
+    with _step_runs_lock:
+        running = _running_step_runs.get((project_id, step))
+        last = _last_step_runs.get((project_id, step))
+        return (dict(running) if running else None), (dict(last) if last else None)
+
+
 def run_project_step(project_id: int, step: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
     """Perform one step, for whoever asked - a button, a run, an orchestrator."""
     options = dict(options or {})
@@ -2101,30 +2120,54 @@ def run_project_step(project_id: int, step: str, options: dict[str, Any] | None 
     if definition.spends and not bool(options.get("confirmed", True)):
         raise refuse(400, f"Bước {definition.label} tiêu lượt, cần xác nhận")
 
+    run_key = (project_id, definition.key)
+    single = definition.key in _SINGLE_RUN_STEPS
+    if single:
+        with _step_runs_lock:
+            busy = run_key in _running_step_runs
+            if not busy:
+                _running_step_runs[run_key] = {
+                    "run_id": uuid.uuid4().hex[:12],
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                }
+        if busy:
+            raise refuse(409, f"Bước {definition.label} đang chạy cho dự án này. Chờ lượt đó xong rồi hãy chạy lại.")
+
     started = time.monotonic()
-    _announce_step("step.started", project_id, definition.key, definition.label)
+    outcome: dict[str, Any] = {"status": "failed", "status_code": 500, "error": "Bước dừng giữa chừng."}
     try:
-        result = _STEP_RUNNERS[definition.key](project_id, project, options)
-    except HTTPException as exc:
+        _announce_step("step.started", project_id, definition.key, definition.label)
+        try:
+            result = _STEP_RUNNERS[definition.key](project_id, project, options)
+        except HTTPException as exc:
+            outcome = {"status": "failed", "status_code": exc.status_code, "error": str(exc.detail)[:500]}
+            _record_orchestrator_step(
+                project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
+                status="failed", why=f"run_step({definition.key})", error=str(exc.detail)[:1500],
+            )
+            _announce_step(
+                "step.failed", project_id, definition.key, definition.label,
+                seconds=round(time.monotonic() - started, 1), error=str(exc.detail)[:500],
+            )
+            raise
         _record_orchestrator_step(
             project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
-            status="failed", why=f"run_step({definition.key})", error=str(exc.detail)[:1500],
+            status="success", why=f"run_step({definition.key})",
+            output_ref=f"{time.monotonic() - started:.1f}s",
         )
         _announce_step(
-            "step.failed", project_id, definition.key, definition.label,
-            seconds=round(time.monotonic() - started, 1), error=str(exc.detail)[:500],
+            "step.finished", project_id, definition.key, definition.label,
+            seconds=round(time.monotonic() - started, 1),
         )
-        raise
-    _record_orchestrator_step(
-        project_id=project_id, stage=definition.stage or "pipeline", step=definition.label,
-        status="success", why=f"run_step({definition.key})",
-        output_ref=f"{time.monotonic() - started:.1f}s",
-    )
-    _announce_step(
-        "step.finished", project_id, definition.key, definition.label,
-        seconds=round(time.monotonic() - started, 1),
-    )
-    return {"step": definition.key, "label": definition.label, "result": result}
+        outcome = {"status": "success"}
+        return {"step": definition.key, "label": definition.label, "result": result}
+    finally:
+        if single:
+            with _step_runs_lock:
+                run = _running_step_runs.pop(run_key, {})
+                _last_step_runs[run_key] = {
+                    **run, **outcome, "finished_at": datetime.now(timezone.utc).isoformat(),
+                }
 
 
 @app.get("/api/research/search")
@@ -2233,9 +2276,12 @@ def list_project_steps(project_id: int) -> dict[str, Any]:
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     done = _steps_done(project_id)
-    rows = steps.describe(done)
+    runs = {key: _step_runs(project_id, key) for key in _SINGLE_RUN_STEPS}
+    rows = steps.describe(done, [key for key, (running, _) in runs.items() if running])
     for row in rows:
         row["runnable"] = row["key"] in _STEP_RUNNERS
+        if row["key"] in runs:
+            row["run"], row["last_run"] = runs[row["key"]]
     return {"project_id": project_id, "done": sorted(done), "steps": rows}
 
 

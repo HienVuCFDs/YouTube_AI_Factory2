@@ -410,7 +410,7 @@
     const select = $('studioVideoSelect');
     if (select) select.value = videoId;
     await selectStudioVideo();
-    setMessage(`Đã chọn “${video.title || videoId}”. Bây giờ chỉ cần bấm “1. Phân tích tham chiếu”.`, 'success');
+    setMessage(`Đã chọn “${video.title || videoId}”. Bấm “Phân tích”.`, 'success');
   }
 
   async function updateProjectStatus(projectId, status) {

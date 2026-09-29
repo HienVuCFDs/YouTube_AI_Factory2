@@ -1275,6 +1275,9 @@
     } catch (error) { setMessage(`Không lưu được phân công AI: ${error.message}`, 'error'); }
   }
 
+  // Bước Phân tích xem ảnh (khung hình, ảnh sản phẩm) nên chỉ AI xem được ảnh chạy được nó.
+  const STUDIO_ANALYZE_PROVIDERS = new Set(['auto', 'codex_cli', 'claude_code_cli', 'astra', 'claude']);
+
   async function loadAnalysisProviders() {
     const providers = await api('/api/analysis-providers');
     // The server names the models now, so Astra is not called Antigravity in
@@ -1298,11 +1301,12 @@
       }
     }
     const writerProviders = providers.filter((item) => item.provider !== 'local_metadata');
+    const analyzeProviders = writerProviders.filter((item) => STUDIO_ANALYZE_PROVIDERS.has(item.provider));
     ['studioAnalysisProviderSelect', 'studioWriterProviderSelect', 'studioChatProviderSelect'].forEach((id) => {
       const target = $(id);
       if (!target) return;
       const previous = target.value;
-      const source = writerProviders;
+      const source = id === 'studioAnalysisProviderSelect' ? analyzeProviders : writerProviders;
       target.innerHTML = source.map(optionFor).join('');
       if (source.some((item) => item.provider === previous && item.available)) target.value = previous;
       else {
@@ -1419,29 +1423,114 @@
     saveStudioSession();
   }
 
+  // Loại và nền tảng của nguồn, đọc từ chính bản ghi nguồn (và từ kết quả
+  // phân tích khi đã có, vì bước phân tích mới biết chắc một link là gì).
+  const STUDIO_SHOP_PLATFORMS = [
+    ['shopee.vn', 'Shopee'], ['shop.tiktok.com', 'TikTok Shop'], ['lazada.vn', 'Lazada'],
+    ['tiki.vn', 'Tiki'], ['sendo.vn', 'Sendo'],
+  ];
+  const STUDIO_SOURCE_LABELS = {video: 'Video', product: 'Sản phẩm', article: 'Bài viết', images: 'Ảnh', idea: 'Ý tưởng'};
+
+  function studioSourceHost(video) {
+    try { return new URL(String(video?.video_url || '')).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
+  }
+
+  function studioSourceKind(video, analysis = state.studioAnalysis?.result) {
+    const host = studioSourceHost(video);
+    const shop = STUDIO_SHOP_PLATFORMS.find(([site]) => host === site || host.endsWith(`.${site}`));
+    const id = String(video?.youtube_video_id || '');
+    let kind = String(analysis?.source_type || analysis?.source_kind || '');
+    if (!STUDIO_SOURCE_LABELS[kind]) {
+      // A link imported from YouTube or TikTok is "web-..." too; a page is the
+      // one that came in with no running time.
+      const playable = Number(video?.duration_seconds || 0) > 0
+        || /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|vimeo\.com|bilibili\.com|facebook\.com|dailymotion\.com)$/.test(host);
+      kind = shop ? 'product' : id.startsWith('idea-') ? 'idea' : (id.startsWith('web-') && !playable) ? 'article' : 'video';
+    }
+    const platform = shop ? shop[1]
+      : id.startsWith('local-') ? 'File tải lên'
+        : /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host) ? 'YouTube'
+          : /(^|\.)tiktok\.com$/.test(host) ? 'TikTok' : host;
+    const label = kind === 'video' && video && studioSourceIsAudio(video) ? 'Audio' : STUDIO_SOURCE_LABELS[kind];
+    return {kind, label, platform};
+  }
+
+  function renderStudioAnalyzeState() {
+    const target = $('studioAnalyzeState');
+    if (!target) return;
+    target.classList.remove('error');
+    if (state.studioAnalyzing) { target.textContent = 'Đang phân tích...'; return; }
+    if (state.studioAnalyzeError) {
+      target.textContent = `Không phân tích được: ${state.studioAnalyzeError}`;
+      target.classList.add('error');
+      return;
+    }
+    const analysis = state.studioAnalysis;
+    if (analysis?.result) {
+      const at = analysis.created_at ? new Date(analysis.created_at) : null;
+      target.textContent = at && !Number.isNaN(at.getTime())
+        ? `Đã phân tích · ${at.toLocaleString('vi-VN', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit'})}`
+        : 'Đã phân tích';
+      return;
+    }
+    target.textContent = studioSelectedVideo() ? 'Chưa phân tích' : '';
+  }
+
   function renderStudioVideoPreview() {
     const container = $('studioVideoPreview');
     const button = $('studioAnalyzeButton');
     const writerButton = $('studioWriteButton');
     const video = studioSelectedVideo();
     if (!container || !button) return;
-    button.disabled = !video;
+    button.disabled = !video || Boolean(state.studioAnalyzing);
+    button.textContent = state.studioAnalysis?.result ? 'Phân tích lại' : 'Phân tích';
     if (writerButton && !state.scriptId) writerButton.disabled = !video;
-    if (!video) { container.hidden = true; return; }
-    container.hidden = false;
-    const sourceDuration = Number(video.duration_seconds || 0);
-    const durationLabel = sourceDuration ? ` · Video gốc: ${formatStudioDuration(sourceDuration)}` : '';
-    const localReady = String(video.media_status || '') === 'downloaded_for_editing' && String(video.local_media_path || '').trim();
-    const mode = localReady
-      ? (studioSourceIsAudio(video) ? 'File audio trên máy' : 'File video trên máy')
-      : (youtubeEmbedUrl(video) ? 'Xem trực tiếp qua YouTube nhúng' : 'Nguồn ngoài');
+    if (!state.studioAnalysis?.result) renderStudioStep1Result(null);
+    renderStudioAnalyzeState();
+    if (!video) {
+      container.innerHTML = '<div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Video tham khảo.</div>';
+      return;
+    }
+    const {kind, label, platform} = studioSourceKind(video);
+    // A listing imported by link often has no thumbnail of its own; the
+    // analysis read its pictures off the page.
+    const picture = video.thumbnail || (state.studioAnalysis?.result?.source_facts?.images || [])[0] || '';
+    const media = kind === 'video'
+      ? sourcePreviewPlayer(video)
+      : (picture ? `<img src="${esc(picture)}" alt="">` : '<span class="secondary-text">Chưa có ảnh xem trước</span>');
+    const facts = [];
+    if (Number(video.duration_seconds)) facts.push(formatStudioDuration(Number(video.duration_seconds)));
+    if (video.published_at && kind === 'video') facts.push(date(video.published_at));
     container.innerHTML = `
-      <div class="studio-source-player">${sourcePreviewPlayer(video)}</div>
-      <div class="studio-source-meta">
-        <div class="primary-text">${esc(video.title || video.youtube_video_id)}</div>
-        <div class="secondary-text">${esc(channelName(video.youtube_channel_id))} · ${date(video.published_at)}${durationLabel}</div>
-        <div class="secondary-text">${esc(mode)} · ${video.analysis_status === 'completed' ? 'Đã có phân tích trước đó' : 'Chưa phân tích'}</div>
-      </div>`;
+      <div class="studio-source-card">
+        <div class="studio-source-media">${media}</div>
+        <div class="studio-source-meta">
+          <div class="primary-text">${esc(video.title || video.youtube_video_id)}</div>
+          <div class="secondary-text">${esc([label, platform].filter(Boolean).join(' · '))}</div>
+          ${facts.length ? `<div class="secondary-text">${esc(facts.join(' · '))}</div>` : ''}
+          <span class="studio-source-tag">Dùng để phân tích</span>
+        </div>
+      </div>
+      <div id="studioSourceExtras" class="studio-source-extras" hidden></div>`;
+    void renderStudioSourceExtras(kind);
+  }
+
+  // Ảnh của dự án: là nguồn khi dự án chỉ có ảnh, còn lại là ảnh tham khảo
+  // phong cách - nói rõ cái nào được đưa vào phân tích.
+  async function renderStudioSourceExtras(kind) {
+    const box = $('studioSourceExtras');
+    const projectId = state.studioProjectId;
+    if (!box || !projectId) return;
+    let images = [];
+    try {
+      images = ((await api(`/api/projects/${projectId}/assets`)) || []).filter((item) => item.asset_type === 'image');
+    } catch (_) { return; }
+    if (!images.length || $('studioSourceExtras') !== box) return;
+    const analysed = kind === 'images' || kind === 'idea';
+    box.innerHTML = `<div class="secondary-text">${analysed ? 'Ảnh dùng để phân tích' : 'Ảnh tham khảo của dự án (không đưa vào phân tích nguồn này)'} · ${images.length} ảnh</div>
+      <div class="studio-thumbs">${images.slice(0, 12).map((item) =>
+        `<img src="/api/assets/${item.id}/download" alt="${esc(item.original_name || '')}" title="${esc(item.original_name || '')}">`).join('')}</div>`;
+    box.hidden = false;
   }
 
   function setStudioStep(step) {
@@ -1452,7 +1541,7 @@
     // the only way to learn they existed was to press a button inside a
     // different step.
     const stepLabels = {
-      1: 'Nguồn',
+      1: 'Phân tích',
       2: 'Kế hoạch',
       3: 'Kịch bản',
       4: 'Giọng đọc',
@@ -1792,6 +1881,10 @@
     state.studioReference = null;
     state.studioWriter = null;
     state.studioProjectId = null;
+    // Whether this source is being analysed is read from the server below.
+    stopStudioAnalyzeWatch();
+    state.studioAnalyzing = false;
+    state.studioAnalyzeError = '';
     renderStudioVideoPreview();
     if ($('studioGenerateStoryboardButton')) $('studioGenerateStoryboardButton').disabled = true;
     if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = true;
@@ -1821,7 +1914,7 @@
     const existingProject = (preferredProjectId
       ? state.projects.find((item) => Number(item.id) === Number(preferredProjectId))
       : null) || state.projects.find((item) => item.youtube_video_id === state.studioVideoId);
-    let nextStep = state.studioAnalysis?.result ? 2 : 1;
+    let nextStep = 1;
     if (!existingProject) {
       setStudioStep(nextStep);
       return;
@@ -1829,6 +1922,8 @@
     try {
       const bundle = await api(`/api/projects/${existingProject.id}`);
       state.studioProjectId = existingProject.id;
+      // An analysis started before a reload is still running on the server.
+      void followStudioAnalyze(existingProject.id);
       // Quy trinh thuoc ve du an, khong thuoc ve trinh duyet: mo lai mot du an
       // cu phai tra dung cac buoc ma no da duoc dung nen.
       const savedWorkflow = bundle.project?.workflow || existingProject.workflow;
@@ -1838,7 +1933,7 @@
         state.studioAnalysis = bundle.reference_analysis || bundle.metadata_analysis;
         state.studioReference = bundle.reference_analysis || null;
         renderStudioAnalysis(state.studioAnalysis);
-        nextStep = 2;
+        nextStep = 1;
       }
       if (bundle.latest_script) {
         state.studioWriter = bundle.writer_content || state.studioWriter;

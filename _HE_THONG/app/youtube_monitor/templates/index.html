@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>YouTube AI Factory - Giám sát</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260929-tiktok" />
+  <link rel="stylesheet" href="/static/app.css?v=20260929-step1g" />
 </head>
 <body>
 <div class="app">
@@ -48,34 +48,8 @@
         <div class="panel-head">
           <div><div class="panel-title"><span class="mark">▶</span> AI VIDEO STUDIO</div></div>
         </div>
-        <div class="studio-command-center">
-          <div class="studio-command-main">
-            <div class="eyebrow">AI ĐIỀU PHỐI DỰNG VIDEO</div>
-            <h2>Dựng video bằng kế hoạch của AI, không phải tự bấm từng công đoạn rời rạc.</h2>
-            <p>App là bộ công cụ cho Astra/AI điều phối: hiểu video nguồn, viết lại kịch bản, chia cảnh, chọn ảnh/clip phụ, tạo chữ động, SFX, chuyển cảnh và render bản nháp.</p>
-            <div class="studio-command-actions">
-              <button class="btn primary" type="button" onclick="setStudioStep(2)">Giao việc cho AI</button>
-              <button class="btn ghost" type="button" onclick="setWorkspace('source')">Mở Video tham khảo</button>
-            </div>
-          </div>
-          <div class="studio-command-card">
-            <span class="studio-card-icon">✦</span>
-            <b>Astra điều phối</b>
-            <span>Model chính lập kế hoạch và chọn tool/model cho từng bước.</span>
-          </div>
-          <div class="studio-command-card">
-            <span class="studio-card-icon">▣</span>
-            <b>Storyboard & Edit</b>
-            <span>AI quyết định chữ động, hình phụ, SFX và chuyển cảnh theo từng cảnh.</span>
-          </div>
-          <div class="studio-command-card">
-            <span class="studio-card-icon">●</span>
-            <b>Render nháp</b>
-            <span>Xuất video để xem lại trước khi đăng hoặc chỉnh tiếp.</span>
-          </div>
-        </div>
         <div class="studio-stepper" role="tablist" aria-label="Quy trình tạo video">
-          <button class="studio-step-tab active" data-studio-tab="1" onclick="setStudioStep(1)"><span>01</span><strong>Nguồn</strong></button>
+          <button class="studio-step-tab active" data-studio-tab="1" onclick="setStudioStep(1)"><span>01</span><strong>Phân tích</strong></button>
           <button class="studio-step-tab" data-studio-tab="2" onclick="setStudioStep(2)"><span>02</span><strong>Kế hoạch</strong></button>
           <button class="studio-step-tab" data-studio-tab="3" onclick="setStudioStep(3)"><span>03</span><strong>Kịch bản</strong></button>
           <button class="studio-step-tab" data-studio-tab="4" onclick="setStudioStep(4)"><span>04</span><strong>Giọng đọc</strong></button>
@@ -84,69 +58,33 @@
           <button class="studio-step-tab" data-studio-tab="7" onclick="setStudioStep(7)"><span>07</span><strong>Render &amp; Xuất bản</strong></button>
         </div>
         <div id="studioMessage" class="message" style="margin:12px 17px 0" hidden></div>
-        <details id="studioLogPanel" class="studio-option-card" style="margin:10px 17px 0" hidden><summary><b>Nhật ký vận hành</b> <span id="studioLogSummary" class="studio-model-note"></span></summary><div class="studio-actions" style="margin-top:8px"><button class="btn small ghost" type="button" onclick="loadProjectLog()">↻ Làm mới</button></div><div class="panel-sub" style="margin-top:10px">AI NÀO ĐÃ LÀM BƯỚC NÀO</div><div id="studioAiAuditBody" style="margin-top:6px"></div><div class="panel-sub" style="margin-top:12px">DIỄN BIẾN VẬN HÀNH</div><div id="studioLogBody" style="margin-top:8px"></div></details><div id="studioProgress" class="studio-progress" hidden aria-live="polite"><div class="studio-progress-head"><span id="studioProgressLabel">Đang chuẩn bị...</span><strong id="studioProgressPercent">0%</strong></div><div class="studio-progress-track"><div id="studioProgressBar" class="studio-progress-bar"></div></div></div>
+        <div id="studioProgress" class="studio-progress" hidden aria-live="polite"><div class="studio-progress-head"><span id="studioProgressLabel">Đang chuẩn bị...</span><strong id="studioProgressPercent">0%</strong></div><div class="studio-progress-track"><div id="studioProgressBar" class="studio-progress-bar"></div></div></div>
         <div id="studioStep1" class="studio-step" data-studio-step="1">
           <div class="studio-step-intro">
-            <div><span class="studio-kicker">BƯỚC 01</span><h3>Nguồn & mục tiêu</h3></div>
+            <div><span class="studio-kicker">BƯỚC 01</span><h3>Phân tích</h3><p>Phân tích và hiểu nội dung của nguồn tham khảo đang chọn</p></div>
           </div>
-          <div class="studio-source-layout">
-            <div class="studio-work-card studio-source-card">
-              <div class="studio-card-head"><div><b>Video mẫu</b></div><button class="btn small ghost" type="button" onclick="setWorkspace('source')">Mở Video tham khảo</button></div>
-              <div class="studio-grid compact">
-                <div class="studio-field"><label for="studioSourceChannelSelect">Kênh nguồn</label><select id="studioSourceChannelSelect"><option value="">Chưa có kênh nguồn</option></select></div>
-                <div class="studio-field"><label for="studioVideoSelect">Video nguồn</label><select id="studioVideoSelect"><option value="">Chưa có video trong thư viện</option></select></div>
-              </div>
-              <div id="studioVideoPreview" class="studio-video-preview" hidden></div>
-              <div class="studio-upload compact">
-                <div class="studio-upload-title">Nguồn bổ sung</div>
-                <div class="studio-actions">
-                  <label class="btn ghost" for="studioSourceUpload">Tải video/audio</label>
-                  <input id="studioSourceUpload" type="file" accept="video/*,audio/*" hidden>
-                  <label class="btn ghost" for="studioImageUpload">Tải ảnh style</label>
-                  <input id="studioImageUpload" type="file" accept="image/*" multiple hidden>
-                  <label class="btn ghost" for="studioFolderUpload">Tải thư mục ảnh</label>
-                  <input id="studioFolderUpload" type="file" webkitdirectory directory multiple hidden>
-                  <button id="studioAnalyzeImagesButton" class="btn" hidden>Cho AI xem ảnh</button>
-                </div>
-                <div id="studioUploadStatus" class="studio-model-note">Video tải lên trở thành nguồn của dự án. Ảnh dùng làm tham khảo phong cách.</div>
-                <div id="studioUploadResult" class="studio-result"></div>
-              </div>
-            </div>
-            <div class="studio-work-card studio-brief-card">
-              <div class="studio-card-head"><div><b>Kế hoạch AI</b><span>AI phối hợp nhiều tác vụ để tạo video hoàn chỉnh</span></div><span class="tag cyan">AUTO</span></div>
-              <div class="studio-ai-task-list">
-                <div class="studio-ai-task done"><span class="studio-task-icon">✦</span><div><b>Phân tích nguồn</b><small>Trích xuất nội dung, nhận diện chủ đề, phong cách và nhịp dựng</small></div><em>Hoàn thành</em></div>
-                <div class="studio-ai-task review"><span class="studio-task-icon">✎</span><div><b>Viết lại kịch bản</b><small>Tối ưu câu chữ, giữ ý chính, tăng tính hấp dẫn</small></div><em>Cần duyệt</em></div>
-                <div class="studio-ai-task idle"><span class="studio-task-icon">♪</span><div><b>Tạo voice</b><small>Chọn giọng phù hợp, tạo file voice cho từng cảnh</small></div><em>Đang chờ</em></div>
-                <div class="studio-ai-task done"><span class="studio-task-icon">▣</span><div><b>Lập storyboard</b><small>Chia cảnh, gợi ý hình ảnh, bố cục và hiệu ứng</small></div><em>Hoàn thành</em></div>
-                <div class="studio-ai-task active"><span class="studio-task-icon">✺</span><div><b>Dựng từng cảnh: chữ động + SFX</b><small>Tự động tạo visual, thêm chữ động, hiệu ứng và nhạc nền</small></div><em>Đang chạy</em></div>
-                <div class="studio-ai-task idle"><span class="studio-task-icon">●</span><div><b>Render bản nháp</b><small>Kết xuất video và kiểm tra chất lượng</small></div><em>Chưa chạy</em></div>
-              </div>
-              <div class="studio-actions studio-primary-actions"><button id="studioAnalyzeButton" class="btn primary" disabled>AI tiếp tục</button></div>
-            </div>
-            <div class="studio-work-card studio-control-card">
-              <div class="studio-card-head"><div><b>Bảng điều phối</b><span><span class="studio-live-dot"></span> AI đang hoạt động</span></div></div>
-              <div class="studio-orchestrator-profile">
-                <span class="studio-orb">⌘</span>
-                <div><b>Orchestrator</b><strong>Astra / ChatGPT app / Claude</strong><small>Phân tích · Lập kế hoạch · Điều phối · Kiểm soát chất lượng</small></div>
-              </div>
-              <div class="studio-field"><label for="studioManagedChannelSelect">Kênh xuất bản</label><select id="studioManagedChannelSelect"><option value="">Chưa chọn kênh của tôi</option></select></div>
-              <div id="studioWorkflowSummary" class="studio-managed-summary">Chọn kênh của tôi để áp dụng workflow đã gắn.</div>
-              <div class="studio-grid compact" style="margin-top:10px">
-                <div class="studio-field"><label for="studioAnalysisProviderSelect">Model phân tích</label><select id="studioAnalysisProviderSelect"><option value="auto">Auto · AI tự chọn</option><option value="codex_cli">Codex CLI</option></select></div><div class="studio-field"><label for="studioAnalysisLanguage">Ngôn ngữ</label><select id="studioAnalysisLanguage"><option value="vi" selected>Tiếng Việt</option><option value="en">Tiếng Anh</option><option value="de">Tiếng Đức</option><option value="es">Tiếng Tây Ban Nha</option><option value="zh">Tiếng Trung</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option><option value="fr">Tiếng Pháp</option></select></div>
-              </div>
-              <div class="studio-render-widget"><div><span>Tiến độ render</span><b>12/15 cảnh sẵn sàng</b></div><strong>80%</strong><div class="studio-render-track"><i style="width:80%"></i></div></div>
-            </div>
+          <!-- Chọn nguồn thuộc tab Video tham khảo ("Dựng lại video →"); các ô này chỉ giữ trạng thái cho nút đó. -->
+          <div class="studio-source-pickers" hidden>
+            <select id="studioSourceChannelSelect" aria-label="Kênh nguồn"><option value="">Chưa có kênh nguồn</option></select>
+            <select id="studioVideoSelect" aria-label="Nguồn"><option value="">Chưa có nguồn</option></select>
+            <select id="studioManagedChannelSelect" aria-label="Kênh xuất bản"><option value="">Chưa chọn kênh của tôi</option></select>
+            <div id="studioWorkflowSummary"></div>
           </div>
-          <div class="studio-demo-storyboard">
-            <div class="studio-card-head"><div><b>Storyboard & Timeline</b><span>Xem, chỉnh sửa và kiểm tra từng cảnh trước khi render</span></div><div class="studio-view-toggle"><span>Đang timeline</span><span>Đang lưới</span></div></div>
-            <div class="studio-timeline-preview">
-              <div class="studio-scene-preview"><b>Cảnh 1 · 0:00 - 0:15</b><div>MỌI CHUYỆN ĐỀU BẮT ĐẦU TỪ MỘT Ý TƯỞNG</div><span>3 nhịp · 1 chữ động · 1 SFX</span></div>
-              <div class="studio-scene-preview"><b>Cảnh 2 · 0:15 - 0:30</b><div>NGHIÊN CỨU LÀ NỀN TẢNG</div><span>3 nhịp · 1 chữ động · 1 SFX</span></div>
-              <div class="studio-scene-preview"><b>Cảnh 3 · 0:30 - 0:45</b><div>NỘI DUNG LÀ TRÁI TIM</div><span>3 nhịp · 1 chữ động · 1 SFX</span></div>
-              <button class="studio-add-scene" type="button" onclick="setStudioStep(4)">＋<span>Thêm cảnh mới</span></button>
-            </div>
+          <section class="studio-work-card studio-source-now">
+            <div class="studio-card-head"><div><b>Nguồn đang dùng</b></div><button class="btn small ghost" type="button" onclick="setWorkspace('source')">Đổi nguồn</button></div>
+            <div id="studioVideoPreview" class="studio-source-card-body"><div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Video tham khảo.</div></div>
+          </section>
+          <div class="studio-analyze-row">
+            <button id="studioAnalyzeButton" class="btn primary studio-analyze-cta" disabled>Phân tích</button>
+            <span id="studioAnalyzeState" class="studio-analyze-state">Chưa phân tích</span>
           </div>
+          <section id="studioStep1Result" class="studio-step1-result" hidden></section>
+          <details id="studioAdvanced" class="studio-option-card studio-advanced">
+            <summary>Nâng cao</summary>
+            <div class="studio-field" style="margin-top:10px"><label for="studioAnalysisProviderSelect">AI phân tích</label><select id="studioAnalysisProviderSelect"><option value="auto">Tự chọn</option></select></div>
+            <details id="studioAnalysisJson" class="studio-advanced-json" hidden><summary>Dữ liệu phân tích đầy đủ (JSON)</summary><pre class="studio-json"></pre></details>
+          </details>
+          <div class="studio-actions studio-step1-next"><button id="studioStep1NextButton" class="btn primary" type="button" disabled onclick="setStudioStep(2)">Tiếp tục Kế hoạch →</button></div>
         </div>
         <div id="studioStep2" class="studio-step" data-studio-step="2" hidden>
           <div id="studioAnalysisResult" class="studio-result"><div class="studio-empty">Chưa có kết quả phân tích.</div></div>
@@ -412,7 +350,7 @@
       </section>
 
       <section id="addChannelPanel" class="panel register workspace-panel">
-        <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN THAM CHIẾU</div><div class="panel-sub">Chọn thêm cả kênh hoặc chỉ một URL video. Không tải file video.</div></div><span class="tag orange">YOUTUBE API</span></div>
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN THAM CHIẾU</div><div class="panel-sub">Thêm kênh, một video, bài viết, link sản phẩm — hoặc tải file lên.</div></div><span class="tag orange">YOUTUBE API</span></div>
         <div class="panel-body">
           <form id="addChannelForm" class="register-grid">
             <div class="field"><label for="sourceImportType">Loại nguồn</label><select id="sourceImportType"><option value="channel">Kênh · lấy video trong kênh</option><option value="video">Một video YouTube · chỉ lấy video này</option><option value="link">Link bất kỳ · Bilibili, TikTok, Vimeo, Archive...</option></select></div>
@@ -420,6 +358,20 @@
             <div class="field"><label for="groupName">Nhãn nhóm</label><input id="groupName" placeholder="Công nghệ" /></div>
             <button class="btn primary" type="submit" id="sourceImportSubmit">＋ Thêm & đồng bộ</button>
           </form>
+          <div class="studio-upload compact source-upload-block">
+            <div class="studio-upload-title">Hoặc tải file lên</div>
+            <div class="studio-actions">
+              <label class="btn ghost" for="studioSourceUpload">Tải video/audio</label>
+              <input id="studioSourceUpload" type="file" accept="video/*,audio/*" hidden>
+              <label class="btn ghost" for="studioImageUpload">Tải ảnh</label>
+              <input id="studioImageUpload" type="file" accept="image/*" multiple hidden>
+              <label class="btn ghost" for="studioFolderUpload">Tải thư mục ảnh</label>
+              <input id="studioFolderUpload" type="file" webkitdirectory directory multiple hidden>
+              <button id="studioAnalyzeImagesButton" class="btn" type="button" hidden>Cho AI xem ảnh</button>
+            </div>
+            <div id="studioUploadStatus" class="studio-model-note">Video/audio tải lên trở thành nguồn của dự án đang mở. Ảnh được thêm vào dự án làm tham khảo.</div>
+            <div id="studioUploadResult" class="studio-result"></div>
+          </div>
           <div id="sourceImportLinkHint" class="secondary-text" style="margin-top:6px" hidden></div><div id="message" class="message">Sẵn sàng. Hãy thêm một kênh để bắt đầu.</div>
           <div id="sourceImportResult" class="source-import-result" hidden>
             <div>
@@ -491,10 +443,10 @@
   </div>
 </div>
 
-<script src="/static/core.js?v=20260929-tiktok"></script>
-  <script src="/static/studio-lanes.js?v=20260929-tiktok"></script>
-  <script src="/static/project-detail.js?v=20260929-tiktok"></script>
-  <script src="/static/library.js?v=20260929-tiktok"></script>
-  <script src="/static/publish.js?v=20260929-tiktok"></script>
+<script src="/static/core.js?v=20260929-step1g"></script>
+  <script src="/static/studio-lanes.js?v=20260929-step1g"></script>
+  <script src="/static/project-detail.js?v=20260929-step1g"></script>
+  <script src="/static/library.js?v=20260929-step1g"></script>
+  <script src="/static/publish.js?v=20260929-step1g"></script>
 </body>
 </html>
