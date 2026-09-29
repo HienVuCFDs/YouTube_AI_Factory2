@@ -13,3 +13,8 @@ _test_root = Path(_TEST_STATE_DIR.name)
 os.environ.setdefault("YOUTUBE_DATA_DIR", str(_test_root / "data"))
 os.environ.setdefault("YOUTUBE_DB_PATH", str(_test_root / "data" / "test.db"))
 os.environ.setdefault("PRODUCTION_ARTIFACT_DIR", str(_test_root / "projects"))
+# Browser profiles and the record of which is signed in belong to the machine;
+# a test must never read or overwrite the real ones.
+os.environ.setdefault("WEB_VIDEO_STATE_DIR", str(_test_root / "browser_state"))
+os.environ.setdefault("YOUTUBE_PROFILES_DIR", str(_test_root / "browser_state" / "profiles"))
+os.environ.setdefault("YOUTUBE_CONNECTIONS_STORE", str(_test_root / "browser_state" / "connections.json"))

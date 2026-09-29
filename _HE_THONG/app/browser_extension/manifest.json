@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YT Factory - AI Web Bridge",
-  "version": "1.1.0",
-  "description": "Dieu phoi Gemini/ChatGPT/Meta AI web (tai khoan da dang nhap trong trinh duyet nay) de tao anh/video cho YouTube AI Factory. Khong dung API tra phi, khong can dang nhap rieng.",
+  "version": "1.3.1",
+  "description": "Dieu phoi Gemini/ChatGPT/Meta AI web (tai khoan da dang nhap trong trinh duyet nay) de tao anh/video cho YouTube AI Factory. Khong dung API tra phi, khong can dang nhap rieng. Doc trang san pham (Shopee/Lazada/TikTok Shop/Tiki/Sendo) bang phien da dang nhap, chi tra ve noi dung trang - khong tra cookie hay mat khau.",
   "permissions": [
     "tabs",
     "scripting",
@@ -22,7 +22,16 @@
     "https://*.fbsbx.com/*",
     "https://*.googleusercontent.com/*",
     "https://*.oaiusercontent.com/*",
-    "https://*.gstatic.com/*"
+    "https://*.gstatic.com/*",
+    "https://shopee.vn/*",
+    "https://*.shopee.vn/*",
+    "https://www.lazada.vn/*",
+    "https://*.lazada.vn/*",
+    "https://shop.tiktok.com/*",
+    "https://tiki.vn/*",
+    "https://*.tiki.vn/*",
+    "https://www.sendo.vn/*",
+    "https://*.sendo.vn/*"
   ],
   "background": {
     "service_worker": "background.js"

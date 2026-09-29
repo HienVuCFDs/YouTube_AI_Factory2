@@ -68,7 +68,11 @@ CÁCH LÀM (bắt buộc):
    - AI/provider lỗi hoặc hết hạn mức → chạy lại bước với options.provider khác
      (xem youtube_factory_get_ai_runtimes để biết cái nào chạy được);
    - bước cần nội dung mà AI của app không viết được → tự viết và đưa qua options
-     (script: options.draft; shots: options.shots).
+     (script: options.draft; shots: options.shots);
+   - nguồn là link sản phẩm mà trang chưa đọc được (NEED_LOGIN / NEED_HUMAN_VERIFY) →
+     youtube_factory_list_connections xem nền tảng nào can_read (hoặc Browser Bridge), rồi chạy lại
+     analyze với options.browser_session=profile:<nền tảng> hoặc extension:<trình duyệt> (vd extension:coccoc). Không tự giải captcha,
+     không đăng nhập hộ; không còn cách nào thì báo blocked và nói người dùng cần bấm Kết nối nền tảng nào.
 4. Không gọi lại Y HỆT một lệnh vừa lỗi khi trạng thái dự án chưa đổi — app sẽ chặn. Đổi cách.
 5. Trước khi báo "done": gọi youtube_factory_list_steps lần nữa và xác nhận các bước đích đã "done".
    App sẽ tự kiểm tra lại bằng dữ liệu thật; báo done khi chưa xong sẽ bị phát hiện.
@@ -120,6 +124,7 @@ def build_prompt(
         f"ĐÍCH (app tự kiểm bằng dữ liệu thật): các bước {list(spec.target_steps)} phải ở trạng thái done.",
         f"Chuỗi bước còn phải đi theo điều kiện tiên quyết: {route or 'không còn gì'}",
         f"Hiện đã done: {done or 'chưa có bước nào'}. Còn thiếu cho đích: {check.get('missing')}",
+        *[f"Vì sao {name} chưa tính là xong: {reason}" for name, reason in (check.get("reasons") or {}).items()],
         "QUYỀN: " + ("được tiêu lượt tạo/quota khi cần." if spec.allow_spend
                      else "KHÔNG được tiêu lượt tạo/quota (app sẽ chặn bước tiêu lượt).")
         + (" Được dùng force để làm lại thứ đã có." if spec.allow_overwrite
@@ -142,6 +147,8 @@ def build_prompt(
             lines.extend(_call_line(entry) for entry in item.get("calls") or [])
             verification = item.get("verification") or {}
             lines.append(f"  App kiểm tra sau vòng: còn thiếu {verification.get('missing')}")
+            for name, reason in (verification.get("reasons") or {}).items():
+                lines.append(f"    {name}: {reason[:300]}")
             if verification.get("false_claims"):
                 lines.append(f"  Agent báo đã xong nhưng thực tế CHƯA: {verification['false_claims']}")
     lines.append(f"\nVòng này do {runtime} làm. Bắt đầu bằng youtube_factory_list_steps.")

@@ -868,6 +868,151 @@
     $('toolStatusPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
   }
 
+  // Kết nối nền tảng bán hàng: mỗi sàn một profile trình duyệt riêng của app.
+  // Người dùng tự đăng nhập trong cửa sổ app mở ra; app chỉ nhìn đầu trang để
+  // biết đã đăng nhập chưa. Bảng làm mới khi người dùng quay lại cửa sổ app,
+  // không hỏi định kỳ.
+  const PLATFORM_STATUS_TAGS = {
+    CONNECTED: ['green', 'ĐÃ KẾT NỐI'],
+    DISCONNECTED: ['cyan', 'CHƯA KẾT NỐI'],
+    NEED_LOGIN: ['orange', 'CẦN ĐĂNG NHẬP'],
+    EXPIRED: ['orange', 'HẾT HẠN'],
+    NEED_HUMAN_VERIFY: ['orange', 'CẦN XÁC MINH'],
+    ERROR: ['red', 'LỖI'],
+  };
+  const BRIDGE_STATUS_TAGS = {
+    connected: ['green', 'ĐANG KẾT NỐI'],
+    standby: ['cyan', 'ĐANG NGỦ'],
+    offline: ['orange', 'CHƯA THẤY'],
+    outdated: ['orange', 'CẦN TẢI LẠI'],
+  };
+
+  async function loadPlatformConnections() {
+    const box = $('platformConnectionsBody');
+    if (!box) return;
+    try {
+      renderPlatformConnections(await api('/api/connections'));
+    } catch (error) { box.innerHTML = `<div class="empty">Không tải được kết nối: ${esc(error.message)}</div>`; }
+  }
+
+  // Trình duyệt có extension, để chọn cho một sàn kết nối qua trình duyệt thật (Shopee).
+  const platformBridgeChoices = {};
+
+  function renderBridgeChoices(key) {
+    const choice = platformBridgeChoices[key];
+    if (!choice) return '';
+    const rows = (choice.bridges || []).map((bridge) => {
+      const slug = esc(String(bridge.id || '').split(':')[1] || '');
+      const [color, label] = BRIDGE_STATUS_TAGS[bridge.status] || ['cyan', bridge.status];
+      const openButton = bridge.can_open
+        ? `<button class="btn small primary" type="button" onclick="openPlatformInBrowser('${esc(key)}', '${slug}')">Mở ${esc(choice.label)} trong ${esc(bridge.browser)}</button>`
+        : `<span class="secondary-text">Tự mở ${esc(choice.login_url)} trong ${esc(bridge.browser)} (tải lại extension để app mở giúp).</span>`;
+      return `<div class="secondary-text" style="margin-top:8px"><b>${esc(bridge.browser)}</b> ${esc(bridge.version || '')}
+          <span class="tag ${color}">${esc(label)}</span></div>
+        <div class="queue-controls">${openButton}
+          <button class="btn small ghost" type="button" ${bridge.can_read ? '' : 'disabled'} onclick="checkPlatform('${esc(key)}', '${slug}')">Tôi đã đăng nhập · Kiểm tra</button>
+        </div>`;
+    }).join('');
+    const ownProfile = choice.profile_option
+      ? `<div class="queue-controls" style="margin-top:8px">
+          <button class="btn small ghost" type="button" onclick="connectPlatform('${esc(key)}', 'profile')">Dùng trình duyệt riêng của app (cửa sổ hiện)</button>
+          <button class="btn small ghost" type="button" onclick="checkPlatform('${esc(key)}', 'profile')">Kiểm tra trình duyệt riêng</button>
+        </div>`
+      : '';
+    return `<div class="secondary-text" style="margin-top:8px">${esc(choice.message || '')}</div>${rows}${ownProfile}`;
+  }
+
+  function renderPlatformConnections(data) {
+    const platforms = data.platforms || [];
+    const connected = platforms.filter((item) => item.status === 'CONNECTED').length;
+    $('platformConnectionsSummary').textContent = `${connected}/${platforms.length} SÀN ĐÃ KẾT NỐI`;
+    const when = (value) => (value ? new Date(value).toLocaleString('vi-VN') : '—');
+    const cards = platforms.map((item) => {
+      const [color, label] = PLATFORM_STATUS_TAGS[item.status] || ['cyan', item.status];
+      const key = esc(item.platform);
+      const idle = !item.busy;
+      const viaBridge = item.mode === 'bridge';
+      const note = item.login_window_open
+        ? 'Cửa sổ đăng nhập đang mở. Đăng nhập xong app tự nhận ra và đóng cửa sổ.'
+        : (item.detail || (viaBridge
+          ? 'Kết nối qua trình duyệt thật của bạn (extension YT Factory); app không mở trình duyệt tự động.'
+          : (item.login_to_read ? 'Sàn này ẩn giá khi chưa đăng nhập.' : 'Đọc được trang sản phẩm cả khi chưa đăng nhập.')));
+      const via = item.via ? `<div class="secondary-text">Qua: ${esc(item.via)}</div>` : '';
+      const canManage = viaBridge ? true : item.profile;
+      return `<div class="integration-card ${item.status === 'CONNECTED' ? 'connected' : ''}">
+        <div class="tool-status-title"><span>${esc(item.label)}</span><span class="tag ${color}">${esc(label)}</span></div>
+        <div class="secondary-text">${esc(note)}</div>
+        ${via}
+        <div class="secondary-text">Kiểm tra lần cuối: ${esc(when(item.checked_at))}</div>
+        <div class="queue-controls">
+          <button class="btn small primary" type="button" ${idle && item.status !== 'CONNECTED' ? '' : 'disabled'} onclick="connectPlatform('${key}')">Kết nối</button>
+          <button class="btn small ghost" type="button" ${idle && canManage ? '' : 'disabled'} onclick="checkPlatform('${key}')">Kiểm tra</button>
+          <button class="btn small ghost" type="button" ${idle && canManage ? '' : 'disabled'} onclick="connectPlatform('${key}')">Đăng nhập lại</button>
+          <button class="btn small ghost" type="button" ${idle && (item.profile || item.via) ? '' : 'disabled'} onclick="disconnectPlatform('${key}')">Ngắt kết nối</button>
+        </div>
+        ${renderBridgeChoices(item.platform)}
+      </div>`;
+    }).join('');
+    const bridges = (data.browser_bridge || {}).bridges || [];
+    const bridgeRows = bridges.length
+      ? bridges.map((bridge) => {
+        const [bridgeColor, bridgeLabel] = BRIDGE_STATUS_TAGS[bridge.status] || ['cyan', bridge.status || '—'];
+        return `<div class="tool-status-title"><span>${esc(bridge.browser)} ${esc(bridge.version || '')} · ${esc(bridge.id)}</span><span class="tag ${bridgeColor}">${esc(bridgeLabel)}</span></div>`;
+      }).join('')
+      : '<div class="tool-status-title"><span>Chưa thấy trình duyệt nào có extension</span><span class="tag orange">CHƯA THẤY</span></div>';
+    $('platformConnectionsBody').innerHTML = `<div class="studio-grid">${cards}</div>
+      <div class="integration-card handoff" style="margin-top:12px">
+        <div class="secondary-text"><b>Browser Bridge · extension YT Factory</b> — không gửi nhịp định kỳ; có việc thì nhận khi extension thức (tối đa khoảng 1 phút).</div>
+        ${bridgeRows}
+      </div>`;
+  }
+
+  async function connectPlatform(key, use = '') {
+    try {
+      const query = use ? `?use=${encodeURIComponent(use)}` : '';
+      const result = await api(`/api/connections/${encodeURIComponent(key)}/connect${query}`, {method: 'POST'});
+      if (result.action === 'choose_bridge') platformBridgeChoices[key] = result;
+      setMessage(result.message || 'Đã mở cửa sổ đăng nhập.', result.action === 'choose_bridge' && !(result.bridges || []).length ? 'error' : 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+    await loadPlatformConnections();
+  }
+
+  async function openPlatformInBrowser(key, bridge) {
+    setMessage('Đang nhờ extension mở trang trong trình duyệt của bạn...');
+    try {
+      const result = await api(`/api/connections/${encodeURIComponent(key)}/open?bridge=${encodeURIComponent(bridge)}`, {method: 'POST'});
+      setMessage(result.message || 'Đã mở trang.', 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+    await loadPlatformConnections();
+  }
+
+  async function checkPlatform(key, bridge = '') {
+    setMessage('Đang kiểm tra phiên đăng nhập...');
+    try {
+      const query = bridge ? `?bridge=${encodeURIComponent(bridge)}` : '';
+      const result = await api(`/api/connections/${encodeURIComponent(key)}/check${query}`, {method: 'POST'});
+      if (result.status === 'CONNECTED') delete platformBridgeChoices[key];
+      setMessage(`${result.label}: ${result.status}${result.via ? ` qua ${result.via}` : ''}${result.detail ? ` — ${result.detail}` : ''}`,
+        result.status === 'CONNECTED' ? 'success' : 'error');
+    } catch (error) { setMessage(error.message, 'error'); }
+    await loadPlatformConnections();
+  }
+
+  async function disconnectPlatform(key) {
+    if (!confirm(`Ngắt kết nối ${key}? App sẽ thôi dùng phiên của sàn này (phiên trong trình duyệt riêng của app bị xoá; trình duyệt thật của bạn không bị đăng xuất).`)) return;
+    try {
+      const result = await api(`/api/connections/${encodeURIComponent(key)}/disconnect`, {method: 'POST'});
+      delete platformBridgeChoices[key];
+      setMessage(`Đã ngắt kết nối ${result.label}.`, 'success');
+    } catch (error) { setMessage(error.message, 'error'); }
+    await loadPlatformConnections();
+  }
+
+  // Đăng nhập diễn ra trong cửa sổ khác; khi người dùng quay lại app thì làm mới.
+  window.addEventListener('focus', () => {
+    if (state.workspace === 'settings') void loadPlatformConnections();
+  });
+
   async function saveIntegration(provider) {
     const ids = integrationInputIds(provider);
     const apiKey = $(ids.key)?.value || '';

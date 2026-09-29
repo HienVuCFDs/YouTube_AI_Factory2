@@ -515,6 +515,20 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # it asks which AI can run at all before a run is started.
         if name == "youtube_factory_get_ai_runtimes":
             return _text_result(_factory_request("/api/orchestrator/runtimes"))
+        # Connections belong to the machine, not to a project. What comes back
+        # is a status per platform and what a page shows - never a cookie.
+        if name == "youtube_factory_list_connections":
+            return _text_result(_factory_request("/api/connections?view=capabilities"))
+        if name == "youtube_factory_get_connection_status":
+            platform = urllib.parse.quote(str(arguments.get("platform") or "").strip(), safe="")
+            return _text_result(_factory_request(f"/api/connections/{platform}"))
+        if name == "youtube_factory_read_product":
+            return _text_result(_json_factory(
+                "/api/connections/read",
+                {"url": str(arguments.get("url") or "").strip(),
+                 "session_id": str(arguments.get("session_id") or "").strip()},
+                timeout=240,
+            ))
         # Research is not about a project either: it is how a project starts.
         if name == "youtube_factory_search_web":
             query = urllib.parse.quote(str(arguments.get("query") or "").strip(), safe="")

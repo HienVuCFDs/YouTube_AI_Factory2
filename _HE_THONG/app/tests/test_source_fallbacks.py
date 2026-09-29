@@ -202,34 +202,51 @@ class BringingInALinkThatIsNotAVideoTests(unittest.TestCase):
         "<body>Cần đăng nhập</body></html>"
     )
 
+    class _Sessions:
+        def __init__(self, outcome: dict) -> None:
+            self.outcome = outcome
+            self.calls: list[str] = []
+
+        def read(self, url: str, *, session_id: str = "") -> dict:
+            self.calls.append(url)
+            return dict(self.outcome)
+
     def test_a_readable_page_becomes_a_source(self) -> None:
-        with mock.patch.object(main_module.page_source, "fetch_static", return_value=self.REAL),                 mock.patch.object(main_module.page_source, "fetch_rendered") as browser:
+        sessions = self._Sessions({"status": "OK"})
+        with mock.patch.object(main_module.page_source, "fetch_static", return_value=self.REAL), \
+                mock.patch.object(main_module.platform_connections, "manager", return_value=sessions):
             details = main_module._probe_page_link("https://shopee.vn/x-i.1.2")
 
-        # A usable title on the static page means the browser is not needed.
-        browser.assert_not_called()
+        # A usable title on the static page means no browser is needed.
+        self.assertEqual(sessions.calls, [])
         self.assertEqual(details["title"], "Điều khiển từ xa K-1028E")
         self.assertEqual(details["duration_seconds"], 0)
         self.assertEqual(details["platform"], "shop")
 
     def test_a_challenge_is_never_imported_as_a_source(self) -> None:
+        sessions = self._Sessions({"status": "NEED_HUMAN_VERIFY", "probe": {}, "attempts": []})
         with mock.patch.object(main_module.page_source, "fetch_static", return_value=self.WALL), \
-                mock.patch.object(
-                    main_module.page_source, "fetch_rendered",
-                    return_value=(self.WALL, "Verify to continue", "https://shop.tiktok.com/vn/pdp/1"),
-                ):
+                mock.patch.object(main_module.platform_connections, "manager", return_value=sessions):
             self.assertIsNone(main_module._probe_page_link("https://shop.tiktok.com/vn/pdp/1"))
+        self.assertEqual(sessions.calls, ["https://shop.tiktok.com/vn/pdp/1"])
 
-    def test_a_walled_body_with_a_real_title_is_still_worth_importing(self) -> None:
-        """A signed-out Shopee page names the product in og:title even while
-        the body says "Cần đăng nhập". A source row with the right name beats
-        no source at all; what the page withholds is reported later."""
+    def test_a_marketplace_is_never_read_with_a_throwaway_browser(self) -> None:
+        sessions = self._Sessions({"status": "NEED_LOGIN", "probe": {}, "attempts": []})
+        with mock.patch.object(main_module.page_source, "fetch_static", return_value=self.WALL), \
+                mock.patch.object(main_module.platform_connections, "manager", return_value=sessions), \
+                mock.patch.object(main_module.page_source, "fetch_rendered") as throwaway:
+            main_module._probe_page_link("https://shopee.vn/Tai-Nghe-S10-i.1.2")
+
+        throwaway.assert_not_called()
+
+    def test_a_page_a_session_was_served_is_named_after_the_product(self) -> None:
+        """Read through a signed-in session, the listing names itself."""
         shell = "<html><head></head><body>Please enable JavaScript</body></html>"
+        probe = {"url": "https://shopee.vn/x-i.1.2", "title": "Shopee",
+                 "meta": {"og:title": "Điều khiển từ xa K-1028E"}, "ld": [], "prices": [], "images": []}
+        sessions = self._Sessions({"status": "OK", "session": "extension:browser", "probe": probe})
         with mock.patch.object(main_module.page_source, "fetch_static", return_value=shell), \
-                mock.patch.object(
-                    main_module.page_source, "fetch_rendered",
-                    return_value=(self.REAL, "Cần đăng nhập", "https://shopee.vn/x-i.1.2"),
-                ):
+                mock.patch.object(main_module.platform_connections, "manager", return_value=sessions):
             details = main_module._probe_page_link("https://shopee.vn/x-i.1.2")
 
         self.assertEqual(details["title"], "Điều khiển từ xa K-1028E")
@@ -260,11 +277,7 @@ class TheRefusalNamesTheFixTests(unittest.TestCase):
         with mock.patch.object(
                 main_module, "probe_source_link",
                 side_effect=main_module.SourceLinkError("Unsupported URL"),
-        ), mock.patch.object(main_module, "_probe_page_link", return_value=None), \
-                mock.patch.object(
-                    main_module.page_source, "saved_profile",
-                    return_value="C:/profile" if has_profile else "",
-                ):
+        ), mock.patch.object(main_module, "_probe_page_link", return_value=None):
             with self.assertRaises(HTTPException) as raised:
                 main_module._import_video_from_link("https://shopee.vn/x-i.1.2")
         return raised.exception.detail

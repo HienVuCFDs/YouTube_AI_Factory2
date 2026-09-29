@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>YouTube AI Factory - Giám sát</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260924-meta-image" />
+  <link rel="stylesheet" href="/static/app.css?v=20260929-tiktok" />
 </head>
 <body>
 <div class="app">
@@ -293,6 +293,11 @@
         <div id="connectionQuickBody" class="panel-body"><div class="empty">Đang kiểm tra kết nối...</div></div>
       </section>
 
+      <section id="platformConnectionsPanel" class="panel workspace-panel" style="margin-bottom:14px" hidden>
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">⇄</span> KẾT NỐI NỀN TẢNG BÁN HÀNG</div><div class="panel-sub">Shopee và TikTok Shop dùng trình duyệt thật của bạn qua extension (TikTok có thể dùng thêm trình duyệt riêng của app); các sàn khác dùng trình duyệt riêng của app, giữ phiên sau khi đóng/mở lại. Bạn tự đăng nhập (mật khẩu, OTP, captcha); app không nhập hộ, không vượt bảo mật.</div></div><div class="queue-controls"><span id="platformConnectionsSummary" class="tag cyan">ĐANG KIỂM TRA</span><button class="btn small ghost" type="button" onclick="loadPlatformConnections()">Làm mới</button></div></div>
+        <div id="platformConnectionsBody" class="panel-body"><div class="empty">Đang tải kết nối...</div></div>
+      </section>
+
       <section id="toolStatusPanel" class="panel workspace-panel" style="margin-bottom:14px" hidden>
         <div class="panel-head"><div><div class="panel-title"><span class="mark">◈</span> TRUNG TÂM TRẠNG THÁI TOOLS</div><div class="panel-sub">Kiểm tra nhanh adapter nào đã sẵn sàng trước khi chạy pipeline.</div></div><div class="queue-controls"><button class="btn small ghost" type="button" onclick="createDatabaseBackup()">Sao lưu DB</button><button class="btn small ghost" type="button" onclick="pruneDatabaseBackups()">Dọn backup cũ</button><span id="toolStatusSummary" class="tag cyan">ĐANG KIỂM TRA</span></div></div>
         <div id="toolStatusBody" class="panel-body"><div class="empty">Đang kiểm tra tool...</div></div>
@@ -486,10 +491,10 @@
   </div>
 </div>
 
-<script src="/static/core.js?v=20260924-meta-image"></script>
-  <script src="/static/studio-lanes.js?v=20260924-meta-image"></script>
-  <script src="/static/project-detail.js?v=20260924-meta-image"></script>
-  <script src="/static/library.js?v=20260924-meta-image"></script>
-  <script src="/static/publish.js?v=20260924-meta-image"></script>
+<script src="/static/core.js?v=20260929-tiktok"></script>
+  <script src="/static/studio-lanes.js?v=20260929-tiktok"></script>
+  <script src="/static/project-detail.js?v=20260929-tiktok"></script>
+  <script src="/static/library.js?v=20260929-tiktok"></script>
+  <script src="/static/publish.js?v=20260929-tiktok"></script>
 </body>
 </html>

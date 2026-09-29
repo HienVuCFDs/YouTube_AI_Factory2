@@ -131,47 +131,112 @@ class WhatTheModelIsHandedTests(unittest.TestCase):
         self.assertIn("2026-09-27", described)
 
 
-class TheCheapestRouteThatAnswersTests(unittest.TestCase):
-    def test_plain_http_is_enough_for_a_structured_listing(self) -> None:
-        with mock.patch.object(page_source, "fetch_static", return_value=_page([LAZADA_LIKE])), \
-                mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(page_source, "fetch_rendered") as browser:
-            product = page_source.read_product("https://www.lazada.vn/products/x.html")
+class _Sessions:
+    """Stands in for browser_sessions.manager(): no browser is ever opened."""
 
-        browser.assert_not_called()
+    def __init__(self, outcome: dict | None = None) -> None:
+        self.outcome = outcome or {"status": "NEED_LOGIN", "session": "", "site": "shopee.vn",
+                                   "probe": {}, "attempts": [], "detail": "cần đăng nhập"}
+        self.calls: list[tuple[str, str]] = []
+
+    def read(self, url: str, *, session_id: str = "") -> dict:
+        self.calls.append((url, session_id))
+        return dict(self.outcome)
+
+
+def _served(session: str, probe: dict) -> _Sessions:
+    return _Sessions({"status": "OK", "session": session, "site": "x", "probe": probe,
+                      "attempts": [{"session": session, "status": "OK", "detail": "", "seconds": 1.0}]})
+
+
+PRICED = dict(LAZADA_LIKE, offers={"@type": "Offer", "price": "285000", "priceCurrency": "VND"})
+
+
+class TheCheapestRouteThatAnswersTests(unittest.TestCase):
+    def test_plain_http_is_enough_when_the_listing_states_its_price(self) -> None:
+        sessions = _Sessions()
+        with mock.patch.object(page_source, "fetch_static", return_value=_page([PRICED])):
+            product = page_source.read_product("https://www.lazada.vn/products/x.html", sessions=sessions)
+
+        self.assertEqual(sessions.calls, [])
         self.assertEqual(product["route"], "http_jsonld")
+        self.assertEqual(product["read_status"], "OK")
         self.assertTrue(product["captured_at"])
 
-    def test_a_page_that_needs_rendering_gets_the_browser(self) -> None:
-        with mock.patch.object(page_source, "fetch_static", return_value=_page()), \
-                mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(
-                    page_source, "fetch_rendered",
-                    return_value=(_page([LAZADA_LIKE]), "text", "https://shop.tiktok.com/vn/pdp/1"),
-                ):
-            product = page_source.read_product("https://shop.tiktok.com/vn/pdp/1")
+    def test_a_listing_without_a_price_goes_on_to_a_browser_session(self) -> None:
+        """Lazada: name, pictures and SKU over HTTP, the price only on screen."""
+        probe = {"url": "https://www.lazada.vn/products/x.html", "title": "Nước hoa", "ld": [], "meta": {},
+                 "prices": [{"text": "₫285.000", "size": 28, "top": 500, "struck": False},
+                            {"text": "₫350.000", "size": 14, "top": 520, "struck": True}],
+                 "text": "Nước hoa ₫285.000"}
+        sessions = _served("app_profile:lazada.vn", probe)
+        with mock.patch.object(page_source, "fetch_static", return_value=_page([LAZADA_LIKE])):
+            product = page_source.read_product("https://www.lazada.vn/products/x.html", sessions=sessions)
 
-        self.assertEqual(product["route"], "browser_jsonld")
+        self.assertEqual(product["route"], "session:app_profile:lazada.vn")
+        self.assertEqual(product["price"], "285000")
+        self.assertEqual(product["price_source"], "dom")
+        # What HTTP stated exactly is kept over what the screen showed.
+        self.assertEqual(product["sku"], "204631671")
+        self.assertEqual(product["images"][0], "https://cdn.test/a.jpg")
+        self.assertEqual(product["read_status"], "OK")
+
+    def test_a_page_that_needs_rendering_is_read_through_a_session(self) -> None:
+        probe = {"url": "https://shop.tiktok.com/vn/pdp/1", "title": "Bàn chải",
+                 "ld": [json.dumps(PRICED, ensure_ascii=False)], "meta": {}, "prices": [], "text": "Bàn chải"}
+        sessions = _served("extension:browser", probe)
+        with mock.patch.object(page_source, "fetch_static", return_value=_page()):
+            product = page_source.read_product("https://shop.tiktok.com/vn/pdp/1", sessions=sessions)
+
+        self.assertEqual(product["route"], "session:extension:browser")
+        self.assertEqual(product["session"], "extension:browser")
+        self.assertEqual(product["price_source"], "jsonld")
 
     def test_the_routes_that_were_tried_are_recorded(self) -> None:
         """A caller holding a thin result needs to know which doors were shut."""
+        sessions = _Sessions({"status": "NEED_LOGIN", "session": "", "site": "shopee.vn", "probe": {},
+                              "detail": "shopee.vn cần một phiên đã đăng nhập",
+                              "attempts": [{"session": "app_profile:shopee.vn", "status": "NEED_LOGIN",
+                                            "detail": "Bị chuyển khỏi trang sản phẩm", "seconds": 9}],
+                              "sessions": [{"id": "extension:browser", "status": "offline", "can_read": False}]})
+        with mock.patch.object(page_source, "fetch_static", return_value=_page()):
+            product = page_source.read_product("https://shopee.vn/x-i.1.2", sessions=sessions)
+
+        self.assertIn("app_profile:shopee.vn: NEED_LOGIN", " ".join(product["attempts"]))
+        self.assertEqual(product["read_status"], "NEED_LOGIN")
+        self.assertEqual(product["sessions"][0]["id"], "extension:browser")
+
+    def test_a_site_that_will_not_load_at_all_is_a_structured_failure(self) -> None:
+        """Not an exception: the caller gets the name the URL carries and the
+        reason the listing itself was not read."""
+        with mock.patch.object(page_source, "fetch_static", side_effect=page_source.PageSourceError("mất mạng")):
+            product = page_source.read_product(
+                "https://shopee.vn/Tai-Nghe-S10-i.1.2",
+                sessions=_Sessions({"status": "FAILED", "site": "shopee.vn", "probe": {}, "attempts": []}),
+            )
+
+        self.assertEqual(product["read_status"], "FAILED")
+        self.assertEqual(product["route"], "url_slug")
+        self.assertEqual(product["name"], "Tai Nghe S10")
+
+    def test_a_named_session_is_passed_on_and_used_even_over_http(self) -> None:
+        sessions = _served("extension:browser", {"url": "https://www.lazada.vn/products/x.html", "ld": [],
+                                                 "meta": {}, "prices": [], "text": ""})
+        with mock.patch.object(page_source, "fetch_static", return_value=_page([PRICED])):
+            page_source.read_product(
+                "https://www.lazada.vn/products/x.html", session_id="extension:browser", sessions=sessions,
+            )
+
+        self.assertEqual(sessions.calls, [("https://www.lazada.vn/products/x.html", "extension:browser")])
+
+    def test_the_ai_reader_is_not_used_unless_asked(self) -> None:
+        """Measured on all three marketplaces it never returned a price, and
+        it costs a minute."""
         with mock.patch.object(page_source, "fetch_static", return_value=_page()), \
-                mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(page_source, "saved_profile", return_value=""), \
-                mock.patch.object(page_source, "fetch_rendered", return_value=(_page(), "Cần đăng nhập", "https://shopee.vn/x-i.1.2")):
-            product = page_source.read_product("https://shopee.vn/x-i.1.2")
+                mock.patch.object(page_source, "read_with_ai") as reader:
+            page_source.read_product("https://shopee.vn/x-i.1.2", sessions=_Sessions())
 
-        self.assertTrue(product["attempts"])
-        self.assertEqual(product["route"], "browser_text")
-
-    def test_a_site_that_will_not_load_at_all_raises(self) -> None:
-        with mock.patch.object(page_source, "read_with_ai", return_value={}), mock.patch.object(
-                page_source, "fetch_static", side_effect=page_source.PageSourceError("mất mạng"),
-        ), mock.patch.object(
-                page_source, "fetch_rendered", side_effect=page_source.PageSourceError("không mở được"),
-        ):
-            with self.assertRaises(page_source.PageSourceError):
-                page_source.read_product("https://shopee.vn/x-i.1.2")
+        reader.assert_not_called()
 
 
 class AnArticlesOwnPicturesTests(unittest.TestCase):
@@ -260,6 +325,20 @@ class BeingSentSomewhereElseTests(unittest.TestCase):
             "https://www.lazada.vn/products/x.html?spm=a2o4n.homepage",
         ))
 
+    def test_the_same_listing_under_its_named_url_is_not_a_redirect(self) -> None:
+        """TikTok Shop answers /vn/pdp/<id> from /vn/pdp/<name>/<id>. The page
+        was served; calling it a redirect threw it away."""
+        self.assertFalse(page_source.landed_elsewhere(
+            "https://shop.tiktok.com/vn/pdp/1733450240927368413",
+            "https://shop.tiktok.com/vn/pdp/ban-chai-cha-giay/1733450240927368413?source=product_detail",
+        ))
+
+    def test_another_listing_is_a_redirect(self) -> None:
+        self.assertTrue(page_source.landed_elsewhere(
+            "https://shop.tiktok.com/vn/pdp/1733450240927368413",
+            "https://shop.tiktok.com/vn/pdp/ban-chai/1111111111111111111",
+        ))
+
     def test_a_trailing_slash_is_not_a_redirect(self) -> None:
         self.assertFalse(page_source.landed_elsewhere(
             "https://vnexpress.net/khoa-hoc", "https://vnexpress.net/khoa-hoc/",
@@ -267,10 +346,10 @@ class BeingSentSomewhereElseTests(unittest.TestCase):
 
 
 class ASignedInSessionPerSiteTests(unittest.TestCase):
-    """Shopee does not refuse a robot, it sends one to the home page; a
-    signed-in shopper is served the listing. One profile per site, so signing
-    into Shopee does not require a TikTok account and a site that flags one
-    profile does not reach the others."""
+    """Shopee does not refuse a robot, it sends one away; a signed-in shopper
+    is served the listing. One profile per platform, so signing into Shopee
+    does not require a TikTok account and a site that flags one profile does
+    not reach the others."""
 
     def test_each_site_gets_its_own_profile(self) -> None:
         from youtube_monitor import shop_login
@@ -279,7 +358,7 @@ class ASignedInSessionPerSiteTests(unittest.TestCase):
         tiktok = shop_login.profile_dir("shop.tiktok.com")
 
         self.assertNotEqual(shopee, tiktok)
-        self.assertTrue(shopee.name.endswith("shopee_vn"))
+        self.assertEqual(shopee.name, "shopee")
 
     def test_a_bare_domain_and_a_full_link_mean_the_same_profile(self) -> None:
         from youtube_monitor import shop_login
@@ -290,46 +369,31 @@ class ASignedInSessionPerSiteTests(unittest.TestCase):
         )
 
     def test_a_directory_with_no_browser_state_is_not_a_profile(self) -> None:
-        """What is answered here is "is there a profile worth using", not "are
-        you signed in" - that cannot be told from outside, because opening a
-        login page alone writes three hundred files and sets cookies."""
+        """What is answered here is "is there a profile", not "are you signed
+        in" - the Connection Manager's check answers that by looking."""
         import pathlib
         import tempfile
 
-        from youtube_monitor import shop_login
+        from youtube_monitor import platform_connections
 
         with tempfile.TemporaryDirectory() as folder:
-            with mock.patch.object(shop_login, "profile_dir", return_value=pathlib.Path(folder)):
-                self.assertFalse(shop_login.has_profile("shopee.vn"))
+            with mock.patch.object(platform_connections, "PROFILES_ROOT", pathlib.Path(folder)):
+                self.assertFalse(platform_connections.has_profile(platform_connections.BY_KEY["shopee"]))
+                (pathlib.Path(folder) / "shopee" / "Default").mkdir(parents=True)
+                self.assertTrue(platform_connections.has_profile(platform_connections.BY_KEY["shopee"]))
 
-    def test_a_profile_with_a_cookie_store_is_used(self) -> None:
-        import pathlib
-        import tempfile
+    def test_without_a_named_session_the_manager_chooses(self) -> None:
+        sessions = _Sessions()
+        with mock.patch.object(page_source, "fetch_static", return_value=_page([LAZADA_LIKE])):
+            page_source.read_product("https://shopee.vn/x-i.1.2", sessions=sessions)
 
+        self.assertEqual(sessions.calls, [("https://shopee.vn/x-i.1.2", "")])
+
+    def test_www_names_the_same_profile(self) -> None:
         from youtube_monitor import shop_login
 
-        with tempfile.TemporaryDirectory() as folder:
-            store = pathlib.Path(folder) / "Default" / "Network"
-            store.mkdir(parents=True)
-            (store / "Cookies").write_bytes(b"sqlite")
-            with mock.patch.object(shop_login, "profile_dir", return_value=pathlib.Path(folder)):
-                self.assertTrue(shop_login.has_profile("shopee.vn"))
-
-    def test_the_reader_picks_up_a_saved_session_without_being_told(self) -> None:
-        with mock.patch.object(page_source, "saved_profile", return_value="C:/profile") as lookup, \
-                mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(page_source, "fetch_static", return_value=_page([LAZADA_LIKE])):
-            page_source.read_product("https://shopee.vn/x-i.1.2")
-
-        lookup.assert_called_once()
-
-    def test_an_explicit_profile_is_not_overridden(self) -> None:
-        with mock.patch.object(page_source, "saved_profile") as lookup, \
-                mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(page_source, "fetch_static", return_value=_page([LAZADA_LIKE])):
-            page_source.read_product("https://shopee.vn/x-i.1.2", profile_dir="C:/chosen")
-
-        lookup.assert_not_called()
+        self.assertEqual(shop_login.profile_dir("https://www.lazada.vn/products/x.html"),
+                         shop_login.profile_dir("lazada.vn"))
 
 
 class LettingTheReaderSeeWhatTheMarkupCannotTests(unittest.TestCase):
@@ -432,19 +496,49 @@ class TheNameAMarketplaceWritesIntoItsOwnUrlTests(unittest.TestCase):
 
 class WhenTheBrowserIsSentToTheHomePageTests(unittest.TestCase):
     def test_the_home_pages_title_never_becomes_the_product(self) -> None:
-        home = _page(metas={"og:title": "Shopee Việt Nam | Mua và Bán Trên Ứng Dụng Di Động"})
-
-        with mock.patch.object(page_source, "read_with_ai", return_value={}), \
-                mock.patch.object(page_source, "saved_profile", return_value=""), \
-                mock.patch.object(page_source, "fetch_static", return_value=_page()), \
-                mock.patch.object(
-                    page_source, "fetch_rendered", return_value=(home, "Cần đăng nhập", "https://shopee.vn/"),
-                ):
+        sessions = _Sessions({"status": "NEED_LOGIN", "site": "shopee.vn", "probe": {}, "detail": "",
+                              "attempts": [{"session": "app_profile:shopee.vn", "status": "NEED_LOGIN",
+                                            "detail": "Bị chuyển khỏi trang sản phẩm (/)", "seconds": 5}]})
+        with mock.patch.object(page_source, "fetch_static", return_value=_page()):
             product = page_source.read_product(
-                "https://shopee.vn/Tai-Nghe-S10-M%C3%A0u-%C4%90en-i.196261835.29134843988"
+                "https://shopee.vn/Tai-Nghe-S10-M%C3%A0u-%C4%90en-i.196261835.29134843988", sessions=sessions,
             )
 
         self.assertNotIn("Shopee Việt Nam", product["name"])
         self.assertEqual(product["name"], "Tai Nghe S10 Màu Đen")
         self.assertEqual(product["route"], "url_slug")
-        self.assertIn("bị chuyển sang trang khác", " ".join(product["attempts"]))
+        self.assertIn("Bị chuyển khỏi trang sản phẩm", " ".join(product["attempts"]))
+
+
+class ThePriceOnScreenTests(unittest.TestCase):
+    def test_the_largest_unstruck_price_near_the_top_is_the_selling_price(self) -> None:
+        shown, digits = page_source.pick_display_price([
+            {"text": "₫3.290.000", "size": 24, "top": 400, "struck": False},
+            {"text": "₫4.000.000", "size": 30, "top": 380, "struck": True},
+            {"text": "₫99.000", "size": 40, "top": 3200, "struck": False},
+            {"text": "₫150.000", "size": 14, "top": 900, "struck": False},
+        ])
+
+        self.assertEqual((shown, digits), ("₫3.290.000", "3290000"))
+
+    def test_a_threshold_in_a_promotion_is_not_the_price(self) -> None:
+        """Measured on Lazada 29/09: the flash-sale price, the struck old
+        price, a gift threshold and a delivery fee, all near the top."""
+        shown, digits = page_source.pick_display_price([
+            {"text": "267.000₫", "size": 32, "top": 402, "struck": False, "context": "267.000₫ 326.000 ₫-18%"},
+            {"text": "326.000 ₫", "size": 14, "top": 415, "struck": True, "context": "326.000 ₫-18%"},
+            {"text": "299.000 ₫", "size": 40, "top": 465, "struck": False,
+             "context": "Nhận ngay Quà tặng khi mua từ 299.000 ₫"},
+            {"text": "16.500 ₫", "size": 40, "top": 570, "struck": False,
+             "context": "Giao tiêu chuẩn, phí vận chuyển 16.500 ₫"},
+        ])
+
+        self.assertEqual(digits, "267000")
+
+    def test_no_figure_on_screen_is_no_price(self) -> None:
+        self.assertEqual(page_source.pick_display_price([]), ("", ""))
+
+    def test_a_missing_listing_is_said_out_loud_to_the_model(self) -> None:
+        described = page_source.describe({"name": "Tai nghe", "price": "", "read_status": "NEED_LOGIN"})
+
+        self.assertIn("TRANG SAN PHAM CHUA DOC DUOC (NEED_LOGIN)", described)

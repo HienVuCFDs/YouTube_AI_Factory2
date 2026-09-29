@@ -135,24 +135,39 @@
     finally { if (button) button.disabled = false; }
   }
 
+  // Nút này và AI điều phối chạy CÙNG một bước: POST /api/projects/{id}/steps/analyze.
+  // Bước đó tự lấy transcript, khung hình, nội dung bài hay trang sản phẩm tuỳ loại nguồn.
   async function analyzeStudioVideo() {
-    if (!state.studioVideoId) return setMessage('Hãy chọn một video trước.', 'error');
-    const provider = $('studioAnalysisProviderSelect').value || 'codex_cli';
+    if (!state.studioVideoId && !state.studioProjectId) return setMessage('Hãy chọn một nguồn trước.', 'error');
+    const provider = $('studioAnalysisProviderSelect').value || 'auto';
     const button = $('studioAnalyzeButton');
     button.disabled = true;
-    setStudioProgress(5, 'Đang kiểm tra transcript của video...');
-    setMessage('Đang chuẩn bị transcript trước khi phân tích video...');
+    setStudioProgress(10, 'Đang đọc nguồn và phân tích (bước "Phân tích nguồn")...');
+    setMessage('Đang phân tích nguồn...');
     try {
-      const transcript = await ensureTranscriptForAnalysis(state.studioVideoId, (text) => setStudioProgress(35, text));
-      setStudioProgress(45, `Đã có transcript (${number(transcript.word_count || 0)} từ). Đang phân tích cấu trúc, cảnh và phong cách...`);
-      const analysisLanguage = $('studioAnalysisLanguage')?.value || 'vi';
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/reference-analysis?provider=${encodeURIComponent(provider)}&output_language=${encodeURIComponent(analysisLanguage)}`, {method: 'POST'});
-      state.studioAnalysis = response;
-      state.studioReference = response;
-      renderStudioAnalysis(response);
+      if (!state.studioProjectId) {
+        const created = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {
+          method: 'POST', body: JSON.stringify({managed_channel_id: null}),
+        });
+        state.studioProjectId = created.project?.id || created.id || null;
+      }
+      if (!state.studioProjectId) throw new Error('Không tạo được dự án cho nguồn này.');
+      const options = provider && provider !== 'auto' ? {provider} : {};
+      const response = await api(`/api/projects/${state.studioProjectId}/steps/analyze`, {
+        method: 'POST', body: JSON.stringify({options}),
+      });
+      const brief = response.result?.result || {};
+      const analysis = {status: 'completed', provider: brief.provider || '', result: brief};
+      state.studioAnalysis = analysis;
+      state.studioReference = analysis;
+      renderStudioAnalysis(analysis);
       setStudioStep(2);
-      setStudioProgress(100, 'Phân tích tham chiếu đã hoàn tất.');
-      setMessage('Phân tích tham chiếu hoàn tất. Sang bước tiếp theo để tạo câu chuyện mới.', 'success');
+      const warnings = response.result?.source?.warnings || [];
+      setStudioProgress(100, 'Phân tích nguồn đã hoàn tất.');
+      setMessage(
+        warnings.length ? `Phân tích xong, có lưu ý: ${warnings.join(' ')}` : 'Phân tích nguồn hoàn tất. Sang bước tiếp theo để tạo câu chuyện mới.',
+        warnings.length ? 'error' : 'success',
+      );
       void Promise.all([loadSummary(), loadVideos(), loadProjects()]);
     } catch (error) { setStudioProgress(0, `Phân tích thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
     finally { button.disabled = false; }

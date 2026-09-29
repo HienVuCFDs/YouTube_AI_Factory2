@@ -286,7 +286,7 @@
     settings: {
       label: 'Cài đặt', eyebrow: 'HỆ THỐNG', title: 'Công cụ, model và kết nối',
       description: 'Kết nối Codex, GPU, Whisper, TTS, FFmpeg và các AI cloud khi cần.',
-      panels: ['toolStatusPanel', 'modelCatalogPanel', 'integrations', 'providerCatalogPanel'],
+      panels: ['platformConnectionsPanel', 'toolStatusPanel', 'modelCatalogPanel', 'integrations', 'providerCatalogPanel'],
     },
   };
 
@@ -310,7 +310,7 @@
       saveStudioSession();
     }
     if (state.workspace === 'orchestration') void loadOrchestrationWorkspace();
-    if (state.workspace === 'settings') void loadProviderCatalog();
+    if (state.workspace === 'settings') { void loadProviderCatalog(); void loadPlatformConnections(); }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
 

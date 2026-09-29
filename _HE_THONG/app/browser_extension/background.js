@@ -1045,16 +1045,203 @@ async function handleProviderNotified(provider) {
   }
 }
 
+// ---- Đọc trang sản phẩm bằng phiên đã đăng nhập của trình duyệt này ----
+//
+// The app asks for one listing; it is opened in a background tab, read, and
+// the tab is closed. Only what the page shows goes back: its text, its
+// structured data, the prices on screen. No cookie, no password, no storage.
+// The list below is the whole of what may be read this way - it is checked
+// here, in the browser, whatever the app asks for.
+const PAGE_READ_SITES = ['shopee.vn', 'lazada.vn', 'shop.tiktok.com', 'tiki.vn', 'sendo.vn'];
+const PAGE_LOAD_TIMEOUT_MS = 45000;
+const PAGE_SETTLE_MIN_MS = 2000;
+const PAGE_SETTLE_MAX_MS = 12000;
+
+function pageReadSite(url) {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return ''; }
+  return PAGE_READ_SITES.find((site) => host === site || host.endsWith(`.${site}`)) || '';
+}
+
+// Same function as PROBE_JS in youtube_monitor/browser_sessions.py; keep the two identical.
+function probePage() {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const text = clean(document.body ? document.body.innerText : '').slice(0, 40000);
+  const ld = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+    .map((node) => (node.textContent || '').slice(0, 100000)).filter(Boolean).slice(0, 20);
+  const meta = {};
+  for (const node of document.querySelectorAll('meta')) {
+    const key = (node.getAttribute('property') || node.getAttribute('name') || node.getAttribute('itemprop') || '').toLowerCase();
+    if (!key || key in meta) continue;
+    if (/^(og:|product:|twitter:)/.test(key) || ['description', 'title', 'price', 'pricecurrency'].includes(key)) {
+      meta[key] = clean(node.getAttribute('content')).slice(0, 500);
+    }
+  }
+  const money = /(₫\s?\d{1,3}(?:[.,]\d{3})+|\d{1,3}(?:[.,]\d{3})+\s?(?:₫|đ|vnđ|vnd)(?![a-z]))/i;
+  const prices = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (prices.length >= 80) break;
+    if (el.childElementCount > 3) continue;
+    const raw = el.textContent || '';
+    if (!raw || raw.length > 80) continue;
+    const own = clean(el.innerText);
+    if (!own || own.length > 40) continue;
+    const found = own.match(money);
+    if (!found) continue;
+    if (Array.from(el.children).some((child) => clean(child.innerText) === own)) continue;
+    const box = el.getBoundingClientRect();
+    if (!box.width || !box.height) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none') continue;
+    // A price is often a small wrapper around large digits: measure the largest
+    // type inside it, and count it struck if any part of it is.
+    const parts = [el, ...Array.from(el.querySelectorAll('*'))].map((node) => getComputedStyle(node));
+    const size = Math.max(...parts.map((part) => parseFloat(part.fontSize) || 0));
+    const struck = parts.some((part) => String(part.textDecorationLine || '').includes('line-through')) || !!el.closest('del, s, strike');
+    const context = clean(el.parentElement ? el.parentElement.innerText : '').slice(0, 120);
+    prices.push({ text: found[0], size, top: Math.round(box.top + window.scrollY), struck, context });
+  }
+  const images = Array.from(document.images)
+    .filter((img) => (img.naturalWidth || img.width) >= 300 && (img.naturalHeight || img.height) >= 300)
+    .map((img) => img.currentSrc || img.src)
+    .filter((src) => /^https?:/.test(src));
+  return { url: location.href, title: document.title || '', text, ld, meta, prices, images: Array.from(new Set(images)).slice(0, 12) };
+}
+
+function pageShowsAPrice() {
+  return /(₫\s?\d|\d[.,]\d{3}\s?(₫|đ))/i.test(document.body ? document.body.innerText : '');
+}
+
+function waitForTabLoaded(tabId) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, PAGE_LOAD_TIMEOUT_MS);
+    function listener(updatedId, info) {
+      if (updatedId === tabId && info.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function runInTab(tabId, func) {
+  const [injection] = await chrome.scripting.executeScript({ target: { tabId }, func });
+  return injection ? injection.result : null;
+}
+
+async function handlePageRead(message) {
+  const requestId = message.request_id;
+  const url = String(message.url || '');
+  const reply = (payload) => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'page_read_result', request_id: requestId, ...payload }));
+    }
+  };
+  if (!pageReadSite(url)) {
+    reply({ ok: false, error: `Extension chỉ đọc trang của: ${PAGE_READ_SITES.join(', ')}` });
+    return;
+  }
+  let tabId = null;
+  let windowId = null;
+  activeJobs += 1;
+  startKeepAlive();
+  try {
+    await setStatus(`Đang đọc trang sản phẩm: ${url.slice(0, 80)}`);
+    // Its own window, not a background tab: measured on Shopee 29/09, a
+    // listing in a hidden tab never fetches its price or its title. The page
+    // is really shown - nothing about its visibility is faked.
+    const win = await chrome.windows.create({ url, focused: false, type: 'normal', width: 1280, height: 900 });
+    windowId = win.id;
+    tabId = win.tabs && win.tabs[0] ? win.tabs[0].id : null;
+    if (tabId == null) throw new Error('Không mở được cửa sổ đọc trang');
+    await waitForTabLoaded(tabId);
+    let visibility = '';
+    try { visibility = await runInTab(tabId, () => document.visibilityState); } catch { /* still navigating */ }
+    if (visibility !== 'visible') {
+      // Covered by other windows the page counts as hidden; bring it forward
+      // for the few seconds the read takes.
+      await chrome.windows.update(windowId, { focused: true });
+    }
+    await new Promise((resolve) => setTimeout(resolve, PAGE_SETTLE_MIN_MS));
+    for (let waited = PAGE_SETTLE_MIN_MS; waited < PAGE_SETTLE_MAX_MS; waited += 1000) {
+      let ready = false;
+      try { ready = await runInTab(tabId, pageShowsAPrice); } catch { /* page still navigating */ }
+      if (ready) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    const current = await chrome.tabs.get(tabId);
+    if (current.url && !pageReadSite(current.url)) {
+      // Sent off the marketplace (a sign-in provider, say): report where, read nothing.
+      reply({ ok: true, result: { url: current.url, title: current.title || '', text: '', ld: [], meta: {}, prices: [], images: [] } });
+      return;
+    }
+    const result = (await runInTab(tabId, probePage)) || {};
+    try { result.visibility = await runInTab(tabId, () => document.visibilityState); } catch { /* reported as unknown */ }
+    reply({ ok: true, result });
+    await setStatus('Đã đọc xong trang sản phẩm.');
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error).slice(0, 500) });
+  } finally {
+    if (windowId != null) {
+      try { await chrome.windows.remove(windowId); } catch { /* already closed */ }
+    } else if (tabId != null) {
+      try { await chrome.tabs.remove(tabId); } catch { /* already closed */ }
+    }
+    activeJobs -= 1;
+    stopKeepAliveIfIdle();
+  }
+}
+
+// Shows a marketplace page to the person as an ordinary tab, when the app
+// asks - so they can sign in the way they always do. Nothing is read or typed.
+async function handleOpenTab(message) {
+  const url = String(message.url || '');
+  const reply = (payload) => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'open_tab_result', request_id: message.request_id, ...payload }));
+    }
+  };
+  if (!pageReadSite(url)) {
+    reply({ ok: false, error: `Extension chỉ mở trang của: ${PAGE_READ_SITES.join(', ')}` });
+    return;
+  }
+  try {
+    const tab = await chrome.tabs.create({ url, active: true });
+    if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true });
+    reply({ ok: true });
+  } catch (error) {
+    reply({ ok: false, error: String(error?.message || error).slice(0, 300) });
+  }
+}
+
 function connectSocket() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   socket = new WebSocket(WS_URL);
   socket.onopen = () => {
     reconnectDelayMs = 2000;
+    // A service worker's user agent does not always carry Cốc Cốc's own token;
+    // the client-hint brands name the browser either way.
+    const agent = String(navigator.userAgent || '');
+    const brands = (navigator.userAgentData?.brands || []).map((item) => String(item.brand || ''));
+    const named = brands.find((brand) => !/chromium|not.?a.?brand/i.test(brand)) || '';
+    const browser = /coc/i.test(named) || /coc_coc_browser/i.test(agent) ? 'Cốc Cốc'
+      : /edge/i.test(named) || /Edg\//.test(agent) ? 'Edge' : named || 'Chrome';
+    socket.send(JSON.stringify({
+      type: 'hello',
+      version: chrome.runtime.getManifest().version,
+      capabilities: ['page_read', 'open_tab'],
+      browser,
+      sites: PAGE_READ_SITES,
+    }));
     setStatus('Đã kết nối app — chờ job (không tự poll).');
   };
   socket.onmessage = (event) => {
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
+    if (data && data.type === 'page_read') { void handlePageRead(data); return; }
+    if (data && data.type === 'open_tab') { void handleOpenTab(data); return; }
     if (data && data.provider) handleProviderNotified(data.provider);
   };
   socket.onclose = () => {

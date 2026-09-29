@@ -1,6 +1,6 @@
 # AI CONNECTION HANDOFF — YouTube AI Factory
 
-Cập nhật: **2026-09-29**, mốc "Agent Orchestrator" + xác minh Claude CLI làm AI điều phối. Bản trước (28/09) đã lỗi thời ở các điểm: pipeline CLI "unavailable", "chưa có agent loop", "fallback chưa hoạt động".
+Cập nhật: **2026-09-29**, mốc "Agent Orchestrator" + xác minh Claude CLI làm AI điều phối; bổ sung mục 9 "Bước 1 – Phân tích nguồn và kết nối nền tảng". Bản trước (28/09) đã lỗi thời ở các điểm: pipeline CLI "unavailable", "chưa có agent loop", "fallback chưa hoạt động".
 
 Nhãn trạng thái:
 
@@ -58,7 +58,7 @@ GOAL + target_steps
 
 ## 4. MCP `youtube_ai_factory` (`ai_desktop_mcp.py`, stdio → HTTP 127.0.0.1:8787)
 
-- **45 tool**, không đổi. `initialize` trả `instructions`: "dùng tool youtube_factory_*, không bấm giao diện".
+- **48 tool**: 45 tool cũ cộng 3 tool kết nối nền tảng của Bước 1 (`list_connections`, `get_connection_status`, `read_product`, xem mục 9). `initialize` trả `instructions`: "dùng tool youtube_factory_*, không bấm giao diện".
 - **Chế độ agent-run** chỉ bật khi app tự khởi chạy agent, qua biến môi trường. Ở chế độ này:
   - không gửi nhịp tim giả làm app chat;
   - ẩn 6 tool hàng đợi của app chat;
@@ -125,7 +125,57 @@ Task `agt_b32ad16…`, dự án 66, mục tiêu `timeline`:
 _verify_goal: missing=[] false_claims=[] ; task completed ; 1 vòng ; 7 tool call ; 144 giây
 ```
 
-## 9. Còn tồn tại
+## 9. Bước 1 – Phân tích nguồn và kết nối nền tảng (29/09)
+
+**Một đường duy nhất.** Nút "AI tiếp tục" gọi `POST /api/projects/{id}/steps/analyze`, đúng bước mà AI điều phối gọi qua `run_step`. Endpoint cũ `POST /api/videos/{id}/reference-analysis` đã gỡ; nút này là nơi duy nhất còn gọi nó. `GET` cùng đường dẫn vẫn giữ để đọc bản phân tích đã lưu.
+
+**Connection Manager** (`platform_connections.py`, panel "Kết nối nền tảng bán hàng" trong tab Công cụ & kết nối). Có hai kiểu kết nối, chọn theo điều mà từng sàn chấp nhận:
+
+| Sàn | Kiểu | Vì sao |
+|---|---|---|
+| Shopee | **Trình duyệt thật của người dùng** qua Browser Bridge (extension YT Factory trong Cốc Cốc). Không có profile riêng của app | Shopee đẩy mọi trình duyệt tự động sang `/verify/captcha?anti_bot…`, dù đã đăng nhập (đo 29/09) |
+| TikTok Shop | **Trình duyệt thật** qua Browser Bridge trước; profile riêng của app (cửa sổ hiện) làm đường thứ hai | Headless bị "Security Check"; trình duyệt thật và cửa sổ hiện đều được phục vụ trang (đo 29/09) |
+| Lazada, Tiki, Sendo | Profile riêng của app ở `%LOCALAPPDATA%\YouTubeAIFactory\profiles\<sàn>` | Đọc được qua profile riêng; profile nằm trên ổ C: vì trên ổ F: Chrome bị lỗi quyền truy cập thư mục |
+
+- Trạng thái: `CONNECTED` / `DISCONNECTED` / `NEED_LOGIN` / `EXPIRED` / `NEED_HUMAN_VERIFY` / `ERROR`. `NEED_HUMAN_VERIFY` nghĩa là sàn đòi người vượt một bước kiểm tra (captcha, Security Check); app không tự giải.
+- Các nút:
+  - **Kết nối** Shopee / TikTok Shop: **không** mở trình duyệt tự động. App liệt kê trình duyệt có extension; nút "Mở … trong Cốc Cốc" nhờ extension mở một tab thường. Người dùng đăng nhập hoặc tự xác minh, rồi bấm "Kiểm tra". Riêng TikTok có thêm lựa chọn "Dùng trình duyệt riêng của app (cửa sổ hiện)".
+  - **Kiểm tra**:
+    - Shopee: extension đọc trang chủ Shopee; thấy tên tài khoản ở đầu trang thì `CONNECTED`.
+    - TikTok: đọc lại trang sản phẩm gần nhất đã được phục vụ (trang chủ TikTok hay bị Security Check hơn trang sản phẩm). TikTok không bắt đăng nhập để xem, nên được phục vụ trang là đủ để `CONNECTED`.
+  - **Kết nối** Lazada/Tiki/Sendo: mở cửa sổ profile riêng; người dùng tự đăng nhập, app nhìn đầu trang để nhận ra.
+  - **Ngắt kết nối**: xoá profile riêng của sàn đó. Với phiên trong trình duyệt thật, app chỉ thôi dùng, không đăng xuất người dùng.
+- ProductReader:
+  - Shopee: đọc thẳng dữ liệu trang → trình duyệt thật qua extension → profile riêng (dự phòng, **không tự thử lại** sau khi đã gặp captcha) → `NEED_HUMAN_VERIFY` / `NEED_LOGIN`.
+  - TikTok Shop: đọc thẳng dữ liệu trang → **phiên đang kết nối** → extension bất kỳ → profile riêng (cửa sổ hiện; sau một lần bị Security Check thì 30 phút sau mới tự thử lại) → `NEED_HUMAN_VERIFY`.
+  - Lazada/Tiki/Sendo: đọc thẳng dữ liệu trang → profile riêng → extension → `NEED_*`.
+  - Gặp captcha thì trả `NEED_HUMAN_VERIFY` ngay, không lặp.
+- **Dữ liệu lưu của một lần đọc** (vào `source_facts` của bản phân tích): tên, giá đang hiển thị, giá gốc gạch ngang, mức giảm như trang ghi, ảnh, người bán, số sao, số đánh giá, số đã bán (khi trang có ghi), mã sản phẩm, URL chuẩn, phiên đã dùng, `captured_at`.
+  - Giá TikTok **khác theo phiên**: cùng sản phẩm, cùng giờ, trình duyệt đã đăng nhập hiện ₫9.999, profile riêng chưa đăng nhập hiện ₫11.546. Vì vậy mỗi giá luôn đi kèm phiên và thời điểm đọc.
+- **Browser Bridge không heartbeat.** Extension tự nối khi khởi động. Cốc Cốc cho nó ngủ khi rảnh; có việc thì yêu cầu nằm chờ và được đẩy khi extension tự nối lại (tối đa khoảng 1 phút). Extension (bản 1.3.1) chỉ đọc hoặc mở tab 5 sàn trên, không có quyền cookie.
+  - Tên trình duyệt lấy theo tiến trình thật đang giữ kết nối, vì Cốc Cốc tự khai là "Google Chrome".
+  - Trang được đọc trong một cửa sổ riêng thật sự hiển thị, vì trong tab chạy nền Shopee không tải giá và tiêu đề.
+- AI chỉ thấy dạng `shopee: CONNECTED via extension:coccoc`, qua `youtube_factory_list_connections`, `get_connection_status` và `read_product`. Không có cookie, mật khẩu hay đường dẫn profile.
+
+| Mục | Trạng thái | Bằng chứng |
+|---|---|---|
+| Nút và AI cùng vào `run_step("analyze")` | **VERIFIED** | Endpoint cũ đã gỡ; test giao diện |
+| Bài báo đọc thân bài thay vì phần mô tả | **VERIFIED** | Dự án 66: 9.083 ký tự (trước 151) |
+| Ghi đúng provider, `options.provider` có tác dụng | **VERIFIED** | Dự án 65 chạy với `claude_code_cli`, brief ghi đúng |
+| Lazada: giá hiển thị trên trang | **VERIFIED** | 267.000₫ qua `profile:lazada`; không lấy nhầm mức 299.000₫ trong câu khuyến mãi |
+| Shopee `CONNECTED via extension:coccoc`, đọc A/B, mở lại app, đọc lại A | **VERIFIED** | Loa MoMo 229.000 (gốc 450.000, −49%); lót chuột Deli 29.000 (gốc 63.000, −54%); đọc lại A 5,7 giây sau khi mở lại |
+| `run_step("analyze")` Shopee dự án 68 | **VERIFIED** | DB: `read_status=OK`, `session=extension:coccoc`, giá 119.000 VND |
+| TikTok `CONNECTED via extension:coccoc` | **VERIFIED** | Kiểm tra qua Cốc Cốc trên trang sản phẩm đã đọc: 5,4 giây |
+| TikTok đọc A/B, mở lại app, đọc lại A | **VERIFIED** | Bàn chải ₫9.999 (gốc 26.000₫, −62%); móc treo ₫11.899 (gốc 39.800₫, −70%); shop "Shop Gia Dụng Tú Anh"; đọc lại A 6,2 giây sau khi mở lại |
+| `run_step("analyze")` TikTok dự án 74 và 75 | **VERIFIED** | DB dự án 75: giá, giá gốc, giảm giá, người bán, 4.3 sao, 23.7K đã bán, mã sản phẩm, `session=extension:coccoc`, `captured_at` |
+| TikTok trang chủ bị Security Check | **VERIFIED** | Trả `NEED_HUMAN_VERIFY`, không tự giải, không lặp |
+| AI tự chọn đường khác khi đường đầu hỏng | **VERIFIED** | Task `agt_d0832968…` (dự án 75): `extension:googlechrome` → 424 → `list_connections` → `extension:coccoc` → đạt; cũng `agt_abe78e…` (dự án 74) |
+| AI báo `blocked` đúng khi không còn đường | **VERIFIED** | Task `agt_f46241…` (dự án 68, lúc Shopee chưa đăng nhập) |
+| Bridge không heartbeat, tự thức nhận việc | **VERIFIED** | Yêu cầu gửi lúc đang ngủ, trả kết quả sau 19,8 giây |
+| Profile riêng của app cho Shopee | **Bị Shopee chặn** | `/verify/captcha?anti_bot…` dù người dùng đăng nhập; không còn được đề nghị khi Kết nối |
+| Nhận biết đăng nhập của Tiki / Sendo | **UNVERIFIED** | Chưa đo đầu trang thật của hai sàn này |
+
+## 10. Còn tồn tại
 
 - **Vai `media` của pipeline 5 vai** vẫn tự tạo scene job, không đi qua `run_step("media")` (nhát 2c trong kế hoạch).
 - **GPT Work** chỉ được hướng dẫn qua mô tả tool và `instructions`. Dòng "ưu tiên tool youtube_factory_*" nên được thêm vào `AGENTS.md`. Claude Code không được tự sửa file luật đó, nên việc này do người dùng làm.

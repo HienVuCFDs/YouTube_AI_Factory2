@@ -233,7 +233,9 @@ ASTRA_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
                     "type": "object",
                     "description": (
                         "Tuy chon cua buoc. provider: AI/engine se lam (vd codex_cli, claude_code_cli, antigravity; "
-                        "xem youtube_factory_get_ai_runtimes). script: draft={script_title,hook,intro,main_content,cta} "
+                        "xem youtube_factory_get_ai_runtimes). analyze voi nguon san pham: browser_session=profile:<nen tang> "
+                        "hoac extension:browser (xem youtube_factory_list_connections). "
+                        "script: draft={script_title,hook,intro,main_content,cta} "
                         "de luu kich ban tu viet. shots: shots=[...] de luu danh sach canh tu viet. force: lam lai. "
                         "confirmed: dong y tieu luot."
                     ),
@@ -264,6 +266,48 @@ ASTRA_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
             "type": "object",
             "properties": {"project_id": _PROJECT_ID, "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}},
             "required": ["project_id"],
+        },
+    ),
+    ToolDefinition(
+        name="youtube_factory_list_connections",
+        category="READ",
+        read_only=True,
+        description=(
+            "Nang luc doc trang san pham cua app: moi nen tang (Shopee, TikTok Shop, Lazada, Tiki, Sendo) dang "
+            "CONNECTED / DISCONNECTED / NEED_LOGIN / EXPIRED / ERROR, qua duong nao (vd 'shopee: CONNECTED via extension:coccoc'), "
+            "co doc duoc khong (can_read), va cac Browser Bridge (extension trong trinh duyet that cua nguoi dung). Dung khi analyze bao trang san pham chua doc duoc "
+            "de chon cach doc khac. Khong tra cookie, mat khau hay duong dan profile; dang nhap la viec cua nguoi dung."
+        ),
+        input_schema={"type": "object", "properties": {}},
+    ),
+    ToolDefinition(
+        name="youtube_factory_get_connection_status",
+        category="READ",
+        read_only=True,
+        description="Trang thai ket noi cua mot nen tang (shopee, tiktok, lazada, tiki, sendo).",
+        input_schema={
+            "type": "object",
+            "properties": {"platform": {"type": "string", "description": "shopee | tiktok | lazada | tiki | sendo"}},
+            "required": ["platform"],
+        },
+    ),
+    ToolDefinition(
+        name="youtube_factory_read_product",
+        category="READ",
+        read_only=True,
+        description=(
+            "ProductReader: doc MOT trang san pham qua ket noi cua app (profile rieng cua nen tang, roi Browser "
+            "Bridge). session_id tuy chon: profile:<nen tang> hoac extension:browser. Tra status OK / NEED_LOGIN / "
+            "NEED_HUMAN_VERIFY / UNAVAILABLE / FAILED, ten, gia, anh va mot doan noi dung trang. Khong luu vao du an: "
+            "muon luu thi chay analyze voi options.browser_session. Khong giai captcha, khong dang nhap ho."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Link san pham"},
+                "session_id": {"type": "string", "description": "profile:<nen tang> | extension:<trinh duyet, vd coccoc> | extension:browser (bat ky); bo trong de app tu chon"},
+            },
+            "required": ["url"],
         },
     ),
     ToolDefinition(

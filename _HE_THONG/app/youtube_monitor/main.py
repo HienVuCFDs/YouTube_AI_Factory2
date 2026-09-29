@@ -58,7 +58,7 @@ from .oauth import disconnect as oauth_disconnect
 from .oauth import exchange_code as oauth_exchange_code
 from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
-from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge
+from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
 from .production_worker import (
     ProductionJobError,
@@ -171,7 +171,6 @@ from .transcript_queue import TranscriptQueue
 from .video_downloader import VideoDownloadError, delete_downloaded_video, download_preview_video, download_video
 from .writer import WriterError, resolve_target_duration_seconds, resolve_writer, revise_script, validate_voiceover_plan
 from .folklore_research import research_folklore_remake
-from .reference_analyzer import ReferenceAnalysisError, analyze_reference
 from .youtube_captions import CaptionsError, download_caption, list_captions
 from .youtube_client import YouTubeApiError, YouTubeClient
 
@@ -952,15 +951,23 @@ def _probe_page_link(url: str) -> dict[str, Any] | None:
     except page_source.PageSourceError:
         html = ""
     title = _page_identity(html, strict=strict)
+    seen: dict[str, Any] = {}
 
-    if not title:
+    if not title and platform_connections.site_of(url):
+        # A marketplace is read through a browser session - the site's own
+        # persistent profile, then the person's signed-in browser - and never
+        # through a throwaway browser, which is what these sites refuse.
+        outcome = platform_connections.manager().read(url)
+        if outcome.get("status") == platform_connections.OK:
+            seen = page_source.product_from_probe(outcome.get("probe") or {})
+            named = str(seen.get("name") or "").strip()
+            title = "" if page_source.looks_like_bot_wall(named) else named
+    elif not title:
         # Either the shell or a challenge came back. The browser is the next
         # thing to try, not a refusal.
         rendered = ""
         try:
-            rendered, _text, final_url = page_source.fetch_rendered(
-                url, profile_dir=page_source.saved_profile(url),
-            )
+            rendered, _text, final_url = page_source.fetch_rendered(url)
             # Being sent to the home page is how a marketplace refuses without
             # refusing: the page loads, names itself honestly, and is not the
             # page that was asked for.
@@ -983,7 +990,7 @@ def _probe_page_link(url: str) -> dict[str, Any] | None:
         return None
 
     tags = page_source.meta_tags(html)
-    product = page_source.product_from_ld(html)
+    product = page_source.product_from_ld(html) or seen
     host = (urlparse(url).hostname or "page").lower()
     return {
         "video_id": f"web-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}",
@@ -999,7 +1006,10 @@ def _probe_page_link(url: str) -> dict[str, Any] | None:
         )[:5000],
         # No running time is what later marks this as a page rather than a film.
         "duration_seconds": 0,
-        "thumbnail": page_source.article_images(html)[:1] and page_source.article_images(html)[0] or "",
+        "thumbnail": (
+            page_source.article_images(html)[:1] and page_source.article_images(html)[0]
+            or next(iter(seen.get("images") or []), "")
+        ),
         "is_live": False,
     }
 
@@ -1432,12 +1442,7 @@ def ask_orchestrator_to_read(project_id: int, url: str, missing: list[str]) -> s
     One task per link: re-running the step must not pile up duplicates of a
     job nobody has done yet.
     """
-    pending = [
-        task for task in database.list_agent_tasks(limit=200)
-        if str(task.get("task_type") or "") == ORCHESTRATOR_READ_TASK
-        and str(task.get("status") or "") in {"queued", "running"}
-        and str(((task.get("input") or {}).get("url") or "")) == url
-    ]
+    pending = _open_read_tasks(url)
     if pending:
         return str(pending[0].get("id") or "")
     task = database.create_agent_task(
@@ -1478,6 +1483,50 @@ def _directing_chat_agent() -> str:
         if chat_agent_presence.connected(agent):
             return agent
     return chosen[0] if chosen else ""
+
+
+def _open_read_tasks(url: str) -> list[dict[str, Any]]:
+    """Requests still waiting for someone to read this listing.
+
+    Filtered by status in the query, not by scanning the newest rows: once two
+    hundred other tasks had been created since, an open request for this link
+    fell out of view and a duplicate was queued.
+    """
+    return [
+        task
+        for status in ("queued", "running")
+        for task in database.list_agent_tasks(status=status, limit=1000)
+        if str(task.get("task_type") or "") == ORCHESTRATOR_READ_TASK
+        and _same_listing(str(((task.get("input") or {}).get("url") or "")), url)
+    ]
+
+
+def _withdraw_read_tasks(url: str, route: str) -> list[str]:
+    """Cancel requests to read a listing the app has now read itself.
+
+    Left open, they send GPT Work to repeat a read that is already done.
+    """
+    withdrawn = []
+    for task in _open_read_tasks(url):
+        task_id = str(task.get("id") or "")
+        try:
+            database.finish_agent_task(
+                task_id, "cancelled", output={"reason": f"App đã tự đọc được trang qua {route}"},
+            )
+            withdrawn.append(task_id)
+        except Exception:
+            continue
+    return withdrawn
+
+
+def _same_listing(first: str, second: str) -> bool:
+    """Two links to the same listing, ignoring tracking queries and slashes."""
+    if not first or not second:
+        return False
+    first_id, second_id = page_source.product_id(first), page_source.product_id(second)
+    if first_id and second_id:
+        return first_id == second_id and urlparse(first).hostname == urlparse(second).hostname
+    return first.split("?", 1)[0].rstrip("/") == second.split("?", 1)[0].rstrip("/")
 
 
 def _reading_chat_agent() -> str:
@@ -1556,15 +1605,32 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
         )
 
     if kind == "product":
+        session_id = str(options.get("browser_session") or "").strip()
         try:
             product = page_source.read_product(
-                str(metadata["url"]), profile_dir=str(options.get("browser_profile") or ""),
+                str(metadata["url"]), session_id=session_id, use_ai=bool(options.get("ai_reader")),
             )
         except page_source.PageSourceError as exc:
             return source_brief.Extraction(
                 kind="idea", text=str(metadata.get("title") or "").strip(),
                 text_label="Tieu de trang ban hang (khong doc duoc noi dung)",
                 metadata=metadata, notes=notes + [f"Không đọc được trang bán hàng: {str(exc)[:200]}"],
+            )
+        read_status = str(product.get("read_status") or "")
+        if session_id and read_status != platform_connections.OK:
+            # The caller chose this session, so its failure is the answer -
+            # reported with what else there is, not papered over.
+            others = [
+                f"{item.get('id')} ({item.get('status')})"
+                for item in product.get("sessions") or [] if item.get("id") != session_id
+            ]
+            raise HTTPException(
+                status_code=424,
+                detail=(
+                    f"{read_status}: phiên {session_id} không đọc được trang sản phẩm. "
+                    f"{product.get('read_detail') or ''} Các phiên khác: {', '.join(others) or 'không có'}. "
+                    "Chạy lại với options.browser_session là một phiên khác, hoặc bỏ trống để app tự chọn."
+                ).strip(),
             )
         # Anything the caller supplies wins: the marketplaces do not hand over
         # a price to an automated fetch, and a figure typed in by the person
@@ -1574,6 +1640,10 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
             if supplied:
                 product[field] = supplied
         warnings: list[str] = []
+        if read_status and read_status != platform_connections.OK:
+            warnings.append(
+                f"Chưa đọc được trang sản phẩm ({read_status}). {product.get('read_detail') or ''}".strip()
+            )
         if not str(product.get("price") or "").strip():
             warnings.append(
                 "Không đọc được giá từ trang bán hàng này. Kịch bản không được nêu bất kỳ con số "
@@ -1590,6 +1660,8 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
                     f"Đã giao cho AI điều phối đọc trang này (task {task_id[:18]}). "
                     "Bảo nó lấy việc tiếp theo, rồi chạy lại bước phân tích."
                 )
+        elif read_status == platform_connections.OK:
+            _withdraw_read_tasks(str(metadata["url"]), str(product.get("route") or ""))
         sheet, count = _sheet_from_remote_images(
             list(product.get("images") or []), project_id, "product-view",
         )
@@ -1601,18 +1673,27 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
             metadata={**metadata, "title": product.get("name") or metadata.get("title") or ""},
             notes=notes + [f"Đọc trang qua đường: {product.get('route')}"],
             warnings=warnings,
+            # Read off the page with where and when: a TikTok price differs by
+            # session and by the hour, so it is only a fact with both attached.
             facts={key: product.get(key) for key in (
-                "name", "brand", "category", "sku", "price", "currency",
-                "availability", "url", "route", "captured_at",
+                "name", "brand", "category", "sku", "seller", "price", "currency", "price_text", "price_source",
+                "original_price", "original_price_text", "discount", "rating", "review_count", "sold_count",
+                "availability", "images",
+                "product_id", "canonical_url", "url", "route", "captured_at", "read_status", "read_detail", "session",
             ) if product.get(key)},
         )
 
     if kind == "article":
-        body = source_brief.article_text(
-            str(options.get("text") or "") or str(video.get("description") or "")
-        )
+        # The page itself first. Its description is the one-line summary a
+        # link preview shows, and taking it whenever it existed meant a
+        # 9,000-character page was analysed from 151 characters.
+        body = source_brief.article_text(str(options.get("text") or ""))
         if not body and metadata["url"]:
             body = source_brief.article_text(web_research.read_page(str(metadata["url"]), max_chars=24_000))
+        if not body:
+            body = source_brief.article_text(str(video.get("description") or ""))
+            if body:
+                notes = notes + ["Không mở được trang; chỉ đọc được phần mô tả ngắn của nó."]
         if not body:
             # The page would not open, or it had nothing readable in it. The
             # title is still a subject, so the run continues on that footing
@@ -1682,16 +1763,27 @@ def _step_analyze(project_id: int, project: dict[str, Any], options: dict[str, A
     video_id = _project_source_video_id(project)
     video = (database.get_video(video_id) or {}) if video_id else {}
 
-    parsed = _call_orchestrator_json(
-        source_brief.SYSTEM_PROMPT,
-        source_brief.build_prompt(extraction),
-        source_brief.BRIEF_SCHEMA,
-        stage="orchestration",
-        project_id=project_id,
-        step="Phan tich nguon",
-        image_path=extraction.image_sheet,
-    )
-    brief = source_brief.finalise(parsed, extraction, str(parsed.get("provider") or ""))
+    report: dict[str, Any] = {}
+    try:
+        parsed = _call_orchestrator_json(
+            source_brief.SYSTEM_PROMPT,
+            source_brief.build_prompt(extraction),
+            source_brief.BRIEF_SCHEMA,
+            stage="orchestration",
+            project_id=project_id,
+            step="Phan tich nguon",
+            image_path=extraction.image_sheet,
+            provider=str(options.get("provider") or "").strip().lower(),
+            report=report,
+        )
+    except ProviderNotSupported as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=f"Phân tích nguồn không chạy được: {exc}") from exc
+    # Which runtime answered, as the call recorded it. The model's own JSON
+    # has no provider field, so reading it from there left every brief
+    # unattributed.
+    brief = source_brief.finalise(parsed, extraction, str(report.get("runtime") or ""))
 
     if extraction.kind == "product" and not str(brief.get("topic") or "").strip():
         # The page gave little more than its name, so the model had little to
@@ -4366,6 +4458,10 @@ def _auto_agent_order(stage: str, executor: str, allowed: list[str]) -> list[str
     )
 
 
+class ProviderNotSupported(LlmError):
+    """The runtime a caller named cannot do this kind of task at all."""
+
+
 def _orchestrator_runtime_id(agent: str) -> str:
     """Map the product-level coordinator choice to the local callable runtime.
 
@@ -4422,8 +4518,15 @@ def _call_orchestrator_json(
     project_id: int | None = None,
     step: str = "",
     image_path: Path | None = None,
+    provider: str = "",
+    report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Route a structured task through the user's per-stage agent policy.
+
+    `provider` names one runtime and overrides the policy: only that runtime
+    is tried, because a person or an orchestrator who picked it asked for it.
+    `report`, when given, receives which runtime answered - the model's JSON
+    does not say, and a result that cannot name its author is unauditable.
 
     With `image_path` the task is one the model must look at, and only the
     runtimes that accept an image can take it. Falling back to a text-only
@@ -4465,7 +4568,16 @@ def _call_orchestrator_json(
         _orchestrator_runtime_id(str(item)) for item in assignment.get("fallback_agents", [])
         if _orchestrator_runtime_id(str(item)) in calls and _orchestrator_runtime_id(str(item)) != executor
     ]
-    if mode == "fixed":
+    forced = _orchestrator_runtime_id(provider) if provider and provider != "auto" else ""
+    if forced:
+        if forced not in calls:
+            raise ProviderNotSupported(
+                f"{provider} không làm được việc này"
+                + (" (việc này cần xem ảnh)" if looking else "")
+                + f". Chọn một trong: {', '.join(calls)} hoặc auto."
+            )
+        order = [forced]
+    elif mode == "fixed":
         order = [executor]
     elif mode == "fallback":
         order = [executor, *fallbacks]
@@ -4476,7 +4588,8 @@ def _call_orchestrator_json(
             executor,
             [agent for agent in auto_candidates if agent in calls],
         )
-    order = list(dict.fromkeys(agent for agent in order if agent in calls and (not allowed or agent in allowed)))
+    if not forced:
+        order = list(dict.fromkeys(agent for agent in order if agent in calls and (not allowed or agent in allowed)))
     label = step or stage
     if not order:
         detail = f"Không có AI được phép thực hiện công đoạn {stage}"
@@ -4520,6 +4633,10 @@ def _call_orchestrator_json(
             attempts.append({"runtime": agent, "status": "failed", "error": str(exc)[:600]})
             continue
         attempts.append({"runtime": agent, "status": "success", "error": ""})
+        if report is not None:
+            report.update(runtime=agent, attempts=list(attempts))
+        if forced:
+            why = "Người gọi chỉ định runtime này (options.provider)"
         _record_orchestrator_step(
             project_id=project_id, stage=stage, step=label, status="success",
             runtime=agent, agent=agent, why=why,
@@ -9089,23 +9206,162 @@ async def browser_scene_jobs_ws(websocket: WebSocket) -> None:
     server-side, in-process polling of its own SQLite file is negligible
     load; a browser extension re-hitting this API in a tight client loop
     just to ask "anything new?" is not.
+
+    The same socket is the Browser Bridge for page reads. There is no
+    heartbeat on it: the browser puts an idle extension to sleep and the
+    socket closes; a page read asked for meanwhile waits in the bridge's
+    queue and is sent the moment the extension reconnects.
     """
     global _browser_extension_connections
     await websocket.accept()
     _browser_extension_connections += 1
-    last_queued: dict[str, int] = {}
-    try:
+    connection_id = uuid.uuid4().hex
+    bridge = platform_connections.BRIDGE
+    # An extension that never says hello is an older build: connected, and
+    # unable to read pages until it is reloaded.
+    bridge.register(connection_id)
+
+    async def listen() -> None:
+        # The extension speaks twice: a hello saying what it can do, and the
+        # answer to a page it was asked to read.
         while True:
-            for provider in database.BROWSER_SIDECAR_PROVIDERS:
-                count = database.count_queued_scene_generation_jobs(provider)
-                if count > 0 and count != last_queued.get(provider):
-                    await websocket.send_json({"provider": provider, "queued": count})
-                last_queued[provider] = count
-            await asyncio.sleep(2)
+            try:
+                message = await websocket.receive_json()
+            except ValueError:
+                continue
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") == "hello":
+                reported = str(message.get("browser") or "")[:40]
+                # Named by the program holding the socket: Cốc Cốc reports
+                # itself as "Google Chrome".
+                peer = await asyncio.to_thread(
+                    platform_connections.browser_of_peer, websocket.client.port if websocket.client else 0,
+                )
+                bridge.register(connection_id, {
+                    "capabilities": [str(item) for item in message.get("capabilities") or []][:10],
+                    "version": str(message.get("version") or "")[:20],
+                    "browser": peer or reported,
+                    "reported_browser": reported,
+                    "sites": [str(item) for item in message.get("sites") or []][:20],
+                })
+            elif message.get("type") in {"page_read_result", "open_tab_result"}:
+                bridge.resolve(str(message.get("request_id") or ""), {
+                    "ok": bool(message.get("ok")),
+                    "error": str(message.get("error") or "")[:500],
+                    "result": message.get("result") if isinstance(message.get("result"), dict) else {},
+                })
+
+    listener = asyncio.create_task(listen())
+    last_queued: dict[str, int] = {}
+    last_checked = 0.0
+    try:
+        while not listener.done():
+            if time.monotonic() - last_checked >= 2:
+                last_checked = time.monotonic()
+                for provider in database.BROWSER_SIDECAR_PROVIDERS:
+                    count = database.count_queued_scene_generation_jobs(provider)
+                    if count > 0 and count != last_queued.get(provider):
+                        await websocket.send_json({"provider": provider, "queued": count})
+                    last_queued[provider] = count
+            for message in bridge.outbox(connection_id):
+                await websocket.send_json(message)
+            await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         pass
     finally:
+        listener.cancel()
+        bridge.unregister(connection_id)
         _browser_extension_connections = max(0, _browser_extension_connections - 1)
+
+
+class ConnectionReadRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    session_id: str = Field(default="", max_length=120)
+
+
+def _connection_action(action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    try:
+        return action()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/connections")
+def list_platform_connections(view: Literal["full", "capabilities"] = "full") -> dict[str, Any]:
+    """The Connection Manager: every marketplace, its status, and the bridge.
+
+    `view=capabilities` is what an AI is shown - which platform can be read
+    and how, with no paths, cookies or timestamps.
+    """
+    manager = platform_connections.manager()
+    return manager.capabilities() if view == "capabilities" else manager.overview()
+
+
+@app.post("/api/connections/read")
+def read_product_page(payload: ConnectionReadRequest) -> dict[str, Any]:
+    """ProductReader over the connections: read one listing, save nothing.
+
+    Returns what the page shows - product fields and a slice of its text - or
+    NEED_LOGIN / NEED_HUMAN_VERIFY / UNAVAILABLE with each platform's status.
+    """
+    if not platform_connections.site_of(payload.url):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chỉ đọc qua kết nối cho các sàn: {', '.join(platform_connections.SITES)}",
+        )
+    outcome = platform_connections.manager().read(payload.url, session_id=payload.session_id.strip())
+    return platform_connections.public_view(outcome)
+
+
+@app.get("/api/connections/{platform}")
+def get_platform_connection(platform: str) -> dict[str, Any]:
+    manager = platform_connections.manager()
+    return _connection_action(lambda: manager.connection(manager._platform(platform)))
+
+
+@app.post("/api/connections/{platform}/connect")
+def connect_platform(platform: str, use: str = Query(default="", max_length=20)) -> dict[str, Any]:
+    """Kết nối / Đăng nhập lại.
+
+    Shopee and TikTok Shop launch nothing: the answer lists the browsers that
+    have the extension, for the person to choose one and sign in or pass a
+    check there. `use=profile` opens the app's own profile instead, in a
+    visible window, where the platform allows it (TikTok Shop). The others get
+    their own profile in a window; the person signs in themselves - password,
+    OTP, captcha - and the profile keeps that session across restarts.
+    """
+    return _connection_action(lambda: platform_connections.manager().connect(platform, use))
+
+
+@app.post("/api/connections/{platform}/open")
+def open_platform_in_browser(platform: str, bridge: str = Query(default="", max_length=40)) -> dict[str, Any]:
+    """Open the platform's sign-in page as a normal tab of the person's browser.
+
+    Sent to the YT Factory extension in the browser the person chose; nothing
+    is launched by the app. The person signs in there as they always do.
+    """
+    return _connection_action(lambda: platform_connections.manager().open_in_browser(platform, bridge))
+
+
+@app.post("/api/connections/{platform}/check")
+def check_platform_connection(platform: str, bridge: str = Query(default="", max_length=40)) -> dict[str, Any]:
+    """Kiểm tra: is the platform's session signed in?
+
+    Shopee is checked through the person's browser (the extension reads its
+    home page once); the others by opening their own profile once.
+    """
+    return _connection_action(lambda: platform_connections.manager().check(platform, bridge))
+
+
+@app.post("/api/connections/{platform}/disconnect")
+def disconnect_platform(platform: str) -> dict[str, Any]:
+    """Ngắt kết nối: delete that platform's session from this machine."""
+    return _connection_action(lambda: platform_connections.manager().disconnect(platform))
 
 
 @app.get("/api/projects/{project_id}/timeline/{segment_id}/visual-preview")
@@ -10469,41 +10725,6 @@ def get_reference_analysis(video_id: str) -> dict[str, Any]:
     return {"status": "completed", **analysis}
 
 
-def _analysis_transcript(video_id: str) -> str:
-    """Give the analysis one utterance per line, with its timestamp.
-
-    The plain-text transcript is every fragment run together into a wall with
-    no punctuation, which throws away the one clue an automatic transcript
-    does carry: where each utterance ended. In a drama that boundary is
-    usually a change of speaker, so reading the timed version is the
-    difference between being able to attribute dialogue and not.
-    """
-    timed = database.get_transcript(video_id, transcript_format="json")
-    if timed:
-        try:
-            segments = json.loads(str(timed.get("content_text") or "[]"))
-        except (TypeError, ValueError):
-            segments = []
-        lines = [
-            f"[{float(item.get('start') or 0):.0f}s] {str(item.get('text') or '').strip()}"
-            for item in segments
-            if isinstance(item, dict) and str(item.get("text") or "").strip()
-        ]
-        if lines:
-            return "\n".join(lines)
-    subtitles = database.get_transcript(video_id, transcript_format="srt")
-    if subtitles:
-        body = str(subtitles.get("content_text") or "")
-        lines = [
-            line.strip() for line in body.splitlines()
-            if line.strip() and not line.strip().isdigit() and "-->" not in line
-        ]
-        if lines:
-            return "\n".join(lines)
-    plain = database.get_transcript(video_id, transcript_format="txt") or database.get_transcript(video_id)
-    return str((plain or {}).get("content_text") or "").strip()
-
-
 def _available_text_providers(*, include_local: bool = False) -> list[str]:
     """Provider order used when a step-level selector is set to Auto."""
     anthropic_key, _ = settings.anthropic_config()
@@ -10538,54 +10759,6 @@ def _resolve_auto_text_provider(provider: str | None, *, include_local: bool = F
         status_code=400,
         detail="Chưa có AI text nào sẵn sàng cho chế độ Auto. Hãy đăng nhập Astra/ChatGPT/Claude hoặc cấu hình API key.",
     )
-
-
-@app.post("/api/videos/{video_id}/reference-analysis")
-def create_reference_analysis(
-    video_id: str,
-    provider: str = Query(default="auto"),
-    output_language: str = Query(default=languages.DEFAULT_LANGUAGE, max_length=12),
-) -> dict[str, Any]:
-    """Analyse structure and style as a remake reference, not a viewer-facing recap."""
-    video = database.get_video(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Không tìm thấy video")
-    transcript_text = _analysis_transcript(video_id)
-    selected_provider = _resolve_auto_text_provider(provider, include_local=False)
-    job_id = database.start_analysis_job(video_id, "reference", selected_provider)
-    try:
-        # Do not rely solely on the browser to enforce this workflow.  Reference
-        # analysis is also called from project actions and API clients; in all
-        # cases it needs spoken content before judging story beats and scenes.
-        # Existing transcripts are reused, so this never downloads audio twice.
-        transcript_generated = False
-        if not transcript_text:
-            whisper_result = _transcribe_video_source(video, video_id)
-            if not whisper_result["text"]:
-                raise TranscriptionError("Whisper không nhận diện được nội dung thoại nào trong audio")
-            transcript = save_transcript_result(database, video_id, whisper_result)
-            transcript_text = str(transcript.get("content_text") or "").strip()
-            transcript_generated = True
-        with operations.track("reference", f"Phân tích nguồn: {str(video.get('title') or video_id)[:50]}"):
-            result = analyze_reference(video, transcript_text, selected_provider, output_language=output_language)
-        database.save_video_analysis(
-            video_id, result, analysis_type="reference", provider=result["provider"], source_type=result["source_type"],
-        )
-        database.finish_analysis_job(job_id, "completed")
-        return {
-            "job_id": job_id,
-            "video_id": video_id,
-            "status": "completed",
-            "provider": result["provider"],
-            "transcript_generated": transcript_generated,
-            "result": result,
-        }
-    except ReferenceAnalysisError as exc:
-        database.finish_analysis_job(job_id, "error", str(exc))
-        raise _api_error(exc) from exc
-    except Exception as exc:
-        database.finish_analysis_job(job_id, "error", str(exc))
-        raise _api_error(exc) from exc
 
 
 @app.post("/api/videos/{video_id}/analyze")
@@ -11328,14 +11501,44 @@ def _verify_goal(project_id: int, target_steps: Iterable[str], claimed: Iterable
         # An mp4 that exists but will not play is not a finished video.
         if "render" in targets and not seconds and "render" not in missing:
             missing.append("render")
+    reasons: dict[str, str] = {}
+    if "analyze" in targets and "analyze" in done:
+        # A product analysis written from the URL alone exists as a row, and
+        # is not an analysis of the listing: the listing was never read.
+        gap = _unread_listing(project_id)
+        if gap:
+            missing.append("analyze")
+            reasons["analyze"] = gap
+            evidence["analyze"] = {"listing_read": False}
     false_claims = sorted({str(name) for name in claimed if steps.get(str(name)) and str(name) not in done})
     return {
         "passed": not missing,
         "missing": missing,
+        "reasons": reasons,
         "done": sorted(done),
         "false_claims": false_claims,
         "evidence": evidence,
     }
+
+
+def _unread_listing(project_id: int) -> str:
+    """Why a product source's brief does not count yet, or "" when it does."""
+    project = database.get_production_project(project_id) or {}
+    video_id = _project_source_video_id(project)
+    saved = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    brief = (saved or {}).get("result") or {}
+    if str(brief.get("source_type") or "") != "product":
+        return ""
+    facts = brief.get("source_facts") or {}
+    status = str(facts.get("read_status") or "")
+    if status == platform_connections.OK:
+        return ""
+    return (
+        f"Trang sản phẩm chưa đọc được ({status or 'không rõ'}); bản phân tích hiện chỉ dựa trên đường dẫn. "
+        "Gọi youtube_factory_list_connections, chọn kết nối can_read (profile:<nền tảng> hoặc "
+        "extension:browser), rồi chạy lại analyze với options.browser_session=<id>. Không kết nối nào đọc "
+        "được thì báo blocked kèm việc người dùng cần làm (bấm Kết nối / tự xác minh)."
+    )
 
 
 def _goal_state(project_id: int) -> dict[str, Any]:
