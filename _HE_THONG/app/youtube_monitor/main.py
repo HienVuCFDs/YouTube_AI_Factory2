@@ -60,6 +60,10 @@ from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
 from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
+from . import project_planner, research_collectors, source_identity
+from .channel_research import ChannelResearchError, ChannelResearchService
+from .youtube_quota import YouTubeQuota
+from .run_registry import RunRegistry
 from .production_worker import (
     ProductionJobError,
     ProductionWorker,
@@ -80,6 +84,7 @@ from .source_visuals import mismatched_source_clips
 from .source_links import (
     SourceLinkError,
     is_http_url,
+    platform_of as source_links_platform,
     probe_url as probe_source_link,
 )
 from .short_script import (
@@ -173,6 +178,7 @@ from .writer import WriterError, resolve_target_duration_seconds, resolve_writer
 from .folklore_research import research_folklore_remake
 from .youtube_captions import CaptionsError, download_caption, list_captions
 from .youtube_client import YouTubeApiError, YouTubeClient
+from .youtube_client import parse_duration as parse_youtube_duration
 
 
 database = Database(DB_PATH)
@@ -238,8 +244,15 @@ usage_limits.set_sink(
     database.record_provider_usage_limit,
     database.clear_provider_usage_limit,
 )
-youtube = YouTubeClient(YOUTUBE_API_KEY)
+# Every Data API call is priced and written to the usage ledger, the monitor's
+# included: research searches cost 100 units each and must not be able to
+# spend the allowance the channel sync depends on without anyone seeing it.
+youtube_quota = YouTubeQuota(database)
+youtube = YouTubeClient(YOUTUBE_API_KEY, quota=youtube_quota)
 service = SyncService(database, youtube, YOUTUBE_MAX_INITIAL_VIDEOS)
+# One Channel Intelligence engine: the channel manager's button and the plan
+# step both go through it, so they read and update the same profiles.
+channel_research_service = ChannelResearchService(database, youtube)
 metadata_queue = AnalysisQueue(database)
 transcript_queue = TranscriptQueue(database)
 openmontage_adapter = OpenMontageAdapter(
@@ -875,7 +888,176 @@ app.include_router(_oauth_router)
 
 @app.get("/api/channels")
 def list_channels() -> list[dict[str, Any]]:
-    return database.list_channels()
+    """Tracked channels, each with its research status - read from the DB only."""
+    channels = database.list_channels()
+    for channel in channels:
+        try:
+            identity = channel_research_service.resolve(channel["youtube_channel_id"])
+            summary = channel_research_service.summary(identity)
+        except Exception:
+            identity, summary = {}, {"state": "none", "label": "Chưa nghiên cứu", "coverage": {}}
+        channel["research"] = {key: summary.get(key) for key in ("state", "label", "updated_at", "coverage")}
+        channel["identity"] = {
+            "platform": _channel_platform(channel, identity),
+            "native_channel_id": identity.get("native_channel_id") or "",
+            "resolved": bool(identity.get("resolved")),
+            "ref": identity.get("ref") or "",
+        }
+        # A synthetic row has no picture of its own; the real channel it
+        # resolves to may.
+        native_row = database.get_channel(identity["native_channel_id"]) if identity.get("native_channel_id") else None
+        channel["avatar_url"] = channel.get("thumbnail_url") or (native_row or {}).get("thumbnail_url") or ""
+    _group_channel_rows(channels)
+    return channels
+
+
+def _group_channel_rows(channels: list[dict[str, Any]]) -> None:
+    """One card per real channel, while every row stays in the list.
+
+    An older link import filed a channel under "WEB-YOUTUBE-…"; the same
+    channel may also have its real "UC…" row. Both rows are kept - videos,
+    projects and the studio's source picker still point at the old one - but
+    only one is shown as the channel: the native row when there is one.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for channel in channels:
+        ref = channel["identity"]["ref"]
+        groups.setdefault(ref or f"row:{channel['youtube_channel_id']}", []).append(channel)
+    for members in groups.values():
+        native = members[0]["identity"]["native_channel_id"]
+        primary = next((item for item in members if item["youtube_channel_id"] == native), None) or min(
+            members,
+            key=lambda item: (
+                not item.get("thumbnail_url"), not item.get("tracking_enabled"), str(item.get("created_at") or ""),
+            ),
+        )
+        keys = [item["youtube_channel_id"] for item in members]
+        for item in members:
+            item["display"] = {
+                "primary": item is primary,
+                "primary_key": primary["youtube_channel_id"],
+                "group_keys": keys,
+            }
+
+
+_YOUTUBE_CHANNEL_KEY = re.compile(r"UC[\w-]{22}")
+
+
+def _channel_platform(channel: dict[str, Any], identity: dict[str, Any]) -> str:
+    """The platform a channels row stands for, from what the row already says."""
+    if identity.get("platform"):
+        return str(identity["platform"])
+    key = str(channel.get("youtube_channel_id") or "")
+    if key.startswith("site-"):
+        return "shop" if str(channel.get("group_name") or "").lower() == "shop" or page_source.looks_like_shop(f"https://{key[5:]}/") else "web"
+    if key.startswith("LOCAL-"):
+        return "upload"
+    if key == "UC_YOUTUBE_AI_FACTORY_IDEAS":
+        return "idea"
+    if key.startswith("WEB-"):
+        extractor = key.split("-")[1] if key.count("-") >= 2 else ""
+        return "web" if extractor.startswith(("HTML5", "GENERIC")) else source_links_platform(extractor)
+    return "youtube" if _YOUTUBE_CHANNEL_KEY.fullmatch(key) else "web"
+
+
+def _plain_failure(item: dict[str, Any]) -> dict[str, str]:
+    """A collector failure in words for the page: what, where, why - no codes, no collector names."""
+    collector = str(item.get("collector") or "")
+    source = str(item.get("source") or "")
+    reason = str(item.get("reason") or "").lower()
+    what = next((label for prefix, label in (
+        ("web", "Trang web"), ("youtube.comments", "Comment"), ("youtube.captions", "Phụ đề"),
+        ("youtube.similar", "Video tương tự"), ("youtube.reviews", "Video review"), ("channel_research", "Hồ sơ kênh"),
+    ) if collector.startswith(prefix)), "Nguồn")
+    if source.startswith("search: "):
+        where = f"tìm “{source[8:60]}”"
+    else:
+        where = urlparse(source).hostname or source[:80]
+    if any(code in reason for code in ("403", "401", "forbidden", "captcha")):
+        why = "trang chặn truy cập tự động"
+    elif "timeout" in reason or "timed out" in reason or "quá lâu" in reason:
+        why = "phản hồi quá lâu"
+    elif "tắt comment" in reason:
+        why = "video tắt comment"
+    elif "chưa có comment" in reason:
+        why = "video chưa có comment"
+    elif "phụ đề" in reason:
+        why = "không có phụ đề công khai"
+    elif "api key" in reason:
+        why = "chưa cấu hình YouTube API"
+    elif "không có kết quả" in reason:
+        why = "tìm không ra kết quả"
+    else:
+        why = "chưa đọc được"
+    return {"what": what, "where": where, "why": why}
+
+
+def _latest_channel_report(identity: dict[str, Any]) -> dict[str, Any] | None:
+    """The newest ResearchReport that researched this channel, summed up for the page."""
+    if not identity.get("resolved"):
+        return None
+    for row in database.list_recent_research_reports(200):
+        report = row.get("report") or {}
+        source = report.get("source_channel") or {}
+        if source.get("native_channel_id") != identity.get("native_channel_id") or source.get("platform") != identity.get("platform"):
+            continue
+        evidence = report.get("evidence") or []
+        kinds: dict[str, int] = {}
+        for item in evidence:
+            kinds[item.get("source_kind", "")] = kinds.get(item.get("source_kind", ""), 0) + 1
+        failures = [_plain_failure(item) for item in report.get("failed_sources") or []]
+        return {
+            "report_id": row.get("id"), "project_id": row.get("project_id"), "version": row.get("version"),
+            "status": row.get("status"), "captured_at": row.get("captured_at"),
+            "similar_videos": len(report.get("similar_content") or []),
+            "transcripts": kinds.get("transcript", 0),
+            "comment_samples": kinds.get("comment_sample", 0),
+            "comments_sampled": sum(int(item.get("sample_size") or 0) for item in evidence if item.get("source_kind") == "comment_sample"),
+            "web_read": kinds.get("article", 0) + kinds.get("official", 0),
+            "web_snippets": kinds.get("search_result", 0),
+            "unread_sources": failures,
+            "limitations": [str(item) for item in report.get("limitations") or []][:10],
+            "channel_status": source.get("status"), "channel_profile_version": source.get("profile_version"),
+        }
+    return None
+
+
+def _channel_videos(identity: dict[str, Any], recent: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The channel's videos the app knows: its library rows, then the research window."""
+    merged: dict[str, dict[str, Any]] = {}
+    for key in identity.get("row_keys") or []:
+        for video in database.list_videos(channel_id=key, limit=200):
+            row_key = str(video.get("youtube_video_id") or "")
+            native = str(video.get("native_video_id") or ("" if row_key.startswith(("web-", "local-", "idea-")) else row_key))
+            merged[native or row_key] = {
+                "video_id": native or row_key, "row_key": row_key, "in_library": True,
+                "title": video.get("title"), "published_at": video.get("published_at"),
+                "duration_seconds": video.get("duration_seconds"), "view_count": video.get("view_count"),
+                "comment_count": video.get("comment_count"), "thumbnail_url": video.get("thumbnail_url") or "",
+                "url": video.get("video_url") or "",
+            }
+    youtube = identity.get("platform") == "youtube"
+    for video in recent:
+        native = str(video.get("video_id") or "")
+        if not native:
+            continue
+        if native in merged:
+            # The library row wins, but a figure it lacks is taken from research.
+            kept = merged[native]
+            for field in ("title", "published_at", "duration_seconds", "view_count", "comment_count"):
+                if kept.get(field) in (None, "", 0) and video.get(field) not in (None, ""):
+                    kept[field] = video[field]
+            continue
+        merged[native] = {
+            "video_id": native, "row_key": "", "in_library": False,
+            "title": video.get("title"), "published_at": video.get("published_at"),
+            "duration_seconds": video.get("duration_seconds"), "view_count": video.get("view_count"),
+            "comment_count": video.get("comment_count"),
+            # YouTube serves every video's thumbnail at this address.
+            "thumbnail_url": f"https://i.ytimg.com/vi/{native}/mqdefault.jpg" if youtube else "",
+            "url": f"https://www.youtube.com/watch?v={native}" if youtube else "",
+        }
+    return sorted(merged.values(), key=lambda item: str(item.get("published_at") or ""), reverse=True)
 
 
 @app.post("/api/channels")
@@ -1054,34 +1236,181 @@ def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]
             status_code=400,
             detail="Đây là buổi phát trực tiếp đang diễn ra; hãy nhập lại khi đã có bản lưu.",
         )
-    database.upsert_channel({
-        "youtube_channel_id": details["channel_id"],
-        "channel_url": details["uploader_url"] or details["webpage_url"],
-        "title": f"{details['uploader']} · {details['platform']}"[:200],
-        "uploads_playlist_id": details["channel_id"],
-        "group_name": group_name or details["platform"],
-    })
-    database.upsert_video({
-        "youtube_video_id": details["video_id"],
-        "youtube_channel_id": details["channel_id"],
-        "video_url": details["webpage_url"],
-        "title": details["title"],
+    platform = str(details.get("platform_slug") or source_links_platform(details["platform"]))
+    metrics_source = "yt_dlp" if details.get("view_count") is not None else ""
+    if platform == "youtube":
+        # The Data API is the authority on a YouTube video's channel and
+        # counts; yt-dlp's reading stands only when the API cannot be asked.
+        official = _official_youtube_details(str(details.get("native_id") or ""))
+        if official:
+            details = {**details, **{key: value for key, value in official.items() if value not in (None, "")}}
+            metrics_source = "youtube_data_api"
+            if official.get("native_channel_id"):
+                details["channel_id"] = official["native_channel_id"]
+    if platform == "youtube" and details.get("native_id"):
+        # One YouTube video, one row: the monitor, "Một video" and a pasted
+        # link all land on the same key, and an older link import keeps its own.
+        details["video_id"] = _canonical_youtube_row(str(details["native_id"]))
+        if database.get_video_raw_payload(details["video_id"]).get("kind") == "youtube#video":
+            return _refresh_monitored_row(details, platform, metrics_source)
+    previous = database.get_video(details["video_id"]) or {}
+    channel_key = details["channel_id"]
+    # Importing the same link again must not make it poorer: a second read
+    # that did not get the real channel keeps the one the first read found.
+    if str(previous.get("youtube_channel_id") or "").startswith("UC") and not channel_key.startswith("UC"):
+        channel_key = str(previous["youtube_channel_id"])
+    real_youtube_channel = platform == "youtube" and channel_key.startswith("UC")
+    existing_channel = database.get_channel(channel_key)
+    # A real channel may already be tracked by the monitor, with its own
+    # title, counts and uploads playlist; a link import must not overwrite it.
+    if not (real_youtube_channel and existing_channel):
+        database.upsert_channel({
+            "youtube_channel_id": channel_key,
+            "channel_url": details["uploader_url"] or details["webpage_url"],
+            "title": f"{details['uploader']} · {details['platform']}"[:200],
+            "uploads_playlist_id": ("UU" + channel_key[2:]) if real_youtube_channel else channel_key,
+            "group_name": group_name or details["platform"],
+        })
+    fields = _keep_known_metadata(previous, {
+        # yt-dlp names a video after its URL when it found no title.
+        "title": "" if details["title"] == details["webpage_url"] else details["title"],
         "description": details["description"],
+        "published_at": details.get("published_at"),
         "duration_seconds": details["duration_seconds"],
         "thumbnail_url": details["thumbnail"],
+    })
+    counts = {key: details.get(key) for key in ("view_count", "like_count", "comment_count")}
+    if all(value is None for value in counts.values()) and previous.get("metrics_captured_at"):
+        # Nothing was counted this time: keep the last counts, with the time
+        # they were really read, rather than blanking them.
+        counts = {key: previous.get(key) for key in counts}
+        counts["metrics_captured_at"] = previous["metrics_captured_at"]
+        metrics_source = str(previous.get("metrics_source") or "")
+    database.upsert_video({
+        "youtube_video_id": details["video_id"],
+        "youtube_channel_id": channel_key,
+        "video_url": details["webpage_url"],
+        **fields,
+        "title": fields["title"] or details["webpage_url"],
+        **counts,
         "metadata_hash": details["video_id"],
         "raw_payload": {
             "source": "link_import",
             "platform": details["platform"],
             "native_id": details["native_id"],
+            "native_channel_id": details.get("native_channel_id", ""),
+            "channel_name": details.get("channel_name", ""),
         },
     })
+    database.set_video_source_identity(
+        details["video_id"],
+        source_platform=platform,
+        source_extractor=details["platform"],
+        # A page has no video id of its own; for one read by a catch-all
+        # extractor the "id" is a piece of its URL.
+        native_video_id="" if platform in {"web", "shop"} else details["native_id"],
+        native_channel_id=details.get("native_channel_id", ""),
+        native_channel_name=details.get("channel_name", ""),
+        metrics_source=metrics_source,
+    )
     return {
         "status": "imported",
         "import_mode": "link",
         "platform": details["platform"],
         "video": database.get_video(details["video_id"]),
-        "channel": database.get_channel(details["channel_id"]),
+        "channel": database.get_channel(channel_key),
+        "identity": source_identity.of(database, details["video_id"]),
+    }
+
+
+def _canonical_youtube_row(native_id: str) -> str:
+    """The row a YouTube video already has, or its native id for a new one."""
+    rows = database.find_videos_by_native_id("youtube", native_id)
+    keys = [str(row["youtube_video_id"]) for row in rows]
+    if native_id in keys:
+        return native_id
+    return keys[0] if keys else native_id
+
+
+def _refresh_monitored_row(details: dict[str, Any], platform: str, metrics_source: str) -> dict[str, Any]:
+    """A link to a video the monitor already stores: add what was read, change nothing it owns.
+
+    The monitor's row holds the API payload, the real channel and the stats
+    history; a link import rewriting it would take those away.
+    """
+    video_id = details["video_id"]
+    if any(details.get(key) is not None for key in ("view_count", "like_count", "comment_count")):
+        database.update_video_metrics(
+            video_id,
+            view_count=details.get("view_count"),
+            like_count=details.get("like_count"),
+            comment_count=details.get("comment_count"),
+        )
+    database.set_video_source_identity(
+        video_id,
+        source_platform=platform,
+        native_video_id=details["native_id"],
+        native_channel_id=details.get("native_channel_id", ""),
+        native_channel_name=details.get("channel_name", ""),
+        metrics_source=metrics_source,
+    )
+    video = database.get_video(video_id) or {}
+    return {
+        "status": "imported",
+        "import_mode": "link",
+        "platform": details["platform"],
+        "video": video,
+        "channel": database.get_channel(str(video.get("youtube_channel_id") or "")),
+        "identity": source_identity.of(database, video_id),
+        "reused_row": True,
+    }
+
+
+def _keep_known_metadata(previous: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
+    """The fresh values, except where the fresh read came back empty.
+
+    An empty title, a zero duration or a missing date says the read failed,
+    not that the video changed, so the value already on the row stands.
+    """
+    kept: dict[str, Any] = {}
+    for key, value in fresh.items():
+        empty = value is None or (isinstance(value, str) and not value.strip()) or (key == "duration_seconds" and not value)
+        kept[key] = previous.get(key) if empty and previous.get(key) not in (None, "", 0) else value
+    return kept
+
+
+def _official_youtube_details(native_id: str) -> dict[str, Any] | None:
+    """What the YouTube Data API says about one video, or None when it cannot say.
+
+    One quota unit. A missing key, a spent quota or an unreachable API leaves
+    the import to yt-dlp's reading rather than failing it.
+    """
+    if not native_id or not youtube.api_key:
+        return None
+    try:
+        items = youtube.get_videos([native_id])
+    except YouTubeApiError:
+        return None
+    if not items:
+        return None
+    snippet = items[0].get("snippet") or {}
+    statistics = items[0].get("statistics") or {}
+    content = items[0].get("contentDetails") or {}
+
+    def count(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "native_channel_id": str(snippet.get("channelId") or ""),
+        "channel_name": str(snippet.get("channelTitle") or ""),
+        "view_count": count(statistics.get("viewCount")),
+        "like_count": count(statistics.get("likeCount")),
+        "comment_count": count(statistics.get("commentCount")),
+        "published_at": snippet.get("publishedAt"),
+        "duration_seconds": parse_youtube_duration(content.get("duration")),
     }
 
 
@@ -1202,6 +1531,59 @@ def sync_channel(
         raise _api_error(exc) from exc
 
 
+@app.get("/api/channels/{channel_id}/research")
+def get_channel_research(channel_id: str) -> dict[str, Any]:
+    """Channel Intelligence for one channel, assembled for the page.
+
+    Opening a channel only reads: freshness is computed from what is stored,
+    and nothing is fetched. `channel_id` may be a channels row key (a real
+    "UC…" or an older synthetic one), "youtube:UC…", or a video id.
+    """
+    bundle = channel_research_service.bundle(channel_id)
+    identity = bundle["identity"]
+    if not identity["resolved"] and not identity["row_keys"]:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kênh")
+    # What the page needs beyond the profile, still read from the database only.
+    profile = (
+        channel_research_service.store.get(identity["platform"], identity["native_channel_id"])
+        if identity["resolved"] else None
+    ) or {}
+    recent = list(((profile.get("profile") or {}).get("recent_videos")) or [])
+    row = database.get_channel(channel_id) or next(
+        (database.get_channel(key) for key in identity["row_keys"] if database.get_channel(key)), None,
+    ) or {}
+    identity["platform"] = identity.get("platform") or _channel_platform(row, identity)
+    bundle["avatar_url"] = row.get("thumbnail_url") or ((profile.get("profile") or {}).get("channel") or {}).get("thumbnail_url") or ""
+    bundle["recent_videos"] = recent
+    bundle["videos"] = _channel_videos(identity, recent)
+    bundle["latest_report"] = _latest_channel_report(identity)
+    return bundle
+
+
+class ChannelResearchRefreshRequest(BaseModel):
+    mode: Literal["auto", "full"] = "auto"
+
+
+@app.post("/api/channels/{channel_id}/research/refresh")
+def refresh_channel_research(
+    channel_id: str, payload: ChannelResearchRefreshRequest = ChannelResearchRefreshRequest(),
+) -> dict[str, Any]:
+    """Bring a channel's research up to date - the same engine the plan step uses.
+
+    "auto" reuses, updates incrementally or redoes in full as freshness
+    requires; "full" redoes it. A second request for the same channel while
+    one runs is refused with 409.
+    """
+    try:
+        result = channel_research_service.refresh(
+            channel_id, mode=payload.mode,
+            identify=lambda video_id: source_identity.refresh(database, video_id, youtube=youtube, probe=probe_source_link),
+        )
+    except ChannelResearchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+    return {"result": result, "research": channel_research_service.bundle(channel_id)["research"]}
+
+
 @app.get("/api/videos")
 def list_videos(
     channel_id: str | None = None,
@@ -1309,8 +1691,14 @@ def _steps_done(project_id: int) -> set[str]:
     if not project:
         return done
     video_id = _project_source_video_id(project)
-    if video_id and database.get_video_analysis(video_id, analysis_type="reference"):
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    if analysis:
         done.add("analyze")
+        # A plan built on an older analysis does not count: the source it
+        # planned for has since been read differently.
+        project_plan = project_planner.current_plan(database, project_id, str(analysis.get("created_at") or ""))
+        if project_plan and not project_plan["stale"]:
+            done.add("plan")
     script = database.get_latest_project_script(project_id)
     if script:
         done.add("script")
@@ -1813,12 +2201,58 @@ def _step_analyze(project_id: int, project: dict[str, Any], options: dict[str, A
     return {"status": "analyzed", "source": extraction.as_dict(), "result": brief}
 
 
-def _step_research(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
-    """Look the subject up and keep what came back with the project.
+def _step_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Bước 2 · Kế hoạch: from the analysed source, what video to make and how.
 
-    Stored rather than returned and forgotten: the writer two steps later
-    should be able to see what was actually found, instead of being told to
-    research and then trusted not to invent.
+    Phase 1 builds the research brief from the analysis, reads what the
+    knowledge stores already hold, and saves a ResearchReport and a draft
+    ProjectPlan whose research-dependent fields are named as pending. It calls
+    no model and runs no collector yet; it may make one identity lookup (one
+    YouTube quota unit, or yt-dlp) for a source imported before its channel
+    was recorded. It reads nothing from the legacy research paths.
+    """
+    video_id = _project_source_video_id(project)
+    video = (database.get_video(video_id) or {}) if video_id else {}
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    if not video or not (analysis or {}).get("result"):
+        raise HTTPException(status_code=409, detail="Chưa có kết quả phân tích nguồn để lập kế hoạch")
+
+    def identify() -> dict[str, Any]:
+        if not bool(options.get("refresh_identity", True)):
+            return source_identity.of(database, video_id)
+        return source_identity.refresh(database, video_id, youtube=youtube, probe=probe_source_link)
+
+    # collect=False keeps the Phase 1 skeleton: no channel research, no
+    # collectors, no network beyond the identity lookup.
+    collect = bool(options.get("collect", True))
+    return project_planner.run(
+        database, project, video, analysis, identify=identify,
+        channel_service=channel_research_service if collect else None,
+        collectors=_research_collectors() if collect else None,
+        quota_used=youtube_quota.used_today,
+    )
+
+
+def _research_collectors() -> research_collectors.Collectors:
+    return research_collectors.Collectors(database, youtube)
+
+
+def _current_project_plan(project_id: int) -> dict[str, Any] | None:
+    project = database.get_production_project(project_id)
+    video_id = _project_source_video_id(project) if project else ""
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    return project_planner.current_plan(database, project_id, str((analysis or {}).get("created_at") or ""))
+
+
+def _step_research(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
+    """LEGACY - kept running so nothing that calls it breaks; do not build on it.
+
+    Searches the web for the project's title and stores the hits as a
+    director artifact that no other step reads. Bước 2 · Kế hoạch
+    (`_step_plan`) replaces it and deliberately does not read its output.
+
+    Original intent: stored rather than returned and forgotten, so the writer
+    two steps later could see what was actually found.
     """
     queries = options.get("queries")
     if isinstance(queries, str):
@@ -2052,6 +2486,7 @@ def _step_render(project_id: int, project: dict[str, Any], options: dict[str, An
 
 _STEP_RUNNERS: dict[str, Any] = {
     "analyze": _step_analyze,
+    "plan": _step_plan,
     "research": _step_research,
     "media": _step_media,
     "publish": _step_publish,
@@ -2071,18 +2506,13 @@ _STEP_RUNNERS: dict[str, Any] = {
 # here, in the process doing it, so a page asks instead of remembering - and
 # a second click, a second tab or an orchestrator cannot start the same work
 # twice. It goes with a restart, together with the work it describes.
-_SINGLE_RUN_STEPS = frozenset({"analyze"})
-_step_runs_lock = threading.Lock()
-_running_step_runs: dict[tuple[int, str], dict[str, Any]] = {}
-_last_step_runs: dict[tuple[int, str], dict[str, Any]] = {}
+_SINGLE_RUN_STEPS = frozenset({"analyze", "plan"})
+_step_registry = RunRegistry()
 
 
 def _step_runs(project_id: int, step: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """The run of this step going on now, and the one that last finished."""
-    with _step_runs_lock:
-        running = _running_step_runs.get((project_id, step))
-        last = _last_step_runs.get((project_id, step))
-        return (dict(running) if running else None), (dict(last) if last else None)
+    return _step_registry.state((project_id, step))
 
 
 def run_project_step(project_id: int, step: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2122,16 +2552,8 @@ def run_project_step(project_id: int, step: str, options: dict[str, Any] | None 
 
     run_key = (project_id, definition.key)
     single = definition.key in _SINGLE_RUN_STEPS
-    if single:
-        with _step_runs_lock:
-            busy = run_key in _running_step_runs
-            if not busy:
-                _running_step_runs[run_key] = {
-                    "run_id": uuid.uuid4().hex[:12],
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                }
-        if busy:
-            raise refuse(409, f"Bước {definition.label} đang chạy cho dự án này. Chờ lượt đó xong rồi hãy chạy lại.")
+    if single and _step_registry.claim(run_key) is None:
+        raise refuse(409, f"Bước {definition.label} đang chạy cho dự án này. Chờ lượt đó xong rồi hãy chạy lại.")
 
     started = time.monotonic()
     outcome: dict[str, Any] = {"status": "failed", "status_code": 500, "error": "Bước dừng giữa chừng."}
@@ -2163,11 +2585,7 @@ def run_project_step(project_id: int, step: str, options: dict[str, Any] | None 
         return {"step": definition.key, "label": definition.label, "result": result}
     finally:
         if single:
-            with _step_runs_lock:
-                run = _running_step_runs.pop(run_key, {})
-                _last_step_runs[run_key] = {
-                    **run, **outcome, "finished_at": datetime.now(timezone.utc).isoformat(),
-                }
+            _step_registry.finish(run_key, outcome)
 
 
 @app.get("/api/research/search")
@@ -2283,6 +2701,27 @@ def list_project_steps(project_id: int) -> dict[str, Any]:
         if row["key"] in runs:
             row["run"], row["last_run"] = runs[row["key"]]
     return {"project_id": project_id, "done": sorted(done), "steps": rows}
+
+
+@app.get("/api/projects/{project_id}/plan")
+def get_project_plan(project_id: int) -> dict[str, Any]:
+    """The latest ProjectPlan and the ResearchReport it was built from.
+
+    Kept apart on purpose: research can be reused or redone without the plan,
+    and a plan names the report version it relied on.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    plan = _current_project_plan(project_id)
+    report_id = (plan or {}).get("research_report_id")
+    report = database.get_research_report(int(report_id)) if report_id else database.get_latest_research_report(project_id)
+    return {"project_id": project_id, "plan": plan, "research_report": report}
+
+
+@app.get("/api/youtube/quota")
+def get_youtube_quota() -> dict[str, Any]:
+    """How much of today's YouTube Data API allowance the app has used."""
+    return {**youtube_quota.status(), "api_key_configured": bool(youtube.api_key)}
 
 
 class RunStepRequest(BaseModel):
@@ -11110,6 +11549,8 @@ async def youtube_push_event(request: Request) -> dict[str, Any]:
 # Durable multi-agent automation (WORK BRIEF phases 3-7)
 # ---------------------------------------------------------------------------
 
+# LEGACY: the scores below are asked of a model with no data behind them.
+# New research uses research_evidence (Evidence → Insight, numbers by rule).
 _AGENT_RESEARCH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -11707,6 +12148,10 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
     previous = dict(payload.get("previous_result") or {})
 
     if role == "research":
+        # LEGACY Research Agent of the five-role pipeline: a model answering
+        # from the goal text alone, with no tools, whose trend/competition/
+        # opportunity scores rest on nothing it read. Kept so the automation
+        # tab keeps working; Bước 2 · Kế hoạch (`_step_plan`) does not read it.
         return ask(
             (
                 "Bạn là Research Agent cho video YouTube. Phân tích chủ đề, audience, góc nội dung, "

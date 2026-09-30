@@ -259,9 +259,14 @@
       panels: ['studioWizard'],
     },
     source: {
-      label: 'Video tham khảo', eyebrow: 'CHỌN VIDEO MẪU', title: 'Chọn video tham khảo',
-      description: 'Thêm kênh hoặc một URL video, sau đó bấm “Dựng lại video”. Không cần vào Dự án khi làm video đầu tiên.',
-      panels: ['addChannelPanel', 'sourceSplit', 'transcriptQueue', 'videos', 'analysisDetail', 'transcriptDetail', 'writerDetail'],
+      label: 'Nguồn tham khảo', eyebrow: '', title: 'Nguồn tham khảo',
+      description: 'Quản lý nguồn, kênh và dữ liệu nghiên cứu cho video của bạn',
+      // A second level of tabs (NGUỒN / KÊNH / HÀNG ĐỢI / THƯ VIỆN) chooses
+      // among these by their data-source-tab; see applySourceTab.
+      panels: [
+        'sourceTabsPanel', 'sourceKindsPanel', 'addChannelPanel', 'channelWorkspace', 'queueOverview', 'analysis',
+        'transcriptQueue', 'libraryKinds', 'videos', 'analysisDetail', 'transcriptDetail', 'writerDetail',
+      ],
     },
     managed: {
       label: 'Kênh của tôi', eyebrow: 'QUẢN LÝ ĐÍCH XUẤT BẢN', title: 'Kênh của tôi & workflow tham khảo',
@@ -292,10 +297,13 @@
 
   function setWorkspace(name, persist = true) {
     const workspace = workspaces[name] || workspaces.dashboard;
+    // “Đổi nguồn” in the studio comes here to pick a video: open the library.
+    if (name === 'source' && state.workspace === 'dashboard' && persist) state.sourceTab = 'library';
     state.workspace = workspaces[name] ? name : 'dashboard';
     document.querySelectorAll('.workspace-panel').forEach((panel) => {
       panel.hidden = !workspace.panels.includes(panel.id);
     });
+    if (state.workspace === 'source' && typeof applySourceTab === 'function') applySourceTab();
     document.querySelectorAll('[data-workspace-nav]').forEach((button) => {
       button.classList.toggle('active', button.dataset.workspaceNav === name);
     });

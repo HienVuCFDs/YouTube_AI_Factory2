@@ -930,6 +930,219 @@ class Database:
                 ("default_transition_style", "TEXT NOT NULL DEFAULT 'fade'"),
             ):
                 self._ensure_column(connection, "managed_channels", column, ddl)
+            # Who a source is on its own platform. A video imported by link
+            # was keyed to a channel of our own making and its counts thrown
+            # away, so nothing could tell which real channel it came from.
+            # The row keys stay as they are; these say what they stand for.
+            for column in (
+                "source_platform", "source_extractor", "native_video_id",
+                "native_channel_id", "native_channel_name", "metrics_source",
+            ):
+                self._ensure_column(connection, "videos", column, "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "videos", "identity_checked_at", "TEXT")
+            # When the counts on the row were actually read. last_metadata_sync_at
+            # moves on every upsert, counts or not, so it cannot say how old
+            # a view count is.
+            self._ensure_column(connection, "videos", "metrics_captured_at", "TEXT")
+            self._backfill_source_identity(connection)
+            self._create_research_tables(connection)
+            self._ensure_column(connection, "channel_profiles", "last_checked_at", "TEXT")
+            self._ensure_column(connection, "audience_observations", "channel_ref", "TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audience_observations_channel "
+                "ON audience_observations(channel_ref, captured_at DESC)"
+            )
+
+    @staticmethod
+    def _backfill_source_identity(connection: sqlite3.Connection) -> None:
+        """Fill in what older rows already say about themselves.
+
+        Only rows not yet described are touched, so this is safe to run on
+        every start. A channel id that was never stored cannot be recovered
+        offline: those rows keep an empty native_channel_id, which is how the
+        planner knows to look it up rather than guess.
+        """
+        # Videos the YouTube Data API stored: their keys are the native ids.
+        connection.execute(
+            """
+            UPDATE videos SET
+                source_platform = 'youtube', source_extractor = 'youtube_data_api',
+                native_video_id = youtube_video_id, native_channel_id = youtube_channel_id,
+                metrics_source = CASE WHEN view_count IS NULL THEN '' ELSE 'youtube_data_api' END
+            WHERE source_platform = ''
+              AND json_valid(raw_payload_json)
+              AND json_extract(raw_payload_json, '$.kind') = 'youtube#video'
+            """
+        )
+        # Videos imported by link: the extractor and the native video id were
+        # kept in the payload; the channel was not.
+        connection.execute(
+            """
+            UPDATE videos SET
+                source_extractor = COALESCE(json_extract(raw_payload_json, '$.platform'), ''),
+                source_platform = CASE lower(COALESCE(json_extract(raw_payload_json, '$.platform'), ''))
+                    WHEN 'youtube' THEN 'youtube' WHEN 'tiktok' THEN 'tiktok'
+                    WHEN 'facebook' THEN 'facebook' WHEN 'instagram' THEN 'instagram'
+                    WHEN 'bilibili' THEN 'bilibili' WHEN 'shop' THEN 'shop' WHEN 'web' THEN 'web'
+                    WHEN 'generic' THEN 'web' WHEN 'html5mediaembed' THEN 'web'
+                    ELSE lower(COALESCE(json_extract(raw_payload_json, '$.platform'), 'web')) END,
+                native_video_id = CASE
+                    WHEN lower(COALESCE(json_extract(raw_payload_json, '$.platform'), ''))
+                        IN ('web', 'shop', 'generic', 'html5mediaembed') THEN ''
+                    ELSE COALESCE(json_extract(raw_payload_json, '$.native_id'), '') END
+            WHERE source_platform = ''
+              AND json_valid(raw_payload_json)
+              AND json_extract(raw_payload_json, '$.source') = 'link_import'
+            """
+        )
+        # Counts already on a row get the time of the latest snapshot that
+        # held them, or the row's last sync when no snapshot did.
+        connection.execute(
+            """
+            UPDATE videos SET metrics_captured_at = COALESCE(
+                (SELECT MAX(s.captured_at) FROM video_statistics s
+                 WHERE s.youtube_video_id = videos.youtube_video_id
+                   AND (s.view_count IS NOT NULL OR s.like_count IS NOT NULL OR s.comment_count IS NOT NULL)),
+                last_metadata_sync_at)
+            WHERE metrics_captured_at IS NULL
+              AND (view_count IS NOT NULL OR like_count IS NOT NULL OR comment_count IS NOT NULL)
+            """
+        )
+        # Pushed from WebSub, or anything else the monitoring side keyed by a
+        # real YouTube channel.
+        connection.execute(
+            """
+            UPDATE videos SET
+                source_platform = 'youtube', native_video_id = youtube_video_id,
+                native_channel_id = youtube_channel_id
+            WHERE source_platform = ''
+              AND youtube_channel_id GLOB 'UC??????????????????????'
+              AND youtube_video_id NOT LIKE 'web-%'
+            """
+        )
+
+    @staticmethod
+    def _create_research_tables(connection: sqlite3.Connection) -> None:
+        """What the planner knows, kept so the next video does not start over.
+
+        Freshness is never stored: it is worked out on read from the
+        timestamps, because a column saying "fresh" is itself stale a day
+        later. Nothing here holds a credential, a cookie or a browser profile,
+        and no row names a commenter.
+        """
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS channel_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                native_channel_id TEXT NOT NULL,
+                channel_key TEXT NOT NULL DEFAULT '',
+                channel_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'partial',
+                version INTEGER NOT NULL DEFAULT 1,
+                profile_json TEXT NOT NULL DEFAULT '{}',
+                performance_json TEXT NOT NULL DEFAULT '{}',
+                known_video_ids_json TEXT NOT NULL DEFAULT '[]',
+                last_full_at TEXT,
+                last_incremental_at TEXT,
+                performance_at TEXT,
+                last_seen_upload_at TEXT,
+                last_checked_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(platform, native_channel_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_key TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'vi',
+                title TEXT NOT NULL DEFAULT '',
+                volatility TEXT NOT NULL DEFAULT 'evergreen',
+                summary TEXT NOT NULL DEFAULT '',
+                facts_json TEXT NOT NULL DEFAULT '[]',
+                version INTEGER NOT NULL DEFAULT 1,
+                refreshed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(topic_key, language)
+            );
+
+            -- Append-only: a new sample is a new row, never an edit of an old
+            -- one, so every figure keeps the size and date it was measured at.
+            CREATE TABLE IF NOT EXISTS audience_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                method TEXT NOT NULL DEFAULT '',
+                sample_size INTEGER NOT NULL,
+                patterns_json TEXT NOT NULL DEFAULT '[]',
+                captured_at TEXT NOT NULL,
+                project_id INTEGER REFERENCES production_projects(id) ON DELETE SET NULL,
+                research_report_id INTEGER,
+                channel_ref TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_audience_observations_scope
+                ON audience_observations(scope_type, scope_key, captured_at DESC);
+
+            CREATE TABLE IF NOT EXISTS content_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern_type TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                examples_json TEXT NOT NULL DEFAULT '[]',
+                evidence_count INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(pattern_type, scope_type, scope_key, signature)
+            );
+
+            -- One row per run, numbered per project; kept separate from the
+            -- plan so research can be read, reused or redone on its own.
+            CREATE TABLE IF NOT EXISTS research_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES production_projects(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'partial',
+                source_kind TEXT NOT NULL DEFAULT '',
+                analysis_created_at TEXT NOT NULL DEFAULT '',
+                engine_version TEXT NOT NULL DEFAULT '',
+                report_json TEXT NOT NULL DEFAULT '{}',
+                evidence_count INTEGER NOT NULL DEFAULT 0,
+                insight_count INTEGER NOT NULL DEFAULT 0,
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_research_reports_project
+                ON research_reports(project_id, version DESC);
+
+            CREATE TABLE IF NOT EXISTS project_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES production_projects(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                research_report_id INTEGER REFERENCES research_reports(id) ON DELETE SET NULL,
+                analysis_created_at TEXT NOT NULL DEFAULT '',
+                engine_version TEXT NOT NULL DEFAULT '',
+                plan_json TEXT NOT NULL DEFAULT '{}',
+                feasibility_json TEXT NOT NULL DEFAULT '{}',
+                provider TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_plans_project
+                ON project_plans(project_id, version DESC);
+            """
+        )
 
     def backup_to(self, destination: str | Path) -> Path:
         """Create a transaction-consistent SQLite backup, including WAL state."""
@@ -1365,9 +1578,11 @@ class Database:
                     privacy_status = excluded.privacy_status,
                     license = excluded.license,
                     tags_json = excluded.tags_json,
-                    view_count = excluded.view_count,
-                    like_count = excluded.like_count,
-                    comment_count = excluded.comment_count,
+                    -- A count missing from this read (hidden, or not
+                    -- returned) keeps the last one actually measured.
+                    view_count = COALESCE(excluded.view_count, videos.view_count),
+                    like_count = COALESCE(excluded.like_count, videos.like_count),
+                    comment_count = COALESCE(excluded.comment_count, videos.comment_count),
                     metadata_hash = excluded.metadata_hash,
                     last_seen_at = excluded.last_seen_at,
                     last_metadata_sync_at = excluded.last_metadata_sync_at,
@@ -1401,6 +1616,26 @@ class Database:
                     raw_payload_json,
                 ),
             )
+            # A video the Data API returned is its own identity: say so now,
+            # not at the next start's backfill.
+            payload = video.get("raw_payload") if isinstance(video.get("raw_payload"), dict) else {}
+            if payload.get("kind") == "youtube#video":
+                connection.execute(
+                    """
+                    UPDATE videos SET source_platform = 'youtube', source_extractor = 'youtube_data_api',
+                        native_video_id = youtube_video_id, native_channel_id = youtube_channel_id,
+                        metrics_source = CASE WHEN view_count IS NULL THEN metrics_source ELSE 'youtube_data_api' END
+                    WHERE youtube_video_id = ? AND (source_platform = '' OR source_extractor = 'youtube_data_api')
+                    """,
+                    (video_id,),
+                )
+            # Counts carry the time they were read. A caller passing counts it
+            # kept from an earlier read passes that read's time with them.
+            if any(video.get(key) is not None for key in ("view_count", "like_count", "comment_count")):
+                connection.execute(
+                    "UPDATE videos SET metrics_captured_at = ? WHERE youtube_video_id = ?",
+                    (video.get("metrics_captured_at") or now, video_id),
+                )
 
             if metadata_changed:
                 connection.execute(
@@ -1421,20 +1656,24 @@ class Database:
                     ),
                 )
 
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO video_statistics (
-                    youtube_video_id, captured_at, view_count, like_count, comment_count
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    video_id,
-                    now,
-                    video.get("view_count"),
-                    video.get("like_count"),
-                    video.get("comment_count"),
-                ),
-            )
+            # Counts carried over from an earlier read are already in the
+            # series under their own date; recording them again as "now"
+            # would invent a measurement.
+            if not video.get("metrics_captured_at"):
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO video_statistics (
+                        youtube_video_id, captured_at, view_count, like_count, comment_count
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        video_id,
+                        now,
+                        video.get("view_count"),
+                        video.get("like_count"),
+                        video.get("comment_count"),
+                    ),
+                )
 
         return {"is_new": is_new, "metadata_changed": metadata_changed}
 
@@ -6363,4 +6602,578 @@ class Database:
             "pending_analysis": int(pending),
             "completed_analysis": int(completed),
             "production_projects": int(projects),
+        }
+
+    # ------------------------------------------------------------------
+    # Source identity: who a source is on its own platform
+    # ------------------------------------------------------------------
+
+    _IDENTITY_COLUMNS = (
+        "source_platform", "source_extractor", "native_video_id",
+        "native_channel_id", "native_channel_name", "metrics_source",
+    )
+
+    def set_video_source_identity(self, video_id: str, **fields: Any) -> dict[str, Any] | None:
+        """Record the platform identity of a video without touching its keys.
+
+        Empty values never overwrite known ones, so a later, poorer read (a
+        fallback that did not return the channel) cannot erase a good one.
+        """
+        updates = {
+            key: str(value).strip()[:300]
+            for key, value in fields.items()
+            if key in self._IDENTITY_COLUMNS and str(value or "").strip()
+        }
+        assignments = [f"{key} = ?" for key in updates]
+        params: list[Any] = list(updates.values())
+        assignments.append("identity_checked_at = ?")
+        params.append(utc_now())
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE videos SET {', '.join(assignments)} WHERE youtube_video_id = ?",
+                [*params, video_id],
+            )
+        return self.get_video(video_id)
+
+    def update_video_metrics(
+        self,
+        video_id: str,
+        *,
+        view_count: int | None = None,
+        like_count: int | None = None,
+        comment_count: int | None = None,
+        published_at: str | None = None,
+        duration_seconds: int | None = None,
+    ) -> None:
+        """New counts for a video, kept as a dated snapshot too.
+
+        Only what was actually read is written: a missing figure stays as it
+        was rather than becoming NULL.
+        """
+        now = utc_now()
+        values = {
+            "view_count": view_count, "like_count": like_count, "comment_count": comment_count,
+            "published_at": published_at, "duration_seconds": duration_seconds,
+        }
+        present = {key: value for key, value in values.items() if value not in (None, "")}
+        with self._connect() as connection:
+            if present:
+                connection.execute(
+                    f"UPDATE videos SET {', '.join(f'{key} = ?' for key in present)}, last_metadata_sync_at = ? "
+                    "WHERE youtube_video_id = ?",
+                    [*present.values(), now, video_id],
+                )
+            if any(values[key] is not None for key in ("view_count", "like_count", "comment_count")):
+                connection.execute(
+                    "UPDATE videos SET metrics_captured_at = ? WHERE youtube_video_id = ?", (now, video_id),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO video_statistics "
+                    "(youtube_video_id, captured_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)",
+                    (video_id, now, view_count, like_count, comment_count),
+                )
+
+    def find_videos_by_native_id(self, platform: str, native_video_id: str) -> list[dict[str, Any]]:
+        """Every row standing for this platform video, oldest first."""
+        if not native_video_id:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT youtube_video_id, youtube_channel_id, first_seen_at FROM videos
+                WHERE (source_platform = ? AND native_video_id = ?) OR youtube_video_id = ?
+                ORDER BY first_seen_at, id
+                """,
+                (platform, native_video_id, native_video_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def duplicate_native_videos(self) -> list[dict[str, Any]]:
+        """Platform videos stored under more than one row - reported, never merged here."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_platform, native_video_id, COUNT(*) AS rows_count,
+                       GROUP_CONCAT(youtube_video_id) AS row_keys
+                FROM videos
+                WHERE native_video_id <> '' AND source_platform <> ''
+                GROUP BY source_platform, native_video_id
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_video_raw_payload(self, video_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT raw_payload_json FROM videos WHERE youtube_video_id = ?", (video_id,)
+            ).fetchone()
+        try:
+            payload = json.loads(str(row["raw_payload_json"] or "{}")) if row else {}
+        except json.JSONDecodeError:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
+    def latest_video_statistics(self, video_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM video_statistics WHERE youtube_video_id = ? ORDER BY captured_at DESC LIMIT 1",
+                (video_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Research knowledge: channel, topic, audience, patterns
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _json_list(value: Any) -> list[Any]:
+        try:
+            decoded = json.loads(str(value or "[]"))
+        except json.JSONDecodeError:
+            return []
+        return decoded if isinstance(decoded, list) else []
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str, Any]:
+        try:
+            decoded = json.loads(str(value or "{}"))
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    def _decode_channel_profile(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["profile"] = self._json_object(item.pop("profile_json"))
+        item["performance"] = self._json_object(item.pop("performance_json"))
+        item["known_video_ids"] = self._json_list(item.pop("known_video_ids_json"))
+        return item
+
+    def get_channel_profile(self, platform: str, native_channel_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_profiles WHERE platform = ? AND native_channel_id = ?",
+                (platform, native_channel_id),
+            ).fetchone()
+        return self._decode_channel_profile(row)
+
+    def save_channel_profile(self, platform: str, native_channel_id: str, **values: Any) -> dict[str, Any]:
+        """Insert or update one channel's profile; every write is a new version."""
+        now = utc_now()
+        existing = self.get_channel_profile(platform, native_channel_id) or {}
+        merged: dict[str, Any] = {
+            "channel_key": existing.get("channel_key", ""),
+            "channel_name": existing.get("channel_name", ""),
+            "status": existing.get("status", "partial"),
+            "profile": existing.get("profile", {}),
+            "performance": existing.get("performance", {}),
+            "known_video_ids": existing.get("known_video_ids", []),
+            "last_full_at": existing.get("last_full_at"),
+            "last_incremental_at": existing.get("last_incremental_at"),
+            "performance_at": existing.get("performance_at"),
+            "last_seen_upload_at": existing.get("last_seen_upload_at"),
+            "last_checked_at": existing.get("last_checked_at"),
+        }
+        merged.update({key: value for key, value in values.items() if key in merged})
+        row = (
+            platform, native_channel_id, str(merged["channel_key"] or ""), str(merged["channel_name"] or ""),
+            str(merged["status"] or "partial"),
+            json.dumps(merged["profile"] or {}, ensure_ascii=False),
+            json.dumps(merged["performance"] or {}, ensure_ascii=False),
+            json.dumps(list(merged["known_video_ids"] or []), ensure_ascii=False),
+            merged["last_full_at"], merged["last_incremental_at"], merged["performance_at"],
+            merged["last_seen_upload_at"], merged["last_checked_at"], now, now,
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO channel_profiles (
+                    platform, native_channel_id, channel_key, channel_name, status,
+                    profile_json, performance_json, known_video_ids_json,
+                    last_full_at, last_incremental_at, performance_at, last_seen_upload_at,
+                    last_checked_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, native_channel_id) DO UPDATE SET
+                    channel_key = excluded.channel_key,
+                    channel_name = excluded.channel_name,
+                    status = excluded.status,
+                    version = channel_profiles.version + 1,
+                    profile_json = excluded.profile_json,
+                    performance_json = excluded.performance_json,
+                    known_video_ids_json = excluded.known_video_ids_json,
+                    last_full_at = excluded.last_full_at,
+                    last_incremental_at = excluded.last_incremental_at,
+                    performance_at = excluded.performance_at,
+                    last_seen_upload_at = excluded.last_seen_upload_at,
+                    last_checked_at = excluded.last_checked_at,
+                    updated_at = excluded.updated_at
+                """,
+                row,
+            )
+        return self.get_channel_profile(platform, native_channel_id) or {}
+
+    def touch_channel_profile(self, platform: str, native_channel_id: str, checked_at: str) -> None:
+        """Note that the channel was checked and nothing changed: no new version."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE channel_profiles SET last_checked_at = ? WHERE platform = ? AND native_channel_id = ?",
+                (checked_at, platform, native_channel_id),
+            )
+
+    def _decode_topic(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["facts"] = self._json_list(item.pop("facts_json"))
+        return item
+
+    def get_topic_knowledge(self, topic_key: str, language: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM topic_knowledge WHERE topic_key = ? AND language = ?",
+                (topic_key, language),
+            ).fetchone()
+        return self._decode_topic(row)
+
+    def save_topic_knowledge(
+        self, topic_key: str, language: str, *, title: str, volatility: str, summary: str,
+        facts: list[dict[str, Any]], refreshed_at: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO topic_knowledge (
+                    topic_key, language, title, volatility, summary, facts_json,
+                    refreshed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_key, language) DO UPDATE SET
+                    title = excluded.title,
+                    volatility = excluded.volatility,
+                    summary = excluded.summary,
+                    facts_json = excluded.facts_json,
+                    version = topic_knowledge.version + 1,
+                    refreshed_at = excluded.refreshed_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    topic_key, language, title, volatility, summary,
+                    json.dumps(facts, ensure_ascii=False), refreshed_at or now, now, now,
+                ),
+            )
+        return self.get_topic_knowledge(topic_key, language) or {}
+
+    def append_audience_observation(
+        self, *, scope_type: str, scope_key: str, platform: str, source_url: str, method: str,
+        sample_size: int, patterns: list[dict[str, Any]], captured_at: str,
+        project_id: int | None = None, research_report_id: int | None = None, channel_ref: str = "",
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO audience_observations (
+                    scope_type, scope_key, platform, source_url, method, sample_size,
+                    patterns_json, captured_at, project_id, research_report_id, channel_ref, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope_type, scope_key, platform, source_url, method, int(sample_size),
+                    json.dumps(patterns, ensure_ascii=False), captured_at,
+                    project_id, research_report_id, channel_ref, utc_now(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM audience_observations WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        item = dict(row)
+        item["patterns"] = self._json_list(item.pop("patterns_json"))
+        return item
+
+    def list_audience_observations(self, scope_type: str, scope_key: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM audience_observations
+                WHERE scope_type = ? AND scope_key = ?
+                ORDER BY captured_at DESC, id DESC LIMIT ?
+                """,
+                (scope_type, scope_key, max(1, min(int(limit), 500))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["patterns"] = self._json_list(item.pop("patterns_json"))
+            result.append(item)
+        return result
+
+    def list_channel_audience_observations(self, channel_ref: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Every sample taken under this channel's videos, newest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audience_observations WHERE channel_ref = ? ORDER BY captured_at DESC, id DESC LIMIT ?",
+                (channel_ref, max(1, min(int(limit), 1000))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["patterns"] = self._json_list(item.pop("patterns_json"))
+            result.append(item)
+        return result
+
+    def _decode_pattern(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["examples"] = self._json_list(item.pop("examples_json"))
+        return item
+
+    def get_content_pattern(
+        self, pattern_type: str, scope_type: str, scope_key: str, signature: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM content_patterns
+                WHERE pattern_type = ? AND scope_type = ? AND scope_key = ? AND signature = ?
+                """,
+                (pattern_type, scope_type, scope_key, signature),
+            ).fetchone()
+        return self._decode_pattern(row)
+
+    def save_content_pattern(
+        self, *, pattern_type: str, scope_type: str, scope_key: str, signature: str,
+        description: str, examples: list[dict[str, Any]], evidence_count: int, seen_at: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO content_patterns (
+                    pattern_type, scope_type, scope_key, signature, description, examples_json,
+                    evidence_count, first_seen_at, last_seen_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pattern_type, scope_type, scope_key, signature) DO UPDATE SET
+                    description = excluded.description,
+                    examples_json = excluded.examples_json,
+                    evidence_count = excluded.evidence_count,
+                    last_seen_at = excluded.last_seen_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    pattern_type, scope_type, scope_key, signature, description,
+                    json.dumps(examples, ensure_ascii=False), int(evidence_count), seen_at, seen_at, now, now,
+                ),
+            )
+        return self.get_content_pattern(pattern_type, scope_type, scope_key, signature) or {}
+
+    def list_content_patterns(
+        self, scope_type: str, scope_key: str, pattern_type: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM content_patterns WHERE scope_type = ? AND scope_key = ?"
+        params: list[Any] = [scope_type, scope_key]
+        if pattern_type:
+            query += " AND pattern_type = ?"
+            params.append(pattern_type)
+        query += " ORDER BY evidence_count DESC, last_seen_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._decode_pattern(row) or {} for row in rows]
+
+    # ------------------------------------------------------------------
+    # Research reports and project plans: one numbered version per run
+    # ------------------------------------------------------------------
+
+    def create_research_report(
+        self, project_id: int, *, status: str, source_kind: str, analysis_created_at: str,
+        engine_version: str, report: dict[str, Any], captured_at: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            version = int(connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM research_reports WHERE project_id = ?", (project_id,)
+            ).fetchone()[0])
+            cursor = connection.execute(
+                """
+                INSERT INTO research_reports (
+                    project_id, version, status, source_kind, analysis_created_at, engine_version,
+                    report_json, evidence_count, insight_count, captured_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, version, status, source_kind, analysis_created_at, engine_version,
+                    json.dumps(report, ensure_ascii=False),
+                    len(report.get("evidence") or []),
+                    sum(len(report.get(group) or []) for group in (
+                        "audience_insights", "competitor_patterns", "content_gaps", "opportunities",
+                    )),
+                    captured_at, now,
+                ),
+            )
+            report_id = int(cursor.lastrowid)
+        return self.get_research_report(report_id) or {}
+
+    def _decode_report(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["report"] = self._json_object(item.pop("report_json"))
+        return item
+
+    def get_research_report(self, report_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM research_reports WHERE id = ?", (report_id,)).fetchone()
+        return self._decode_report(row)
+
+    def list_recent_research_reports(self, limit: int = 60) -> list[dict[str, Any]]:
+        """The latest reports of any project, newest first: what collectors may reuse."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM research_reports ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [self._decode_report(row) or {} for row in rows]
+
+    def get_latest_research_report(self, project_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_reports WHERE project_id = ? ORDER BY version DESC LIMIT 1", (project_id,)
+            ).fetchone()
+        return self._decode_report(row)
+
+    def create_project_plan(
+        self, project_id: int, *, status: str, research_report_id: int | None, analysis_created_at: str,
+        engine_version: str, plan: dict[str, Any], feasibility: dict[str, Any], provider: str = "",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            version = int(connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM project_plans WHERE project_id = ?", (project_id,)
+            ).fetchone()[0])
+            cursor = connection.execute(
+                """
+                INSERT INTO project_plans (
+                    project_id, version, status, research_report_id, analysis_created_at, engine_version,
+                    plan_json, feasibility_json, provider, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, version, status, research_report_id, analysis_created_at, engine_version,
+                    json.dumps(plan, ensure_ascii=False), json.dumps(feasibility, ensure_ascii=False),
+                    provider, now, now,
+                ),
+            )
+            plan_id = int(cursor.lastrowid)
+        return self.get_project_plan(plan_id) or {}
+
+    def _decode_plan(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["plan"] = self._json_object(item.pop("plan_json"))
+        item["feasibility"] = self._json_object(item.pop("feasibility_json"))
+        return item
+
+    def get_project_plan(self, plan_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM project_plans WHERE id = ?", (plan_id,)).fetchone()
+        return self._decode_plan(row)
+
+    def get_latest_project_plan(self, project_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM project_plans WHERE project_id = ? ORDER BY version DESC LIMIT 1", (project_id,)
+            ).fetchone()
+        return self._decode_plan(row)
+
+    # ------------------------------------------------------------------
+    # YouTube Data API quota, counted in the existing usage ledger
+    # ------------------------------------------------------------------
+
+    def provider_units_since(self, provider: str, since_iso: str) -> float:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(units), 0) FROM provider_usage_ledger WHERE provider = ? AND created_at >= ?",
+                (provider, since_iso),
+            ).fetchone()
+        return float(row[0] or 0)
+
+    # ------------------------------------------------------------------
+    # One channel, whichever key it is stored under
+    # ------------------------------------------------------------------
+
+    def native_channels_of_row(self, channel_key: str) -> list[dict[str, Any]]:
+        """The platform channel(s) the videos filed under this row belong to."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_platform AS platform, native_channel_id, MAX(native_channel_name) AS channel_name,
+                       COUNT(*) AS videos
+                FROM videos
+                WHERE youtube_channel_id = ? AND native_channel_id <> '' AND source_platform <> ''
+                GROUP BY source_platform, native_channel_id
+                ORDER BY videos DESC
+                """,
+                (channel_key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def row_keys_of_native_channel(self, platform: str, native_channel_id: str) -> list[str]:
+        """Every channels row that stands for this platform channel: the real one first."""
+        with self._connect() as connection:
+            keys = [
+                str(row[0]) for row in connection.execute(
+                    """
+                    SELECT DISTINCT youtube_channel_id FROM videos
+                    WHERE source_platform = ? AND native_channel_id = ?
+                    """,
+                    (platform, native_channel_id),
+                ).fetchall()
+            ]
+            own = connection.execute(
+                "SELECT 1 FROM channels WHERE youtube_channel_id = ?", (native_channel_id,)
+            ).fetchone()
+        ordered = ([native_channel_id] if own else []) + [key for key in keys if key != native_channel_id]
+        return list(dict.fromkeys(ordered))
+
+    def channel_monitoring_summary(self, channel_keys: list[str]) -> dict[str, Any]:
+        """What the monitor holds for these rows - read only, nothing recomputed."""
+        keys = [key for key in channel_keys if key]
+        if not keys:
+            return {"videos": 0, "videos_with_counts": 0, "total_views": None, "latest_statistics_at": None,
+                    "statistics_snapshots": 0, "metadata_versions": 0, "last_sync_run": None}
+        marks = ",".join("?" for _ in keys)
+        with self._connect() as connection:
+            videos = connection.execute(
+                f"SELECT COUNT(*), SUM(view_count IS NOT NULL), SUM(view_count) FROM videos WHERE youtube_channel_id IN ({marks})",
+                keys,
+            ).fetchone()
+            stats = connection.execute(
+                f"""
+                SELECT COUNT(*), MAX(s.captured_at) FROM video_statistics s
+                JOIN videos v ON v.youtube_video_id = s.youtube_video_id
+                WHERE v.youtube_channel_id IN ({marks}) AND s.view_count IS NOT NULL
+                """,
+                keys,
+            ).fetchone()
+            versions = connection.execute(
+                f"""
+                SELECT COUNT(*) FROM metadata_versions m
+                JOIN videos v ON v.youtube_video_id = m.youtube_video_id
+                WHERE v.youtube_channel_id IN ({marks})
+                """,
+                keys,
+            ).fetchone()
+            run = connection.execute(
+                f"SELECT * FROM sync_runs WHERE youtube_channel_id IN ({marks}) ORDER BY id DESC LIMIT 1", keys,
+            ).fetchone()
+        return {
+            "videos": int(videos[0] or 0),
+            "videos_with_counts": int(videos[1] or 0),
+            "total_views": int(videos[2]) if videos[2] is not None else None,
+            "statistics_snapshots": int(stats[0] or 0),
+            "latest_statistics_at": stats[1],
+            "metadata_versions": int(versions[0] or 0),
+            "last_sync_run": dict(run) if run else None,
         }

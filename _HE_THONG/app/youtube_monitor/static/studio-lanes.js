@@ -1488,7 +1488,7 @@
     if (!state.studioAnalysis?.result) renderStudioStep1Result(null);
     renderStudioAnalyzeState();
     if (!video) {
-      container.innerHTML = '<div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Video tham khảo.</div>';
+      container.innerHTML = '<div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Nguồn tham khảo.</div>';
       return;
     }
     const {kind, label, platform} = studioSourceKind(video);

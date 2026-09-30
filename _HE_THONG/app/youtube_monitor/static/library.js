@@ -299,36 +299,659 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
+  // ---- Nguồn tham khảo: NGUỒN / KÊNH / HÀNG ĐỢI / THƯ VIỆN ----
+  const SOURCE_TABS = ['sources', 'channels', 'queue', 'library'];
+
+  function currentSourceTab() {
+    if (!SOURCE_TABS.includes(state.sourceTab)) {
+      let saved = '';
+      try { saved = localStorage.getItem('ytFactory.sourceTab') || ''; } catch (_) {}
+      state.sourceTab = SOURCE_TABS.includes(saved) ? saved : 'channels';
+    }
+    return state.sourceTab;
+  }
+
+  function applySourceTab() {
+    if (state.workspace !== 'source') return;
+    const tab = currentSourceTab();
+    document.querySelectorAll('[data-source-tab]').forEach((panel) => { panel.hidden = panel.dataset.sourceTab !== tab; });
+    document.querySelectorAll('[data-source-tab-button]').forEach((button) => {
+      const active = button.dataset.sourceTabButton === tab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+    });
+  }
+
+  function setSourceTab(tab) {
+    state.sourceTab = SOURCE_TABS.includes(tab) ? tab : 'channels';
+    try { localStorage.setItem('ytFactory.sourceTab', state.sourceTab); } catch (_) {}
+    applySourceTab();
+  }
+
+  // The existing add-source form, opened on the kind asked for.
+  function openAddSource(kind = 'channel') {
+    setSourceTab('sources');
+    const type = $('sourceImportType');
+    if (type && kind !== 'upload' && [...type.options].some((option) => option.value === kind)) {
+      type.value = kind;
+      type.dispatchEvent(new Event('change'));
+    }
+    const target = kind === 'upload' ? document.querySelector('.source-upload-block') : $('reference');
+    target?.scrollIntoView({block: 'center'});
+    if (kind !== 'upload') $('reference')?.focus();
+  }
+
+  // ---- Tab KÊNH: danh sách bên trái, chi tiết bên phải ----
+  // Mở tab, chọn kênh, đổi tab con: chỉ ĐỌC (GET). Chỉ “Cập nhật nghiên cứu”
+  // mới chạy engine - cùng engine mà bước Kế hoạch dùng.
+  const CHANNEL_RESEARCH_POLL_MS = 2500;
+  const RESEARCH_TONE = {fresh: 'green', stale: 'orange', partial: 'orange', running: 'cyan'};
+  const RESEARCH_RESULT = {
+    new: 'nghiên cứu lần đầu', reused: 'dùng lại hồ sơ còn mới',
+    incremental: 'cập nhật phần video mới', refreshed: 'nghiên cứu lại toàn bộ',
+  };
+  const PLATFORM_LABELS = {
+    youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook', instagram: 'Instagram', bilibili: 'Bilibili',
+    web: 'Trang web', shop: 'Sàn thương mại', upload: 'Tệp tải lên', idea: 'Ý tưởng',
+  };
+  const CHANNEL_STATUS_FILTERS = [
+    ['fresh', 'Mới cập nhật'], ['stale', 'Cần cập nhật'], ['partial', 'Nghiên cứu chưa đầy đủ'],
+    ['none', 'Chưa nghiên cứu'], ['running', 'Đang nghiên cứu'], ['paused', 'Tạm dừng giám sát'],
+  ];
+  const YOUTUBE_CHANNEL = /^UC[\w-]{22}$/;
+
   async function loadChannels() {
     state.channels = await api('/api/channels');
-    $('channelCountLabel').textContent = `${state.channels.length} NGUỒN`;
     populateChannelSelect($('analysisChannelSelect'));
     populateChannelSelect($('transcriptChannelSelect'));
     populateStudioSourceChannelSelect();
     populateVideoFilters();
-    if (!state.channels.length) {
-      $('channelsBody').innerHTML = '<tr><td colspan="4" class="empty">Chưa có kênh nào được đăng ký.</td></tr>';
+    renderChannelFilters();
+    // A remembered pick may be an old synthetic row: show its channel instead.
+    let wanted = state.selectedChannel;
+    if (!wanted) {
+      try { wanted = localStorage.getItem('ytFactory.selectedChannel') || ''; } catch (_) {}
+    }
+    state.selectedChannel = primaryChannelKey(wanted) || filteredChannels()[0]?.youtube_channel_id || null;
+    renderChannelList();
+    if (state.selectedChannel) void loadChannelDetail(state.selectedChannel);
+    else renderChannelDetail(null);
+    shownChannels().filter((item) => item.research?.state === 'running').forEach((item) => followChannelResearch(item.youtube_channel_id));
+  }
+
+  // Rows the list shows: one per real channel. Every row stays in
+  // state.channels for the pickers and filters that need the old ones.
+  function shownChannels() {
+    return state.channels.filter((channel) => channel.display?.primary !== false);
+  }
+
+  function primaryChannelKey(channelId) {
+    const channel = state.channels.find((item) => item.youtube_channel_id === channelId);
+    return channel ? (channel.display?.primary_key || channel.youtube_channel_id) : '';
+  }
+
+  function channelPlatform(channel) {
+    return channel?.identity?.platform || 'web';
+  }
+
+  function platformLabel(platform) {
+    return PLATFORM_LABELS[platform] || platform || '—';
+  }
+
+  function channelAvatar(url, title, size = 'md') {
+    const initials = String(title || '?').trim().split(/\s+/).slice(0, 2).map((word) => word[0] || '').join('').toUpperCase() || '?';
+    return url
+      ? `<img class="channel-avatar ${size}" src="${esc(url)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'), {className: 'channel-avatar ${size} initials', textContent: '${esc(initials)}'}))">`
+      : `<span class="channel-avatar ${size} initials" aria-hidden="true">${esc(initials)}</span>`;
+  }
+
+  function monitoringBadge(channel) {
+    if (!channel.tracking_enabled) return '<span class="status-badge red">Tạm dừng</span>';
+    if (channel.sync_status === 'error') return '<span class="status-badge red">Lỗi đồng bộ</span>';
+    return '<span class="status-badge green">Hoạt động</span>';
+  }
+
+  function researchBadge(research) {
+    const item = research || {};
+    return `<span class="status-badge ${RESEARCH_TONE[item.state] || ''}">${esc(item.label || 'Chưa nghiên cứu')}</span>`;
+  }
+
+  function coverageLine(coverage) {
+    const parts = [];
+    if (coverage?.videos) parts.push(`${number(coverage.videos)} video`);
+    if (coverage?.comments_sampled) parts.push(`${number(coverage.comments_sampled)} comment mẫu`);
+    return parts.join(' · ');
+  }
+
+  function renderChannelFilters() {
+    const platform = $('channelPlatformFilter');
+    if (platform) {
+      const chosen = platform.value;
+      const present = [...new Set(shownChannels().map(channelPlatform))].sort();
+      platform.innerHTML = '<option value="">Tất cả nền tảng</option>'
+        + present.map((key) => `<option value="${esc(key)}">${esc(platformLabel(key))}</option>`).join('');
+      platform.value = present.includes(chosen) ? chosen : '';
+    }
+    const status = $('channelStatusFilter');
+    if (status && status.options.length <= 1) {
+      status.innerHTML = '<option value="">Tất cả trạng thái</option>'
+        + CHANNEL_STATUS_FILTERS.map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
+    }
+  }
+
+  function filteredChannels() {
+    const query = ($('channelSearch')?.value || '').trim().toLowerCase();
+    const platform = $('channelPlatformFilter')?.value || '';
+    const status = $('channelStatusFilter')?.value || '';
+    return shownChannels()
+      .filter((channel) => !query || `${channel.title} ${channel.youtube_channel_id} ${channel.identity?.native_channel_id || ''}`.toLowerCase().includes(query))
+      .filter((channel) => !platform || channelPlatform(channel) === platform)
+      .filter((channel) => !status || (status === 'paused' ? !channel.tracking_enabled : channel.research?.state === status))
+      .sort((left, right) => String(right.research?.updated_at || '').localeCompare(String(left.research?.updated_at || ''))
+        || String(left.title || '').localeCompare(String(right.title || ''), 'vi'));
+  }
+
+  function renderChannelList() {
+    const list = $('channelList');
+    if (!list) return;
+    const channels = filteredChannels();
+    const total = shownChannels().length;
+    $('channelCountLabel').textContent = `${channels.length}${channels.length !== total ? `/${total}` : ''} kênh`;
+    if (!total) {
+      list.innerHTML = '<div class="empty">Chưa có kênh nào. Bấm “Thêm kênh” để bắt đầu.</div>';
       return;
     }
-    const groups = new Map();
-    state.channels.forEach((channel) => {
-      const group = String(channel.group_name || '').trim() || 'Chưa gắn nhãn';
-      if (!groups.has(group)) groups.set(group, []);
-      groups.get(group).push(channel);
-    });
-    const groupedRows = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, 'vi')).map(([group, channels], index) => {
-      const groupId = `channelGroup-${index}`;
-      const open = uiPreference(`channel-group.${groupId}`, true);
-      const channelRows = channels.map((channel) => `
-        <tr class="group-channel-row${open ? '' : ' is-collapsed'}" data-channel-group="${groupId}">
-          <td class="channel-cell"><a class="primary-text" href="${esc(channel.channel_url)}" target="_blank" rel="noreferrer">${esc(channel.title || channel.youtube_channel_id)}</a><div class="secondary-text">${esc(channel.youtube_channel_id)}</div></td>
-          <td>${channel.tracking_enabled ? statusTag(channel.sync_status) : '<span class="tag red">ĐÃ TẠM DỪNG</span>'}</td>
-          <td class="secondary-text">${date(channel.last_sync_at)}</td>
-          <td><div class="channel-actions"><button class="btn small ghost" onclick="editChannelGroup('${esc(channel.youtube_channel_id)}')">Nhãn</button><button class="btn small ghost" onclick="syncChannel('${esc(channel.youtube_channel_id)}')">Đồng bộ</button><button class="btn small ${channel.tracking_enabled ? 'danger' : ''}" onclick="toggleChannel('${esc(channel.youtube_channel_id)}', ${!channel.tracking_enabled})">${channel.tracking_enabled ? 'Tạm dừng' : 'Tiếp tục'}</button></div></td>
-        </tr>`).join('');
-      return `<tr class="group-tab-row"><td colspan="4"><button id="${groupId}Toggle" class="group-tab" type="button" onclick="toggleChannelGroup('${groupId}')" aria-expanded="${open}"><span class="group-tab-main"><span class="group-tab-chevron">${open ? '⌃' : '⌄'}</span><span class="group-tab-label">${esc(group)}</span></span><span class="tag cyan">${channels.length} KÊNH</span></button></td></tr>${channelRows}`;
+    if (!channels.length) {
+      list.innerHTML = '<div class="empty">Không có kênh khớp bộ lọc.</div>';
+      return;
+    }
+    list.innerHTML = channels.map((channel) => {
+      const key = channel.youtube_channel_id;
+      const identity = channel.identity || {};
+      const coverage = coverageLine(channel.research?.coverage);
+      const selected = key === state.selectedChannel;
+      return `<article class="channel-card${selected ? ' selected' : ''}" role="option" aria-selected="${selected}" tabindex="0"
+          onclick="selectChannel('${esc(key)}')" onkeydown="if (event.key === 'Enter') selectChannel('${esc(key)}')">
+        ${channelAvatar(channel.avatar_url || channel.thumbnail_url, channel.title)}
+        <div class="channel-card-body">
+          <div class="channel-card-title">${esc(channel.title || key)}</div>
+          <div class="channel-card-meta">${esc(platformLabel(channelPlatform(channel)))} · ${esc(identity.native_channel_id || key)}${(channel.display?.group_keys || []).length > 1 ? ` · gộp ${channel.display.group_keys.length} bản ghi` : ''}</div>
+          <div class="channel-card-badges">${monitoringBadge(channel)}${researchBadge(channel.research)}</div>
+          ${coverage ? `<div class="channel-card-stats">${esc(coverage)}</div>` : ''}
+          ${channel.research?.updated_at ? `<div class="channel-card-updated">Cập nhật: ${esc(date(channel.research.updated_at))}</div>` : ''}
+        </div>
+        <button class="channel-menu-button" type="button" aria-label="Thao tác" onclick="event.stopPropagation(); openChannelMenu('${esc(key)}', this)">⋮</button>
+      </article>`;
     }).join('');
-    $('channelsBody').innerHTML = groupedRows;
+  }
+
+  function selectChannel(channelId) {
+    state.selectedChannel = primaryChannelKey(channelId) || channelId;
+    channelId = state.selectedChannel;
+    try { localStorage.setItem('ytFactory.selectedChannel', channelId); } catch (_) {}
+    $('channelWorkspace')?.classList.add('is-detail-open');
+    renderChannelList();
+    void loadChannelDetail(channelId);
+  }
+
+  function closeChannelDetail() {
+    $('channelWorkspace')?.classList.remove('is-detail-open');
+  }
+
+  // ⋮: only actions the backend already has.
+  function openChannelMenu(channelId, button) {
+    closeChannelMenu();
+    const channel = state.channels.find((item) => item.youtube_channel_id === channelId);
+    if (!channel) return;
+    const researchable = !['not_applicable', 'unsupported'].includes(channel.research?.state);
+    const items = [
+      YOUTUBE_CHANNEL.test(channelId) ? ['Đồng bộ ngay', `syncChannel('${esc(channelId)}')`] : null,
+      researchable ? ['Cập nhật nghiên cứu', `selectChannel('${esc(channelId)}'); refreshChannelResearch('${esc(channelId)}')`] : null,
+      [channel.tracking_enabled ? 'Tạm dừng' : 'Tiếp tục', `toggleChannel('${esc(channelId)}', ${!channel.tracking_enabled})`],
+      ['Đổi nhãn', `editChannelGroup('${esc(channelId)}')`],
+    ].filter(Boolean);
+    const menu = document.createElement('div');
+    menu.id = 'channelMenu';
+    menu.className = 'channel-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = items.map(([label, action]) => `<button type="button" role="menuitem" onclick="closeChannelMenu(); ${action}">${esc(label)}</button>`).join('');
+    document.body.appendChild(menu);
+    const box = button.getBoundingClientRect();
+    menu.style.top = `${window.scrollY + box.bottom + 4}px`;
+    menu.style.left = `${window.scrollX + Math.max(8, box.right - menu.offsetWidth)}px`;
+    setTimeout(() => document.addEventListener('click', closeChannelMenu, {once: true}), 0);
+  }
+
+  function closeChannelMenu() {
+    document.getElementById('channelMenu')?.remove();
+  }
+
+  async function loadChannelDetail(channelId) {
+    if (!channelId) return null;
+    if (!state.channelResearch?.[channelId] && channelId === state.selectedChannel) {
+      const target = $('channelDetail');
+      if (target) target.innerHTML = '<div class="empty">Đang đọc hồ sơ kênh…</div>';
+    }
+    try {
+      const bundle = await api(`/api/channels/${encodeURIComponent(channelId)}/research`);
+      state.channelResearch = {...(state.channelResearch || {}), [channelId]: bundle};
+      if (channelId === state.selectedChannel) renderChannelDetail(channelId);
+      if (bundle.research?.summary?.state === 'running') followChannelResearch(channelId);
+      return bundle;
+    } catch (error) {
+      if (channelId === state.selectedChannel) $('channelDetail').innerHTML = `<div class="empty">Không đọc được hồ sơ kênh: ${esc(error.message)}</div>`;
+      return null;
+    }
+  }
+
+  function setChannelDetailTab(channelId, tab) {
+    state.channelDetailTab = tab;
+    renderChannelDetail(channelId);
+  }
+
+  function renderChannelDetail(channelId) {
+    const target = $('channelDetail');
+    if (!target) return;
+    const bundle = channelId ? state.channelResearch?.[channelId] : null;
+    if (!channelId) {
+      target.innerHTML = '<div class="empty">Chọn một kênh ở danh sách bên trái.</div>';
+      return;
+    }
+    if (!bundle) return;
+    const channel = state.channels.find((item) => item.youtube_channel_id === channelId) || {};
+    const overview = bundle.overview || {};
+    const identity = bundle.identity || {};
+    const title = overview.title || channel.title || channelId;
+    const syncable = (bundle.monitoring?.rows || []).find((row) => YOUTUBE_CHANNEL.test(row.channel_key));
+    const tab = state.channelDetailTab || 'overview';
+    const tabs = [['overview', 'TỔNG QUAN'], ['videos', 'VIDEO'], ['monitoring', 'GIÁM SÁT'], ['research', 'NGHIÊN CỨU']];
+    const body = tab === 'videos' ? renderChannelVideos(channelId, bundle)
+      : tab === 'monitoring' ? renderChannelMonitoring(channelId, bundle)
+        : tab === 'research' ? renderChannelResearch(channelId, bundle)
+          : renderChannelOverview(channelId, bundle);
+    target.innerHTML = `
+      <header class="channel-detail-header">
+        <button class="btn small ghost channel-back" type="button" onclick="closeChannelDetail()">← Danh sách kênh</button>
+        ${channelAvatar(bundle.avatar_url || channel.avatar_url || channel.thumbnail_url, title, 'lg')}
+        <div class="channel-detail-title">
+          <h2>${esc(title)}</h2>
+          <div class="channel-card-meta">${esc(platformLabel(identity.platform || channelPlatform(channel)))}
+            ${identity.native_channel_id ? ` · ${esc(identity.native_channel_id)}` : ''}
+            ${overview.channel_url ? ` <a href="${esc(overview.channel_url)}" target="_blank" rel="noreferrer" aria-label="Mở kênh">↗</a>` : ''}</div>
+        </div>
+        <div class="channel-detail-actions">
+          ${syncable ? `<button class="btn" type="button" onclick="syncChannel('${esc(syncable.channel_key)}')">Đồng bộ ngay</button>` : ''}
+          <button class="btn" type="button" onclick="toggleChannel('${esc(channelId)}', ${!channel.tracking_enabled})">${channel.tracking_enabled ? 'Tạm dừng' : 'Tiếp tục'}</button>
+          <button class="btn channel-menu-button" type="button" aria-label="Thao tác khác" onclick="event.stopPropagation(); openChannelMenu('${esc(channelId)}', this)">⋯</button>
+        </div>
+      </header>
+      <nav class="channel-detail-tabs" role="tablist">${tabs.map(([key, label]) => `
+        <button type="button" role="tab" class="channel-detail-tab${key === tab ? ' active' : ''}" aria-selected="${key === tab}"
+          onclick="setChannelDetailTab('${esc(channelId)}', '${key}')">${label}</button>`).join('')}</nav>
+      <div class="channel-detail-body">${body}</div>`;
+  }
+
+  // ---- Charts: one series each, drawn from what the bundle holds ----
+  const CHART_BLUE = '#3987e5';
+  const DURATION_RAMP = ['#a8cbf7', '#6aa7ef', '#3987e5', '#2a6fc4', '#1d4f91'];
+
+  function compactNumber(value) {
+    const amount = Number(value || 0);
+    if (amount >= 1e6) return `${(amount / 1e6).toFixed(amount >= 1e7 ? 0 : 1)}M`;
+    if (amount >= 1e3) return `${(amount / 1e3).toFixed(amount >= 1e4 ? 0 : 1)}K`;
+    return String(Math.round(amount));
+  }
+
+  function viewsChart(recent) {
+    const points = (recent || []).filter((item) => item.published_at && item.view_count != null)
+      .sort((left, right) => String(left.published_at).localeCompare(String(right.published_at)));
+    if (points.length < 3) return '';
+    const width = 560; const height = 190; const left = 44; const right = 12; const top = 12; const bottom = 26;
+    const times = points.map((item) => new Date(item.published_at).getTime());
+    const minT = Math.min(...times); const maxT = Math.max(...times);
+    const logs = points.map((item) => Math.log10(Math.max(1, item.view_count)));
+    const minL = Math.floor(Math.min(...logs)); const maxL = Math.ceil(Math.max(...logs));
+    const x = (t) => left + (maxT === minT ? 0.5 : (t - minT) / (maxT - minT)) * (width - left - right);
+    const y = (l) => top + (1 - (l - minL) / Math.max(1, maxL - minL)) * (height - top - bottom);
+    const path = points.map((item, index) => `${index ? 'L' : 'M'}${x(times[index]).toFixed(1)},${y(logs[index]).toFixed(1)}`).join(' ');
+    const grid = [];
+    for (let level = minL; level <= maxL; level += 1) {
+      grid.push(`<line x1="${left}" x2="${width - right}" y1="${y(level)}" y2="${y(level)}" class="chart-gridline"/>`
+        + `<text x="${left - 6}" y="${y(level) + 4}" class="chart-axis" text-anchor="end">${compactNumber(10 ** level)}</text>`);
+    }
+    const ticks = [0, 1, 2, 3].map((part) => {
+      const t = minT + (part / 3) * (maxT - minT);
+      return `<text x="${x(t)}" y="${height - 6}" class="chart-axis" text-anchor="middle">${new Date(t).toLocaleDateString('vi-VN', {day: '2-digit', month: '2-digit'})}</text>`;
+    }).join('');
+    const marks = points.map((item, index) => `<circle cx="${x(times[index]).toFixed(1)}" cy="${y(logs[index]).toFixed(1)}" r="9" class="chart-hit">
+      <title>${esc(item.title)} · ${esc(date(item.published_at))} · ${esc(number(item.view_count))} lượt xem</title></circle>
+      <circle cx="${x(times[index]).toFixed(1)}" cy="${y(logs[index]).toFixed(1)}" r="3" fill="${CHART_BLUE}" stroke="var(--surface)" stroke-width="2" pointer-events="none"/>`).join('');
+    return `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Lượt xem ${points.length} video gần nhất theo ngày đăng">
+        ${grid.join('')}${ticks}<path d="${path}" fill="none" stroke="${CHART_BLUE}" stroke-width="2" stroke-linejoin="round"/>${marks}</svg>
+      <details class="chart-table"><summary>Xem bảng số liệu</summary><table><tbody>${points.slice().reverse().map((item) => `
+        <tr><td>${esc(date(item.published_at))}</td><td>${esc(item.title)}</td><td class="num">${esc(number(item.view_count))}</td></tr>`).join('')}</tbody></table></details>`;
+  }
+
+  function weekdayChart(recent) {
+    const dated = (recent || []).filter((item) => item.published_at);
+    if (dated.length < 3) return '';
+    const labels = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
+    const counts = [0, 0, 0, 0, 0, 0, 0];
+    dated.forEach((item) => { counts[(new Date(item.published_at).getDay() + 6) % 7] += 1; });
+    const max = Math.max(...counts, 1);
+    const width = 280; const height = 150; const barWidth = 26; const gap = (width - 7 * barWidth) / 8;
+    const bars = counts.map((count, index) => {
+      const barHeight = Math.max(count ? 4 : 0, (count / max) * 100);
+      const xPos = gap + index * (barWidth + gap);
+      return `<g><rect x="${xPos}" y="${118 - barHeight}" width="${barWidth}" height="${barHeight}" rx="4" fill="${CHART_BLUE}"><title>${labels[index]}: ${count} video</title></rect>
+        ${count ? `<text x="${xPos + barWidth / 2}" y="${112 - barHeight}" class="chart-value" text-anchor="middle">${count}</text>` : ''}
+        <text x="${xPos + barWidth / 2}" y="138" class="chart-axis" text-anchor="middle">${labels[index]}</text></g>`;
+    }).join('');
+    return `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Số video đăng theo thứ trong tuần">${bars}</svg>`;
+  }
+
+  function durationChart(duration) {
+    const entries = Object.entries(duration?.buckets || {});
+    const total = entries.reduce((sum, [, count]) => sum + count, 0);
+    if (!total) return '';
+    const segments = entries.map(([bucket, count], index) => count ? `<span class="duration-segment" style="flex:${count};background:${DURATION_RAMP[index]}" title="${esc(bucket)}: ${count}/${total} video"></span>` : '').join('');
+    const legend = entries.map(([bucket, count], index) => `<div class="duration-legend-item"><i style="background:${DURATION_RAMP[index]}"></i><span>${esc(bucket)}</span><b>${count}/${total}</b></div>`).join('');
+    return `<div class="duration-bar" role="img" aria-label="Phân bố độ dài video">${segments}</div><div class="duration-legend">${legend}</div>`;
+  }
+
+  function topicBars(topics, sampled) {
+    if (!(topics || []).length || !sampled) return '';
+    return `<div class="topic-bars">${topics.slice(0, 6).map((item) => `
+      <div class="topic-row"><span>${esc(item.term)}</span><span class="topic-track"><i style="width:${Math.round(100 * item.videos / sampled)}%"></i></span><b>${item.videos}/${sampled} video</b></div>`).join('')}</div>`;
+  }
+
+  // ---- Tabs of the detail ----
+  function kpi(value, label) {
+    return value === null || value === undefined || value === '' ? ''
+      : `<div class="kpi"><b>${esc(value)}</b><span>${esc(label)}</span></div>`;
+  }
+
+  function infoRow(label, value) {
+    return value === null || value === undefined || value === '' ? '' : `<div class="info-row"><span>${esc(label)}</span><div>${value}</div></div>`;
+  }
+
+  function researchStatusCard(channelId, bundle) {
+    const summary = bundle.research?.summary || {};
+    const running = summary.state === 'running' || state.channelResearchPending?.[channelId];
+    const blocked = ['not_applicable', 'unsupported'].includes(summary.state);
+    const stages = bundle.stages || [];
+    const run = summary.run || {};
+    const done = new Set(run.stages_done || []);
+    const progress = running ? `<div class="research-progress"><b>Đang cập nhật nghiên cứu...</b>${stages.map((stage) => {
+      const mark = done.has(stage.key) ? '✓' : stage.key === run.stage ? '●' : '○';
+      return `<div class="research-stage ${done.has(stage.key) ? 'done' : stage.key === run.stage ? 'current' : ''}">${mark} ${esc(stage.label)}</div>`;
+    }).join('')}</div>` : '';
+    const failed = !running && summary.last_run?.status === 'failed'
+      ? '<div class="secondary-text warning-text">Lần cập nhật trước chưa xong. Thử lại sau.</div>' : '';
+    return `<div class="research-status-wrap"><div class="research-status-card">
+        <div>
+          <div class="secondary-text">Research</div>
+          <div class="research-status-line"><i class="dot ${RESEARCH_TONE[summary.state] || ''}"></i>${esc(summary.label || 'Chưa nghiên cứu')}</div>
+          ${summary.updated_at ? `<div class="secondary-text">Cập nhật: ${esc(date(summary.updated_at))}</div>` : ''}
+          ${summary.reason && !summary.updated_at ? `<div class="secondary-text">${esc(summary.reason)}</div>` : ''}
+        </div>
+        ${blocked ? '' : `<button class="btn primary" type="button" ${running ? 'disabled' : ''} onclick="refreshChannelResearch('${esc(channelId)}')">${summary.state === 'unresolved' ? 'Tra kênh gốc & nghiên cứu' : 'Cập nhật nghiên cứu'}</button>`}
+      </div>${progress}${failed}</div>`;
+  }
+
+  // What the newest project research that used this channel collected. Its
+  // comments are from that project's sample (source + similar videos), not
+  // the channel's comments.
+  function latestResearch(latest) {
+    if (!latest) return '';
+    const parts = [
+      latest.similar_videos ? `${number(latest.similar_videos)} video tương tự` : '',
+      latest.comments_sampled ? `${number(latest.comments_sampled)} comment mẫu` : '',
+      latest.transcripts ? `${number(latest.transcripts)} transcript` : '',
+      latest.web_read + latest.web_snippets ? `${number(latest.web_read + latest.web_snippets)} nguồn web (${number(latest.web_read)} đã đọc)` : '',
+    ].filter(Boolean);
+    return `<div class="latest-research">
+        <div class="research-sub">Nghiên cứu gần đây · dự án #${esc(latest.project_id)}</div>
+        ${parts.length ? `<div>${esc(parts.join(' · '))}</div>` : ''}
+        <div class="secondary-text">Dữ liệu của lần lập kế hoạch này (video nguồn và video tương tự), không phải toàn bộ comment của kênh.</div>
+      </div>`;
+  }
+
+  function partialNotice(channelId, latest) {
+    const unread = latest?.unread_sources || [];
+    if (!latest || (latest.status !== 'partial' && !unread.length)) return '';
+    return `<div class="partial-notice">
+        <b>⚠ Nghiên cứu dự án #${esc(latest.project_id)} chưa đầy đủ</b>
+        <span>${unread.length ? `Có ${unread.length} nguồn chưa đọc được.` : 'Một phần dữ liệu chưa thu thập được.'}
+          <button class="link-button" type="button" onclick="setChannelDetailTab('${esc(channelId)}', 'research'); setTimeout(() => document.getElementById('researchLimitations')?.scrollIntoView({block: 'center'}), 50)">Xem chi tiết →</button></span>
+      </div>`;
+  }
+
+  function renderChannelOverview(channelId, bundle) {
+    const overview = bundle.overview || {};
+    const identity = bundle.identity || {};
+    const research = bundle.research || {};
+    const summary = research.summary || {};
+    const profile = research.profile || {};
+    const latest = bundle.latest_report;
+    const row = (bundle.monitoring?.rows || [])[0] || {};
+    const channel = state.channels.find((item) => item.youtube_channel_id === channelId) || {};
+    const kpis = [
+      kpi(overview.subscriber_count != null ? compactNumber(overview.subscriber_count) : null, 'Người đăng ký'),
+      kpi(overview.video_count != null ? number(overview.video_count) : null, 'Tổng video'),
+      kpi(summary.coverage?.videos ? number(summary.coverage.videos) : null, 'Video gần đây đã đọc'),
+    ].join('');
+    // Channel tiles hold channel-scope figures only. What the latest project
+    // research collected (similar videos, their comments) is shown apart,
+    // named as that project's, never as the channel's own.
+    const researchTiles = [
+      summary.coverage?.videos ? kpi(number(summary.coverage.videos), 'video của kênh đã nghiên cứu') : '',
+      summary.coverage?.comments_sampled ? kpi(number(summary.coverage.comments_sampled), 'comment của kênh đã lấy mẫu') : '',
+    ].join('');
+    const recent = bundle.recent_videos || [];
+    const performance = research.performance || {};
+    const cadence = profile.cadence || {};
+    const charts = [
+      viewsChart(recent) ? `<div class="chart-card wide"><h3>Hiệu suất gần đây</h3><div class="secondary-text">Lượt xem hiện tại của ${recent.length} video gần nhất, theo ngày đăng (thang log)${performance.median_views != null ? ` · trung vị ${number(performance.median_views)}` : ''}</div>${viewsChart(recent)}</div>` : '',
+      weekdayChart(recent) ? `<div class="chart-card"><h3>Nhịp đăng video</h3>${cadence.uploads_per_week != null ? `<div class="secondary-text">~ ${esc(cadence.uploads_per_week)} video / tuần</div>` : ''}${weekdayChart(recent)}</div>` : '',
+      durationChart(profile.duration) ? `<div class="chart-card"><h3>Độ dài video phổ biến</h3>${profile.duration.median_seconds ? `<div class="secondary-text">Trung vị ${esc(formatStudioDuration(profile.duration.median_seconds))}</div>` : ''}${durationChart(profile.duration)}</div>` : '',
+      topicBars(profile.topics, profile.sample?.videos) ? `<div class="chart-card"><h3>Chủ đề chính <span class="secondary-text">(theo tag, trên ${profile.sample.videos} video)</span></h3>${topicBars(profile.topics, profile.sample.videos)}</div>` : '',
+    ].filter(Boolean).join('');
+    return `
+      <div class="overview-top">${kpis ? `<div class="kpi-row">${kpis}</div>` : ''}${researchStatusCard(channelId, bundle)}</div>
+      <div class="overview-grid">
+        <section class="detail-card"><h3>Thông tin kênh</h3>
+          ${infoRow('Tên kênh', esc(overview.title || channelId))}
+          ${infoRow('Nền tảng', esc(platformLabel(identity.platform)))}
+          ${infoRow('Channel ID', identity.native_channel_id ? esc(identity.native_channel_id) : '<span class="secondary-text">Chưa xác định</span>')}
+          ${infoRow('Mô tả', research.channel?.description ? `<div class="clamp" title="Bấm để xem đầy đủ" onclick="this.classList.toggle('open')">${esc(research.channel.description)}</div>` : '')}
+          ${infoRow('Lần đồng bộ', row.last_sync_at ? esc(date(row.last_sync_at)) : '<span class="secondary-text">Chưa đồng bộ</span>')}
+          ${infoRow('Trạng thái', monitoringBadge(channel))}
+        </section>
+        <section class="detail-card"><h3>Nghiên cứu kênh</h3>
+          ${researchTiles ? `<div class="kpi-row compact">${researchTiles}</div>` : '<div class="empty">Chưa nghiên cứu kênh này.</div>'}
+          ${latestResearch(latest)}
+          ${partialNotice(channelId, latest)}
+        </section>
+      </div>
+      ${charts ? `<div class="chart-grid">${charts}</div>` : ''}`;
+  }
+
+  function renderChannelVideos(channelId, bundle) {
+    const videos = bundle.videos || [];
+    if (!videos.length) return '<div class="empty">Chưa có video nào của kênh này trong app. Cập nhật nghiên cứu hoặc đồng bộ để đọc video gần đây.</div>';
+    const query = (state.channelVideoQuery || '').toLowerCase();
+    const sort = state.channelVideoSort || 'recent';
+    const shown = videos.filter((item) => !query || String(item.title || '').toLowerCase().includes(query))
+      .sort((left, right) => sort === 'views' ? (right.view_count || 0) - (left.view_count || 0)
+        : String(right.published_at || '').localeCompare(String(left.published_at || '')));
+    return `<div class="video-tools">
+        <input type="search" placeholder="Tìm video..." value="${esc(state.channelVideoQuery || '')}" aria-label="Tìm video"
+          onchange="state.channelVideoQuery = this.value; renderChannelDetail('${esc(channelId)}')">
+        <select aria-label="Sắp xếp" onchange="state.channelVideoSort = this.value; renderChannelDetail('${esc(channelId)}')">
+          <option value="recent"${sort === 'recent' ? ' selected' : ''}>Mới nhất</option>
+          <option value="views"${sort === 'views' ? ' selected' : ''}>Nhiều lượt xem</option>
+        </select>
+        <span class="secondary-text">${shown.length}/${videos.length} video</span>
+      </div>
+      <div class="channel-videos">${shown.map((item) => `
+        <div class="channel-video">
+          ${item.thumbnail_url ? `<img src="${esc(item.thumbnail_url)}" alt="" loading="lazy">` : '<span class="channel-video-thumb"></span>'}
+          <div class="channel-video-body">
+            <div class="primary-text">${item.url ? `<a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title || item.video_id)}</a>` : esc(item.title || item.video_id)}</div>
+            <div class="secondary-text">${[item.published_at ? date(item.published_at) : '', item.duration_seconds ? formatStudioDuration(item.duration_seconds) : '',
+              item.view_count != null ? `${number(item.view_count)} lượt xem` : '', item.comment_count != null ? `${number(item.comment_count)} comment` : '']
+              .filter(Boolean).map(esc).join(' · ')}</div>
+          </div>
+          ${item.in_library || (item.url && YOUTUBE_CHANNEL.test(bundle.identity?.native_channel_id || ''))
+            ? `<button class="btn small" type="button" onclick="useChannelVideoAsSource('${esc(item.row_key)}', '${esc(item.url)}')">Dùng làm nguồn</button>` : ''}
+        </div>`).join('')}</div>`;
+  }
+
+  // An existing row opens in the studio; a video only known from research is
+  // imported first through the usual one-video import.
+  async function useChannelVideoAsSource(rowKey, url) {
+    try {
+      let key = rowKey;
+      if (!key) {
+        setMessage('Đang thêm video làm nguồn…');
+        const result = await api('/api/videos/import', {method: 'POST', body: JSON.stringify({reference: url, group_name: ''})});
+        key = result.video?.youtube_video_id;
+        await loadVideos();
+      }
+      if (key) await startStudioFromVideo(key);
+    } catch (error) { setMessage(`Chưa dùng được video này: ${error.message}`, 'error'); }
+  }
+
+  function renderChannelMonitoring(channelId, bundle) {
+    const monitoring = bundle.monitoring || {};
+    const run = monitoring.last_sync_run;
+    const rows = (monitoring.rows || []).map((row) => `
+      <tr>
+        <td><div class="primary-text">${esc(row.title || row.channel_key)}</div><div class="secondary-text">${esc(row.channel_key)}</div></td>
+        <td>${row.tracking_enabled ? statusTag(row.sync_status) : '<span class="tag red">ĐÃ TẠM DỪNG</span>'}</td>
+        <td class="secondary-text">${date(row.last_sync_at)}${row.last_error ? `<div class="warning-text">${esc(String(row.last_error).slice(0, 120))}</div>` : ''}</td>
+        <td><div class="channel-actions">
+          ${YOUTUBE_CHANNEL.test(row.channel_key) ? `<button class="btn small ghost" onclick="syncChannel('${esc(row.channel_key)}')">Đồng bộ</button>` : ''}
+          <button class="btn small ${row.tracking_enabled ? 'danger' : ''}" onclick="toggleChannel('${esc(row.channel_key)}', ${!row.tracking_enabled})">${row.tracking_enabled ? 'Tạm dừng' : 'Tiếp tục'}</button>
+          <button class="btn small ghost" onclick="editChannelGroup('${esc(row.channel_key)}')">Nhãn</button>
+        </div></td>
+      </tr>`).join('');
+    return `<div class="kpi-row">
+        ${kpi(number(monitoring.videos), 'video trong kho')}
+        ${kpi(number(monitoring.videos_with_counts), 'video có số liệu')}
+        ${monitoring.total_views != null ? kpi(compactNumber(monitoring.total_views), 'tổng lượt xem (video trong kho)') : ''}
+        ${kpi(number(monitoring.statistics_snapshots), 'bản chụp số liệu')}
+        ${kpi(number(monitoring.metadata_versions), 'phiên bản metadata')}
+      </div>
+      ${monitoring.latest_statistics_at ? `<div class="secondary-text">Bản chụp số liệu mới nhất: ${esc(date(monitoring.latest_statistics_at))}</div>` : ''}
+      ${run ? `<div class="secondary-text">Lần đồng bộ gần nhất: ${esc(run.status)} · ${esc(date(run.started_at))} · kiểm tra ${esc(number(run.videos_seen))}, mới ${esc(number(run.videos_new))}</div>` : ''}
+      ${rows ? `<div class="table-wrap"><table><thead><tr><th>Bản ghi kênh</th><th>Trạng thái</th><th>Đồng bộ gần nhất</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+  }
+
+  function researchSection(title, html, id = '') {
+    return html ? `<section class="detail-card"${id ? ` id="${id}"` : ''}><h3>${esc(title)}</h3>${html}</section>` : '';
+  }
+
+  function chips(items) {
+    return items.length ? `<div class="keyword-list">${items.map((item) => `<span class="keyword">${esc(item)}</span>`).join('')}</div>` : '';
+  }
+
+  function renderChannelResearch(channelId, bundle) {
+    const research = bundle.research || {};
+    const summary = research.summary || {};
+    const profile = research.profile || {};
+    const performance = research.performance || {};
+    const patterns = research.patterns || [];
+    const audience = research.audience || {};
+    const latest = bundle.latest_report;
+    const titles = profile.titles || {};
+    const shapes = (titles.shapes || []).filter((item) => item.count >= 2);
+    const cadence = profile.cadence || {};
+    const samples = audience.samples || [];
+    const byKind = (sample, kind) => (sample.patterns || []).find((item) => item.kind === kind) || {};
+    const questions = samples.map((sample) => {
+      const item = byKind(sample, 'questions');
+      return item.count ? `<li>${esc(`${item.count}/${item.of} comment mẫu là câu hỏi`)}${(item.examples || []).length ? ` · “${esc(item.examples[0])}”` : ''}</li>` : '';
+    }).join('');
+    const concerns = samples.flatMap((sample) => (byKind(sample, 'terms').items || []).slice(0, 5)
+      .map((item) => `<li>${esc(`${item.count}/${item.of} comment mẫu đề cập “${item.term}”`)}</li>`)).join('');
+    const negatives = samples.map((sample) => {
+      const item = byKind(sample, 'negative');
+      return item.count ? `<li>${esc(`${item.count}/${item.of} comment mẫu có từ khoá tiêu cực`)}${(item.examples || []).length ? ` · “${esc(item.examples[0])}”` : ''}</li>` : '';
+    }).join('');
+    const coverage = [
+      summary.coverage?.videos ? `${number(summary.coverage.videos)} video của kênh` : '',
+      summary.coverage?.comments_sampled ? `${number(summary.coverage.comments_sampled)} comment của kênh đã lấy mẫu` : '',
+    ].filter(Boolean);
+    const unread = latest?.unread_sources || [];
+    const sections = [
+      researchSection('Tổng quan kênh', research.channel?.description ? `<div class="clamp" title="Bấm để xem đầy đủ" onclick="this.classList.toggle('open')">${esc(research.channel.description)}</div>` : ''),
+      researchSection('Chủ đề chính', topicBars(profile.topics, profile.sample?.videos)),
+      researchSection('Tag chung của kênh', chips((profile.channel_tags || []).map((item) => `${item.term} · ${item.videos} video`))),
+      researchSection('Nhịp đăng', cadence.uploads_per_week != null ? `<p>${esc(`${cadence.uploads_per_week} video/tuần · khoảng cách trung vị ${cadence.median_gap_days ?? '—'} ngày · ${cadence.uploads_last_30_days} video trong 30 ngày`)}</p>${weekdayChart(bundle.recent_videos)}` : ''),
+      researchSection('Độ dài phổ biến', durationChart(profile.duration)),
+      researchSection('Hiệu suất gần đây', performance.median_views != null ? `<p>${esc(`Trung vị ${number(performance.median_views)} lượt xem trên ${performance.measured_videos} video`)}${performance.p25_views != null ? esc(` · khoảng giữa ${number(performance.p25_views)}–${number(performance.p75_views)}`) : ''}</p>`
+        + (performance.recent_median_views != null ? `<p>${esc(`${performance.recent_videos} video gần nhất (≥ 7 ngày): trung vị ${number(performance.recent_median_views)} · ×${performance.recent_vs_overall} so với chung`)}</p>` : '')
+        + ((performance.standouts || []).length ? `<div class="research-sub">Video nổi bật</div><ul class="studio-result-list">${performance.standouts.map((item) => `
+          <li><a href="https://www.youtube.com/watch?v=${esc(item.video_id)}" target="_blank" rel="noreferrer">${esc(item.title)}</a> <span class="secondary-text">${esc(`${number(item.view_count)} lượt xem · ×${item.times_median} trung vị`)}</span></li>`).join('')}</ul>` : '') : ''),
+      researchSection('Mẫu tiêu đề', titles.measured ? `<p class="secondary-text">${esc(`${titles.measured} tiêu đề · dài trung bình ${titles.average_length} ký tự`)}</p>`
+        + (shapes.length ? `<ul class="studio-result-list">${shapes.map((item) => `<li>${esc(`${item.label}: ${item.count}/${item.of}`)}</li>`).join('')}</ul>` : '')
+        + chips((titles.top_terms || []).map((item) => `${item.term} (${item.count}/${item.of})`)) : ''),
+      researchSection('Hook / Content patterns', patterns.length ? `<ul class="studio-result-list">${patterns.map((item) => `<li>${esc(item.description)} <span class="secondary-text">· ${item.evidence_count} ví dụ</span></li>`).join('')}</ul>` : ''),
+      researchSection('Người xem (từ comment mẫu)', audience.total_sample ? `<p class="secondary-text">${esc(`${audience.total_sample} comment mẫu từ ${audience.videos} video của kênh · chỉ phản ánh mẫu đã đọc, không đại diện toàn bộ người xem`)}</p>`
+        + (questions ? `<div class="research-sub">Những câu hỏi phổ biến</div><ul class="studio-result-list">${questions}</ul>` : '')
+        + (concerns ? `<div class="research-sub">Mối quan tâm</div><ul class="studio-result-list">${concerns}</ul>` : '')
+        + (negatives ? `<div class="research-sub">Phản đối / pain points (theo từ khoá)</div><ul class="studio-result-list">${negatives}</ul>` : '') : ''),
+      researchSection('Giới hạn', unread.length || (latest?.limitations || []).length
+        ? `<ul class="studio-result-list">${unread.map((item) => `<li>${esc(`${item.what} · ${item.where}: ${item.why}`)}</li>`).join('')}${(latest?.limitations || []).map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : '', 'researchLimitations'),
+    ].filter(Boolean).join('');
+    return `${researchStatusCard(channelId, bundle)}
+      ${coverage.length ? `<div class="coverage-line"><b>Kênh</b>${coverage.map((item) => `<span>${esc(item)}</span>`).join('')}</div>` : ''}
+      ${latestResearch(latest)}
+      ${sections ? `<div class="research-sections">${sections}</div>` : '<div class="empty">Chưa có dữ liệu nghiên cứu cho kênh này.</div>'}`;
+  }
+
+  async function refreshChannelResearch(channelId, mode = 'auto') {
+    if (state.channelResearchPending?.[channelId]) return;
+    state.channelResearchPending = {...(state.channelResearchPending || {}), [channelId]: true};
+    if (channelId === state.selectedChannel) renderChannelDetail(channelId);
+    followChannelResearch(channelId);
+    try {
+      const response = await api(`/api/channels/${encodeURIComponent(channelId)}/research/refresh`, {
+        method: 'POST', body: JSON.stringify({mode}),
+      });
+      setMessage(`Đã cập nhật nghiên cứu kênh: ${RESEARCH_RESULT[response.result?.status] || 'xong'}.`, 'success');
+    } catch (error) {
+      setMessage(error.status === 409 ? 'Kênh này đang được nghiên cứu, đang theo dõi tiến độ.' : `Chưa cập nhật được nghiên cứu: ${error.message}`, error.status === 409 ? '' : 'error');
+    } finally {
+      delete state.channelResearchPending[channelId];
+      await loadChannelDetail(channelId);
+      await loadChannels();
+    }
+  }
+
+  // Hỏi lại server trong lúc một lượt nghiên cứu chạy, kể cả sau khi tải lại
+  // trang, và kể cả khi lượt đó do bước Kế hoạch khởi động.
+  function followChannelResearch(channelId) {
+    state.channelResearchWatch = state.channelResearchWatch || {};
+    if (state.channelResearchWatch[channelId]) return;
+    const tick = async () => {
+      let bundle = null;
+      try { bundle = await api(`/api/channels/${encodeURIComponent(channelId)}/research`); } catch (_) { /* hỏi lại sau */ }
+      if (bundle) {
+        state.channelResearch = {...(state.channelResearch || {}), [channelId]: bundle};
+        if (state.selectedChannel === channelId) renderChannelDetail(channelId);
+      }
+      const running = bundle?.research?.summary?.state === 'running' || state.channelResearchPending?.[channelId];
+      if (running) {
+        state.channelResearchWatch[channelId] = setTimeout(tick, CHANNEL_RESEARCH_POLL_MS);
+        return;
+      }
+      delete state.channelResearchWatch[channelId];
+      if (!state.channelResearchPending?.[channelId]) void loadChannels();
+    };
+    state.channelResearchWatch[channelId] = setTimeout(tick, CHANNEL_RESEARCH_POLL_MS);
   }
 
   async function loadVideos() {

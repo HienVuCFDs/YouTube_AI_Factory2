@@ -34,6 +34,9 @@ class StepDefinition:
     # Anything true here stays behind the confirmation policy.
     spends: bool = False
     note: str = ""
+    # Kept running so nothing that calls it breaks, but superseded: new work
+    # must not build on it.
+    legacy: bool = False
 
 
 STEPS: tuple[StepDefinition, ...] = (
@@ -44,10 +47,21 @@ STEPS: tuple[StepDefinition, ...] = (
         note="Đọc video/nguồn và rút ra chủ đề, phong cách, nhịp dựng.",
     ),
     StepDefinition(
-        key="research",
-        label="Nghiên cứu",
+        key="plan",
+        label="Lập kế hoạch",
         stage="orchestration",
-        note="Tra cứu web, lưu kết quả lại cho bước viết kịch bản đọc.",
+        requires=("analyze",),
+        note="Từ nguồn đã phân tích: nên làm video gì và làm thế nào. Lưu ResearchReport và ProjectPlan.",
+    ),
+    StepDefinition(
+        key="research",
+        label="Nghiên cứu (cũ)",
+        stage="orchestration",
+        legacy=True,
+        note=(
+            "Đường cũ: tra web theo tên dự án, lưu artifact mà không bước nào đọc. "
+            "Giữ để không gãy lời gọi cũ; Kế hoạch mới không dùng kết quả này."
+        ),
     ),
     StepDefinition(
         key="script",
@@ -180,6 +194,7 @@ def describe(done: Iterable[str], running: Iterable[str] = ()) -> list[dict[str,
             "requires": list(step.requires),
             "spends": step.spends,
             "note": step.note,
+            "legacy": step.legacy,
             "state": state,
             "missing": missing,
         })

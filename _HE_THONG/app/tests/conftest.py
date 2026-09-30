@@ -18,3 +18,7 @@ os.environ.setdefault("PRODUCTION_ARTIFACT_DIR", str(_test_root / "projects"))
 os.environ.setdefault("WEB_VIDEO_STATE_DIR", str(_test_root / "browser_state"))
 os.environ.setdefault("YOUTUBE_PROFILES_DIR", str(_test_root / "browser_state" / "profiles"))
 os.environ.setdefault("YOUTUBE_CONNECTIONS_STORE", str(_test_root / "browser_state" / "connections.json"))
+# settings.py loads config/.env with setdefault, so the real YouTube key would
+# otherwise reach the tests: one that forgot to fake the client would spend
+# the user's daily Data API quota. Blank on purpose, not setdefault.
+os.environ["YOUTUBE_API_KEY"] = ""

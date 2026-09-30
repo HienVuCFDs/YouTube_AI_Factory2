@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>YouTube AI Factory - Giám sát</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260929-step1g" />
+  <link rel="stylesheet" href="/static/app.css?v=20260930-sources5" />
 </head>
 <body>
 <div class="app">
@@ -16,7 +16,7 @@
       <div class="nav-label">Làm việc</div>
       <button class="nav-item active" data-workspace-nav="dashboard" onclick="setWorkspace('dashboard')"><span class="nav-icon">◉</span> Tạo video</button>
       <button class="nav-item" data-workspace-nav="orchestration" onclick="setWorkspace('orchestration')"><span class="nav-icon">⇄</span> Điều phối AI</button>
-      <button class="nav-item" data-workspace-nav="source" onclick="setWorkspace('source')"><span class="nav-icon">▣</span> Video tham khảo</button>
+      <button class="nav-item" data-workspace-nav="source" onclick="setWorkspace('source')"><span class="nav-icon">▣</span> Nguồn tham khảo</button>
       <button class="nav-item" data-workspace-nav="production" onclick="setWorkspace('production')"><span class="nav-icon">✎</span> Dự án</button>
       <button class="nav-item" data-workspace-nav="managed" onclick="setWorkspace('managed')"><span class="nav-icon">◎</span> Kênh xuất bản</button>
       <button class="nav-item" data-workspace-nav="workflows" onclick="setWorkspace('workflows')"><span class="nav-icon">✦</span> Công cụ AI</button>
@@ -63,7 +63,7 @@
           <div class="studio-step-intro">
             <div><span class="studio-kicker">BƯỚC 01</span><h3>Phân tích</h3><p>Phân tích và hiểu nội dung của nguồn tham khảo đang chọn</p></div>
           </div>
-          <!-- Chọn nguồn thuộc tab Video tham khảo ("Dựng lại video →"); các ô này chỉ giữ trạng thái cho nút đó. -->
+          <!-- Chọn nguồn thuộc tab Nguồn tham khảo ("Dựng lại video →"); các ô này chỉ giữ trạng thái cho nút đó. -->
           <div class="studio-source-pickers" hidden>
             <select id="studioSourceChannelSelect" aria-label="Kênh nguồn"><option value="">Chưa có kênh nguồn</option></select>
             <select id="studioVideoSelect" aria-label="Nguồn"><option value="">Chưa có nguồn</option></select>
@@ -72,7 +72,7 @@
           </div>
           <section class="studio-work-card studio-source-now">
             <div class="studio-card-head"><div><b>Nguồn đang dùng</b></div><button class="btn small ghost" type="button" onclick="setWorkspace('source')">Đổi nguồn</button></div>
-            <div id="studioVideoPreview" class="studio-source-card-body"><div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Video tham khảo.</div></div>
+            <div id="studioVideoPreview" class="studio-source-card-body"><div class="studio-empty">Chưa chọn nguồn. Bấm “Đổi nguồn” để chọn trong Nguồn tham khảo.</div></div>
           </section>
           <div class="studio-analyze-row">
             <button id="studioAnalyzeButton" class="btn primary studio-analyze-cta" disabled>Phân tích</button>
@@ -349,7 +349,25 @@
         <div class="metric red"><div class="metric-label">CHỜ PHÂN TÍCH</div><div id="pendingCount" class="metric-value">0</div><div id="completedFoot" class="metric-foot">0 ĐÃ HOÀN TẤT</div></div>
       </section>
 
-      <section id="addChannelPanel" class="panel register workspace-panel">
+      <section id="sourceTabsPanel" class="source-tabs-panel workspace-panel">
+        <nav class="source-tabs" role="tablist" aria-label="Nguồn tham khảo">
+          <button type="button" role="tab" class="source-tab" data-source-tab-button="sources" onclick="setSourceTab('sources')"><span aria-hidden="true">▤</span> NGUỒN</button>
+          <button type="button" role="tab" class="source-tab" data-source-tab-button="channels" onclick="setSourceTab('channels')"><span aria-hidden="true">◎</span> KÊNH</button>
+          <button type="button" role="tab" class="source-tab" data-source-tab-button="queue" onclick="setSourceTab('queue')"><span aria-hidden="true">≡</span> HÀNG ĐỢI</button>
+          <button type="button" role="tab" class="source-tab" data-source-tab-button="library" onclick="setSourceTab('library')"><span aria-hidden="true">▦</span> THƯ VIỆN</button>
+        </nav>
+        <button class="btn primary" type="button" onclick="openAddSource('channel')">＋ Thêm kênh</button>
+        <div id="message" class="message source-message">Sẵn sàng.</div>
+      </section>
+
+      <section id="sourceKindsPanel" class="source-kinds workspace-panel" data-source-tab="sources">
+        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Nguồn video</b><span>Kênh, một video hoặc link YouTube, TikTok, Facebook…</span></button>
+        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Bài viết</b><span>Link bài báo, blog để phân tích nội dung</span></button>
+        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Sản phẩm</b><span>Link Shopee, TikTok Shop, Lazada…</span></button>
+        <button type="button" class="source-kind" onclick="openAddSource('upload')"><b>Ảnh / File</b><span>Tải video, audio hoặc ảnh từ máy</span></button>
+      </section>
+
+      <section id="addChannelPanel" class="panel register workspace-panel" data-source-tab="sources">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN THAM CHIẾU</div><div class="panel-sub">Thêm kênh, một video, bài viết, link sản phẩm — hoặc tải file lên.</div></div><span class="tag orange">YOUTUBE API</span></div>
         <div class="panel-body">
           <form id="addChannelForm" class="register-grid">
@@ -372,7 +390,7 @@
             <div id="studioUploadStatus" class="studio-model-note">Video/audio tải lên trở thành nguồn của dự án đang mở. Ảnh được thêm vào dự án làm tham khảo.</div>
             <div id="studioUploadResult" class="studio-result"></div>
           </div>
-          <div id="sourceImportLinkHint" class="secondary-text" style="margin-top:6px" hidden></div><div id="message" class="message">Sẵn sàng. Hãy thêm một kênh để bắt đầu.</div>
+          <div id="sourceImportLinkHint" class="secondary-text" style="margin-top:6px" hidden></div>
           <div id="sourceImportResult" class="source-import-result" hidden>
             <div>
               <div id="sourceImportResultTitle" class="source-import-result-title"></div>
@@ -383,25 +401,45 @@
         </div>
       </section>
 
-      <div id="sourceSplit" class="split workspace-panel">
-        <section id="channels" class="panel collapsible-panel">
-          <div class="panel-head collapsible-tab" onclick="togglePanel('channels')" onkeydown="handlePanelKey(event, 'channels')" role="button" tabindex="0" aria-expanded="true"><div><div class="panel-title"><span class="mark">◎</span> DANH SÁCH KÊNH</div><div class="panel-sub">Quản lý nhiều nguồn kênh · nhóm theo nhãn</div></div><div class="panel-head-tools"><span id="channelCountLabel" class="tag">0 NGUỒN</span><span id="channelsPanelChevron" class="panel-chevron">⌃</span></div></div>
-          <div class="collapsible-content"><div class="table-wrap"><table><thead><tr><th>Kênh</th><th>Trạng thái</th><th>Đồng bộ gần nhất</th><th></th></tr></thead><tbody id="channelsBody"></tbody></table></div></div>
-        </section>
+      <section id="channelWorkspace" class="channel-browser workspace-panel" data-source-tab="channels">
+        <aside class="channel-list-pane" aria-label="Danh sách kênh">
+          <div class="channel-filters">
+            <input id="channelSearch" type="search" placeholder="Tìm kênh..." aria-label="Tìm kênh" oninput="renderChannelList()">
+            <select id="channelPlatformFilter" aria-label="Lọc theo nền tảng" onchange="renderChannelList()"><option value="">Tất cả nền tảng</option></select>
+            <select id="channelStatusFilter" aria-label="Lọc theo trạng thái" onchange="renderChannelList()"><option value="">Tất cả trạng thái</option></select>
+          </div>
+          <div class="channel-list-meta"><span id="channelCountLabel">0 kênh</span><span class="secondary-text">Cập nhật gần nhất</span></div>
+          <div id="channelList" class="channel-list" role="listbox" aria-label="Kênh"></div>
+        </aside>
+        <section id="channelDetail" class="channel-detail-pane" aria-live="polite"></section>
+      </section>
 
-        <section id="analysis" class="panel">
-          <div class="panel-head"><div><div class="panel-title"><span class="mark">✦</span> HÀNG ĐỢI PHÂN TÍCH</div><div class="panel-sub">Quy trình phân tích metadata dạng text</div></div><div class="queue-controls"><select id="analysisChannelSelect" aria-label="Chọn kênh"><option value="">Tất cả kênh</option></select><select id="analysisProviderSelect" aria-label="Chọn provider phân tích"><option value="local_metadata">Local (miễn phí)</option></select><select id="analysisLimit" aria-label="Số lượng video"><option value="25">25 video</option><option value="100" selected>100 video</option><option value="500">500 video</option></select><button id="queueAnalysisButton" class="btn small primary">Phân tích video chờ</button><button id="queuePauseButton" class="btn small ghost">Tạm dừng</button></div></div>
-          <div class="panel-body" style="padding-top:0"><span id="queueStatusTag" class="tag cyan">ĐANG KHỞI TẠO HÀNG ĐỢI</span></div>
-          <div id="jobsBody" class="panel-body"></div>
-        </section>
-      </div>
+      <section id="queueOverview" class="queue-overview workspace-panel" data-source-tab="queue">
+        <div class="queue-kind"><b>Analyze</b><span>Phân tích metadata video, ngay bên dưới.</span></div>
+        <div class="queue-kind"><b>Research</b><span>Mỗi lượt nghiên cứu kênh hiện theo dõi trong tab Kênh.</span></div>
+        <div class="queue-kind"><b>Transcript</b><span>Tạo transcript hàng loạt, ngay bên dưới.</span></div>
+        <div class="queue-kind"><b>Sync</b><span>Đồng bộ từng kênh trong tab Kênh.</span></div>
+      </section>
 
-      <section id="transcriptQueue" class="panel workspace-panel">
+      <section id="analysis" class="panel workspace-panel" data-source-tab="queue">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">✦</span> HÀNG ĐỢI PHÂN TÍCH</div><div class="panel-sub">Quy trình phân tích metadata dạng text</div></div><div class="queue-controls"><select id="analysisChannelSelect" aria-label="Chọn kênh"><option value="">Tất cả kênh</option></select><select id="analysisProviderSelect" aria-label="Chọn provider phân tích"><option value="local_metadata">Local (miễn phí)</option></select><select id="analysisLimit" aria-label="Số lượng video"><option value="25">25 video</option><option value="100" selected>100 video</option><option value="500">500 video</option></select><button id="queueAnalysisButton" class="btn small primary">Phân tích video chờ</button><button id="queuePauseButton" class="btn small ghost">Tạm dừng</button></div></div>
+        <div class="panel-body" style="padding-top:0"><span id="queueStatusTag" class="tag cyan">ĐANG KHỞI TẠO HÀNG ĐỢI</span></div>
+        <div id="jobsBody" class="panel-body"></div>
+      </section>
+
+      <section id="transcriptQueue" class="panel workspace-panel" data-source-tab="queue">
         <div class="panel-head"><div><div class="panel-title"><span class="mark">⌁</span> HÀNG ĐỢI TRANSCRIPT (WHISPER)</div><div class="panel-sub">Tự động trích xuất audio tạm và tạo transcript hàng loạt bằng faster-whisper</div></div><div class="queue-controls"><select id="transcriptChannelSelect" aria-label="Chọn kênh"><option value="">Tất cả kênh</option></select><select id="transcriptLimit" aria-label="Số lượng video"><option value="10" selected>10 video</option><option value="25">25 video</option><option value="100">100 video</option></select><button id="queueTranscriptButton" class="btn small primary">Tạo transcript hàng loạt</button><button id="transcriptPauseButton" class="btn small ghost">Tạm dừng</button></div></div>
         <div class="panel-body" style="padding-top:0"><span id="transcriptQueueStatusTag" class="tag cyan">ĐANG KHỞI TẠO HÀNG ĐỢI</span></div>
       </section>
 
-      <section id="videos" class="panel collapsible-panel workspace-panel">
+      <section id="libraryKinds" class="source-kinds library-kinds workspace-panel" data-source-tab="library">
+        <div class="source-kind active"><b>Video</b><span>Video nguồn đã thêm, bên dưới.</span></div>
+        <div class="source-kind"><b>Ảnh</b><span>Ảnh hiện nằm trong từng dự án.</span></div>
+        <div class="source-kind"><b>Audio</b><span>Chưa có thư viện audio chung.</span></div>
+        <div class="source-kind"><b>Transcript</b><span>Transcript mở từ từng video.</span></div>
+      </section>
+
+      <section id="videos" class="panel collapsible-panel workspace-panel" data-source-tab="library">
         <div class="panel-head collapsible-tab" onclick="togglePanel('videos')" onkeydown="handlePanelKey(event, 'videos')" role="button" tabindex="0" aria-expanded="true"><div><div class="panel-title"><span class="mark">▦</span> DANH MỤC VIDEO GẦN ĐÂY</div><div class="panel-sub">Chỉ metadata · hệ thống mặc định không lưu file media</div></div><div class="panel-head-tools"><span id="videoCountLabel" class="tag">0 BẢN GHI</span><span id="videosPanelChevron" class="panel-chevron">⌃</span></div></div>
         <div class="collapsible-content"><div class="video-filter-bar"><label for="videoGroupFilter">Lọc theo</label><select id="videoGroupFilter" aria-label="Lọc video theo nhóm"><option value="">Tất cả nhóm</option></select><select id="videoChannelFilter" aria-label="Lọc video theo kênh"><option value="">Tất cả kênh</option></select><button class="btn small ghost" type="button" onclick="clearVideoFilters()">Xóa lọc</button><span id="videoFilterStatus" class="video-filter-status"></span></div><div id="batchToolbar" class="batch-toolbar"><span id="batchCount" class="tag orange">0 video đã chọn</span><button class="btn small ghost" onclick="batchAnalyze()">Phân tích</button><button class="btn small ghost" onclick="batchTranscript()">Transcript (Whisper)</button><button class="btn small ghost" onclick="batchWriter()">AI Writer</button><button class="btn small ghost" onclick="batchDownload('video')">Tải video</button><button class="btn small ghost" onclick="batchDownload('audio')">Tải audio</button><button class="btn small ghost" onclick="clearVideoSelection()">Bỏ chọn</button></div>
         <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAllVideos" onclick="toggleSelectAllVideos(this.checked)" /></th><th>Video</th><th>Nguồn</th><th>Ngày đăng</th><th>Lượt xem</th><th>Phân tích</th><th>Thao tác</th></tr></thead><tbody id="videosBody"></tbody></table></div></div>
@@ -443,10 +481,10 @@
   </div>
 </div>
 
-<script src="/static/core.js?v=20260929-step1g"></script>
-  <script src="/static/studio-lanes.js?v=20260929-step1g"></script>
-  <script src="/static/project-detail.js?v=20260929-step1g"></script>
-  <script src="/static/library.js?v=20260929-step1g"></script>
-  <script src="/static/publish.js?v=20260929-step1g"></script>
+<script src="/static/core.js?v=20260930-sources5"></script>
+  <script src="/static/studio-lanes.js?v=20260930-sources5"></script>
+  <script src="/static/project-detail.js?v=20260930-sources5"></script>
+  <script src="/static/library.js?v=20260930-sources5"></script>
+  <script src="/static/publish.js?v=20260930-sources5"></script>
 </body>
 </html>

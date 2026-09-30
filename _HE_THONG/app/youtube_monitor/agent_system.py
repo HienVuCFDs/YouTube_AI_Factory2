@@ -41,6 +41,9 @@ class AgentDefinition:
 
 
 DEFAULT_AGENTS = (
+    # LEGACY role: answers from the goal text alone, no tools, no evidence.
+    # Bước 2 · Kế hoạch (run_step "plan") replaces it and does not read its
+    # output; kept so the automation pipeline keeps running until retired.
     AgentDefinition("research", "Research Agent", "Research chủ đề, cơ hội và audience", "orchestration"),
     AgentDefinition("script", "Script Agent", "Viết hook, outline, narration và CTA", "script"),
     AgentDefinition("director", "Director Agent", "Chia scene, camera, motion và thời lượng", "storyboard"),

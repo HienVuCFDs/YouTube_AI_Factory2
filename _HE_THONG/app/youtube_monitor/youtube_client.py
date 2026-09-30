@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from .youtube_quota import QuotaExceeded
+
 
 API_BASE = "https://www.googleapis.com/youtube/v3"
 
@@ -14,6 +16,10 @@ class YouTubeApiError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class YouTubeQuotaExceeded(YouTubeApiError):
+    """Refused before the call: it would take the day over its quota."""
 
 
 def parse_channel_reference(reference: str) -> tuple[str, str]:
@@ -97,15 +103,34 @@ def thumbnail_url(thumbnails: dict[str, Any] | None) -> str:
 
 
 class YouTubeClient:
-    def __init__(self, api_key: str, timeout: float = 30.0):
+    def __init__(self, api_key: str, timeout: float = 30.0, quota: Any = None):
         self.api_key = api_key.strip()
         self.timeout = timeout
+        # A YouTubeQuota (youtube_quota.py) prices and records every call;
+        # without one the client behaves as it always did.
+        self.quota = quota
+
+    def __repr__(self) -> str:
+        # Never the key, not even in a debugger or a log of the object.
+        return f"YouTubeClient(api_key={'set' if self.api_key else 'missing'}, quota={'on' if self.quota else 'off'})"
+
+    def _redact(self, value: Any) -> str:
+        """The text with the API key taken out, wherever it appears."""
+        text = str(value or "")
+        if self.api_key:
+            text = text.replace(self.api_key, "***")
+        return re.sub(r"([?&]key=)[^&\s\"']+", r"\1***", text)
 
     def _get(self, resource: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise YouTubeApiError(
                 "Thiếu YOUTUBE_API_KEY. Hãy sao chép .env.example thành .env và thêm API key."
             )
+        if self.quota is not None:
+            try:
+                self.quota.check(resource)
+            except QuotaExceeded as exc:
+                raise YouTubeQuotaExceeded(str(exc), status_code=429) from exc
         request_params = {**params, "key": self.api_key}
         try:
             response = httpx.get(
@@ -114,18 +139,27 @@ class YouTubeClient:
                 timeout=self.timeout,
             )
         except httpx.HTTPError as exc:
-            raise YouTubeApiError(f"Không kết nối được YouTube API: {exc}") from exc
+            # Never reached Google, so nothing was spent. httpx can quote the
+            # request URL - key included - in its message, hence the redaction.
+            raise YouTubeApiError(f"Không kết nối được YouTube API: {self._redact(exc)}") from None
 
         if response.status_code >= 400:
             try:
                 payload = response.json()
                 message = payload.get("error", {}).get("message", response.text)
-            except ValueError:
-                message = response.text
-            raise YouTubeApiError(
-                f"YouTube API lỗi {response.status_code}: {message}",
+                reasons = [item.get("reason", "") for item in payload.get("error", {}).get("errors", [])]
+            except (ValueError, AttributeError):
+                message, reasons = response.text, []
+            if self.quota is not None:
+                self.quota.record(resource, ok=False, status_code=response.status_code, note=",".join(reasons))
+            error = YouTubeApiError(
+                f"YouTube API lỗi {response.status_code}: {self._redact(message)}",
                 status_code=response.status_code,
             )
+            error.reasons = reasons  # type: ignore[attr-defined]
+            raise error
+        if self.quota is not None:
+            self.quota.record(resource, ok=True)
         return response.json()
 
     def get_channel(self, reference: str) -> dict[str, Any]:
@@ -200,3 +234,142 @@ class YouTubeClient:
             )
             results.extend(payload.get("items", []))
         return results
+
+    # -- Research foundation. Official API first for YouTube metrics, search
+    # -- and comments; yt-dlp stays the metadata/transcript fallback.
+
+    def search_videos(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        published_after: str | None = None,
+        region_code: str | None = None,
+        relevance_language: str | None = None,
+        order: str = "relevance",
+        video_duration: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Videos matching a query. 100 quota units per call - use sparingly.
+
+        Returns ids and snippets only; counts come from get_videos (1 unit per
+        50 videos), which is far cheaper than searching again.
+        """
+        text = " ".join(str(query or "").split())
+        if not text:
+            return []
+        params: dict[str, Any] = {
+            "part": "snippet",
+            "type": "video",
+            "q": text[:200],
+            "maxResults": max(1, min(int(max_results or 10), 50)),
+            "order": order if order in {"relevance", "date", "viewCount", "rating"} else "relevance",
+        }
+        if published_after:
+            params["publishedAfter"] = published_after
+        if region_code:
+            params["regionCode"] = region_code
+        if relevance_language:
+            params["relevanceLanguage"] = relevance_language
+        if video_duration in {"short", "medium", "long"}:
+            params["videoDuration"] = video_duration
+        payload = self._get("search", params)
+        found: list[dict[str, Any]] = []
+        for item in payload.get("items", []):
+            video_id = (item.get("id") or {}).get("videoId")
+            snippet = item.get("snippet") or {}
+            if not video_id:
+                continue
+            found.append({
+                "video_id": video_id,
+                "channel_id": snippet.get("channelId", ""),
+                "channel_title": snippet.get("channelTitle", ""),
+                "title": snippet.get("title", ""),
+                "description": snippet.get("description", ""),
+                "published_at": snippet.get("publishedAt"),
+                "thumbnail_url": thumbnail_url(snippet.get("thumbnails")),
+            })
+        return found
+
+    def list_channel_recent_videos(
+        self,
+        channel_id: str,
+        *,
+        max_results: int = 20,
+        uploads_playlist_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """A channel's latest uploads with their counts, newest first.
+
+        About 2 units: one page of the uploads playlist and one videos call.
+        The uploads playlist of UC… is UU…, so the channels call is skipped
+        when the id has that shape.
+        """
+        playlist = uploads_playlist_id or ""
+        if not playlist and re.fullmatch(r"UC[\w-]{22}", channel_id or ""):
+            playlist = "UU" + channel_id[2:]
+        if not playlist:
+            playlist = self.get_channel_by_id(channel_id).get("uploads_playlist_id", "")
+        ids = self.list_upload_video_ids(playlist, max_videos=max(1, min(int(max_results or 20), 50)))
+        videos: list[dict[str, Any]] = []
+        for item in self.get_videos(ids):
+            snippet = item.get("snippet", {})
+            statistics = item.get("statistics", {})
+            videos.append({
+                "video_id": item.get("id"),
+                "channel_id": snippet.get("channelId", ""),
+                "title": snippet.get("title", ""),
+                "published_at": snippet.get("publishedAt"),
+                "duration_seconds": parse_duration((item.get("contentDetails") or {}).get("duration")),
+                "view_count": _int_or_none(statistics.get("viewCount")),
+                "like_count": _int_or_none(statistics.get("likeCount")),
+                "comment_count": _int_or_none(statistics.get("commentCount")),
+                "thumbnail_url": thumbnail_url(snippet.get("thumbnails")),
+            })
+        videos.sort(key=lambda video: str(video.get("published_at") or ""), reverse=True)
+        return videos
+
+    def list_comment_threads(
+        self,
+        video_id: str,
+        *,
+        max_results: int = 100,
+        order: str = "relevance",
+        page_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of top-level comments, without anything naming who wrote them.
+
+        1 unit per page of up to 100. A video with comments turned off comes
+        back as an empty, disabled sample rather than an error.
+        """
+        params: dict[str, Any] = {
+            "part": "snippet",
+            "videoId": video_id,
+            "maxResults": max(1, min(int(max_results or 100), 100)),
+            "order": order if order in {"relevance", "time"} else "relevance",
+            "textFormat": "plainText",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            payload = self._get("commentThreads", params)
+        except YouTubeApiError as exc:
+            if "commentsDisabled" in (getattr(exc, "reasons", None) or []):
+                return {"video_id": video_id, "comments": [], "disabled": True, "next_page_token": None}
+            raise
+        comments: list[dict[str, Any]] = []
+        for item in payload.get("items", []):
+            snippet = ((item.get("snippet") or {}).get("topLevelComment") or {}).get("snippet") or {}
+            # Only what was said and how it was received. Author name, channel
+            # id, profile picture and link are never read out of the response.
+            comments.append({
+                "text": str(snippet.get("textDisplay") or snippet.get("textOriginal") or "")[:2000],
+                "like_count": _int_or_none(snippet.get("likeCount")) or 0,
+                "reply_count": _int_or_none((item.get("snippet") or {}).get("totalReplyCount")) or 0,
+                "published_at": snippet.get("publishedAt"),
+            })
+        return {
+            "video_id": video_id,
+            "comments": comments,
+            "disabled": False,
+            "order": params["order"],
+            "next_page_token": payload.get("nextPageToken"),
+        }

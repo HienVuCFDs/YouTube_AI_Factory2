@@ -1,5 +1,10 @@
 """Small, optional web research helper for original folklore remakes.
 
+LEGACY: its result is stored on the writer output as `research_context`, but
+the writer's prompt never reads that argument, so it has no effect on the
+script. Bước 2 · Kế hoạch does not use it. Kept until it is retired or wired
+into the new research engine.
+
 Only search-result titles and snippets are used as idea pointers.  The writer is
 explicitly told to create an original plot, never to retell or scrape a source.
 Network failure is deliberately non-fatal: creative writing still works offline.
