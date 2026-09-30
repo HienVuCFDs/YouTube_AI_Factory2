@@ -30,8 +30,8 @@ def test_the_workspace_is_four_tabs_under_one_header() -> None:
 def test_every_old_panel_still_has_a_tab() -> None:
     markup = studio_markup()
     placed = {
-        "addChannelPanel": "sources", "channelWorkspace": "channels", "analysis": "queue",
-        "transcriptQueue": "queue", "videos": "library",
+        "sourceAddPanel": "sources", "sourceListPanel": "sources", "channelWorkspace": "channels",
+        "analysis": "queue", "transcriptQueue": "queue", "videos": "library",
     }
     for panel, tab in placed.items():
         start = markup.index(f'id="{panel}"')

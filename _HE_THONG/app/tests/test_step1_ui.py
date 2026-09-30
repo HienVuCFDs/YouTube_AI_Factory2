@@ -61,10 +61,12 @@ def test_the_source_is_shown_and_changed_in_the_reference_tab() -> None:
 
 def test_uploading_lives_in_the_reference_tab() -> None:
     markup = studio_markup()
-    panel = markup[markup.index('id="addChannelPanel"'):]
+    panel = markup[markup.index('id="sourceAddPanel"'):]
     panel = panel[:panel.index("</section>")]
-    for control in ("studioSourceUpload", "studioImageUpload", "studioFolderUpload", "studioUploadStatus"):
-        assert f'id="{control}"' in panel, control
+    # One picker for every kind of file, beside the link box.
+    assert '<input id="sourceFileInput" type="file" multiple' in panel
+    for gone in ("studioSourceUpload", "studioImageUpload", "studioFolderUpload"):
+        assert gone not in markup, gone
 
 
 def test_one_main_action_and_it_runs_the_analyze_step() -> None:

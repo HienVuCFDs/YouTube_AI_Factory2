@@ -30,7 +30,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SOURCE_KINDS = ("video", "article", "images", "product", "idea")
+from . import source_kinds
+
+# What the analysis reads a source as (source_kinds.ANALYSIS_KIND), plus "idea"
+# for a project with no source at all.
+SOURCE_KINDS = ("video", "audio", "article", "web", "images", "product", "idea")
 
 # Enough frames to follow what happens without becoming a wall the model skims.
 SHEET_TILES = 12
@@ -86,7 +90,7 @@ class Extraction:
     @property
     def has_dialogue(self) -> bool:
         """Spoken words specifically - an article has prose, not dialogue."""
-        return self.kind == "video" and bool(self.text.strip())
+        return self.kind in ("video", "audio") and bool(self.text.strip())
 
     @property
     def has_visual_style(self) -> bool:
@@ -196,7 +200,15 @@ def _kind_instruction(extraction: Extraction) -> str:
         )
     lines = {
         "video": "NGUON LA MOT VIDEO. Ban nhan loi thoai da phien am va mot bang cac khung hinh lay deu tu video.",
+        "audio": (
+            "NGUON LA MOT FILE AM THANH. Ban nhan loi noi da phien am; nguon khong co hinh anh nao, "
+            "nen de visual_style rong."
+        ),
         "article": "NGUON LA MOT BAI VIET. Ban nhan noi dung chu cua bai. Bai viet khong co loi thoai noi, de dialogue rong.",
+        "web": (
+            "NGUON LA MOT TRANG WEB, khong chac la bai viet. Ban nhan noi dung chu cua trang. "
+            "Trang khong co loi thoai noi, de dialogue rong."
+        ),
         "images": "NGUON CHI LA ANH TINH. Khong co loi thoai va khong co cot chuyen; hay mo ta that ky phong cach hinh anh, va ghi ro trong limitations rang moi cot chuyen sau nay la do nguoi viet sang tac.",
         "product": (
             "NGUON LA MOT TRANG BAN HANG. Cac con so o day - gia, dung luong, kich thuoc, so sao, "
@@ -315,26 +327,18 @@ def detect_kind(
     video: dict[str, Any] | None,
     image_assets: list[dict[str, Any]] | None = None,
 ) -> str:
-    """What kind of source this project actually has."""
-    if video and str(video.get("youtube_video_id") or "").strip():
-        # An idea project is stored against a placeholder video row, so the
-        # presence of a row is not by itself a source.
-        if not str(video.get("youtube_video_id") or "").startswith("idea-"):
-            from .page_source import looks_like_shop
+    """How the analysis reads this project's source: the row's own source_kind.
 
-            if looks_like_shop(str(video.get("video_url") or "")):
-                return "product"
-            return "article" if _is_article(video) else "video"
+    Read, not worked out: the importer stated it when the row was written
+    (source_kinds). A row with none is the placeholder behind an idea
+    project, which is not a source - its pictures are, if it has any.
+    """
+    stored = source_kinds.valid((video or {}).get("source_kind"))
+    if stored:
+        return source_kinds.ANALYSIS_KIND[stored]
     if image_assets:
         return "images"
     return "idea"
-
-
-def _is_article(video: dict[str, Any]) -> bool:
-    payload = video.get("raw_payload") or {}
-    if isinstance(payload, dict) and str(payload.get("source") or "") == "article_import":
-        return True
-    return int(video.get("duration_seconds") or 0) <= 0 and bool(str(video.get("description") or "").strip())
 
 
 def article_text(html_or_text: str, *, max_chars: int = MAX_TEXT_CHARS) -> str:

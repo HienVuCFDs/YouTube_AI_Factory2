@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>YouTube AI Factory - Giám sát</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260930-sources5" />
+  <link rel="stylesheet" href="/static/app.css?v=20260930-sources8" />
 </head>
 <body>
 <div class="app">
@@ -360,45 +360,27 @@
         <div id="message" class="message source-message">Sẵn sàng.</div>
       </section>
 
-      <section id="sourceKindsPanel" class="source-kinds workspace-panel" data-source-tab="sources">
-        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Nguồn video</b><span>Kênh, một video hoặc link YouTube, TikTok, Facebook…</span></button>
-        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Bài viết</b><span>Link bài báo, blog để phân tích nội dung</span></button>
-        <button type="button" class="source-kind" onclick="openAddSource('link')"><b>Sản phẩm</b><span>Link Shopee, TikTok Shop, Lazada…</span></button>
-        <button type="button" class="source-kind" onclick="openAddSource('upload')"><b>Ảnh / File</b><span>Tải video, audio hoặc ảnh từ máy</span></button>
+      <!-- NGUỒN: dán link hoặc thả file; app tự nhận dạng (source_detector) rồi mới thêm. -->
+      <section id="sourceAddPanel" class="panel source-add workspace-panel" data-source-tab="sources">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN</div><div class="panel-sub">Dán link hoặc thả file. App tự nhận ra đó là video, kênh, bài viết, sản phẩm hay ảnh.</div></div></div>
+        <div class="panel-body">
+          <div id="sourceDropZone" class="source-drop" ondragover="sourceDragOver(event)" ondragleave="sourceDragLeave(event)" ondrop="sourceDrop(event)">
+            <form class="source-link-row" onsubmit="event.preventDefault(); detectSourceLink()">
+              <input id="sourceInput" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="Dán link YouTube, TikTok, Shopee, bài viết…" aria-label="Dán link hoặc thả file">
+              <button class="btn primary" type="submit">Nhận dạng</button>
+            </form>
+            <div class="source-drop-hint">hoặc kéo thả file / ảnh / video vào đây</div>
+            <label class="btn ghost" for="sourceFileInput">Chọn từ máy</label>
+            <input id="sourceFileInput" type="file" multiple hidden onchange="pickSourceFiles(this)">
+          </div>
+          <div id="sourcePreview" class="source-preview" aria-live="polite" hidden></div>
+        </div>
       </section>
 
-      <section id="addChannelPanel" class="panel register workspace-panel" data-source-tab="sources">
-        <div class="panel-head"><div><div class="panel-title"><span class="mark">＋</span> THÊM NGUỒN THAM CHIẾU</div><div class="panel-sub">Thêm kênh, một video, bài viết, link sản phẩm — hoặc tải file lên.</div></div><span class="tag orange">YOUTUBE API</span></div>
-        <div class="panel-body">
-          <form id="addChannelForm" class="register-grid">
-            <div class="field"><label for="sourceImportType">Loại nguồn</label><select id="sourceImportType"><option value="channel">Kênh · lấy video trong kênh</option><option value="video">Một video YouTube · chỉ lấy video này</option><option value="link">Link bất kỳ · Bilibili, TikTok, Vimeo, Archive...</option></select></div>
-            <div class="field"><label for="reference" id="referenceLabel">URL kênh / @handle / ID</label><input id="reference" required placeholder="https://youtube.com/@GoogleDevelopers" /></div>
-            <div class="field"><label for="groupName">Nhãn nhóm</label><input id="groupName" placeholder="Công nghệ" /></div>
-            <button class="btn primary" type="submit" id="sourceImportSubmit">＋ Thêm & đồng bộ</button>
-          </form>
-          <div class="studio-upload compact source-upload-block">
-            <div class="studio-upload-title">Hoặc tải file lên</div>
-            <div class="studio-actions">
-              <label class="btn ghost" for="studioSourceUpload">Tải video/audio</label>
-              <input id="studioSourceUpload" type="file" accept="video/*,audio/*" hidden>
-              <label class="btn ghost" for="studioImageUpload">Tải ảnh</label>
-              <input id="studioImageUpload" type="file" accept="image/*" multiple hidden>
-              <label class="btn ghost" for="studioFolderUpload">Tải thư mục ảnh</label>
-              <input id="studioFolderUpload" type="file" webkitdirectory directory multiple hidden>
-              <button id="studioAnalyzeImagesButton" class="btn" type="button" hidden>Cho AI xem ảnh</button>
-            </div>
-            <div id="studioUploadStatus" class="studio-model-note">Video/audio tải lên trở thành nguồn của dự án đang mở. Ảnh được thêm vào dự án làm tham khảo.</div>
-            <div id="studioUploadResult" class="studio-result"></div>
-          </div>
-          <div id="sourceImportLinkHint" class="secondary-text" style="margin-top:6px" hidden></div>
-          <div id="sourceImportResult" class="source-import-result" hidden>
-            <div>
-              <div id="sourceImportResultTitle" class="source-import-result-title"></div>
-              <div class="source-import-result-copy">Video đã sẵn sàng để dùng làm mẫu. Bạn sẽ được chuyển sang bước tạo video với video này đã chọn.</div>
-            </div>
-            <button id="sourceImportRemakeButton" class="btn primary" type="button">✦ Dựng lại video này →</button>
-          </div>
-        </div>
+      <section id="sourceListPanel" class="panel source-list-panel workspace-panel" data-source-tab="sources">
+        <div class="panel-head"><div><div class="panel-title"><span class="mark">▤</span> NGUỒN ĐÃ LƯU</div><div class="panel-sub">Video, bài viết, sản phẩm và file đã thêm làm nguồn. Kênh nằm ở tab Kênh.</div></div></div>
+        <div id="sourceFilters" class="source-filters" role="tablist" aria-label="Lọc nguồn"></div>
+        <div id="sourceList" class="source-list" aria-live="polite"></div>
       </section>
 
       <section id="channelWorkspace" class="channel-browser workspace-panel" data-source-tab="channels">
@@ -481,10 +463,10 @@
   </div>
 </div>
 
-<script src="/static/core.js?v=20260930-sources5"></script>
-  <script src="/static/studio-lanes.js?v=20260930-sources5"></script>
-  <script src="/static/project-detail.js?v=20260930-sources5"></script>
-  <script src="/static/library.js?v=20260930-sources5"></script>
-  <script src="/static/publish.js?v=20260930-sources5"></script>
+<script src="/static/core.js?v=20260930-sources8"></script>
+  <script src="/static/studio-lanes.js?v=20260930-sources8"></script>
+  <script src="/static/project-detail.js?v=20260930-sources8"></script>
+  <script src="/static/library.js?v=20260930-sources8"></script>
+  <script src="/static/publish.js?v=20260930-sources8"></script>
 </body>
 </html>

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import workflows
+from . import source_kinds, workflows
 
 
 def utc_now() -> str:
@@ -946,6 +946,10 @@ class Database:
             self._ensure_column(connection, "videos", "metrics_captured_at", "TEXT")
             self._backfill_source_identity(connection)
             self._create_research_tables(connection)
+            # What the row is (source_kinds): stated by its importer, read by everything else.
+            self._ensure_column(connection, "videos", "source_kind", "TEXT NOT NULL DEFAULT ''")
+            self._create_source_tables(connection)
+            self._backfill_source_kind(connection)
             self._ensure_column(connection, "channel_profiles", "last_checked_at", "TEXT")
             self._ensure_column(connection, "audience_observations", "channel_ref", "TEXT NOT NULL DEFAULT ''")
             connection.execute(
@@ -1020,6 +1024,82 @@ class Database:
               AND youtube_video_id NOT LIKE 'web-%'
             """
         )
+
+    _SOURCE_ITEMS_TABLE = """
+        CREATE TABLE IF NOT EXISTS source_items (
+            youtube_video_id TEXT PRIMARY KEY
+                REFERENCES videos(youtube_video_id) ON DELETE CASCADE,
+            platform TEXT NOT NULL DEFAULT '',
+            detected_by TEXT NOT NULL DEFAULT '',
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            added_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_items_added ON source_items(added_at DESC);
+    """
+
+    @classmethod
+    def _create_source_tables(cls, connection: sqlite3.Connection) -> None:
+        """Which rows were added as sources, and when.
+
+        A video row alone cannot say it: a YouTube video added by link is
+        stored under its native id, exactly like one the monitor found. The
+        row itself is untouched; this only marks it. What it is lives on the
+        row (videos.source_kind), not here. `snapshot_json` holds what the
+        preview showed (a price with the time it was read, a site name) and
+        never a session, a cookie or a person.
+        """
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_items)")}
+        if "kind" in columns:
+            # The first cut kept a kind here as well. It moves to the row it
+            # describes, then the table is rebuilt without it; no row is lost.
+            connection.execute(
+                """
+                UPDATE videos SET source_kind = (
+                    SELECT CASE s.kind WHEN 'image' THEN 'image_collection' ELSE s.kind END
+                    FROM source_items s WHERE s.youtube_video_id = videos.youtube_video_id)
+                WHERE youtube_video_id IN (
+                    SELECT youtube_video_id FROM source_items
+                    WHERE kind IN ('video', 'article', 'product', 'image_collection', 'image', 'audio', 'web'))
+                """
+            )
+            connection.execute("ALTER TABLE source_items RENAME TO source_items_first_cut")
+            connection.execute("DROP INDEX IF EXISTS idx_source_items_added")
+            connection.executescript(cls._SOURCE_ITEMS_TABLE)
+            connection.execute(
+                """
+                INSERT INTO source_items (youtube_video_id, platform, detected_by, snapshot_json, added_at, updated_at)
+                SELECT youtube_video_id, platform, detected_by, snapshot_json, added_at, updated_at
+                FROM source_items_first_cut
+                """
+            )
+            connection.execute("DROP TABLE source_items_first_cut")
+        else:
+            connection.executescript(cls._SOURCE_ITEMS_TABLE)
+
+    @staticmethod
+    def _backfill_source_kind(connection: sqlite3.Connection) -> None:
+        """Give every row written before the column its kind, by the rules the app used then.
+
+        Only rows still without one are read, so this is safe on every start;
+        an idea placeholder keeps none and is looked at again, which is cheap.
+        """
+        rows = connection.execute(
+            """
+            SELECT youtube_video_id, video_url, duration_seconds, description, raw_payload_json
+            FROM videos WHERE source_kind = ''
+            """
+        ).fetchall()
+        updates = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["raw_payload_json"] or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            kind = source_kinds.for_row(dict(row), payload)
+            if kind:
+                updates.append((kind, row["youtube_video_id"]))
+        connection.executemany("UPDATE videos SET source_kind = ? WHERE youtube_video_id = ?", updates)
 
     @staticmethod
     def _create_research_tables(connection: sqlite3.Connection) -> None:
@@ -1619,6 +1699,18 @@ class Database:
             # A video the Data API returned is its own identity: say so now,
             # not at the next start's backfill.
             payload = video.get("raw_payload") if isinstance(video.get("raw_payload"), dict) else {}
+            # What the row is. The writer that knows says so and that stands;
+            # a writer that does not (the monitor) gets the one rule, once.
+            stated = source_kinds.valid(video.get("source_kind"))
+            if stated:
+                connection.execute("UPDATE videos SET source_kind = ? WHERE youtube_video_id = ?", (stated, video_id))
+            else:
+                derived = source_kinds.for_row(video, payload)
+                if derived:
+                    connection.execute(
+                        "UPDATE videos SET source_kind = ? WHERE youtube_video_id = ? AND source_kind = ''",
+                        (derived, video_id),
+                    )
             if payload.get("kind") == "youtube#video":
                 connection.execute(
                     """
@@ -1812,8 +1904,13 @@ class Database:
         *,
         title: str = "",
         language: str = "vi",
+        source: str = "high_level_request",
     ) -> dict[str, Any]:
-        """Create a content project without requiring a real source video."""
+        """Create a content project without requiring a real source video.
+
+        `source` says what the placeholder row stands for: a request, or a
+        set of pictures added as a source ("image_collection").
+        """
         channel_id = "UC_YOUTUBE_AI_FACTORY_IDEAS"
         idea_id = f"idea-{uuid.uuid4().hex}"
         cleaned_goal = goal.strip()
@@ -1836,7 +1933,9 @@ class Database:
                 "description": cleaned_goal,
                 "default_language": language.strip() or "vi",
                 "metadata_hash": uuid.uuid5(uuid.NAMESPACE_URL, cleaned_goal or idea_id).hex,
-                "raw_payload": {"source": "high_level_request", "goal": cleaned_goal},
+                "raw_payload": {"source": source, "goal": cleaned_goal},
+                # A request is not a source; a set of pictures is.
+                "source_kind": source_kinds.IMAGE_COLLECTION if source == "image_collection" else "",
             }
         )
         project = self.create_production_project(
@@ -6672,6 +6771,156 @@ class Database:
                     "(youtube_video_id, captured_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)",
                     (video_id, now, view_count, like_count, comment_count),
                 )
+
+    # ---- Sources added through "Thêm nguồn" --------------------------------
+
+    def is_source_item(self, video_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM source_items WHERE youtube_video_id = ?", (video_id,),
+            ).fetchone()
+        return row is not None
+
+    def record_source_item(
+        self, video_id: str, *, kind: str, platform: str = "", detected_by: str = "",
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Mark a row as added as a source, of this kind. Adding it again keeps when it was first added.
+
+        The kind is written onto the row (videos.source_kind), the one place
+        it is kept; this table only says the row was added, when, and what
+        its preview showed.
+        """
+        now = utc_now()
+        fresh = {key: value for key, value in (snapshot or {}).items() if value not in (None, "", [], {})}
+        stated = source_kinds.valid(kind)
+        with self._connect() as connection:
+            if stated:
+                connection.execute("UPDATE videos SET source_kind = ? WHERE youtube_video_id = ?", (stated, video_id))
+            row = connection.execute(
+                "SELECT snapshot_json FROM source_items WHERE youtube_video_id = ?", (video_id,),
+            ).fetchone()
+            try:
+                kept = json.loads(str(row["snapshot_json"] or "{}")) if row else {}
+            except json.JSONDecodeError:
+                kept = {}
+            merged = {**(kept if isinstance(kept, dict) else {}), **fresh}
+            connection.execute(
+                """
+                INSERT INTO source_items
+                    (youtube_video_id, platform, detected_by, snapshot_json, added_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(youtube_video_id) DO UPDATE SET
+                    platform = CASE WHEN excluded.platform <> '' THEN excluded.platform ELSE source_items.platform END,
+                    detected_by = CASE WHEN excluded.detected_by <> '' THEN excluded.detected_by
+                                       ELSE source_items.detected_by END,
+                    snapshot_json = excluded.snapshot_json,
+                    updated_at = excluded.updated_at
+                """,
+                (video_id, platform, detected_by, json.dumps(merged, ensure_ascii=False), now, now),
+            )
+            saved = connection.execute(
+                """
+                SELECT s.*, v.source_kind FROM source_items s
+                JOIN videos v ON v.youtube_video_id = s.youtube_video_id
+                WHERE s.youtube_video_id = ?
+                """,
+                (video_id,),
+            ).fetchone()
+        return dict(saved)
+
+    def list_source_rows(self) -> list[dict[str, Any]]:
+        """Every row that is a source someone added, newest first.
+
+        Marked rows, and the older ones that could only have been added by a
+        person: a link import ("web-…"), an upload ("local-…"), or any row a
+        project was made from. Rows the monitor found on its own, and the
+        placeholder rows behind idea projects, are not sources.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT v.youtube_video_id, v.youtube_channel_id, v.video_url, v.title, v.description,
+                       v.thumbnail_url, v.duration_seconds, v.first_seen_at, v.raw_payload_json,
+                       v.source_platform, v.native_channel_name, v.local_media_path, v.source_kind,
+                       c.title AS channel_title,
+                       s.platform AS source_item_platform,
+                       s.snapshot_json, s.added_at AS source_added_at,
+                       p.id AS project_id,
+                       EXISTS(
+                           SELECT 1 FROM video_analyses a
+                           WHERE a.youtube_video_id = v.youtube_video_id AND a.analysis_type = 'reference'
+                       ) AS analyzed,
+                       (SELECT COUNT(*) FROM project_assets pa
+                        WHERE pa.project_id = p.id AND pa.asset_type = 'image') AS image_count,
+                       (SELECT MIN(pa.id) FROM project_assets pa
+                        WHERE pa.project_id = p.id AND pa.asset_type = 'image') AS first_image_id
+                FROM videos v
+                LEFT JOIN source_items s ON s.youtube_video_id = v.youtube_video_id
+                LEFT JOIN production_projects p ON p.youtube_video_id = v.youtube_video_id
+                LEFT JOIN channels c ON c.youtube_channel_id = v.youtube_channel_id
+                WHERE s.youtube_video_id IS NOT NULL
+                   OR (v.youtube_video_id NOT LIKE 'idea-%'
+                       AND (v.youtube_video_id LIKE 'web-%' OR v.youtube_video_id LIKE 'local-%'
+                            OR p.id IS NOT NULL))
+                ORDER BY COALESCE(s.added_at, v.first_seen_at) DESC, v.id DESC
+                """
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            for key, target in (("raw_payload_json", "raw_payload"), ("snapshot_json", "snapshot")):
+                try:
+                    value = json.loads(str(item.pop(key) or "{}"))
+                except json.JSONDecodeError:
+                    value = {}
+                item[target] = value if isinstance(value, dict) else {}
+            items.append(item)
+        return items
+
+    def set_video_title(self, video_id: str, title: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE videos SET title = ? WHERE youtube_video_id = ?", (title[:300], video_id))
+
+    def find_video_by_url(self, url: str) -> dict[str, Any] | None:
+        """The oldest row stored for exactly this link, whatever key it was given."""
+        if not url:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT youtube_video_id FROM videos WHERE video_url = ? ORDER BY id LIMIT 1", (url,),
+            ).fetchone()
+        return self.get_video(str(row["youtube_video_id"])) if row else None
+
+    def find_channel_by_handle(self, handle: str) -> dict[str, Any] | None:
+        """The followed channel with this @handle, whichever way it was written."""
+        bare = str(handle or "").strip().lstrip("@").lower()
+        if not bare:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channels WHERE lower(handle) IN (?, ?) ORDER BY id LIMIT 1",
+                (bare, f"@{bare}"),
+            ).fetchone()
+        return self._dict(row)
+
+    def find_local_upload(self, channel_id: str, content_hash: str) -> dict[str, Any] | None:
+        """An earlier upload of the same bytes whose file is still on disk, or None."""
+        if not content_hash:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT youtube_video_id, local_media_path FROM videos
+                WHERE youtube_channel_id = ? AND metadata_hash = ? AND local_media_path <> ''
+                ORDER BY id
+                """,
+                (channel_id, content_hash),
+            ).fetchall()
+        for row in rows:
+            if Path(str(row["local_media_path"] or "")).is_file():
+                return self.get_video(str(row["youtube_video_id"]))
+        return None
 
     def find_videos_by_native_id(self, platform: str, native_video_id: str) -> list[dict[str, Any]]:
         """Every row standing for this platform video, oldest first."""

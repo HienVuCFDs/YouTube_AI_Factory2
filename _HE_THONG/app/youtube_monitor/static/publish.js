@@ -1410,89 +1410,12 @@
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
-  const SOURCE_IMPORT_FORM = {
-    channel: {
-      label: 'URL kênh / @handle / ID',
-      placeholder: 'https://youtube.com/@GoogleDevelopers',
-      submit: '＋ Thêm & đồng bộ',
-    },
-    video: {
-      label: 'URL video YouTube',
-      placeholder: 'https://www.youtube.com/watch?v=...',
-      submit: '＋ Thêm video này',
-    },
-    link: {
-      label: 'Link video từ nền tảng bất kỳ',
-      placeholder: 'https://www.bilibili.com/video/BV1... · TikTok · Vimeo · Archive.org',
-      submit: '＋ Thêm từ link',
-    },
-  };
-
-  function updateSourceImportForm() {
-    const mode = $('sourceImportType')?.value || 'channel';
-    const shape = SOURCE_IMPORT_FORM[mode] || SOURCE_IMPORT_FORM.channel;
-    $('sourceImportResult')?.setAttribute('hidden', '');
-    $('referenceLabel').textContent = shape.label;
-    $('reference').placeholder = shape.placeholder;
-    $('sourceImportSubmit').textContent = shape.submit;
-    const hint = $('sourceImportLinkHint');
-    if (hint) {
-      hint.hidden = mode !== 'link';
-      // Metadata only: nothing is fetched until a download is asked for.
-      hint.textContent = 'App đọc tiêu đề, tác giả và thời lượng bằng yt-dlp (khoảng 1800 trang được hỗ trợ). Chưa tải file về máy; bấm Tải video/audio ở bước sau khi cần.';
-    }
-  }
-
-  function showSourceImportResult(video) {
-    const result = $('sourceImportResult');
-    const title = $('sourceImportResultTitle');
-    const remake = $('sourceImportRemakeButton');
-    const videoId = String(video?.youtube_video_id || '');
-    if (!result || !title || !remake || !videoId) return;
-    title.textContent = `Đã thêm: ${video?.title || videoId}`;
-    remake.onclick = () => startStudioFromVideo(videoId);
-    result.removeAttribute('hidden');
-  }
-
-  $('addChannelForm').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const submit = event.target.querySelector('button[type="submit"]');
-    const mode = $('sourceImportType')?.value || 'channel';
-    const isVideo = mode === 'video';
-    const isLink = mode === 'link';
-    const reference = $('reference').value;
-    const groupName = $('groupName').value;
-    submit.disabled = true;
-    setMessage(
-      isLink ? 'Đang đọc thông tin video từ link...'
-      : isVideo ? 'Đang lấy metadata của đúng một video...'
-      : 'Đang đăng ký kênh và đồng bộ metadata...'
-    );
-    try {
-      let result;
-      if (isLink) {
-        result = await api('/api/videos/import-link', {method: 'POST', body: JSON.stringify({url: reference, group_name: groupName})});
-      } else {
-        result = await api(isVideo ? '/api/videos/import' : '/api/channels', {method: 'POST', body: JSON.stringify({reference, group_name: groupName})});
-      }
-      $('reference').value = '';
-      setMessage(
-        isLink ? `Đã thêm “${result.video?.title || ''}” từ ${result.platform}. Chưa tải file về máy.`
-        : isVideo ? `Đã thêm đúng video “${result.video?.title || ''}”. Không quét các video khác của kênh.`
-        : `Đã đăng ký kênh. Đã lưu ${result.videos_new} video mới.`,
-        'success'
-      );
-      await refresh();
-      if (isVideo || isLink) showSourceImportResult(result.video);
-    } catch (error) { setMessage(error.message, 'error'); }
-    finally { submit.disabled = false; }
-  });
+  // Thêm nguồn (link hoặc file) nằm trong tab NGUỒN: library.js, detectSourceLink().
   $('refreshButton').addEventListener('click', refresh);
   $('queueAnalysisButton').addEventListener('click', queuePendingAnalysis);
   $('queuePauseButton').addEventListener('click', toggleAnalysisQueue);
   $('queueTranscriptButton').addEventListener('click', queuePendingTranscripts);
   $('transcriptPauseButton').addEventListener('click', toggleTranscriptQueue);
-  $('sourceImportType').addEventListener('change', updateSourceImportForm);
   $('studioSourceChannelSelect').addEventListener('change', selectStudioSourceChannel);
   $('studioVideoSelect').addEventListener('change', selectStudioVideo);
   $('studioAnalyzeButton')?.addEventListener('click', analyzeStudioVideo);
@@ -1511,10 +1434,6 @@
     syncStudioVoiceModelOptions();
     saveStudioSession();
   });
-  $('studioSourceUpload')?.addEventListener('change', (event) => { void uploadStudioSourceFile(event.target.files?.[0]); event.target.value = ''; });
-  $('studioImageUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
-  $('studioFolderUpload')?.addEventListener('change', (event) => { void uploadStudioReferenceImages(event.target.files); event.target.value = ''; });
-  $('studioAnalyzeImagesButton')?.addEventListener('click', () => void analyzeStudioReferenceImages());
   $('studioWriteButton').addEventListener('click', writeStudioScript);
   $('studioChatButton').addEventListener('click', chatStudioScript);
   $('studioGenerateStoryboardButton').addEventListener('click', generateStudioStoryboard);

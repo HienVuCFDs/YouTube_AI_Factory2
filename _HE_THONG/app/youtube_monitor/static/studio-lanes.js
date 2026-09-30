@@ -1321,6 +1321,7 @@
   }
 
   function studioSourceIsAudio(video = studioSelectedVideo()) {
+    if (video?.source_kind === 'audio') return true;
     const source = String(video?.local_media_path || video?.video_url || '').split('?')[0].toLowerCase();
     const extension = source.split('.').pop() || '';
     return AUDIO_SOURCE_EXTENSIONS.has(extension);
@@ -1423,13 +1424,19 @@
     saveStudioSession();
   }
 
-  // Loại và nền tảng của nguồn, đọc từ chính bản ghi nguồn (và từ kết quả
-  // phân tích khi đã có, vì bước phân tích mới biết chắc một link là gì).
+  // Loại nguồn: đọc từ video.source_kind - trường duy nhất, ghi một lần khi
+  // nguồn được thêm - rồi đổi sang cách bước Phân tích đọc nó. Sau khi phân
+  // tích thì theo loại mà bước đó thật sự đã đọc (vd không mở được thì là ý tưởng).
   const STUDIO_SHOP_PLATFORMS = [
     ['shopee.vn', 'Shopee'], ['shop.tiktok.com', 'TikTok Shop'], ['lazada.vn', 'Lazada'],
     ['tiki.vn', 'Tiki'], ['sendo.vn', 'Sendo'],
   ];
-  const STUDIO_SOURCE_LABELS = {video: 'Video', product: 'Sản phẩm', article: 'Bài viết', images: 'Ảnh', idea: 'Ý tưởng'};
+  const STUDIO_SOURCE_LABELS = {
+    video: 'Video', audio: 'Audio', product: 'Sản phẩm', article: 'Bài viết', web: 'Trang web', images: 'Bộ ảnh', idea: 'Ý tưởng',
+  };
+  const STUDIO_ANALYSIS_KIND = {
+    video: 'video', audio: 'audio', article: 'article', web: 'web', product: 'product', image_collection: 'images',
+  };
 
   function studioSourceHost(video) {
     try { return new URL(String(video?.video_url || '')).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
@@ -1439,20 +1446,13 @@
     const host = studioSourceHost(video);
     const shop = STUDIO_SHOP_PLATFORMS.find(([site]) => host === site || host.endsWith(`.${site}`));
     const id = String(video?.youtube_video_id || '');
-    let kind = String(analysis?.source_type || analysis?.source_kind || '');
-    if (!STUDIO_SOURCE_LABELS[kind]) {
-      // A link imported from YouTube or TikTok is "web-..." too; a page is the
-      // one that came in with no running time.
-      const playable = Number(video?.duration_seconds || 0) > 0
-        || /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|vimeo\.com|bilibili\.com|facebook\.com|dailymotion\.com)$/.test(host);
-      kind = shop ? 'product' : id.startsWith('idea-') ? 'idea' : (id.startsWith('web-') && !playable) ? 'article' : 'video';
-    }
+    let kind = String(analysis?.source_type || '');
+    if (!STUDIO_SOURCE_LABELS[kind]) kind = STUDIO_ANALYSIS_KIND[String(video?.source_kind || '')] || 'idea';
     const platform = shop ? shop[1]
       : id.startsWith('local-') ? 'File tải lên'
         : /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host) ? 'YouTube'
           : /(^|\.)tiktok\.com$/.test(host) ? 'TikTok' : host;
-    const label = kind === 'video' && video && studioSourceIsAudio(video) ? 'Audio' : STUDIO_SOURCE_LABELS[kind];
-    return {kind, label, platform};
+    return {kind, label: STUDIO_SOURCE_LABELS[kind], platform};
   }
 
   function renderStudioAnalyzeState() {

@@ -535,7 +535,7 @@ class WhatATikTokReadKeepsTests(unittest.TestCase):
                    "read_status": "OK", "session": "extension:coccoc", "route": "session:extension:coccoc",
                    "captured_at": "2026-09-29T09:00:00+00:00"}
         video = {"youtube_video_id": "web-tt", "title": "Bàn chải", "description": "", "duration_seconds": 0,
-                 "video_url": TIKTOK}
+                 "video_url": TIKTOK, "source_kind": "product"}
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-tt"), \
                 mock.patch.object(main_module.database, "get_video", return_value=video), \
                 mock.patch.object(main_module.database, "list_project_assets", return_value=[]), \
@@ -846,7 +846,7 @@ class StepOneAnalysisTests(unittest.TestCase):
 
 class ChoosingTheConnectionForAnalysisTests(unittest.TestCase):
     VIDEO = {"youtube_video_id": "web-shop", "title": "Tai nghe", "description": "", "duration_seconds": 0,
-             "video_url": SHOPEE}
+             "video_url": SHOPEE, "source_kind": "product"}
 
     def _extract(self, product: dict, options: dict):
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-shop"), \
@@ -934,7 +934,7 @@ class AListingTheAppHasReadNeedsNoOneElseTests(unittest.TestCase):
         product = {"name": "Tai nghe", "price": "119000.00", "currency": "VND", "read_status": "OK",
                    "route": "session:extension:coccoc", "session": "extension:coccoc"}
         video = {"youtube_video_id": "web-shop", "title": "Tai nghe", "description": "", "duration_seconds": 0,
-                 "video_url": SHOPEE}
+                 "video_url": SHOPEE, "source_kind": "product"}
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-shop"), \
                 mock.patch.object(main_module.database, "get_video", return_value=video), \
                 mock.patch.object(main_module.database, "list_project_assets", return_value=[]), \

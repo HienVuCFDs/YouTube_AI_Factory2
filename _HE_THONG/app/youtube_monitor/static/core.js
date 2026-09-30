@@ -264,7 +264,7 @@
       // A second level of tabs (NGUỒN / KÊNH / HÀNG ĐỢI / THƯ VIỆN) chooses
       // among these by their data-source-tab; see applySourceTab.
       panels: [
-        'sourceTabsPanel', 'sourceKindsPanel', 'addChannelPanel', 'channelWorkspace', 'queueOverview', 'analysis',
+        'sourceTabsPanel', 'sourceAddPanel', 'sourceListPanel', 'channelWorkspace', 'queueOverview', 'analysis',
         'transcriptQueue', 'libraryKinds', 'videos', 'analysisDetail', 'transcriptDetail', 'writerDetail',
       ],
     },

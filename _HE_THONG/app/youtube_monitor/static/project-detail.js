@@ -11,131 +11,7 @@
     await openProjectDetail(saved.detailProjectId, saved.projectView || 'overview');
   }
 
-  // Bước 1 vốn chỉ nhận video mà app đã tìm thấy trên YouTube, nên không có
-  // đường nào để làm việc với tư liệu người dùng đã có sẵn trên máy.
-
-  function setUploadStatus(text, type = '') {
-    const target = $('studioUploadStatus');
-    if (target) {
-      target.textContent = text;
-      target.style.color = type === 'error' ? '#c0392b' : '';
-    }
-    setMessage(text, type);
-  }
-
-  async function uploadStudioSourceFile(file) {
-    if (!file) return;
-    const form = new FormData();
-    form.append('file', file);
-    setUploadStatus(`Đang tải "${file.name}" lên (${(file.size / 1048576).toFixed(1)} MB)...`);
-    try {
-      // FormData đặt Content-Type kèm boundary; helper api() ép JSON nên không dùng được.
-      const response = await fetch('/api/uploads/source', {method: 'POST', body: form});
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw apiError(data, response);
-      const video = data.video || {};
-      await loadVideos();
-      state.studioSourceChannelId = video.youtube_channel_id || '';
-      populateStudioSourceChannelSelect();
-      if ($('studioSourceChannelSelect')) $('studioSourceChannelSelect').value = state.studioSourceChannelId;
-      populateStudioVideoSelect();
-      if ($('studioVideoSelect')) $('studioVideoSelect').value = video.youtube_video_id;
-      state.studioVideoId = video.youtube_video_id;
-      await selectStudioVideo();
-      const minutes = Math.round((data.duration_seconds || 0) / 60);
-      if (data.media_kind === 'audio' && state.studioWorkflow === 'reup') {
-        setStudioWorkflow('content', false);
-      }
-      setUploadStatus(`Đã nhận "${file.name}"${minutes ? ` · khoảng ${minutes} phút` : ''}. Mở Tạo video và bấm “Phân tích”.`, 'success');
-      setWorkspace('dashboard');
-      setStudioStep(1);
-      if (data.media_kind === 'audio') {
-        setUploadStatus(`Đã nạp audio "${file.name}". App sẽ dùng nội dung để phân tích/kịch bản; phần hình sẽ được tạo theo storyboard, không cắt từ audio.`, 'success');
-      }
-    } catch (error) {
-      setUploadStatus(`Tải lên thất bại: ${error.message}`, 'error');
-    }
-  }
-
-  async function uploadStudioReferenceImages(fileList) {
-    const files = Array.from(fileList || []).filter((file) =>
-      IMAGE_EXTENSIONS.has(file.name.split('.').pop()?.toLowerCase() || ''));
-    if (!files.length) return setUploadStatus('Không tìm thấy ảnh nào trong lựa chọn.', 'error');
-    if (!state.studioProjectId) {
-      if (!state.studioVideoId) {
-        return setUploadStatus('Hãy chọn hoặc tải video nguồn trước, rồi mới tải ảnh tham khảo.', 'error');
-      }
-      try {
-        const created = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {
-          method: 'POST', body: JSON.stringify({managed_channel_id: null}),
-        });
-        state.studioProjectId = created.project?.id || created.id || null;
-      } catch (error) { return setUploadStatus(`Không tạo được dự án để chứa ảnh: ${error.message}`, 'error'); }
-    }
-    let done = 0;
-    const failed = [];
-    for (const file of files) {
-      const form = new FormData();
-      form.append('asset_type', 'image');
-      form.append('file', file);
-      setUploadStatus(`Đang tải ảnh ${done + 1}/${files.length}: ${file.name}`);
-      try {
-        const response = await fetch(`/api/projects/${state.studioProjectId}/assets/upload`, {method: 'POST', body: form});
-        if (!response.ok) {
-          const data = await response.json().catch(() => ({}));
-          throw apiError(data, response);
-        }
-        done += 1;
-      } catch (error) { failed.push(`${file.name}: ${error.message}`); }
-    }
-    const button = $('studioAnalyzeImagesButton');
-    if (button) button.hidden = done === 0;
-    setUploadStatus(
-      failed.length
-        ? `Đã tải ${done}/${files.length} ảnh; ${failed.length} ảnh lỗi. ${failed[0]}`
-        : `Đã tải ${done} ảnh tham khảo. Bấm “Cho AI xem ảnh tham khảo” để phân tích.`,
-      failed.length ? 'error' : 'success',
-    );
-    await renderStudioReferenceThumbs();
-  }
-
-  async function renderStudioReferenceThumbs() {
-    const target = $('studioUploadResult');
-    if (!target || !state.studioProjectId) return;
-    try {
-      const assets = await api(`/api/projects/${state.studioProjectId}/assets`);
-      const images = (assets || []).filter((item) => item.asset_type === 'image');
-      if (!images.length) { target.innerHTML = ''; return; }
-      target.innerHTML = `<div class="studio-thumbs">${images.slice(0, 24).map((item) =>
-        `<img src="/api/assets/${item.id}/download" alt="${esc(item.original_name || '')}" title="${esc(item.original_name || '')}">`).join('')}</div>`;
-      const button = $('studioAnalyzeImagesButton');
-      if (button) button.hidden = false;
-    } catch (_) { /* thumbnail chỉ là tiện ích, không chặn luồng */ }
-  }
-
-  async function analyzeStudioReferenceImages() {
-    if (!state.studioProjectId) return setUploadStatus('Chưa có dự án chứa ảnh.', 'error');
-    const button = $('studioAnalyzeImagesButton');
-    if (button) button.disabled = true;
-    setUploadStatus('AI đang xem ảnh tham khảo...');
-    try {
-      const result = await api(`/api/projects/${state.studioProjectId}/assets/analyze-images`, {method: 'POST'});
-      const analysis = result.result || {};
-      const list = (items) => (items || []).map((item) => `<li>${esc(item)}</li>`).join('');
-      const card = document.createElement('div');
-      card.className = 'studio-result-card';
-      card.innerHTML = `<h3>AI đọc ảnh tham khảo · xem ${esc(result.images_seen)}/${esc(result.images_total)} ảnh</h3>
-        <p class="hint">${esc(analysis.summary || '')}</p>
-        <p class="hint"><b>Phong cách:</b> ${esc(analysis.visual_style || '')}</p>
-        ${analysis.composition ? `<p class="hint"><b>Bố cục:</b> ${esc(analysis.composition)}</p>` : ''}
-        ${(analysis.palette || []).length ? `<p class="hint"><b>Màu chủ đạo</b></p><ul>${list(analysis.palette)}</ul>` : ''}
-        ${(analysis.subjects || []).length ? `<p class="hint"><b>Chủ thể lặp lại</b></p><ul>${list(analysis.subjects)}</ul>` : ''}
-        ${analysis.reusable_prompt ? `<p class="hint"><b>Đoạn prompt dùng lại được:</b><br><code>${esc(analysis.reusable_prompt)}</code></p>` : ''}`;
-      $('studioUploadResult')?.prepend(card);
-      setUploadStatus(`AI đã đọc ${result.images_seen} ảnh tham khảo.`, 'success');
-    } catch (error) { setUploadStatus(`Không đọc được ảnh: ${error.message}`, 'error'); }
-    finally { if (button) button.disabled = false; }
-  }
+  // Tải file lên làm nguồn nằm trong tab NGUỒN (library.js, importSourceFiles).
 
   // Nút này và AI điều phối chạy CÙNG một bước: POST /api/projects/{id}/steps/analyze.
   // Bước đó tự lấy transcript, khung hình, nội dung bài hay trang sản phẩm tuỳ loại nguồn.
@@ -490,7 +366,7 @@
     const video = studioSelectedVideo();
     const {kind, label} = studioSourceKind(video, result);
     const sections = kind === 'product' ? studioProductSections(result, video)
-      : kind === 'article' ? studioArticleSections(result, video)
+      : kind === 'article' || kind === 'web' ? studioArticleSections(result, video)
         : kind === 'images' ? studioImageSections(result)
           : kind === 'idea' ? studioIdeaSections(result)
             : studioVideoSections(result);

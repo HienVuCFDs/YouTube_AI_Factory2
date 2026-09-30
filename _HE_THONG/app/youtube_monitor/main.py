@@ -60,7 +60,7 @@ from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
 from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
-from . import project_planner, research_collectors, source_identity
+from . import project_planner, research_collectors, source_detector, source_identity, source_kinds
 from .channel_research import ChannelResearchError, ChannelResearchService
 from .youtube_quota import YouTubeQuota
 from .run_registry import RunRegistry
@@ -1120,12 +1120,15 @@ def _page_identity(html: str, *, strict: bool) -> str:
     return "" if page_source.looks_like_bot_wall(title) else title
 
 
-def _probe_page_link(url: str) -> dict[str, Any] | None:
+def _probe_page_link(url: str, *, known: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Describe a page the way a video probe describes a video, or None.
 
     Enough of the same shape that the row, the project and every later step
     need no knowledge of which one it was; the analysis step works the kind
     out from the URL and the row's own emptiness.
+
+    `known` is a listing the Product Reader was served a moment ago (the
+    preview in "Thêm nguồn"): used instead of opening the marketplace again.
     """
     strict = page_source.looks_like_shop(url)
     try:
@@ -1139,11 +1142,14 @@ def _probe_page_link(url: str) -> dict[str, Any] | None:
         # A marketplace is read through a browser session - the site's own
         # persistent profile, then the person's signed-in browser - and never
         # through a throwaway browser, which is what these sites refuse.
-        outcome = platform_connections.manager().read(url)
-        if outcome.get("status") == platform_connections.OK:
-            seen = page_source.product_from_probe(outcome.get("probe") or {})
-            named = str(seen.get("name") or "").strip()
-            title = "" if page_source.looks_like_bot_wall(named) else named
+        if known:
+            seen = dict(known)
+        else:
+            outcome = platform_connections.manager().read(url)
+            if outcome.get("status") == platform_connections.OK:
+                seen = page_source.product_from_probe(outcome.get("probe") or {})
+        named = str(seen.get("name") or "").strip()
+        title = "" if page_source.looks_like_bot_wall(named) else named
     elif not title:
         # Either the shell or a challenge came back. The browser is the next
         # thing to try, not a refusal.
@@ -1196,41 +1202,59 @@ def _probe_page_link(url: str) -> dict[str, Any] | None:
     }
 
 
-def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]:
+def _unreadable_link_detail(url: str, detail: str) -> str:
+    """Why a link could not be imported, in words the person can act on."""
+    # yt-dlp's "Unsupported URL" says nothing useful about a shop
+    # link, which was never going to be a video in the first place.
+    if page_source.looks_like_shop(url):
+        # Nothing reads this page: not an HTTP client, not a headless
+        # browser, and not the CLI's own web reader either. Measured on
+        # Shopee and TikTok Shop, all three come back with a shell, a
+        # redirect or a captcha. Telling someone to sign in does not
+        # help - viewing a listing never required an account - so the
+        # message says the one thing that does.
+        host = (urlparse(url).hostname or "").lower()
+        return (
+            f"{host} chặn mọi cách đọc tự động, kể cả trình đọc web của AI. "
+            "Hãy mở trang trong trình duyệt của bạn rồi tạo dự án ý tưởng và dán "
+            "tên sản phẩm, giá và mô tả vào đó — app sẽ dùng đúng những gì bạn dán "
+            "và không tự nghĩ ra con số nào."
+        )
+    return detail
+
+
+def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = "") -> dict[str, Any]:
     """Register a source video from any site yt-dlp can read.
 
     The row looks exactly like a tracked or uploaded one, so transcript,
     analysis and the reup workflow need no knowledge of where it came from.
     Nothing is downloaded here: that stays an explicit, confirmed action.
+
+    `as_page` ("article", "product" or "web") is for a link already known to
+    be a page. yt-dlp is not asked, so an article with a clip embedded in it
+    is not stored as that clip, and a listing is read as a listing. The row's
+    source_kind says which; a link read by yt-dlp is a video.
     """
-    try:
-        details = probe_source_link(url)
-    except SourceLinkError as exc:
-        # yt-dlp is asked first because a link is usually a video. When it is
-        # not - an article, a listing - the old behaviour was to refuse, so
-        # those sources could not be brought into the app at all even though
-        # the analysis step knows how to read them.
-        page = _probe_page_link(url)
+    stated_kind = source_kinds.valid(as_page)
+    if as_page:
+        known = source_detector.recent_product(url) if as_page == "product" else None
+        page = _probe_page_link(url, known=known)
         if page is None:
-            # yt-dlp's "Unsupported URL" says nothing useful about a shop
-            # link, which was never going to be a video in the first place.
-            detail = str(exc)
-            if page_source.looks_like_shop(url):
-                # Nothing reads this page: not an HTTP client, not a headless
-                # browser, and not the CLI's own web reader either. Measured on
-                # Shopee and TikTok Shop, all three come back with a shell, a
-                # redirect or a captcha. Telling someone to sign in does not
-                # help - viewing a listing never required an account - so the
-                # message says the one thing that does.
-                host = (urlparse(url).hostname or "").lower()
-                detail = (
-                    f"{host} chặn mọi cách đọc tự động, kể cả trình đọc web của AI. "
-                    "Hãy mở trang trong trình duyệt của bạn rồi tạo dự án ý tưởng và dán "
-                    "tên sản phẩm, giá và mô tả vào đó — app sẽ dùng đúng những gì bạn dán "
-                    "và không tự nghĩ ra con số nào."
-                )
-            raise HTTPException(status_code=400, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=_unreadable_link_detail(url, "Không đọc được trang từ link này."))
         details = page
+    else:
+        try:
+            details = probe_source_link(url)
+            stated_kind = source_kinds.VIDEO
+        except SourceLinkError as exc:
+            # yt-dlp is asked first because a link is usually a video. When it is
+            # not - an article, a listing - the old behaviour was to refuse, so
+            # those sources could not be brought into the app at all even though
+            # the analysis step knows how to read them.
+            page = _probe_page_link(url)
+            if page is None:
+                raise HTTPException(status_code=400, detail=_unreadable_link_detail(url, str(exc))) from exc
+            details = page
     if details["is_live"]:
         raise HTTPException(
             status_code=400,
@@ -1294,6 +1318,9 @@ def _import_video_from_link(url: str, *, group_name: str = "") -> dict[str, Any]
         "title": fields["title"] or details["webpage_url"],
         **counts,
         "metadata_hash": details["video_id"],
+        # A page read without being asked for one (yt-dlp could not read it)
+        # states nothing: the one rule decides (a listing, an article, a page).
+        "source_kind": stated_kind,
         "raw_payload": {
             "source": "link_import",
             "platform": details["platform"],
@@ -1441,6 +1468,274 @@ def probe_video_link(url: str = Query(min_length=8, max_length=2000)) -> dict[st
         return {"video": probe_source_link(url)}
     except SourceLinkError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---- Nguồn tham khảo · NGUỒN: one box for a link or files -----------------
+# source_detector decides what was given; the importers above (and the
+# channel sync, the upload, the project assets) do the importing.
+
+class SourceDetectRequest(BaseModel):
+    text: str = Field(default="", max_length=2000)
+    probe: bool = True
+
+
+class SourceFileDescriptor(BaseModel):
+    index: int = 0
+    name: str = Field(default="", max_length=500)
+    type: str = Field(default="", max_length=200)
+    size: int = Field(default=0, ge=0)
+    path: str = Field(default="", max_length=1000)
+
+
+class SourceFilesDetectRequest(BaseModel):
+    files: list[SourceFileDescriptor] = Field(default_factory=list, max_length=2000)
+
+
+class SourceImportRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    group_name: str = Field(default="", max_length=120)
+
+
+class ImageCollectionRequest(BaseModel):
+    title: str = Field(default="", max_length=200)
+
+
+# ---- Import Router ----------------------------------------------------------
+# Which importer takes what the detector found. The detector only names the
+# kind; every importer below existed before "Thêm nguồn" and is used as it was.
+SOURCE_ROUTES = {
+    source_detector.YOUTUBE_CHANNEL: "channel_sync",  # service.add_channel: follow and sync
+    source_detector.VIDEO: "link_import",  # _import_video_from_link: YouTube Data API, yt-dlp
+    source_detector.PRODUCT: "page_import",  # _probe_page_link, with the Product Reader's read
+    source_detector.ARTICLE: "page_import",
+    source_detector.WEB: "page_import",
+}
+# Files never reach the server before the person confirms, so the page does
+# the sending - to the route named here.
+FILE_ROUTES = {
+    source_detector.IMAGE: "image_collection",  # /api/sources/image-collection, then the project asset upload
+    source_detector.IMAGE_COLLECTION: "image_collection",
+    source_detector.VIDEO: "upload",  # /api/uploads/source
+    source_detector.AUDIO: "upload",
+}
+
+
+def _source_route(detected: dict[str, Any]) -> str:
+    """The importer a detection goes to, or "" when there is nothing to import."""
+    if detected.get("status") not in (source_detector.DETECTED, source_detector.NEED_CONNECTION):
+        return ""
+    routes = FILE_ROUTES if detected.get("origin") == "file" else SOURCE_ROUTES
+    return routes.get(str(detected.get("kind") or ""), "")
+
+
+@app.post("/api/sources/detect")
+def detect_source(payload: SourceDetectRequest) -> dict[str, Any]:
+    """What a pasted link is, and the importer it would go to. Saves nothing.
+
+    `probe=false` answers from the link's shape alone, at once; the page asks
+    that first, then again with `probe=true` for what the source says.
+    """
+    detected = source_detector.detect(
+        payload.text, probe=payload.probe, database=database, youtube=youtube, probe_video=probe_source_link,
+    )
+    return {**detected, "route": _source_route(detected)}
+
+
+@app.post("/api/sources/detect-files")
+def detect_source_files(payload: SourceFilesDetectRequest) -> dict[str, Any]:
+    """Group picked or dropped files into sources, from their names and types only."""
+    found = source_detector.detect_files(
+        [item.model_dump() for item in payload.files],
+        extensions=_ASSET_EXTENSIONS, max_bytes=LOCAL_ASSET_MAX_BYTES,
+    )
+    return {"sources": [{**item, "route": _source_route(item)} for item in found]}
+
+
+# yt-dlp and httpx word their failures for developers.
+_TECHNICAL_ERROR = re.compile(r"ERROR:|HTTP Error|Traceback|Unsupported URL|\[[\w:]+\]|errno", re.I)
+
+
+def _plain_import_error(detail: str) -> str:
+    if _TECHNICAL_ERROR.search(detail):
+        return "Không đọc được nguồn từ link này. Có thể trang riêng tư, đã bị xoá, hoặc không cho đọc tự động."
+    return detail
+
+
+def _source_snapshot(detected: dict[str, Any]) -> dict[str, Any]:
+    """What the preview showed that the row itself does not keep."""
+    metadata = detected.get("metadata") or {}
+    snapshot: dict[str, Any] = {"site_name": metadata.get("site_name"), "is_short": metadata.get("is_short") or None}
+    if detected.get("kind") == source_detector.PRODUCT and metadata.get("price_text"):
+        snapshot.update(
+            price_text=metadata["price_text"], price_captured_at=metadata.get("captured_at"),
+            seller=metadata.get("seller"),
+        )
+    return snapshot
+
+
+def _stored_source(detected: dict[str, Any], url: str) -> dict[str, Any] | None:
+    """The row this link already has, if any: found by the preview, by the video's id, or by the link."""
+    known = str((detected.get("existing") or {}).get("video_id") or "")
+    stored = database.get_video(known) if known else None
+    if stored is None and detected.get("kind") == source_detector.VIDEO and detected.get("platform") == "youtube":
+        # Without a preview to go by (the app restarted in between): the video's
+        # own id says whether it is stored. Importing it again would move an
+        # older link import onto its real channel and leave the old row empty.
+        rows = database.find_videos_by_native_id("youtube", str(detected.get("native_id") or ""))
+        stored = database.get_video(str(rows[0]["youtube_video_id"])) if rows else None
+    if stored is None and detected.get("kind") != source_detector.VIDEO:
+        # A page kept under an older key for this exact link.
+        stored = database.find_video_by_url(url)
+    return stored
+
+
+@app.post("/api/sources/import")
+def import_source(payload: SourceImportRequest) -> dict[str, Any]:
+    """Add what "Thêm nguồn" detected, through the importer SOURCE_ROUTES names.
+
+    Decided here, from the detection this link got a moment ago or, failing
+    that, from the link's shape; the page sends only the link. The row's
+    source_kind is stated by the importer that wrote it. A channel goes to the
+    channel sync and is never stored as a source row.
+    """
+    shape = source_detector.classify(payload.text)
+    if shape["status"] != source_detector.DETECTED:
+        raise HTTPException(status_code=400, detail=shape["message"])
+    url = shape["url"]
+    seen = source_detector.recalled(url)
+    detected = shape
+    # A page's own tags may have said what the URL could not (an article,
+    # a listing, a video); a YouTube link is what its shape says it is.
+    if seen and (seen.get("kind") == shape["kind"] or shape["kind"] in (source_detector.WEB, source_detector.ARTICLE)):
+        detected = seen
+    route = _source_route(detected)
+    if route == "channel_sync":
+        return _import_source_channel(detected, payload.group_name)
+    if route not in ("link_import", "page_import"):
+        raise HTTPException(status_code=400, detail=detected.get("message") or "Nguồn này chưa thêm được.")
+    snapshot = _source_snapshot(detected)
+    by = str(detected.get("detected_by") or "")
+    stored = _stored_source(detected, url)
+    if stored:
+        # Already stored: marked as a source, not read or stored again. A row
+        # that has its kind keeps it; one that has none takes the detection's.
+        # One thing is corrected: a page stored before the app could tell a
+        # check page from a listing is named after it ("Security Check"), and
+        # the preview has just read the real name.
+        named = str(detected.get("title") or "").strip()
+        if page_source.looks_like_bot_wall(str(stored.get("title") or "")) and named \
+                and not page_source.looks_like_bot_wall(named):
+            database.set_video_title(str(stored["youtube_video_id"]), named)
+            stored = database.get_video(str(stored["youtube_video_id"])) or stored
+        item = database.record_source_item(
+            str(stored["youtube_video_id"]), kind="" if stored.get("source_kind") else detected.get("source_kind", ""),
+            platform=str(detected.get("platform") or ""), detected_by=by, snapshot=snapshot,
+        )
+        return {"status": "exists", "video": stored, "reused_row": True, "kind": item["source_kind"],
+                "route": "existing", "source": item}
+    as_page = str(detected.get("source_kind") or "") if route == "page_import" else ""
+    try:
+        result = _import_video_from_link(url, group_name=payload.group_name, as_page=as_page)
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail=_plain_import_error(str(exc.detail))) from exc
+    video = result.get("video") or {}
+    platform = str(detected.get("platform") or "")
+    if platform in ("", "web") and video.get("source_kind") == source_kinds.VIDEO:
+        platform = str(video.get("source_platform") or platform)
+    # The importer stated the kind (a page asked for, or a video yt-dlp read).
+    item = database.record_source_item(
+        str(video.get("youtube_video_id") or ""), kind="", platform=platform, detected_by=by, snapshot=snapshot,
+    )
+    return {**result, "kind": item.get("source_kind", ""), "route": route, "source": item}
+
+
+def _import_source_channel(detected: dict[str, Any], group_name: str) -> dict[str, Any]:
+    native = str(detected.get("native_id") or "")
+    handle = str((detected.get("metadata") or {}).get("handle") or "")
+    row = database.get_channel(native) if native else database.find_channel_by_handle(handle) if handle else None
+    if row:
+        # Already followed: nothing is synced again, the page opens it.
+        return {"status": "exists", "kind": source_detector.YOUTUBE_CHANNEL, "route": "channel_sync",
+                "channel_id": row["youtube_channel_id"], "channel": row}
+    try:
+        result = service.add_channel(native or str(detected.get("url") or ""), group_name=group_name)
+    except Exception as exc:
+        raise _api_error(exc) from exc
+    channel_id = str(result.get("channel_id") or "")
+    return {**result, "status": "imported", "kind": source_detector.YOUTUBE_CHANNEL, "route": "channel_sync",
+            "channel_id": channel_id, "channel": database.get_channel(channel_id)}
+
+
+@app.post("/api/sources/image-collection")
+def create_image_collection(payload: ImageCollectionRequest) -> dict[str, Any]:
+    """A set of pictures as one source: an idea project the images are uploaded into.
+
+    The pictures go through the project's own asset upload; the row says
+    image_collection, which the analysis step reads as images.
+    """
+    title = payload.title.strip() or "Bộ ảnh tham khảo"
+    project = database.create_idea_project(f"Bộ ảnh tham khảo: {title}", title=title, source="image_collection")
+    video_id = str(project["youtube_video_id"])
+    item = database.record_source_item(
+        video_id, kind=source_kinds.IMAGE_COLLECTION, platform="local", detected_by="file_type",
+    )
+    return {"status": "created", "project": project, "video_id": video_id, "source": item}
+
+
+def _source_view(row: dict[str, Any]) -> dict[str, Any] | None:
+    """One saved source as the list shows it."""
+    video_id = str(row["youtube_video_id"])
+    snapshot = row.get("snapshot") or {}
+    local = video_id.startswith(("local-", "idea-"))
+    kind = source_kinds.valid(row.get("source_kind"))
+    image_count = int(row.get("image_count") or 0)
+    if not kind or (kind == source_kinds.IMAGE_COLLECTION and not image_count):
+        return None  # not a source, or its pictures never arrived
+    url = "" if local else str(row.get("video_url") or "")
+    platform = str(row.get("source_item_platform") or "") or ("local" if local else str(row.get("source_platform") or ""))
+    if kind == source_kinds.PRODUCT and platform in ("", "shop", "web"):
+        market = platform_connections.platform_of(url)
+        platform = source_detector.MARKETPLACES.get(market.key, market.key) if market else "shop"
+    domain = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    channel = str(row.get("native_channel_name") or "")
+    if not channel and not str(row.get("youtube_channel_id") or "").startswith(("site-", "LOCAL-", "UC_YOUTUBE_AI")):
+        channel = str(row.get("channel_title") or "").rsplit(" · ", 1)[0]
+    if kind in (source_kinds.VIDEO, source_kinds.AUDIO) and not local:
+        site = channel or domain
+    else:
+        site = str(snapshot.get("site_name") or "") or ("" if local else domain)
+    thumbnail = str(row.get("thumbnail_url") or "")
+    if kind == source_kinds.IMAGE_COLLECTION and row.get("first_image_id"):
+        thumbnail = f"/api/assets/{int(row['first_image_id'])}/download"
+    project_id = int(row["project_id"]) if row.get("project_id") else None
+    running = bool(project_id) and _step_runs(project_id, "analyze")[0] is not None
+    return {
+        "video_id": video_id, "kind": kind,
+        "group": "file" if local else source_kinds.GROUPS[kind],
+        "title": str(row.get("title") or "") or domain or video_id,
+        "thumbnail_url": thumbnail, "platform": platform, "site": site, "url": url,
+        "added_at": row.get("source_added_at") or row.get("first_seen_at"),
+        "analyzed": bool(row.get("analyzed")), "analyzing": running, "project_id": project_id,
+        "duration_seconds": row.get("duration_seconds"),
+        "is_short": bool(snapshot.get("is_short")),
+        "price_text": str(snapshot.get("price_text") or ""),
+        "price_captured_at": str(snapshot.get("price_captured_at") or ""),
+        "image_count": image_count,
+    }
+
+
+@app.get("/api/sources")
+def list_sources(
+    group: Literal["all", "video", "article", "product", "file"] = "all",
+    limit: int = Query(default=300, ge=1, le=1000),
+) -> dict[str, Any]:
+    """The sources added so far, with a count per filter. Reads only."""
+    items = [view for view in (_source_view(row) for row in database.list_source_rows()) if view]
+    counts = {"all": len(items), "video": 0, "article": 0, "product": 0, "file": 0}
+    for item in items:
+        counts[item["group"]] = counts.get(item["group"], 0) + 1
+    shown = [item for item in items if group == "all" or item["group"] == group][:limit]
+    return {"counts": counts, "items": shown}
 
 
 @app.get("/api/managed-channels")
@@ -1928,14 +2223,19 @@ def _reading_chat_agent() -> str:
 
 
 def extract_source(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> source_brief.Extraction:
-    """Gather what there is to analyse. Mechanical: no model is called here."""
+    """Gather what there is to analyse. Mechanical: no model is called here.
+
+    What the source is comes from its row (videos.source_kind, stated when it
+    was added); `options.source_kind` overrides it, in either vocabulary.
+    """
     video_id = _project_source_video_id(project)
     video = (database.get_video(video_id) or {}) if video_id else {}
     images = [
         asset for asset in database.list_project_assets(project_id)
         if str(asset.get("asset_type")) == "image" and Path(str(asset.get("file_path") or "")).is_file()
     ]
-    kind = str(options.get("source_kind") or "") or source_brief.detect_kind(project, video, images)
+    asked = str(options.get("source_kind") or "").strip().lower()
+    kind = source_kinds.ANALYSIS_KIND.get(asked, asked) or source_brief.detect_kind(project, video, images)
     metadata = {
         "title": video.get("title") or project.get("title") or "",
         "description": video.get("description") or "",
@@ -1944,7 +2244,8 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
     }
     notes = [note for note in [str(project.get("notes") or "").strip()] if note]
 
-    if kind == "video":
+    if kind in ("video", "audio"):
+        what = "video nguồn" if kind == "video" else "file âm thanh"
         text = str((database.get_transcript(video_id, transcript_format="txt") or {}).get("content_text") or "").strip()
         silent = ""
         if not text:
@@ -1952,7 +2253,7 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
                 whisper_result = _transcribe_video_source(video, video_id)
             except Exception as exc:
                 whisper_result = {"text": ""}
-                silent = f"Không lấy được tiếng của video nguồn: {str(exc)[:200]}"
+                silent = f"Không lấy được tiếng của {what}: {str(exc)[:200]}"
             if whisper_result["text"]:
                 text = str(save_transcript_result(database, video_id, whisper_result).get("content_text") or "")
             else:
@@ -1960,13 +2261,14 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
                 # pictures and no words - the same situation as a folder of
                 # images, not a failure. Refusing here stopped the whole run
                 # on a source the frames alone could have carried.
-                silent = silent or "Video nguồn không có lời nói nào nhận ra được."
+                silent = silent or f"{what[0].upper()}{what[1:]} không có lời nói nào nhận ra được."
         # The timed version when there is one: handed the flat text, the
         # analyst can only report the whole thing as a single unattributed
         # turn, and the workflow that cuts scenes where a line is spoken then
         # has nothing to cut on.
         timed = str((database.get_transcript(video_id, transcript_format="srt") or {}).get("content_text") or "").strip()
-        sheet = _source_contact_sheet(video, project_id)
+        # Only a video has pictures; an audio file has no frames to take.
+        sheet = _source_contact_sheet(video, project_id) if kind == "video" else None
         if not text and sheet is None:
             # Neither words nor pictures got through - the video may be
             # geo-blocked, removed, or behind a sign-in. What is left is the
@@ -1979,13 +2281,12 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
                 text=str(metadata.get("description") or "").strip(),
                 text_label="Mo ta cua nguon (khong lay duoc noi dung that)",
                 metadata=metadata,
-                notes=notes + [
-                    silent or "Không lấy được lời nói của video nguồn.",
-                    "Không lấy được khung hình nào của video nguồn.",
-                ],
+                notes=notes + [silent or f"Không lấy được lời nói của {what}."] + (
+                    ["Không lấy được khung hình nào của video nguồn."] if kind == "video" else []
+                ),
             )
         return source_brief.Extraction(
-            kind="video",
+            kind=kind,
             text=timed or text,
             text_label="Loi thoai da phien am (co moc thoi gian)" if timed else "Loi thoai da phien am",
             image_sheet=sheet, image_count=source_brief.SHEET_TILES if sheet else 0,
@@ -2071,7 +2372,7 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
             ) if product.get(key)},
         )
 
-    if kind == "article":
+    if kind in ("article", "web"):
         # The page itself first. Its description is the one-line summary a
         # link preview shows, and taking it whenever it existed meant a
         # 9,000-character page was analysed from 151 characters.
@@ -2101,7 +2402,7 @@ def extract_source(project_id: int, project: dict[str, Any], options: dict[str, 
                 picture_urls = []
         sheet, count = _sheet_from_remote_images(picture_urls, project_id, "article-view")
         return source_brief.Extraction(
-            kind="article", text=body, text_label="Noi dung bai viet",
+            kind=kind, text=body, text_label="Noi dung bai viet" if kind == "article" else "Noi dung trang web",
             image_sheet=sheet, image_count=count,
             metadata=metadata, notes=notes,
         )
@@ -4173,6 +4474,20 @@ def upload_local_source(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="File rỗng")
 
+    # The same file added twice is one source: the earlier row is returned
+    # and the second copy is not kept.
+    previous = database.find_local_upload(LOCAL_UPLOAD_CHANNEL_ID, digest.hexdigest())
+    if previous:
+        target.unlink(missing_ok=True)
+        return {
+            "status": "duplicate",
+            "video": previous,
+            "file_size": total,
+            "duration_seconds": int(previous.get("duration_seconds") or 0),
+            "media_kind": str(database.get_video_raw_payload(str(previous["youtube_video_id"])).get("media_kind") or ""),
+            "reused_row": True,
+        }
+
     # A permitted suffix is only a first-pass guard. Probe the bytes before
     # registering a source so renamed or corrupt files cannot create projects
     # which fail later in analysis or rendering.
@@ -4185,6 +4500,8 @@ def upload_local_source(
         )
 
     media_kind = "audio" if extension in _ASSET_EXTENSIONS["audio"] else "video"
+    # What the bytes hold decides it: a .webm or .mp4 with no picture is sound.
+    probed = _source_media_kind(target)
     _ensure_local_upload_channel()
     database.upsert_video({
         "youtube_video_id": video_id,
@@ -4194,6 +4511,7 @@ def upload_local_source(
         "description": f"Tệp tải lên từ máy: {filename}",
         "duration_seconds": int(duration),
         "metadata_hash": digest.hexdigest(),
+        "source_kind": source_kinds.AUDIO if "audio" in (media_kind, probed) else source_kinds.VIDEO,
         "raw_payload": {
             "uploaded_filename": filename,
             "file_size": total,
@@ -4202,7 +4520,7 @@ def upload_local_source(
     })
     # upsert_video does not write local_media_path - the column was added later
     # for downloads - so the file is registered the same way a download is.
-    database.mark_video_downloaded(video_id, str(target), _source_media_kind(target))
+    database.mark_video_downloaded(video_id, str(target), probed)
     return {
         "status": "uploaded",
         "video": database.get_video(video_id),
@@ -4220,7 +4538,7 @@ def _contact_sheet_for_review(images: list[Path], project_id: int) -> Path:
     which is the whole point of handing over a folder.
     """
     if len(images) == 1:
-        return images[0]
+        return _viewable_image(images[0])
     workspace = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["work"] / "reference"
     workspace.mkdir(parents=True, exist_ok=True)
     sheet_path = workspace / "reference-contact-sheet.png"
@@ -4243,8 +4561,32 @@ def _contact_sheet_for_review(images: list[Path], project_id: int) -> Path:
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
     if result.returncode != 0 or not sheet_path.is_file():
         # One picture the model can actually see beats a sheet it cannot.
-        return images[0]
+        return _viewable_image(images[0])
     return sheet_path
+
+
+_VIEWABLE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def _viewable_image(image: Path) -> Path:
+    """The picture in a format every vision reader opens, or as it was.
+
+    Marketplaces serve WebP. Handed one on its own - a listing with a single
+    photograph, which is not tiled - the Codex CLI hung until its timeout
+    (measured 30/09 on a TikTok Shop listing; the Shopee one, a JPEG, read
+    fine). Two or more pictures are tiled into a PNG already.
+    """
+    if image.suffix.lower() in _VIEWABLE_SUFFIXES:
+        return image
+    target = image.with_suffix(".jpg")
+    try:
+        result = subprocess.run(
+            [FFMPEG_BINARY, "-y", "-hide_banner", "-loglevel", "error", "-i", str(image), "-frames:v", "1", str(target)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return image
+    return target if result.returncode == 0 and target.is_file() and target.stat().st_size else image
 
 
 def _xstack_layout(count: int, columns: int) -> str:

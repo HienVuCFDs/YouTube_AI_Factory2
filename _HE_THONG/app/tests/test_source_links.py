@@ -185,11 +185,18 @@ class ReachableFromThePageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.page = studio_ui()
 
-    def test_the_source_picker_offers_a_plain_link(self) -> None:
-        self.assertIn('<option value="link">', self.page)
+    def test_any_link_goes_in_the_one_box(self) -> None:
+        # No type to pick first: the box sends the link, the server routes it.
+        self.assertNotIn('<option value="link">', self.page)
+        self.assertIn("/api/sources/import", self.page)
 
-    def test_the_form_calls_the_link_endpoint(self) -> None:
-        self.assertIn("/api/videos/import-link", self.page)
+    def test_a_video_link_from_another_site_reaches_the_link_importer(self) -> None:
+        with mock.patch.object(main, "_import_video_from_link", return_value={"video": None}) as taken, \
+                mock.patch.object(main.database, "record_source_item", return_value={}):
+            with TestClient(main.app) as client:
+                client.post("/api/sources/import", json={"text": "https://www.bilibili.com/video/BV1xx411c7mD"})
+        taken.assert_called_once()
+        self.assertEqual(taken.call_args.kwargs.get("as_page"), "")
 
     def test_the_endpoints_exist(self) -> None:
         paths = {getattr(route, "path", "") for route in main.app.routes}

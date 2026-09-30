@@ -320,6 +320,8 @@
       button.classList.toggle('active', active);
       button.setAttribute('aria-selected', String(active));
     });
+    // The saved-sources list is one read of the database; nothing is fetched from outside.
+    if (tab === 'sources') void loadSources();
   }
 
   function setSourceTab(tab) {
@@ -328,17 +330,495 @@
     applySourceTab();
   }
 
-  // The existing add-source form, opened on the kind asked for.
-  function openAddSource(kind = 'channel') {
+  // ---- Tab NGUỒN: một ô cho link hoặc file ----
+  // Không chọn loại trước. Server (source_detector) nhận dạng; thêm nguồn đi
+  // qua đúng importer đã có: đồng bộ kênh, nhập link, tải file lên, ảnh vào dự án.
+  function openAddSource() {
     setSourceTab('sources');
-    const type = $('sourceImportType');
-    if (type && kind !== 'upload' && [...type.options].some((option) => option.value === kind)) {
-      type.value = kind;
-      type.dispatchEvent(new Event('change'));
+    const input = $('sourceInput');
+    input?.scrollIntoView({block: 'center'});
+    input?.focus();
+  }
+
+  const SOURCE_KIND_LABELS = {
+    youtube_channel: 'Kênh YouTube', channel: 'Kênh', video: 'Video', audio: 'Audio', product: 'Sản phẩm',
+    article: 'Bài viết', web: 'Trang web', image: 'Ảnh', image_collection: 'Bộ ảnh',
+    invalid: 'Không phải link', unsupported: 'Chưa hỗ trợ',
+  };
+  const SOURCE_KIND_ICONS = {
+    video: '▶', audio: '♪', product: '🛍', article: '🌐', web: '🌐', image: '🖼', image_collection: '🖼',
+    youtube_channel: '◎', channel: '◎', unsupported: '⚠', invalid: '⚠',
+  };
+  const SOURCE_PLATFORM_LABELS = {
+    shopee: 'Shopee', tiktok_shop: 'TikTok Shop', lazada: 'Lazada', tiki: 'Tiki', sendo: 'Sendo',
+    amazon: 'Amazon', aliexpress: 'AliExpress', taobao: 'Taobao', shein: 'Shein', temu: 'Temu',
+    vimeo: 'Vimeo', dailymotion: 'Dailymotion', local: 'Máy của bạn', shop: 'Sàn thương mại',
+  };
+  const SOURCE_GROUPS = [['all', 'Tất cả'], ['video', 'Video'], ['article', 'Bài viết'], ['product', 'Sản phẩm'], ['file', 'Ảnh/File']];
+  const SOURCE_STATUS = {
+    detected: ['Đã nhận dạng', 'green'], unreadable: ['Không đọc được nguồn', 'orange'],
+    invalid: ['Không đọc được nguồn', 'orange'], need_connection: ['Cần đăng nhập/kết nối', 'orange'],
+  };
+
+  function sourcePlatformLabel(key) {
+    return SOURCE_PLATFORM_LABELS[key] || PLATFORM_LABELS[key] || (key ? key.charAt(0).toUpperCase() + key.slice(1) : '');
+  }
+
+  function clockText(seconds) {
+    const total = Math.round(Number(seconds) || 0);
+    if (!total) return '';
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = String(total % 60).padStart(2, '0');
+    return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${String(m).padStart(2, '0')}:${s}`;
+  }
+
+  function sizeText(bytes) {
+    const value = Number(bytes) || 0;
+    return value >= 1048576 ? `${(value / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`;
+  }
+
+  // "Video YouTube", "Sản phẩm · Shopee", "Bài viết · VnExpress": what it is and where from.
+  function sourceHeading(item) {
+    const meta = item.metadata || {};
+    const platform = sourcePlatformLabel(item.platform);
+    if (item.kind === 'video' && item.origin === 'file') return 'Video từ máy';
+    if (item.kind === 'audio') return 'Audio từ máy';
+    if (item.kind === 'video') return meta.is_short ? `Shorts · ${platform}` : `Video ${platform}`.trim();
+    if (item.kind === 'youtube_channel') return 'Kênh YouTube';
+    if (item.kind === 'channel') return `Kênh ${platform}`.trim();
+    if (item.kind === 'product') return `Sản phẩm · ${meta.marketplace || platform || 'Trang bán hàng'}`;
+    if (item.kind === 'article') return `Bài viết · ${meta.site_name || meta.domain || platform}`;
+    if (item.kind === 'web') return `Trang web · ${meta.site_name || meta.domain || ''}`.replace(/ · $/, '');
+    if (item.kind === 'image_collection') return `Bộ ảnh · ${number(meta.file_count)} ảnh`;
+    return SOURCE_KIND_LABELS[item.kind] || 'Nguồn';
+  }
+
+  // Only what was actually read; a missing field is left out, never guessed.
+  function sourceFacts(item) {
+    const meta = item.metadata || {};
+    const facts = [];
+    if (item.origin === 'file') {
+      const files = meta.files || [];
+      facts.push(files.slice(0, 4).map((file) => file.name).join(', ') + (files.length > 4 ? ` và ${files.length - 4} file khác` : ''));
+      facts.push(sizeText(meta.total_size));
+      return facts.filter(Boolean);
     }
-    const target = kind === 'upload' ? document.querySelector('.source-upload-block') : $('reference');
-    target?.scrollIntoView({block: 'center'});
-    if (kind !== 'upload') $('reference')?.focus();
+    if (item.kind === 'youtube_channel') {
+      facts.push([item.native_id, meta.handle].filter(Boolean).join(' · '));
+      if (meta.subscriber_count != null) facts.push(`${compactNumber(meta.subscriber_count)} người đăng ký`);
+      if (meta.video_count != null) facts.push(`${number(meta.video_count)} video`);
+    } else if (item.kind === 'video') {
+      if (meta.channel_name) facts.push(`Kênh: ${meta.channel_name}`);
+      if (meta.author && !meta.channel_name) facts.push(`Tác giả: ${meta.author}`);
+      if (clockText(meta.duration_seconds)) facts.push(clockText(meta.duration_seconds));
+      if (meta.view_count != null) facts.push(`${compactNumber(meta.view_count)} lượt xem`);
+    } else if (item.kind === 'product') {
+      if (meta.seller) facts.push(meta.seller);
+      if (meta.price_text) facts.push(`Giá hiện tại: ${meta.price_text}${meta.captured_at ? ` (đọc lúc ${date(meta.captured_at)})` : ''}`);
+      if (meta.rating) facts.push(`${meta.rating} ★`);
+      if (meta.sold_count) facts.push(`Đã bán ${meta.sold_count}`);
+    } else if (['article', 'web'].includes(item.kind)) {
+      if (meta.domain) facts.push(meta.domain);
+      if (meta.published_at) facts.push(date(meta.published_at));
+    }
+    return facts.filter(Boolean);
+  }
+
+  async function detectSourceLink() {
+    const text = ($('sourceInput')?.value || '').trim();
+    if (!text) { $('sourceInput')?.focus(); return; }
+    const ticket = beginSourcePreview();
+    try {
+      // The link's shape first - instant - then what the source says about itself.
+      const quick = await api('/api/sources/detect', {method: 'POST', body: JSON.stringify({text, probe: false})});
+      if (state.sourceTicket !== ticket) return;
+      const reading = quick.status === 'detected';
+      state.sourcePreview = {phase: reading ? 'reading' : 'done', items: [quick], files: []};
+      renderSourcePreview();
+      if (!reading) return;
+      const full = await api('/api/sources/detect', {method: 'POST', body: JSON.stringify({text, probe: true})});
+      if (state.sourceTicket !== ticket) return;
+      state.sourcePreview = {phase: 'done', items: [full], files: []};
+    } catch (error) {
+      if (state.sourceTicket !== ticket) return;
+      state.sourcePreview = {phase: 'error', items: [], files: [], error: error.message};
+    }
+    renderSourcePreview();
+  }
+
+  function beginSourcePreview() {
+    clearSourcePreview();
+    state.sourceTicket = (state.sourceTicket || 0) + 1;
+    state.sourcePreview = {phase: 'detecting', items: [], files: []};
+    renderSourcePreview();
+    return state.sourceTicket;
+  }
+
+  function clearSourcePreview() {
+    (state.sourceObjectUrls || []).forEach((url) => URL.revokeObjectURL(url));
+    state.sourceObjectUrls = [];
+    state.sourcePreview = null;
+  }
+
+  function cancelSourcePreview() {
+    state.sourceTicket = (state.sourceTicket || 0) + 1;
+    clearSourcePreview();
+    renderSourcePreview();
+  }
+
+  function pickSourceFiles(input) {
+    const files = [...(input.files || [])];
+    input.value = '';
+    if (files.length) void detectSourceFiles(files.map((file) => ({file, path: file.webkitRelativePath || ''})));
+  }
+
+  function sourceDragOver(event) {
+    event.preventDefault();
+    $('sourceDropZone')?.classList.add('dragging');
+  }
+
+  function sourceDragLeave(event) {
+    if (!event.currentTarget.contains(event.relatedTarget)) $('sourceDropZone')?.classList.remove('dragging');
+  }
+
+  async function sourceDrop(event) {
+    event.preventDefault();
+    $('sourceDropZone')?.classList.remove('dragging');
+    const transfer = event.dataTransfer;
+    if (!transfer) return;
+    // A folder is opened where the browser allows it: every file in it, with its path.
+    const entries = [...(transfer.items || [])]
+      .map((item) => (item.kind === 'file' && item.webkitGetAsEntry ? item.webkitGetAsEntry() : null)).filter(Boolean);
+    const picked = entries.length
+      ? (await Promise.all(entries.map((entry) => readDroppedEntry(entry, '')))).flat()
+      : [...(transfer.files || [])].map((file) => ({file, path: ''}));
+    if (picked.length) return detectSourceFiles(picked);
+    // A link dragged in from another tab arrives as text.
+    const text = (transfer.getData('text/uri-list') || transfer.getData('text/plain') || '')
+      .split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#'));
+    if (text) {
+      $('sourceInput').value = text;
+      return detectSourceLink();
+    }
+  }
+
+  async function readDroppedEntry(entry, prefix) {
+    if (entry.isFile) {
+      return new Promise((resolve) => entry.file((file) => resolve([{file, path: prefix + file.name}]), () => resolve([])));
+    }
+    if (!entry.isDirectory) return [];
+    const reader = entry.createReader();
+    const children = [];
+    for (;;) {
+      const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+      if (!batch.length) break;
+      children.push(...batch);
+    }
+    return (await Promise.all(children.map((child) => readDroppedEntry(child, `${prefix}${entry.name}/`)))).flat();
+  }
+
+  async function detectSourceFiles(picked) {
+    // The same file picked twice counts once.
+    const seen = new Set();
+    const chosen = picked.filter(({file}) => {
+      const key = `${file.name}|${file.size}|${file.lastModified}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const ticket = beginSourcePreview();
+    try {
+      const body = {files: chosen.map(({file, path}, index) => ({index, name: file.name, type: file.type || '', size: file.size, path}))};
+      const result = await api('/api/sources/detect-files', {method: 'POST', body: JSON.stringify(body)});
+      if (state.sourceTicket !== ticket) return;
+      state.sourcePreview = {phase: 'done', items: result.sources || [], files: chosen.map(({file}) => file)};
+    } catch (error) {
+      if (state.sourceTicket !== ticket) return;
+      state.sourcePreview = {phase: 'error', items: [], files: [], error: error.message};
+    }
+    renderSourcePreview();
+  }
+
+  function canAddSource(item) {
+    return ['add_channel', 'open_channel', 'add_source', 'upload'].includes(item.suggested_action);
+  }
+
+  // A picture from the machine is shown from the browser's own copy; nothing is uploaded to preview it.
+  function localPreviewUrl(item, files) {
+    const entry = (item.metadata?.files || []).find((file) => /^image\//.test(file.type) || /\.(jpe?g|png|webp|gif|bmp)$/i.test(file.name));
+    const file = entry ? files[entry.index] : null;
+    if (!file) return '';
+    const url = URL.createObjectURL(file);
+    (state.sourceObjectUrls = state.sourceObjectUrls || []).push(url);
+    return url;
+  }
+
+  function sourcePreviewCard(item, files) {
+    const icon = SOURCE_KIND_ICONS[item.kind] || '•';
+    const picture = item.origin === 'file' ? localPreviewUrl(item, files) : item.thumbnail;
+    const [statusText, tone] = SOURCE_STATUS[item.status] || SOURCE_STATUS.detected;
+    const existing = item.existing?.channel_id ? 'Kênh này đã có trong danh sách kênh.'
+      : item.existing?.video_id ? (item.existing.is_source ? 'Nguồn này đã có trong danh sách.' : 'Đã có trong kho video; thêm sẽ dùng lại bản ghi đó.') : '';
+    const facts = sourceFacts(item);
+    return `<article class="source-card ${item.status !== 'detected' ? 'is-warn' : ''}">
+        <div class="source-thumb large"><span aria-hidden="true">${icon}</span>${picture ? `<img src="${esc(picture)}" alt="" onerror="this.hidden=true">` : ''}</div>
+        <div class="source-card-body">
+          <div class="source-card-kind">${esc(sourceHeading(item))} <span class="tag ${tone}">${esc(statusText)}</span></div>
+          ${item.title ? `<div class="source-card-title">${esc(item.title)}</div>` : ''}
+          ${facts.length ? `<div class="source-card-facts">${facts.map((fact) => `<span>${esc(fact)}</span>`).join('')}</div>` : ''}
+          ${item.message ? `<div class="source-card-note">${esc(item.message)}</div>` : ''}
+          ${existing ? `<div class="source-card-note">${esc(existing)}</div>` : ''}
+        </div>
+      </article>`;
+  }
+
+  function renderSourcePreview() {
+    const target = $('sourcePreview');
+    if (!target) return;
+    const preview = state.sourcePreview;
+    if (!preview) { target.hidden = true; target.innerHTML = ''; return; }
+    target.hidden = false;
+    const cancel = `<button class="btn ghost" type="button" onclick="cancelSourcePreview()">Hủy</button>`;
+    if (preview.phase === 'detecting') {
+      target.innerHTML = `<div class="source-status"><span class="source-spinner" aria-hidden="true"></span> Đang nhận dạng…</div>`;
+      return;
+    }
+    if (preview.phase === 'error') {
+      target.innerHTML = `<div class="source-status warn">Không đọc được nguồn. ${esc(preview.error || '')}</div><div class="source-actions">${cancel}</div>`;
+      return;
+    }
+    if (preview.phase === 'added') {
+      const added = preview.added || [];
+      const one = added.length === 1 && added[0].video_id ? added[0] : null;
+      target.innerHTML = `<div class="source-status ok">✓ ${added.length ? `Đã thêm ${esc(added.map((item) => item.reused ? `${item.title} (đã có sẵn)` : item.title).join(', '))}.` : 'Chưa thêm được nguồn nào.'}</div>
+        ${(preview.failed || []).map((line) => `<div class="source-card-note warn">${esc(line)}</div>`).join('')}
+        <div class="source-actions">${cancel.replace('Hủy', 'Đóng')}${one ? `<button class="btn primary" type="button" onclick="useSource('${esc(one.video_id)}')">Dùng để tạo video →</button>` : ''}</div>`;
+      return;
+    }
+    const items = preview.items || [];
+    const addable = items.filter(canAddSource);
+    const reading = preview.phase === 'reading';
+    const needsConnection = items.some((item) => item.status === 'need_connection');
+    let label = addable.length > 1 ? `Thêm ${addable.length} nguồn` : 'Thêm nguồn';
+    if (addable.length === 1 && addable[0].suggested_action === 'add_channel') label = 'Thêm kênh & đồng bộ';
+    if (addable.length === 1 && addable[0].suggested_action === 'open_channel') label = 'Mở kênh';
+    target.innerHTML = `
+      ${reading ? `<div class="source-status"><span class="source-spinner" aria-hidden="true"></span> Đang đọc thông tin…</div>` : ''}
+      <div class="source-cards">${items.map((item) => sourcePreviewCard(item, preview.files || [])).join('')}</div>
+      <div class="source-actions">
+        ${cancel}
+        ${needsConnection ? `<button class="btn ghost" type="button" onclick="setWorkspace('settings')">Mở Công cụ & kết nối</button>` : ''}
+        ${addable.length ? `<button class="btn primary" type="button" onclick="addDetectedSources()" ${reading || preview.busy ? 'disabled' : ''}>${preview.busy ? 'Đang thêm…' : esc(label)}</button>` : ''}
+      </div>`;
+  }
+
+  async function addDetectedSources() {
+    const preview = state.sourcePreview;
+    if (!preview || preview.busy || preview.phase !== 'done') return;
+    const items = preview.items.filter(canAddSource);
+    if (!items.length) return;
+    // A channel already followed is opened, not added again.
+    if (items.length === 1 && items[0].suggested_action === 'open_channel') {
+      return openDetectedChannel(items[0].existing?.channel_id || items[0].native_id);
+    }
+    preview.busy = true;
+    renderSourcePreview();
+    const added = [];
+    const failed = [];
+    for (const item of items) {
+      try {
+        if (item.origin === 'file') added.push(...await importSourceFiles(item, preview.files || []));
+        else added.push(await importSourceLink(item));
+      } catch (error) {
+        failed.push(`${item.title || SOURCE_KIND_LABELS[item.kind] || 'Nguồn'}: ${error.message}`);
+      }
+    }
+    const channel = added.find((item) => item.channel_id);
+    if (channel && added.length === 1 && !failed.length) {
+      setMessage(channel.status === 'exists' ? 'Kênh đã có trong danh sách.' : `Đã thêm kênh “${channel.title}” và đồng bộ video.`, 'success');
+      return openDetectedChannel(channel.channel_id);
+    }
+    clearSourcePreview();
+    state.sourcePreview = {phase: 'added', added, failed};
+    if ($('sourceInput') && added.length && !failed.length) $('sourceInput').value = '';
+    setMessage(failed.length ? `Đã thêm ${added.length} nguồn; ${failed.length} nguồn lỗi.` : `Đã thêm ${added.length} nguồn.`, failed.length ? 'error' : 'success');
+    renderSourcePreview();
+    await Promise.all([loadSources(), loadVideos().catch(() => {})]);
+  }
+
+  async function importSourceLink(item) {
+    setMessage(item.kind === 'youtube_channel' ? 'Đang thêm kênh và đồng bộ video…' : 'Đang thêm nguồn…');
+    const result = await api('/api/sources/import', {method: 'POST', body: JSON.stringify({text: item.url})});
+    return {
+      kind: result.kind, status: result.status, video_id: result.video?.youtube_video_id || '',
+      channel_id: result.channel_id || '', title: result.video?.title || result.channel?.title || item.title || item.url,
+      reused: Boolean(result.reused_row || result.status === 'exists'),
+    };
+  }
+
+  // Files go where the server's router said (item.route); the bytes never left
+  // the browser before this. "upload": each video or audio file its own source,
+  // through the upload that already existed. "image_collection": one collection,
+  // its pictures sent with the project's own asset upload.
+  async function importSourceFiles(item, files) {
+    const chosen = (item.metadata?.files || []).map((entry) => files[entry.index]).filter(Boolean);
+    if (!['upload', 'image_collection'].includes(item.route)) throw new Error('Loại file này chưa thêm được.');
+    if (item.route === 'image_collection') {
+      const created = await api('/api/sources/image-collection', {method: 'POST', body: JSON.stringify({title: item.title})});
+      const projectId = created.project?.id;
+      let uploaded = 0;
+      const problems = [];
+      for (const [index, file] of chosen.entries()) {
+        setMessage(`Đang tải ảnh ${index + 1}/${chosen.length}: ${file.name}`);
+        const form = new FormData();
+        form.append('asset_type', 'image');
+        form.append('file', file);
+        const response = await fetch(`/api/projects/${projectId}/assets/upload`, {method: 'POST', body: form});
+        if (response.ok) uploaded += 1;
+        else problems.push(apiError(await response.json().catch(() => ({})), response).message);
+      }
+      if (!uploaded) throw new Error(problems[0] || 'Không tải được ảnh nào.');
+      const note = problems.length ? ` (${problems.length} ảnh lỗi)` : '';
+      return [{kind: item.kind, video_id: created.video_id, project_id: projectId, title: `${item.title} · ${uploaded} ảnh${note}`}];
+    }
+    const results = [];
+    for (const file of chosen) {
+      setMessage(`Đang tải "${file.name}" lên (${sizeText(file.size)})…`);
+      const form = new FormData();
+      form.append('file', file);
+      // FormData đặt Content-Type kèm boundary; helper api() ép JSON nên không dùng được.
+      const response = await fetch('/api/uploads/source', {method: 'POST', body: form});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw apiError(data, response);
+      results.push({kind: item.kind, video_id: data.video?.youtube_video_id || '', title: data.video?.title || file.name, reused: data.status === 'duplicate'});
+    }
+    return results;
+  }
+
+  // A channel belongs in KÊNH, never in this list: open it there, selected.
+  async function openDetectedChannel(channelId) {
+    clearSourcePreview();
+    renderSourcePreview();
+    state.selectedChannel = channelId;
+    try { localStorage.setItem('ytFactory.selectedChannel', channelId); } catch (_) {}
+    setSourceTab('channels');
+    await loadChannels();
+    $('channelWorkspace')?.classList.add('is-detail-open');
+  }
+
+  async function loadSources() {
+    try {
+      const data = await api('/api/sources');
+      state.sources = data.items || [];
+      state.sourceCounts = data.counts || {};
+      state.sourcesError = '';
+    } catch (error) {
+      state.sourcesError = error.message;
+    }
+    renderSourceList();
+  }
+
+  function currentSourceGroup() {
+    if (!state.sourceGroup) {
+      let saved = '';
+      try { saved = localStorage.getItem('ytFactory.sourceGroup') || ''; } catch (_) {}
+      state.sourceGroup = SOURCE_GROUPS.some(([key]) => key === saved) ? saved : 'all';
+    }
+    return state.sourceGroup;
+  }
+
+  function setSourceGroup(group) {
+    state.sourceGroup = SOURCE_GROUPS.some(([key]) => key === group) ? group : 'all';
+    try { localStorage.setItem('ytFactory.sourceGroup', state.sourceGroup); } catch (_) {}
+    renderSourceList();
+  }
+
+  function sourceRowMeta(item) {
+    const platform = sourcePlatformLabel(item.platform);
+    if (item.group === 'file') {
+      if (item.kind === 'image_collection') return `${item.image_count > 1 ? 'Bộ ảnh' : 'Ảnh'} · ${number(item.image_count)} ảnh`;
+      return [item.kind === 'audio' ? 'Audio từ máy' : 'Video từ máy', clockText(item.duration_seconds)].filter(Boolean).join(' · ');
+    }
+    if (item.kind === 'product') return [platform || 'Sản phẩm', item.price_text].filter(Boolean).join(' · ');
+    if (item.kind === 'video') return [item.is_short ? `${platform} Shorts` : platform, item.site, clockText(item.duration_seconds)].filter(Boolean).join(' · ');
+    return item.site || platform || 'Trang web';
+  }
+
+  function sourceRow(item) {
+    const icon = SOURCE_KIND_ICONS[item.kind] || '•';
+    const analyze = item.analyzing ? '<span class="tag cyan">Đang phân tích</span>'
+      : item.analyzed ? '<span class="tag green">Đã phân tích</span>' : '';
+    return `<div class="source-row">
+        <div class="source-thumb"><span aria-hidden="true">${icon}</span>${item.thumbnail_url ? `<img src="${esc(item.thumbnail_url)}" alt="" loading="lazy" onerror="this.hidden=true">` : ''}</div>
+        <div class="source-row-main">
+          <div class="source-row-title clamp" title="${esc(item.title)}">${esc(item.title)}</div>
+          <div class="source-row-meta">${item.group === 'file' ? '' : `<span class="source-kind-label">${esc(SOURCE_KIND_LABELS[item.kind] || 'Nguồn')}</span> `}${esc(sourceRowMeta(item))}</div>
+        </div>
+        <div class="source-row-side">${analyze}<span class="secondary-text">${item.added_at ? esc(date(item.added_at)) : ''}</span></div>
+        <button type="button" class="channel-menu-button" aria-label="Thao tác" onclick="event.stopPropagation(); openSourceMenu('${esc(item.video_id)}', this)">⋯</button>
+      </div>`;
+  }
+
+  function renderSourceList() {
+    const filters = $('sourceFilters');
+    const list = $('sourceList');
+    if (!filters || !list) return;
+    const counts = state.sourceCounts || {};
+    const group = currentSourceGroup();
+    filters.innerHTML = SOURCE_GROUPS.map(([key, label]) => `<button type="button" role="tab" class="source-filter ${key === group ? 'active' : ''}" aria-selected="${key === group}" onclick="setSourceGroup('${key}')">${label} <b>${number(counts[key] || 0)}</b></button>`).join('');
+    if (state.sourcesError) {
+      list.innerHTML = `<div class="empty">Chưa tải được danh sách nguồn. ${esc(state.sourcesError)}</div>`;
+      return;
+    }
+    const items = (state.sources || []).filter((item) => group === 'all' || item.group === group);
+    list.innerHTML = items.length ? items.map(sourceRow).join('')
+      : `<div class="empty">${(state.sources || []).length ? 'Không có nguồn nào trong mục này.' : 'Chưa có nguồn nào. Dán link hoặc thả file ở trên để thêm.'}</div>`;
+  }
+
+  // ⋯: only actions that already exist elsewhere in the app.
+  function openSourceMenu(videoId, button) {
+    closeSourceMenu();
+    const item = (state.sources || []).find((source) => source.video_id === videoId);
+    if (!item) return;
+    const actions = [
+      ['Dùng để tạo video', `useSource('${esc(videoId)}')`],
+      item.project_id ? ['Mở dự án', `openProjectDetail(${Number(item.project_id)})`] : null,
+      item.url ? ['Mở trang gốc', `window.open('${esc(item.url)}', '_blank', 'noopener')`] : null,
+      item.url ? ['Sao chép link', `copySourceLink('${esc(videoId)}')`] : null,
+    ].filter(Boolean);
+    const menu = document.createElement('div');
+    menu.id = 'sourceMenu';
+    menu.className = 'channel-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = actions.map(([label, action]) => `<button type="button" role="menuitem" onclick="closeSourceMenu(); ${action}">${esc(label)}</button>`).join('');
+    document.body.appendChild(menu);
+    const box = button.getBoundingClientRect();
+    menu.style.top = `${window.scrollY + box.bottom + 4}px`;
+    menu.style.left = `${window.scrollX + Math.max(8, box.right - menu.offsetWidth)}px`;
+    setTimeout(() => document.addEventListener('click', closeSourceMenu, {once: true}), 0);
+  }
+
+  function closeSourceMenu() {
+    document.getElementById('sourceMenu')?.remove();
+  }
+
+  async function copySourceLink(videoId) {
+    const item = (state.sources || []).find((source) => source.video_id === videoId);
+    try {
+      await navigator.clipboard.writeText(item?.url || '');
+      setMessage('Đã sao chép link.', 'success');
+    } catch (_) {
+      setMessage('Không sao chép được link.', 'error');
+    }
+  }
+
+  // Bước 1 chọn nguồn từ kho video; một bộ ảnh đã là dự án nên mở thẳng dự án đó.
+  async function useSource(videoId) {
+    const item = (state.sources || []).find((source) => source.video_id === videoId);
+    if (item?.kind === 'image_collection' && item.project_id) return resumeStudioProject(item.project_id);
+    if (!state.videoCatalog?.some((video) => video.youtube_video_id === videoId)) await loadVideos();
+    return startStudioFromVideo(videoId);
   }
 
   // ---- Tab KÊNH: danh sách bên trái, chi tiết bên phải ----

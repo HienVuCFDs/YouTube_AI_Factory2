@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 from youtube_monitor import main as main_module
-from youtube_monitor import source_brief
+from youtube_monitor import source_brief, source_kinds
 
 
 class WhenTheVideoCannotBeReachedTests(unittest.TestCase):
@@ -29,6 +29,7 @@ class WhenTheVideoCannotBeReachedTests(unittest.TestCase):
             "description": "Giải thích tán xạ ánh sáng.",
             "duration_seconds": 180,
             "video_url": "https://gone.test/clip",
+            "source_kind": "video",
         }
         cls.video = video
 
@@ -138,6 +139,7 @@ class AListingIsReadAsAListingTests(unittest.TestCase):
             "youtube_video_id": "web-shop", "title": "Nước hoa",
             "description": "", "duration_seconds": 0,
             "video_url": "https://www.lazada.vn/products/x.html",
+            "source_kind": "product",
         }
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-shop"), \
                 mock.patch.object(main_module.database, "get_video", return_value=video), \
@@ -147,7 +149,10 @@ class AListingIsReadAsAListingTests(unittest.TestCase):
                 mock.patch.object(main_module, "_sheet_from_remote_images", return_value=(None, 0)):
             return main_module.extract_source(1, {}, options)
 
-    def test_a_shop_link_is_detected_without_being_told(self) -> None:
+    def test_a_shop_link_is_stored_as_a_listing_and_read_as_one(self) -> None:
+        # Decided once, when the row is written (source_kinds); the analysis reads it.
+        row = {"youtube_video_id": "web-shop", "video_url": "https://www.lazada.vn/products/x.html", "duration_seconds": 0}
+        self.assertEqual(source_kinds.for_row(row, {"source": "link_import", "platform": "shop"}), "product")
         self.assertEqual(self._extract({}).kind, "product")
 
     def test_a_price_nobody_could_read_becomes_a_warning(self) -> None:
@@ -176,6 +181,7 @@ class AListingIsReadAsAListingTests(unittest.TestCase):
             "youtube_video_id": "web-shop", "title": "Nước hoa X-Men",
             "description": "", "duration_seconds": 0,
             "video_url": "https://shopee.vn/x-i.1.2",
+            "source_kind": "product",
         }
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-shop"), \
                 mock.patch.object(main_module.database, "get_video", return_value=video), \
@@ -188,6 +194,35 @@ class AListingIsReadAsAListingTests(unittest.TestCase):
 
         self.assertEqual(extraction.kind, "idea")
         self.assertIn("X-Men", extraction.text)
+
+
+class APictureTheModelCanOpenTests(unittest.TestCase):
+    """A listing with one WebP photograph hung the Codex CLI until it timed
+    out (TikTok Shop, 30/09); a lone picture is handed over as a JPEG."""
+
+    def test_a_lone_webp_is_converted_and_a_jpeg_is_left_alone(self) -> None:
+        import subprocess
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            jpeg = Path(folder) / "a.jpg"
+            jpeg.write_bytes(b"x")
+            self.assertEqual(main_module._contact_sheet_for_review([jpeg], 1), jpeg)
+            webp = Path(folder) / "b.webp"
+            webp.write_bytes(b"x")
+
+            def converted(command, **kwargs):
+                Path(command[-1]).write_bytes(b"jpeg")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(main_module.subprocess, "run", side_effect=converted) as ran:
+                self.assertEqual(main_module._contact_sheet_for_review([webp], 1), Path(folder) / "b.jpg")
+            self.assertIn(str(webp), ran.call_args.args[0])
+            (Path(folder) / "b.jpg").unlink()
+            failed = subprocess.CompletedProcess([], 1, "", "no decoder")
+            with mock.patch.object(main_module.subprocess, "run", return_value=failed):
+                self.assertEqual(main_module._contact_sheet_for_review([webp], 1), webp, "kept when it cannot be converted")
 
 
 class BringingInALinkThatIsNotAVideoTests(unittest.TestCase):
@@ -323,6 +358,7 @@ class HandingThePageToWhoeverCanOpenItTests(unittest.TestCase):
             "youtube_video_id": "web-shop", "title": "Tai nghe",
             "description": "", "duration_seconds": 0,
             "video_url": "https://shopee.vn/Tai-Nghe-S10-i.1.2",
+            "source_kind": "product",
         }
         with mock.patch.object(main_module, "_project_source_video_id", return_value="web-shop"), \
                 mock.patch.object(main_module.database, "get_video", return_value=video), \

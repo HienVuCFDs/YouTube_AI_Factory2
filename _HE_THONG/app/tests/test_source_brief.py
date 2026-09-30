@@ -24,22 +24,29 @@ def _sheet(root: Path) -> Path:
 
 
 class WhatKindOfSourceThisIsTests(unittest.TestCase):
-    def test_a_real_video_row_is_a_video(self) -> None:
-        video = {"youtube_video_id": "abc123", "duration_seconds": 62}
+    """The analysis reads the kind the row was stored with (videos.source_kind)."""
 
-        self.assertEqual(source_brief.detect_kind({}, video, []), "video")
+    def test_each_stored_kind_is_read_as_its_analysis_kind(self) -> None:
+        for stored, read in (("video", "video"), ("audio", "audio"), ("article", "article"), ("web", "web"),
+                             ("product", "product"), ("image_collection", "images")):
+            with self.subTest(stored=stored):
+                row = {"youtube_video_id": "x", "source_kind": stored}
+                self.assertEqual(source_brief.detect_kind({}, row, []), read)
+
+    def test_nothing_is_worked_out_again_from_the_row(self) -> None:
+        # No running time, a description and a shop's address: each once made
+        # this an article or a listing here. The stored kind is what counts.
+        row = {"youtube_video_id": "web-1", "duration_seconds": 0, "description": "Bài viết dài",
+               "video_url": "https://shopee.vn/x-i.1.2", "source_kind": "video"}
+
+        self.assertEqual(source_brief.detect_kind({}, row, []), "video")
 
     def test_an_idea_project_is_not_a_source(self) -> None:
         """Idea projects are stored against a placeholder row, so the presence
         of a row is not by itself something to analyse."""
-        placeholder = {"youtube_video_id": "idea-9f2c", "duration_seconds": 0}
+        placeholder = {"youtube_video_id": "idea-9f2c", "duration_seconds": 0, "source_kind": ""}
 
         self.assertEqual(source_brief.detect_kind({}, placeholder, []), "idea")
-
-    def test_a_row_with_text_and_no_running_time_is_an_article(self) -> None:
-        article = {"youtube_video_id": "web-1", "duration_seconds": 0, "description": "Bài viết dài"}
-
-        self.assertEqual(source_brief.detect_kind({}, article, []), "article")
 
     def test_uploaded_pictures_and_nothing_else_are_the_source(self) -> None:
         assets = [{"asset_type": "image", "file_path": "a.png"}]

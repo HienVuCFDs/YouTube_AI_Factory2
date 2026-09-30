@@ -35,11 +35,11 @@ def _file_exists(value: Any) -> bool:
     return bool(path and Path(path).is_file())
 
 
-def _source_kind(video: dict[str, Any]) -> str:
+def _source_kind(video: dict[str, Any], raw: dict[str, Any]) -> str:
+    """Where the source came from, for Astra. What it *is* is videos.source_kind."""
     url = str(video.get("video_url") or "")
     video_id = str(video.get("youtube_video_id") or "")
-    raw = video.get("raw_payload") or video.get("raw_payload_json") or {}
-    if video_id.startswith("idea-") or (isinstance(raw, dict) and raw.get("source") == "high_level_request"):
+    if video_id.startswith("idea-") or raw.get("source") == "high_level_request":
         return "prompt_text"
     if url.startswith("file://") or str(video.get("media_kind") or "").strip():
         return "local_media"
@@ -77,7 +77,9 @@ def build_source_package(
         "source_package_version": SOURCE_PACKAGE_VERSION,
         "project_id": int(project_id),
         "source": {
-            "kind": _source_kind(video),
+            # get_video leaves the payload out; it is read on its own.
+            "kind": _source_kind(video, database.get_video_raw_payload(str(video.get("youtube_video_id") or ""))),
+            "source_kind": str(video.get("source_kind") or ""),
             "video_id": str(video.get("youtube_video_id") or ""),
             "title": str(video.get("title") or project.get("title") or ""),
             "url": str(video.get("video_url") or ""),
