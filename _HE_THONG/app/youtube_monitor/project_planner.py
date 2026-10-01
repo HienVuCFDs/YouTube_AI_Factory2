@@ -23,7 +23,7 @@ from __future__ import annotations
 from math import gcd
 from typing import Any, Callable
 
-from . import freshness, research_evidence, workflows
+from . import freshness, research_evidence, source_kinds, workflows
 from .knowledge_store import AudienceObservations, ChannelIntelligence, ContentPatterns, TopicIntelligence, slug
 from .shorts import OUTPUT_PROFILE_SIZES
 
@@ -74,12 +74,22 @@ def _aspect(profile: str) -> str:
     return f"{width // divisor}:{height // divisor}"
 
 
-def source_kind(result: dict[str, Any], identity: dict[str, Any]) -> str:
-    stated = str(result.get("source_kind") or result.get("source_type") or "").strip().lower()
-    if stated in {"image", "images"}:
-        return "images"
-    if stated in PENDING_COLLECTORS:
-        return stated
+# What each kind is researched as, in PENDING_COLLECTORS' terms: spoken audio
+# like a video's content, a web page like an article.
+_RESEARCH_KIND = {"audio": "video", "web": "article", "image": "images", "image_collection": "images"}
+
+
+def source_kind(result: dict[str, Any], identity: dict[str, Any], stored: str = "") -> str:
+    """What to research from: the kind the analysis read, else the row's source_kind.
+
+    The platform is only read for a row from before source_kind existed.
+    """
+    analysed = str(result.get("source_kind") or result.get("source_type") or "").strip().lower()
+    on_row = source_kinds.ANALYSIS_KIND.get(str(stored or "").strip().lower(), "")
+    for kind in (analysed, on_row):
+        kind = _RESEARCH_KIND.get(kind, kind)
+        if kind in PENDING_COLLECTORS:
+            return kind
     if identity.get("platform") == "shop":
         return "product"
     if identity.get("platform") == "web":
@@ -106,7 +116,7 @@ def research_brief(
 ) -> dict[str, Any]:
     """2.1 - what to find out, from the analysis alone. No model, no network."""
     result = dict(analysis.get("result") or {})
-    kind = source_kind(result, identity)
+    kind = source_kind(result, identity, str(video.get("source_kind") or ""))
     facts = dict(result.get("source_facts") or {})
     topic = " ".join(str(result.get("topic") or video.get("title") or "").split())[:200]
     entities = _texts([item.get("name") for item in result.get("characters") or [] if isinstance(item, dict)], 12)

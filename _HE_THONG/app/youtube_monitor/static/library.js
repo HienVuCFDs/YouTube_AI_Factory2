@@ -2256,7 +2256,6 @@
 
   const VIDEO_SCENE_PROVIDERS = new Set(['phantom_canvas_video', 'gemini_veo', 'gflow_cli', 'flow_veo', 'meta_ai_video', 'runway']);
   const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']);
-  const AUDIO_SOURCE_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac']);
   // Providers that need no API key, driven instead by the caller's own
   // logged-in web/agent session (browser sidecar or Antigravity's agent).
   const SUBSCRIPTION_SCENE_PROVIDERS = new Set(['phantom_canvas_image', 'phantom_canvas_video', 'antigravity_image', 'gflow_cli', 'gflow_image', 'flow_veo', 'flow_image', 'meta_ai_video', 'meta_ai_image', 'gemini_web_image', 'chatgpt_web_image', 'auto_parallel']);

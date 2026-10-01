@@ -177,7 +177,7 @@ from .video_downloader import VideoDownloadError, delete_downloaded_video, downl
 from .writer import WriterError, resolve_target_duration_seconds, resolve_writer, revise_script, validate_voiceover_plan
 from .folklore_research import research_folklore_remake
 from .youtube_captions import CaptionsError, download_caption, list_captions
-from .youtube_client import YouTubeApiError, YouTubeClient
+from .youtube_client import YouTubeApiError, YouTubeClient, parse_video_reference
 from .youtube_client import parse_duration as parse_youtube_duration
 
 
@@ -1078,7 +1078,18 @@ def import_reference_video(payload: ImportVideoRequest) -> dict[str, Any]:
     # membership and view counts that yt-dlp does not, and the tracked-channel
     # features depend on them. Anything else is a plain link.
     if is_http_url(payload.reference) and not _looks_like_youtube(payload.reference):
-        return _import_video_from_link(payload.reference, group_name=payload.group_name)
+        return _add_link_source(payload.reference, group_name=payload.group_name, allow_channel=False)
+    # A YouTube video already stored - under its own id or an older link
+    # import's key - is that video: reused through the same helper, never
+    # written a second time under another key.
+    try:
+        native = parse_video_reference(payload.reference)
+    except ValueError:
+        native = ""
+    if native and database.find_videos_by_native_id("youtube", native):
+        return _add_link_source(
+            f"https://www.youtube.com/watch?v={native}", group_name=payload.group_name, allow_channel=False,
+        )
     try:
         return service.add_video(payload.reference, group_name=payload.group_name)
     except Exception as exc:
@@ -1223,17 +1234,22 @@ def _unreadable_link_detail(url: str, detail: str) -> str:
     return detail
 
 
-def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = "") -> dict[str, Any]:
+def _import_video_from_link(
+    url: str, *, group_name: str = "", as_page: str = "", page_fallback: bool = True,
+) -> dict[str, Any]:
     """Register a source video from any site yt-dlp can read.
 
     The row looks exactly like a tracked or uploaded one, so transcript,
     analysis and the reup workflow need no knowledge of where it came from.
     Nothing is downloaded here: that stays an explicit, confirmed action.
 
+    The row's source_kind is stated here, from what was actually read:
     `as_page` ("article", "product" or "web") is for a link already known to
-    be a page. yt-dlp is not asked, so an article with a clip embedded in it
-    is not stored as that clip, and a listing is read as a listing. The row's
-    source_kind says which; a link read by yt-dlp is a video.
+    be a page - yt-dlp is not asked, so an article with a clip embedded in it
+    is not stored as that clip, and a listing is read as a listing; a link
+    yt-dlp reads is a video. `page_fallback=False` is for a link already
+    known to be a video: if yt-dlp cannot read it now, that is the answer,
+    not a page stored in its place.
     """
     stated_kind = source_kinds.valid(as_page)
     if as_page:
@@ -1247,6 +1263,10 @@ def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = ""
             details = probe_source_link(url)
             stated_kind = source_kinds.VIDEO
         except SourceLinkError as exc:
+            if not page_fallback:
+                raise HTTPException(
+                    status_code=400, detail="Không đọc được video từ link này lúc này. Thử lại sau ít phút.",
+                ) from exc
             # yt-dlp is asked first because a link is usually a video. When it is
             # not - an article, a listing - the old behaviour was to refuse, so
             # those sources could not be brought into the app at all even though
@@ -1255,6 +1275,9 @@ def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = ""
             if page is None:
                 raise HTTPException(status_code=400, detail=_unreadable_link_detail(url, str(exc))) from exc
             details = page
+            # A page nobody identified beyond "not a video": a listing on a
+            # known shop, otherwise a web page - the kind that claims nothing.
+            stated_kind = source_kinds.PRODUCT if page_source.looks_like_shop(url) else source_kinds.WEB
     if details["is_live"]:
         raise HTTPException(
             status_code=400,
@@ -1278,16 +1301,18 @@ def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = ""
         if database.get_video_raw_payload(details["video_id"]).get("kind") == "youtube#video":
             return _refresh_monitored_row(details, platform, metrics_source)
     previous = database.get_video(details["video_id"]) or {}
-    channel_key = details["channel_id"]
-    # Importing the same link again must not make it poorer: a second read
-    # that did not get the real channel keeps the one the first read found.
-    if str(previous.get("youtube_channel_id") or "").startswith("UC") and not channel_key.startswith("UC"):
-        channel_key = str(previous["youtube_channel_id"])
+    # A row that exists stays on the channel it is filed under, whatever this
+    # read found. Its real channel is recorded beside it (native_channel_id),
+    # which is what groups the two in KÊNH; moving the row emptied the older
+    # channel row and split one channel into two cards (30/09). It also means
+    # a second read that did not get the real channel cannot lose it.
+    channel_key = str(previous.get("youtube_channel_id") or "") or details["channel_id"]
     real_youtube_channel = platform == "youtube" and channel_key.startswith("UC")
     existing_channel = database.get_channel(channel_key)
     # A real channel may already be tracked by the monitor, with its own
     # title, counts and uploads playlist; a link import must not overwrite it.
-    if not (real_youtube_channel and existing_channel):
+    # Nor does it rewrite the channel row of a video it already has.
+    if not previous and not (real_youtube_channel and existing_channel):
         database.upsert_channel({
             "youtube_channel_id": channel_key,
             "channel_url": details["uploader_url"] or details["webpage_url"],
@@ -1318,8 +1343,7 @@ def _import_video_from_link(url: str, *, group_name: str = "", as_page: str = ""
         "title": fields["title"] or details["webpage_url"],
         **counts,
         "metadata_hash": details["video_id"],
-        # A page read without being asked for one (yt-dlp could not read it)
-        # states nothing: the one rule decides (a listing, an article, a page).
+        # What was read - stated here, once; everything after reads it.
         "source_kind": stated_kind,
         "raw_payload": {
             "source": "link_import",
@@ -1457,8 +1481,14 @@ def _source_media_kind(path: Path) -> str:
 
 @app.post("/api/videos/import-link")
 def import_video_from_link(payload: ImportVideoLinkRequest) -> dict[str, Any]:
-    """Import a source video from a link on any supported platform."""
-    return _import_video_from_link(payload.url, group_name=payload.group_name)
+    """Import a source from a link. Kept for older callers; the page uses /api/sources/import.
+
+    Only the request shape differs: the same helper resolves the link to what
+    is stored and imports only what is new. This endpoint used to call the
+    importer directly, and re-importing an older YouTube link import moved its
+    row onto the real channel, leaving the old channel row empty.
+    """
+    return _add_link_source(payload.url, group_name=payload.group_name, allow_channel=False)
 
 
 @app.get("/api/videos/probe-link")
@@ -1574,31 +1604,37 @@ def _source_snapshot(detected: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stored_source(detected: dict[str, Any], url: str) -> dict[str, Any] | None:
-    """The row this link already has, if any: found by the preview, by the video's id, or by the link."""
+    """The row this link already has, if any. Reads the database only.
+
+    By what the preview found; then by the platform's own video id (a video
+    is one identity however its row is keyed or filed); then by the exact
+    link. An older link import of a YouTube video sits under a "web-..." key
+    on a synthetic channel - found here, it is reused where it is.
+    """
     known = str((detected.get("existing") or {}).get("video_id") or "")
     stored = database.get_video(known) if known else None
-    if stored is None and detected.get("kind") == source_detector.VIDEO and detected.get("platform") == "youtube":
-        # Without a preview to go by (the app restarted in between): the video's
-        # own id says whether it is stored. Importing it again would move an
-        # older link import onto its real channel and leave the old row empty.
-        rows = database.find_videos_by_native_id("youtube", str(detected.get("native_id") or ""))
+    native = str(detected.get("native_id") or "")
+    if stored is None and detected.get("kind") == source_detector.VIDEO and native:
+        rows = database.find_videos_by_native_id(str(detected.get("platform") or ""), native)
         stored = database.get_video(str(rows[0]["youtube_video_id"])) if rows else None
-    if stored is None and detected.get("kind") != source_detector.VIDEO:
-        # A page kept under an older key for this exact link.
+    if stored is None:
         stored = database.find_video_by_url(url)
     return stored
 
 
-@app.post("/api/sources/import")
-def import_source(payload: SourceImportRequest) -> dict[str, Any]:
-    """Add what "Thêm nguồn" detected, through the importer SOURCE_ROUTES names.
+def _add_link_source(text: str, *, group_name: str = "", allow_channel: bool = True) -> dict[str, Any]:
+    """The one way a link becomes a source - "Thêm nguồn" and the older link endpoints alike.
 
-    Decided here, from the detection this link got a moment ago or, failing
-    that, from the link's shape; the page sends only the link. The row's
-    source_kind is stated by the importer that wrote it. A channel goes to the
-    channel sync and is never stored as a source row.
+    1. What the link is: the detection it got a moment ago or, failing that,
+       its shape (source_detector). No network here.
+    2. Whether it is stored already (_stored_source). If so the row is reused
+       exactly where it is - same key, same channel, its project, transcript
+       and analysis untouched - and nothing is fetched.
+    3. Otherwise the importer SOURCE_ROUTES names takes it, and states the
+       row's source_kind.
+    A channel goes to the channel sync and is never stored as a source row.
     """
-    shape = source_detector.classify(payload.text)
+    shape = source_detector.classify(text)
     if shape["status"] != source_detector.DETECTED:
         raise HTTPException(status_code=400, detail=shape["message"])
     url = shape["url"]
@@ -1610,43 +1646,69 @@ def import_source(payload: SourceImportRequest) -> dict[str, Any]:
         detected = seen
     route = _source_route(detected)
     if route == "channel_sync":
-        return _import_source_channel(detected, payload.group_name)
+        if not allow_channel:
+            raise HTTPException(
+                status_code=400,
+                detail="Đây là link của một kênh, không phải một video. Thêm kênh ở Nguồn tham khảo › NGUỒN.",
+            )
+        return _import_source_channel(detected, group_name)
     if route not in ("link_import", "page_import"):
         raise HTTPException(status_code=400, detail=detected.get("message") or "Nguồn này chưa thêm được.")
     snapshot = _source_snapshot(detected)
     by = str(detected.get("detected_by") or "")
     stored = _stored_source(detected, url)
     if stored:
-        # Already stored: marked as a source, not read or stored again. A row
-        # that has its kind keeps it; one that has none takes the detection's.
-        # One thing is corrected: a page stored before the app could tell a
-        # check page from a listing is named after it ("Security Check"), and
-        # the preview has just read the real name.
+        # Already stored: marked as a source, not read or stored again. What
+        # this preview found is the kind - fresher evidence than whatever an
+        # older row was given - so the chain holds: detected product, stored
+        # product, analysed product. A bare link shape (no preview) is weaker
+        # and only fills in a row that has no kind.
+        # One thing more is corrected: a page stored before the app could tell
+        # a check page from a listing is named after it ("Security Check"),
+        # and the preview has just read the real name.
+        video_id = str(stored["youtube_video_id"])
         named = str(detected.get("title") or "").strip()
         if page_source.looks_like_bot_wall(str(stored.get("title") or "")) and named \
                 and not page_source.looks_like_bot_wall(named):
-            database.set_video_title(str(stored["youtube_video_id"]), named)
-            stored = database.get_video(str(stored["youtube_video_id"])) or stored
+            database.set_video_title(video_id, named)
+        probed = bool(seen) or not stored.get("source_kind")
         item = database.record_source_item(
-            str(stored["youtube_video_id"]), kind="" if stored.get("source_kind") else detected.get("source_kind", ""),
+            video_id, kind=str(detected.get("source_kind") or "") if probed else "",
             platform=str(detected.get("platform") or ""), detected_by=by, snapshot=snapshot,
         )
-        return {"status": "exists", "video": stored, "reused_row": True, "kind": item["source_kind"],
-                "route": "existing", "source": item}
+        stored = database.get_video(video_id) or stored
+        return {
+            "status": "exists", "import_mode": "link", "reused_row": True, "route": "existing",
+            "platform": str(stored.get("source_extractor") or stored.get("source_platform") or detected.get("platform") or ""),
+            "video": stored, "channel": database.get_channel(str(stored.get("youtube_channel_id") or "")),
+            "identity": source_identity.of(database, video_id),
+            "kind": item["source_kind"], "source": item,
+        }
     as_page = str(detected.get("source_kind") or "") if route == "page_import" else ""
     try:
-        result = _import_video_from_link(url, group_name=payload.group_name, as_page=as_page)
+        # The importer states exactly the kind the detector found: a page as
+        # that page, a video as a video - never a page stored in its place.
+        result = _import_video_from_link(
+            url, group_name=group_name, as_page=as_page, page_fallback=route != "link_import",
+        )
     except HTTPException as exc:
         raise HTTPException(status_code=exc.status_code, detail=_plain_import_error(str(exc.detail))) from exc
     video = result.get("video") or {}
+    video_id = str(video.get("youtube_video_id") or "")
+    if not video_id:
+        return {**result, "kind": "", "route": route}
     platform = str(detected.get("platform") or "")
     if platform in ("", "web") and video.get("source_kind") == source_kinds.VIDEO:
         platform = str(video.get("source_platform") or platform)
     # The importer stated the kind (a page asked for, or a video yt-dlp read).
-    item = database.record_source_item(
-        str(video.get("youtube_video_id") or ""), kind="", platform=platform, detected_by=by, snapshot=snapshot,
-    )
+    item = database.record_source_item(video_id, kind="", platform=platform, detected_by=by, snapshot=snapshot)
     return {**result, "kind": item.get("source_kind", ""), "route": route, "source": item}
+
+
+@app.post("/api/sources/import")
+def import_source(payload: SourceImportRequest) -> dict[str, Any]:
+    """Add what "Thêm nguồn" detected. The page sends only the link; _add_link_source does the rest."""
+    return _add_link_source(payload.text, group_name=payload.group_name)
 
 
 def _import_source_channel(detected: dict[str, Any], group_name: str) -> dict[str, Any]:

@@ -23,7 +23,22 @@ def test_source_package_for_idea_project_is_compact(tmp_path: Path) -> None:
     assert package["source"]["kind"] == "prompt_text"
     assert package["source"]["title"] == "AI Director"
     assert package["transcript"]["available"] is False
-    assert "article_url" in package["not_first_class_yet"]
+    assert package["source"]["source_kind"] == ""  # an idea is not a source
+    assert "article_url" in package["supported_inputs"] and "article_url" not in package["not_first_class_yet"]
+
+
+def test_the_package_hands_over_the_stored_kind(tmp_path: Path) -> None:
+    database = Database(tmp_path / "context.db")
+    database.upsert_channel({"youtube_channel_id": "site-x", "channel_url": "x"})
+    # The marker is in the payload only - which get_video leaves out; the kind is on the row.
+    database.upsert_video({"youtube_video_id": "web-a", "youtube_channel_id": "site-x", "video_url": "https://x.test/a",
+                           "metadata_hash": "h", "duration_seconds": 0, "raw_payload": {"source": "product_import"}})
+    project = database.create_production_project("web-a", title="A")
+
+    package = build_source_package(database, int(project["id"]))
+
+    assert package["source"]["source_kind"] == "product"
+    assert package["source"]["kind"] == "product_url"
 
 
 def test_project_context_summarizes_script_storyboard_timeline(tmp_path: Path) -> None:

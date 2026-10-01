@@ -34,12 +34,30 @@ class TheRuleForRowsThatDoNotSayTests(unittest.TestCase):
         ({"youtube_video_id": "local-2", "duration_seconds": 10}, {"media_kind": "video"}, "video"),
         ({"youtube_video_id": "idea-1"}, {"source": "high_level_request"}, ""),
         ({"youtube_video_id": "idea-2"}, {"source": "image_collection"}, "image_collection"),
+        # A YouTube row pushed by WebSub carries no API payload and no running time.
+        ({"youtube_video_id": "dQw4w9WgXcQ", "youtube_channel_id": "UC" + "a" * 22}, {"video_id": "dQw4w9WgXcQ"}, "video"),
+        # yt-dlp read it as a film (a TikTok photo post has no running time).
+        ({"youtube_video_id": "web-6", "duration_seconds": 0}, {"source": "link_import", "platform": "TikTok"}, "video"),
+        # An upload: the probe of the bytes, or only the file's name, says audio.
+        ({"youtube_video_id": "local-3", "duration_seconds": 10, "media_kind": "audio"}, {}, "audio"),
+        ({"youtube_video_id": "local-4", "duration_seconds": 10, "local_media_path": r"F:\x\giong.MP3"}, {}, "audio"),
+        # Nothing to go on: a web page, the kind that claims nothing.
+        ({"youtube_video_id": "web-7", "duration_seconds": 0, "video_url": "https://x.test/y"}, {}, "web"),
+        ({"youtube_video_id": "web-8", "duration_seconds": None, "video_url": "https://x.test/z"}, {}, "web"),
     ]
 
     def test_each_older_shape(self) -> None:
         for row, payload, kind in self.CASES:
             with self.subTest(row=row["youtube_video_id"]):
                 self.assertEqual(source_kinds.for_row(row, payload), kind)
+
+    def test_it_never_reaches_for_the_network(self) -> None:
+        from unittest import mock
+
+        with mock.patch("httpx.get", side_effect=AssertionError("network")), \
+                mock.patch("httpx.Client.send", side_effect=AssertionError("network")):
+            for row, payload, _ in self.CASES:
+                source_kinds.for_row(row, payload)
 
     def test_only_the_six_kinds_are_accepted(self) -> None:
         self.assertEqual(source_kinds.SOURCE_KINDS, ("video", "article", "product", "image_collection", "audio", "web"))
@@ -108,8 +126,13 @@ class RowsFromBeforeTests(_DbCase):
                  raw_payload={"source": "link_import", "platform": "shop"})
         self.add("local-a", duration_seconds=5, raw_payload={"media_kind": "audio"})
         idea = self.database.create_idea_project("Ý tưởng")["youtube_video_id"]
+        project = self.database.create_production_project("web-art", title="Dự án cũ")
+        before = self.sql("SELECT youtube_video_id, youtube_channel_id, title, metadata_hash FROM videos ORDER BY id")
         self.sql("UPDATE videos SET source_kind = ''")  # as a database from before the column
         Database(self.path).initialize()
+        # Only the kind is written: no key, channel, title or project moves.
+        self.assertEqual(self.sql("SELECT youtube_video_id, youtube_channel_id, title, metadata_hash FROM videos ORDER BY id"), before)
+        self.assertEqual(self.database.get_production_project(int(project["id"]))["youtube_video_id"], "web-art")
         self.assertEqual(
             {key: self.kind(key) for key in ("abcdefghijk", "web-art", "web-page", "web-shop", "local-a", idea)},
             {"abcdefghijk": "video", "web-art": "article", "web-page": "web", "web-shop": "product",
@@ -129,6 +152,69 @@ class RowsFromBeforeTests(_DbCase):
         rows = self.sql("SELECT youtube_video_id, platform, snapshot_json, added_at FROM source_items")
         self.assertEqual(rows, [("web-old", "shopee", '{"price_text": "9.999₫"}', "2026-09-30T00:00:00")])
         self.assertNotIn("kind", {row[1] for row in self.sql("PRAGMA table_info(source_items)")})
+
+
+class ThePlanReadsTheSameKindTests(unittest.TestCase):
+    def test_the_analysis_first_then_the_row_and_the_platform_only_for_old_rows(self) -> None:
+        from youtube_monitor.project_planner import source_kind
+
+        cases = [
+            ({"source_type": "product"}, {"platform": "web"}, "web", "product"),  # what was analysed
+            ({"source_type": "idea"}, {}, "product", "idea"),  # the page could not be read: analysed as an idea
+            ({}, {"platform": "upload"}, "audio", "video"),  # spoken audio researched like a video's content
+            ({"source_type": "web"}, {}, "web", "article"),  # a page researched like an article
+            ({}, {}, "image_collection", "images"),
+            ({}, {"platform": "shop"}, "", "product"),  # a row from before source_kind
+        ]
+        for result, identity, stored, expected in cases:
+            with self.subTest(stored=stored, result=result):
+                self.assertEqual(source_kind(result, identity, stored), expected)
+
+
+class ThePayloadBugTests(_DbCase):
+    """The marker saying "article" or "product" was written into raw_payload_json,
+    and the consumers looked for it in raw_payload - which get_video leaves out.
+    Now the kind is on the row, and nothing reads the payload for it."""
+
+    def test_a_marker_only_in_the_payload_reaches_every_consumer_through_the_column(self) -> None:
+        from youtube_monitor import source_brief
+        from youtube_monitor.project_context import build_source_package
+
+        self.add("web-art", duration_seconds=0, raw_payload={"source": "article_import", "platform": "web"})
+        self.add("web-shop", duration_seconds=0, raw_payload={"source": "product_import", "platform": "web"})
+        self.sql("UPDATE videos SET source_kind = ''")  # a database from before the column
+        Database(self.path).initialize()
+        for key, kind, read_as in (("web-art", "article", "article"), ("web-shop", "product", "product")):
+            with self.subTest(key=key):
+                row = self.database.get_video(key)
+                self.assertNotIn("raw_payload", row)
+                self.assertNotIn("raw_payload_json", row)
+                self.assertEqual(row["source_kind"], kind)
+                self.assertEqual(source_brief.detect_kind({}, row, []), read_as)
+                project = self.database.create_production_project(key, title=key)
+                self.assertEqual(build_source_package(self.database, int(project["id"]))["source"]["source_kind"], kind)
+
+    def test_no_consumer_reads_the_payload_for_the_kind(self) -> None:
+        import inspect
+
+        from tests.ui_source import studio_ui
+        from youtube_monitor import main, project_context, source_brief
+
+        for name, code in (
+            ("source_brief", inspect.getsource(source_brief)),
+            ("extract_source", inspect.getsource(main.extract_source)),
+            ("_step_analyze", inspect.getsource(main._step_analyze)),
+            ("_source_view", inspect.getsource(main._source_view)),
+            ("build_source_package", inspect.getsource(project_context.build_source_package)),
+            ("_source_origin", inspect.getsource(project_context._source_origin)),
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn("raw_payload", code)
+        ui = studio_ui()
+        kind = ui[ui.index("function studioSourceKind("):ui.index("\n  }\n", ui.index("function studioSourceKind("))]
+        audio = ui[ui.index("function studioSourceIsAudio("):ui.index("\n  }\n", ui.index("function studioSourceIsAudio("))]
+        for guess in ("raw_payload", "duration_seconds", "startsWith('web-')", "extension", "title"):
+            self.assertNotIn(guess, kind + audio, guess)
 
 
 if __name__ == "__main__":

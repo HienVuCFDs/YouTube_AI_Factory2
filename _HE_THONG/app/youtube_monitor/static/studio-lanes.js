@@ -1320,11 +1320,9 @@
     return state.videoCatalog.find((video) => video.youtube_video_id === state.studioVideoId) || null;
   }
 
+  // Backend nói nguồn là gì (video.source_kind); trang không tự đoán từ đuôi file.
   function studioSourceIsAudio(video = studioSelectedVideo()) {
-    if (video?.source_kind === 'audio') return true;
-    const source = String(video?.local_media_path || video?.video_url || '').split('?')[0].toLowerCase();
-    const extension = source.split('.').pop() || '';
-    return AUDIO_SOURCE_EXTENSIONS.has(extension);
+    return video?.source_kind === 'audio';
   }
 
   function youtubeEmbedUrl(video) {

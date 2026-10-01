@@ -15,6 +15,7 @@ store one kind (the YouTube monitor).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 VIDEO = "video"
@@ -48,8 +49,17 @@ def valid(kind: Any) -> str:
     return text if text in SOURCE_KINDS else ""
 
 
+_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac")
+_YOUTUBE_VIDEO_ID = re.compile(r"[\w-]{11}")
+_YOUTUBE_CHANNEL_ID = re.compile(r"UC[\w-]{22}")
+
+
 def for_row(row: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
-    """The kind of a row whose writer did not state one; "" for an idea placeholder."""
+    """The kind of a row whose writer did not state one; "" for an idea placeholder.
+
+    Only what the row already holds is read - never the network - and a row
+    with too little to go on is a web page: the one kind that claims nothing.
+    """
     from .page_source import looks_like_shop
 
     payload = payload if isinstance(payload, dict) else {}
@@ -58,19 +68,24 @@ def for_row(row: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
     if video_id.startswith("idea-"):
         return IMAGE_COLLECTION if source == "image_collection" else ""
     if video_id.startswith("local-"):
-        return AUDIO if str(payload.get("media_kind") or "") == "audio" else VIDEO
+        # What the probe of the bytes found, what the upload recorded, or the file's name.
+        heard = (str(row.get("media_kind") or ""), str(payload.get("media_kind") or ""))
+        path = str(row.get("local_media_path") or row.get("video_url") or "").lower()
+        return AUDIO if "audio" in heard or path.endswith(_AUDIO_EXTENSIONS) else VIDEO
     if source in _PAYLOAD_MARKERS:
         return _PAYLOAD_MARKERS[source]
     if looks_like_shop(str(row.get("video_url") or "")):
         return PRODUCT
-    if payload.get("kind") == "youtube#video":
-        return VIDEO
-    if int(row.get("duration_seconds") or 0) <= 0:
-        # No running time: text to read, the rule the analysis step used.
-        if str(row.get("description") or "").strip():
-            return ARTICLE
-        # A page imported with no description used to be taken for a video.
-        extractor = str(payload.get("platform") or "").strip().lower()
-        if source == "link_import" and extractor in _PAGE_EXTRACTORS:
-            return WEB
-    return VIDEO
+    youtube = payload.get("kind") == "youtube#video" or (
+        _YOUTUBE_VIDEO_ID.fullmatch(video_id) and _YOUTUBE_CHANNEL_ID.fullmatch(str(row.get("youtube_channel_id") or ""))
+    )
+    if youtube or int(row.get("duration_seconds") or 0) > 0:
+        return VIDEO  # something that plays
+    # No running time: a page. With a description it was read as an article
+    # before this column, and still is.
+    if str(row.get("description") or "").strip():
+        return ARTICLE
+    extractor = str(payload.get("platform") or "").strip().lower()
+    if source == "link_import" and extractor not in _PAGE_EXTRACTORS:
+        return VIDEO  # yt-dlp read it as a film, running time or not
+    return WEB

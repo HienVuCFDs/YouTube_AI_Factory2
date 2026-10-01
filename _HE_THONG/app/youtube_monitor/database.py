@@ -1086,7 +1086,8 @@ class Database:
         """
         rows = connection.execute(
             """
-            SELECT youtube_video_id, video_url, duration_seconds, description, raw_payload_json
+            SELECT youtube_video_id, youtube_channel_id, video_url, duration_seconds, description,
+                   media_kind, local_media_path, raw_payload_json
             FROM videos WHERE source_kind = ''
             """
         ).fetchall()

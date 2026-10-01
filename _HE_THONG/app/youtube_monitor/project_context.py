@@ -35,14 +35,29 @@ def _file_exists(value: Any) -> bool:
     return bool(path and Path(path).is_file())
 
 
-def _source_kind(video: dict[str, Any], raw: dict[str, Any]) -> str:
-    """Where the source came from, for Astra. What it *is* is videos.source_kind."""
+# Where a source of each kind (videos.source_kind) came from, in the package's
+# v1 vocabulary. A video is told apart by its link below.
+_ORIGIN_OF_KIND = {
+    "article": "article_url", "product": "product_url", "web": "web_page_url",
+    "image_collection": "project_asset", "audio": "local_media",
+}
+
+
+def _source_origin(video: dict[str, Any]) -> str:
+    """Where the source came from - the package's `kind`, for Astra.
+
+    What the source *is* is videos.source_kind, handed over beside it; this
+    only reads the row, never its payload (which get_video leaves out).
+    """
     url = str(video.get("video_url") or "")
     video_id = str(video.get("youtube_video_id") or "")
-    if video_id.startswith("idea-") or raw.get("source") == "high_level_request":
+    kind = str(video.get("source_kind") or "")
+    if video_id.startswith("idea-") and kind != "image_collection":
         return "prompt_text"
     if url.startswith("file://") or str(video.get("media_kind") or "").strip():
         return "local_media"
+    if kind in _ORIGIN_OF_KIND:
+        return _ORIGIN_OF_KIND[kind]
     if video_id.startswith("web-"):
         return "web_video_url"
     if "youtube.com" in url or "youtu.be" in url:
@@ -77,8 +92,8 @@ def build_source_package(
         "source_package_version": SOURCE_PACKAGE_VERSION,
         "project_id": int(project_id),
         "source": {
-            # get_video leaves the payload out; it is read on its own.
-            "kind": _source_kind(video, database.get_video_raw_payload(str(video.get("youtube_video_id") or ""))),
+            "kind": _source_origin(video),
+            # What the source is: the one field every step reads (source_kinds).
             "source_kind": str(video.get("source_kind") or ""),
             "video_id": str(video.get("youtube_video_id") or ""),
             "title": str(video.get("title") or project.get("title") or ""),
@@ -110,10 +125,11 @@ def build_source_package(
             "local_media",
             "project_asset",
             "prompt_text",
-        ],
-        "not_first_class_yet": [
             "article_url",
             "product_url",
+            "web_page_url",
+        ],
+        "not_first_class_yet": [
             "folder_footage_as_source_package",
         ],
     }

@@ -54,6 +54,8 @@ def _video_from_api(item: dict[str, Any]) -> dict[str, Any]:
         "like_count": _int_or_none(statistics.get("likeCount")),
         "comment_count": _int_or_none(statistics.get("commentCount")),
         "metadata_hash": _metadata_hash(title, description, tags, thumbnail),
+        # The Data API only ever returns videos (source_kinds).
+        "source_kind": "video",
         "raw_payload": item,
         "analysis_status": "pending",
         "media_status": "not_downloaded",
@@ -205,6 +207,7 @@ class SyncService:
                     "description": "",
                     "published_at": event.get("published_at"),
                     "metadata_hash": _metadata_hash(title, "", [], ""),
+                    "source_kind": "video",
                     "raw_payload": event,
                 }
                 self.database.upsert_video(partial)
