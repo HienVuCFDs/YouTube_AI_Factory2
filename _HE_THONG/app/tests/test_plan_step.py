@@ -137,7 +137,10 @@ class PlanStepTests(unittest.TestCase):
         self.assertEqual(evidence[0]["collector"], "planner.source")
         self.assertEqual(evidence[0]["metrics"]["view_count"], 2000)
         self.assertEqual(report["report"]["knowledge_used"]["channel"]["state"], "missing")
-        self.assertEqual(self._row()["state"], "done")
+        # Research alone is not a finished Bước 2: the row stays runnable and says what it holds.
+        row = self._row()
+        self.assertEqual((row["state"], row["outcome"]["status"], row["outcome"]["completed"]), ("ready", "draft", False))
+        self.assertNotIn("plan", main._steps_done(self.project_id))
 
     def test_a_reused_channel_profile_is_reported_as_fresh(self) -> None:
         self._analyze()

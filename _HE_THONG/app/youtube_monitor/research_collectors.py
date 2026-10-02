@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from . import freshness, research_evidence, research_text, web_research
+from . import freshness, page_source, research_evidence, research_text, web_research
 from .channel_research import video_row
 from .knowledge_store import AudienceObservations, ContentPatterns
 from .youtube_client import YouTubeApiError
@@ -68,8 +68,56 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def failure(collector: str, source: str, reason: str) -> dict[str, str]:
-    return {"collector": collector, "source": str(source)[:300], "reason": str(reason)[:300]}
+# A source that answered with a refusal instead of its content, or did not
+# answer in time. Nothing read from it is evidence.
+BLOCKED = "blocked"
+FAILED = "failed"
+_BLOCKED_REASON = re.compile(
+    r"\b(401|403|407|429|451)\b|forbidden|too many requests|captcha|security check|access denied|unusual traffic"
+    r"|timed? ?out|timeout|hết giờ|đăng nhập|log ?in|sign ?in|xác minh|verify|bị chặn|blocked",
+    re.IGNORECASE,
+)
+# What a page says in place of its content, beyond what an import already looks for.
+_WALL_MARKERS = (
+    "sign in to continue", "log in to continue", "đăng nhập để tiếp tục", "đăng nhập để xem", "you have been blocked",
+    "request blocked", "verify you are human", "403 forbidden", "checking your browser",
+)
+# A page that is only its challenge is short; an article that mentions one is not.
+WALL_TEXT_LIMIT = 600
+
+
+def failure(collector: str, source: str, reason: str, status: str = "", **more: Any) -> dict[str, Any]:
+    """One thing a collector could not get, and whether it was refused (`blocked`) or simply failed."""
+    reason = str(reason)[:300]
+    return {"collector": collector, "source": str(source)[:300], "reason": reason,
+            "collector_status": status or (BLOCKED if _BLOCKED_REASON.search(reason) else FAILED), **more}
+
+
+def refused(error: BaseException) -> bool:
+    """Whether a fetch was turned away or ran out of time, rather than finding nothing there."""
+    if isinstance(error, (TimeoutError, PermissionError, httpx.TimeoutException)):
+        return True
+    return bool(_BLOCKED_REASON.search(f"{type(error).__name__} {error}"))
+
+
+def wall_reason(html: str, text: str) -> str:
+    """Why a page that answered is not its content: a challenge, a sign-in wall. "" when it is the page."""
+    title = page_source.page_title(html)
+    blob = f"{title} {text}".lower()
+    if page_source.looks_like_bot_wall(title) or any(marker in title.lower() for marker in _WALL_MARKERS):
+        return f"Trang trả về màn hình chặn/xác minh thay cho nội dung (“{title[:80]}”)"
+    if len(text) < WALL_TEXT_LIMIT and (page_source.looks_like_bot_wall(text) or any(marker in blob for marker in _WALL_MARKERS)):
+        return "Trang chỉ trả về thông báo chặn, xác minh hoặc đòi đăng nhập"
+    return ""
+
+
+def is_blocked_evidence(item: dict[str, Any]) -> bool:
+    """A page stored as read before blocked pages were refused: its own words give it away."""
+    if item.get("source_kind") not in {"article", "official", "review"}:
+        return False
+    title, text = str(item.get("title") or ""), str(item.get("excerpt") or "")
+    blob = f"{title} {text}".lower()
+    return page_source.looks_like_bot_wall(text) or any(marker in blob for marker in _WALL_MARKERS)
 
 
 def _days_since(published: Any, now: datetime | None = None) -> float | None:
@@ -153,6 +201,41 @@ def rank_similar(rows: list[dict[str, Any]], *, topic_terms: set[str], now: date
         })
     ranked.sort(key=lambda row: (-row["score"], row["search_rank"]))
     return ranked
+
+
+# How much of a title must be about the subject before the video counts as
+# being about it. A source that is not a video (an article, a listing, an
+# audio file) is held to the stricter rule: a search always returns
+# something, and one shared word does not make it related.
+LOW, HIGH = "low", "high"
+STRICT_SHARED = 2
+STRICT_TITLE_SHARE = 0.25
+
+
+def topic_terms(brief: dict[str, Any]) -> set[str]:
+    """The words a similar video is matched against: the subject, its keywords, the product's name."""
+    product = (brief.get("product") or {}).get("name") or ""
+    return set(research_text.tokens(" ".join([str(brief.get("topic") or ""), *(brief.get("keywords") or [])[:5], product])))
+
+
+def mark_relevance(videos: list[dict[str, Any]], terms: set[str], *, strict: bool) -> list[dict[str, Any]]:
+    """Each video with how much of its title is about the subject, and `relevance` high or low.
+
+    With no subject words there is nothing to judge by, and nothing is marked low.
+    """
+    marked = []
+    for video in videos:
+        title = set(research_text.tokens(video.get("title", "")))
+        shared = len(title & terms)
+        share = round(shared / len(title), 2) if title else 0.0
+        if not terms:
+            level = HIGH
+        elif strict:
+            level = HIGH if shared >= STRICT_SHARED and share >= STRICT_TITLE_SHARE else LOW
+        else:
+            level = HIGH if shared >= 1 else LOW
+        marked.append({**video, "topic_match": {"shared": shared, "title_share": share, "strict": strict}, "relevance": level})
+    return marked
 
 
 def published_at_of(html: str) -> str | None:
@@ -258,9 +341,14 @@ class Collectors:
 
     def similar_videos(
         self, *, query: str, exclude_ids: set[str], language: str = "vi", label: str = "similar",
-        topic_terms: set[str] | None = None, volatility: str = "evergreen",
+        topic_terms: set[str] | None = None, volatility: str = "evergreen", strict: bool = False,
     ) -> dict[str, Any]:
-        """Videos on the same subject with their counts, ranked by rank_similar."""
+        """Videos on the same subject with their counts, ranked by rank_similar.
+
+        Each is marked `relevance` high or low (mark_relevance); `strict` is for
+        a source that is not itself a video. A low one stays in the list, so
+        the report shows what the search returned, and is used for nothing.
+        """
         result: dict[str, Any] = {"videos": [], "evidence": [], "failed": [], "limitations": [],
                                   "reused": False, "query": query, "captured_at": None}
         collector = f"youtube.{label}"
@@ -269,7 +357,7 @@ class Collectors:
             return result
         reused = self._reusable_similar(query, volatility)
         if reused:
-            return {**result, **reused, "reused": True}
+            return self._with_relevance({**result, **reused, "reused": True}, topic_terms or set(), strict)
         if not self.youtube_ready:
             result["failed"].append(failure(collector, "YouTube Data API", "Chưa cấu hình YouTube API key"))
             return result
@@ -316,6 +404,17 @@ class Collectors:
                 "url": url, "evidence_id": evidence["id"],
             })
         result["captured_at"] = captured
+        return self._with_relevance(result, topic_terms or set(), strict)
+
+    @staticmethod
+    def _with_relevance(result: dict[str, Any], terms: set[str], strict: bool) -> dict[str, Any]:
+        result["videos"] = mark_relevance(result["videos"], terms, strict=strict)
+        low = [video for video in result["videos"] if video["relevance"] == LOW]
+        if low:
+            result["limitations"] = [*result["limitations"], (
+                f"{len(low)}/{len(result['videos'])} video tìm được ít liên quan tới chủ đề (tiêu đề không khớp): "
+                "giữ lại để đối chiếu, không dùng làm bằng chứng cho insight, pattern hay góc nội dung."
+            )]
         return result
 
     def _reusable_similar(self, query: str, volatility: str) -> dict[str, Any] | None:
@@ -492,10 +591,23 @@ class Collectors:
                 html = ""
                 if read < self.budget.web_read_pages:
                     read += 1
+                    # A page that was asked for and did not give its content is
+                    # not evidence of anything - not even as a snippet. It is
+                    # recorded as a gap, with whether it was refused.
                     try:
                         html = self.fetch_page(url)
                     except Exception as exc:
-                        result["failed"].append(failure(collector, url, f"Không đọc được trang: {str(exc)[:160]}"))
+                        result["failed"].append(failure(
+                            collector, url, f"Không đọc được trang: {str(exc)[:160]}",
+                            BLOCKED if refused(exc) else FAILED, query=query[:200]))
+                        continue
+                    body = _article_text(html)
+                    wall = wall_reason(html, body)
+                    if wall or not body.strip():
+                        result["failed"].append(failure(
+                            collector, url, wall or "Trang không có nội dung đọc được",
+                            BLOCKED if wall else FAILED, query=query[:200]))
+                        continue
                 text = research_text.excerpt(_article_text(html), 300) if html else ""
                 published = published_at_of(html) if html else None
                 was_read = bool(text)
@@ -514,7 +626,8 @@ class Collectors:
                                            "url": item["source_url"], "evidence_id": item["id"]})
         result["timeline"].sort(key=lambda entry: entry["date"])
         if news:
-            result["limitations"].append("Chưa đối chiếu các nguồn để tìm thông tin mâu thuẫn (cần AI, để Phase 3).")
+            # Collecting reads pages; setting them against each other is the insight step's work.
+            result["limitations"].append("Bước thu thập không đối chiếu các nguồn với nhau; chỗ mâu thuẫn do bước phân tích insight xác định.")
         return result
 
     def _reusable_web(self, query: str, volatility: str) -> dict[str, Any] | None:
@@ -536,7 +649,8 @@ class Collectors:
                 if (other.get("web_queries") or {}).get(query) != captured:
                     continue
                 for item in other.get("failed_sources") or []:
-                    if str(item.get("collector", "")).startswith("web") and item.get("source") in urls:
+                    if str(item.get("collector", "")).startswith("web") and (
+                            item.get("source") in urls or item.get("query") == query[:200]):
                         failed.setdefault((item["source"], item.get("reason", "")), {**item, "reused_from": captured})
             return {"evidence": evidence, "captured_at": captured, "failed": list(failed.values())}
         return None

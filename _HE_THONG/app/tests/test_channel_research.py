@@ -52,6 +52,8 @@ class FakeYouTube:
         self.calls: list[tuple] = []
         self.hold: threading.Event | None = None
         self.entered = threading.Event()
+        # A video keeps the title the search showed it under, as on the real API.
+        self.titles: dict[str, str] = {}
 
     def get_channel_by_id(self, channel_id: str) -> dict:
         self.calls.append(("channels", channel_id))
@@ -71,15 +73,19 @@ class FakeYouTube:
             self.entered.set()
             self.hold.wait(10)
         known = {item["id"]: item for item in self.uploads}
-        return [known[item] if item in known else _upload(0, days_ago=10, views=500, title=f"Tương tự {item}") | {"id": item} for item in ids]
+        return [known[item] if item in known
+                else _upload(0, days_ago=10, views=500, title=self.titles.get(item, f"Tương tự {item}")) | {"id": item}
+                for item in ids]
 
     def search_videos(self, query: str, **options) -> list[dict]:
         self.calls.append(("search", query))
         titles = ["Vì sao Trái Đất quay?", "Top 5 sự thật về Trái Đất", "Trái Đất hình thành thế nào?",
                   "Hành tinh xanh", "10 điều về Mặt Trăng", "Trái Đất có tuổi bao nhiêu?", "Lõi Trái Đất", "Vũ trụ"]
         # Ids unique to this fake: tests share one database, and reuse is real.
-        return [{"video_id": f"s{index}-{self.channel_id[-8:]}", "channel_id": _uc(), "channel_title": f"Kênh {index}", "title": title}
+        hits = [{"video_id": f"s{index}-{self.channel_id[-8:]}", "channel_id": _uc(), "channel_title": f"Kênh {index}", "title": title}
                 for index, title in enumerate(titles[: options.get("max_results", 8)])]
+        self.titles.update({hit["video_id"]: hit["title"] for hit in hits})
+        return hits
 
     def list_comment_threads(self, video_id: str, **options) -> dict:
         self.calls.append(("commentThreads", video_id))
@@ -334,7 +340,7 @@ class PlanWithCollectorsTests(_Case):
 
     def test_a_plan_collects_real_evidence_and_records_the_channel_version_used(self) -> None:
         project_id = self._project()
-        response = self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {}})
+        response = self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {"reason": False}})
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()["result"]
         channel = result["source_channel"]
@@ -364,15 +370,15 @@ class PlanWithCollectorsTests(_Case):
         self.assertEqual(summary["coverage"]["comments_sampled"], 40, "only the source's own comments count for its channel")
 
     def test_a_second_project_on_the_same_channel_reuses_its_profile(self) -> None:
-        first = self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {}}).json()["result"]
+        first = self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {"reason": False}}).json()["result"]
         calls = self._calls("channels")
-        second = self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {}}).json()["result"]
+        second = self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {"reason": False}}).json()["result"]
         self.assertEqual(second["source_channel"]["status"], "reused")
         self.assertEqual(second["source_channel"]["profile_version"], first["source_channel"]["profile_version"])
         self.assertEqual(self._calls("channels"), calls, "the channel was not researched again")
 
     def test_no_commenter_is_stored(self) -> None:
-        self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {}})
+        self.client.post(f"/api/projects/{self._project()}/steps/plan", json={"options": {"reason": False}})
         with closing(sqlite3.connect(self.database.path)) as connection:
             stored = " ".join(row[0] for row in connection.execute("SELECT patterns_json FROM audience_observations"))
         self.assertNotIn("nguoidung_test", stored)

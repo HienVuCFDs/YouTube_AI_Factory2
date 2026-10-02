@@ -120,7 +120,7 @@ class ChannelDetailViewTests(_Case):
                 self.database, self.youtube, web_search=_fake_search, fetch_page=blocked, captions=_captions)), \
                 mock.patch.object(main, "youtube", self.youtube):
             project_id = _video_project(self.database, self.channel_id)
-            self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {}})
+            self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {"reason": False}})
         latest = self.client.get(f"/api/channels/{self.channel_id}/research").json()["latest_report"]
         self.assertEqual(latest["project_id"], project_id)
         self.assertEqual(latest["status"], "partial")

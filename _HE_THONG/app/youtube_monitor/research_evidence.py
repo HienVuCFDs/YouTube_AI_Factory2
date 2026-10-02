@@ -47,6 +47,8 @@ PERSONAL_KEYS = frozenset({
     "avatar", "display_name", "channel_of_commenter",
 })
 _MENTION = re.compile(r"@[\w.\-]{2,}", re.UNICODE)
+# A reviewer's name as a shop page shows it, half hidden: "T**n", "n*****8".
+_MASKED_NAME = re.compile(r"(?<![\w*])\w\*{2,}\w(?![\w*])", re.UNICODE)
 EXCERPT_LIMIT = 300
 
 # A proportion stated about the whole audience. Allowed only when it is
@@ -78,6 +80,14 @@ def strip_personal(value: Any) -> Any:
     if isinstance(value, str):
         return _MENTION.sub("@…", value)
     return value
+
+
+def impersonal(text: str) -> str:
+    """A sentence without the person it was said by: no @handle, no half-hidden reviewer name.
+
+    What a buyer said is worth keeping; who said it is not the app's to keep.
+    """
+    return _MASKED_NAME.sub("một người mua", _MENTION.sub("@…", str(text or "")))
 
 
 def _host(url: str) -> str:
@@ -182,6 +192,30 @@ def _scope_note(cited: list[dict[str, Any]], sample_size: int | None, source_cou
     snippets = len({item["source_url"] for item in cited if item["source_kind"] in WEAK_KINDS})
     read = source_count - snippets
     return f"Dựa trên {read} nguồn đã đọc" + (f" và {snippets} trích đoạn tìm kiếm chưa mở." if snippets else ".")
+
+
+def measure(cited: list[dict[str, Any]]) -> dict[str, Any]:
+    """The numbers of a statement, worked out from the evidence it cites.
+
+    The one place sample size, source count and confidence come from - the
+    count statements of Phase 2 and the AI insights of Phase 3 alike. Whatever
+    a model wrote for them is not read.
+    """
+    samples = [item["sample_size"] for item in cited if item["source_kind"] in SAMPLE_KINDS and item["sample_size"]]
+    sample_size = sum(samples) if samples else None
+    source_count = len({item["source_url"] for item in cited})
+    return {
+        "sample_size": sample_size,
+        "source_count": source_count,
+        "confidence": _confidence(cited, sample_size, source_count),
+        "scope_note": _scope_note(cited, sample_size, source_count),
+        "captured_at": max((str(item.get("captured_at") or "") for item in cited), default=""),
+    }
+
+
+def audience_share_without_sample(text: str) -> bool:
+    """True when a sentence gives a proportion of the whole audience, not of the sample read."""
+    return bool(_PERCENT.search(text) and _AUDIENCE_WORDS.search(text) and not _SAMPLE_WORDS.search(text))
 
 
 def validate_insights(

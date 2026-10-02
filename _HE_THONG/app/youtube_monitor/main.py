@@ -60,7 +60,7 @@ from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
 from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
-from . import project_planner, research_collectors, source_detector, source_identity, source_kinds
+from . import plan_engine, project_planner, research_collectors, source_detector, source_identity, source_kinds
 from .channel_research import ChannelResearchError, ChannelResearchService
 from .youtube_quota import YouTubeQuota
 from .run_registry import RunRegistry
@@ -2051,10 +2051,12 @@ def _steps_done(project_id: int) -> set[str]:
     analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
     if analysis:
         done.add("analyze")
-        # A plan built on an older analysis does not count: the source it
-        # planned for has since been read differently.
-        project_plan = project_planner.current_plan(database, project_id, str(analysis.get("created_at") or ""))
-        if project_plan and not project_plan["stale"]:
+        # Bước 2 is done only when its plan is `completed`: feasibility ok or
+        # adjusted, and nothing under it changed since. A plan waiting on a
+        # person's decision, a blocked one and a stale one are all not done.
+        outcome = project_planner.step_outcome(
+            project_planner.current_plan(database, project_id, str(analysis.get("created_at") or "")))
+        if outcome and outcome["completed"]:
             done.add("plan")
     script = database.get_latest_project_script(project_id)
     if script:
@@ -2567,12 +2569,18 @@ def _step_analyze(project_id: int, project: dict[str, Any], options: dict[str, A
 def _step_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
     """Bước 2 · Kế hoạch: from the analysed source, what video to make and how.
 
-    Phase 1 builds the research brief from the analysis, reads what the
-    knowledge stores already hold, and saves a ResearchReport and a draft
-    ProjectPlan whose research-dependent fields are named as pending. It calls
-    no model and runs no collector yet; it may make one identity lookup (one
-    YouTube quota unit, or yt-dlp) for a source imported before its channel
-    was recorded. It reads nothing from the legacy research paths.
+    Research (collectors, no model) saves a ResearchReport; then two model
+    calls - what the evidence means (InsightReport), and the plan - with the
+    validators in insight_engine and plan_engine deciding what a model may
+    not. It reads nothing from the legacy research paths.
+
+    options
+      mode      auto | full | reason | replan (see project_planner.run)
+      settings  {output_profile, target_duration_seconds, video_type} to plan for
+      primary_angle_id  plan for this angle among the stored candidates (replan: no research, no insight call)
+      provider  one runtime instead of the stage's policy
+      collect   false: no collectors, no network beyond the identity lookup
+      reason    false: stop at research and a skeleton plan (defaults to `collect`)
     """
     video_id = _project_source_video_id(project)
     video = (database.get_video(video_id) or {}) if video_id else {}
@@ -2585,26 +2593,84 @@ def _step_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]
             return source_identity.of(database, video_id)
         return source_identity.refresh(database, video_id, youtube=youtube, probe=probe_source_link)
 
-    # collect=False keeps the Phase 1 skeleton: no channel research, no
-    # collectors, no network beyond the identity lookup.
     collect = bool(options.get("collect", True))
-    return project_planner.run(
-        database, project, video, analysis, identify=identify,
-        channel_service=channel_research_service if collect else None,
-        collectors=_research_collectors() if collect else None,
-        quota_used=youtube_quota.used_today,
-    )
+    reason = bool(options.get("reason", collect))
+
+    def progress(key: str, label: str) -> None:
+        # Read back by GET …/steps while the step runs, and after a reload.
+        _step_registry.update((project_id, "plan"), stage=key, stage_label=label,
+                              stages=[{"key": name, "label": text} for name, text in project_planner.STAGES])
+
+    try:
+        return project_planner.run(
+            database, project, video, analysis, identify=identify,
+            channel_service=channel_research_service if collect else None,
+            collectors=_research_collectors() if collect else None,
+            quota_used=youtube_quota.used_today,
+            reasoner=_plan_reasoner(project_id, str(options.get("provider") or "").strip().lower()) if reason else None,
+            options=options, progress=progress,
+        )
+    except project_planner.PlanError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+def _plan_reasoner(project_id: int, provider: str) -> Callable[..., tuple[Any, dict[str, Any]]]:
+    """The plan step's model calls, through the one orchestrator call every step uses.
+
+    So the runtime is chosen by the stage's policy, a runtime that fails falls
+    back to the next one allowed, and each attempt lands in the audit log.
+    """
+    def ask(system: str, prompt: str, schema: dict[str, Any], label: str) -> tuple[Any, dict[str, Any]]:
+        info: dict[str, Any] = {}
+        try:
+            parsed = _call_orchestrator_json(
+                system, prompt, schema, stage="orchestration", project_id=project_id, step=label,
+                provider=provider, report=info,
+            )
+        except ProviderNotSupported as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LlmError as exc:
+            raise project_planner.ReasonerFailed(str(exc)) from exc
+        return parsed, info
+
+    return ask
 
 
 def _research_collectors() -> research_collectors.Collectors:
     return research_collectors.Collectors(database, youtube)
 
 
-def _current_project_plan(project_id: int) -> dict[str, Any] | None:
+def _project_analysis_time(project_id: int) -> str:
     project = database.get_production_project(project_id)
     video_id = _project_source_video_id(project) if project else ""
     analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
-    return project_planner.current_plan(database, project_id, str((analysis or {}).get("created_at") or ""))
+    return str((analysis or {}).get("created_at") or "")
+
+
+def _current_project_plan(project_id: int) -> dict[str, Any] | None:
+    return project_planner.current_plan(database, project_id, _project_analysis_time(project_id))
+
+
+def _current_project_insight(project_id: int) -> dict[str, Any] | None:
+    return project_planner.current_insight(database, project_id, _project_analysis_time(project_id))
+
+
+def _describe_steps(project_id: int, done: set[str], running: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """The step rows, with Bước 2 saying where its plan stands rather than only done / not done.
+
+    A plan that exists but is not `completed` shows as needs_user_decision,
+    blocked or stale, and carries the reason and the choices in `outcome`.
+    """
+    rows = steps.describe(done, running)
+    outcome = project_planner.step_outcome(_current_project_plan(project_id))
+    for row in rows:
+        if row["key"] != "plan" or not outcome:
+            continue
+        row["outcome"] = outcome
+        if row["state"] == "ready" and outcome["status"] in (
+                plan_engine.NEEDS_USER_DECISION, plan_engine.BLOCKED, plan_engine.STALE):
+            row["state"] = outcome["status"]
+    return rows
 
 
 def _step_research(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
@@ -3058,7 +3124,7 @@ def list_project_steps(project_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     done = _steps_done(project_id)
     runs = {key: _step_runs(project_id, key) for key in _SINGLE_RUN_STEPS}
-    rows = steps.describe(done, [key for key, (running, _) in runs.items() if running])
+    rows = _describe_steps(project_id, done, [key for key, (running, _) in runs.items() if running])
     for row in rows:
         row["runnable"] = row["key"] in _STEP_RUNNERS
         if row["key"] in runs:
@@ -3078,7 +3144,11 @@ def get_project_plan(project_id: int) -> dict[str, Any]:
     plan = _current_project_plan(project_id)
     report_id = (plan or {}).get("research_report_id")
     report = database.get_research_report(int(report_id)) if report_id else database.get_latest_research_report(project_id)
-    return {"project_id": project_id, "plan": plan, "research_report": report}
+    # The insights the plan was reasoned from; with no plan yet, the latest ones.
+    insight_id = (plan or {}).get("insight_report_id")
+    insight = database.get_insight_report(int(insight_id)) if insight_id else _current_project_insight(project_id)
+    return {"project_id": project_id, "plan": plan, "research_report": report, "insight_report": insight,
+            "stages": [{"key": key, "label": label} for key, label in project_planner.STAGES]}
 
 
 @app.get("/api/youtube/quota")
@@ -12434,7 +12504,7 @@ def _unread_listing(project_id: int) -> str:
 
 def _goal_state(project_id: int) -> dict[str, Any]:
     done = _steps_done(project_id)
-    return {"done": sorted(done), "steps": steps.describe(done)}
+    return {"done": sorted(done), "steps": _describe_steps(project_id, done)}
 
 
 def _run_codex_agent(prompt: str, mcp_env: dict[str, str]) -> agent_runtime.AgentRun:

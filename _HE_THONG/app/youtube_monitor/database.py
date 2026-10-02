@@ -951,6 +951,8 @@ class Database:
             self._create_source_tables(connection)
             self._backfill_source_kind(connection)
             self._ensure_column(connection, "channel_profiles", "last_checked_at", "TEXT")
+            # Which InsightReport a plan was reasoned from (Phase 3).
+            self._ensure_column(connection, "project_plans", "insight_report_id", "INTEGER")
             self._ensure_column(connection, "audience_observations", "channel_ref", "TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audience_observations_channel "
@@ -1222,6 +1224,30 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_project_plans_project
                 ON project_plans(project_id, version DESC);
+
+            -- What the collected evidence means for the video about to be
+            -- made: the model's reading of a ResearchReport, after the
+            -- validator. Kept apart from the report (which holds only what
+            -- was collected) and from the plan (which can be redone from this
+            -- without researching again).
+            CREATE TABLE IF NOT EXISTS insight_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES production_projects(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'complete',
+                research_report_id INTEGER REFERENCES research_reports(id) ON DELETE SET NULL,
+                analysis_created_at TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT '',
+                engine_version TEXT NOT NULL DEFAULT '',
+                report_json TEXT NOT NULL DEFAULT '{}',
+                insight_count INTEGER NOT NULL DEFAULT 0,
+                angle_count INTEGER NOT NULL DEFAULT 0,
+                provider TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_insight_reports_project
+                ON insight_reports(project_id, version DESC);
             """
         )
 
@@ -7292,9 +7318,47 @@ class Database:
             ).fetchone()
         return self._decode_report(row)
 
+    def create_insight_report(
+        self, project_id: int, *, status: str, research_report_id: int | None, analysis_created_at: str,
+        source_kind: str, engine_version: str, report: dict[str, Any], provider: str = "",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            version = int(connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM insight_reports WHERE project_id = ?", (project_id,)
+            ).fetchone()[0])
+            cursor = connection.execute(
+                """
+                INSERT INTO insight_reports (
+                    project_id, version, status, research_report_id, analysis_created_at, source_kind,
+                    engine_version, report_json, insight_count, angle_count, provider, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, version, status, research_report_id, analysis_created_at, source_kind,
+                    engine_version, json.dumps(report, ensure_ascii=False),
+                    len(report.get("insights") or []), len(report.get("angle_candidates") or []), provider, now,
+                ),
+            )
+            report_id = int(cursor.lastrowid)
+        return self.get_insight_report(report_id) or {}
+
+    def get_insight_report(self, report_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM insight_reports WHERE id = ?", (report_id,)).fetchone()
+        return self._decode_report(row)
+
+    def get_latest_insight_report(self, project_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM insight_reports WHERE project_id = ? ORDER BY version DESC LIMIT 1", (project_id,)
+            ).fetchone()
+        return self._decode_report(row)
+
     def create_project_plan(
         self, project_id: int, *, status: str, research_report_id: int | None, analysis_created_at: str,
         engine_version: str, plan: dict[str, Any], feasibility: dict[str, Any], provider: str = "",
+        insight_report_id: int | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with self._connect() as connection:
@@ -7305,13 +7369,13 @@ class Database:
                 """
                 INSERT INTO project_plans (
                     project_id, version, status, research_report_id, analysis_created_at, engine_version,
-                    plan_json, feasibility_json, provider, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    plan_json, feasibility_json, provider, created_at, updated_at, insight_report_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id, version, status, research_report_id, analysis_created_at, engine_version,
                     json.dumps(plan, ensure_ascii=False), json.dumps(feasibility, ensure_ascii=False),
-                    provider, now, now,
+                    provider, now, now, insight_report_id,
                 ),
             )
             plan_id = int(cursor.lastrowid)

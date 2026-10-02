@@ -88,7 +88,7 @@ class _PlanCase(_Case):
             self.addCleanup(patcher.stop)
 
     def _plan(self, project_id: int) -> dict:
-        response = self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {}})
+        response = self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {"reason": False}})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["result"]
 
@@ -202,9 +202,10 @@ class WebEvidenceTests(unittest.TestCase):
         result = collectors.web(["chủ đề"])
         kinds = {item["source_url"]: item["source_kind"] for item in result["evidence"]}
         self.assertEqual(kinds["https://chinhphu.vn/a"], "official")
-        self.assertEqual(kinds["https://bao.test/b"], "search_result", "attempted but not read")
+        self.assertNotIn("https://bao.test/b", kinds, "a page that was asked for and did not answer is not evidence")
         self.assertEqual(kinds["https://khac.test/c"], "search_result", "never opened")
-        self.assertTrue(any(item["source"] == "https://bao.test/b" for item in result["failed"]))
+        timed_out = next(item for item in result["failed"] if item["source"] == "https://bao.test/b")
+        self.assertEqual(timed_out["collector_status"], "blocked")
         for item in result["evidence"]:
             self.assertTrue(item["collector"] and item["collector_version"] and item["captured_at"])
         snippets = [item for item in result["evidence"] if item["source_kind"] == "search_result"]
@@ -299,7 +300,7 @@ class RunIndependenceTests(_PlanCase):
     def test_the_manager_does_not_duplicate_a_refresh_the_plan_started(self) -> None:
         project_id = _video_project(self.database, self.channel_id)
         hold = self._hold()
-        thread = threading.Thread(target=lambda: self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {}}), daemon=True)
+        thread = threading.Thread(target=lambda: self.client.post(f"/api/projects/{project_id}/steps/plan", json={"options": {"reason": False}}), daemon=True)
         thread.start()
         self.assertTrue(self.youtube.entered.wait(5))
         response = self.client.post(f"/api/channels/{self.channel_id}/research/refresh", json={})
