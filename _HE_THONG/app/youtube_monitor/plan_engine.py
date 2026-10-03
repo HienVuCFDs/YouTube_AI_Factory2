@@ -641,6 +641,60 @@ def missing_assets(
     return list(found.values())
 
 
+# What a later step makes for the plan, in the words its reader uses.
+_MADE_ALWAYS = ("Kịch bản", "Giọng đọc", "Phụ đề")
+_MADE_MEDIA = {"ai_media": "Hình AI", "diagrams": "Sơ đồ", "graphics": "Đồ hoạ"}
+
+
+def resources(plan: dict[str, Any] | None, assets: dict[str, Any]) -> dict[str, Any]:
+    """The plan's resources as a reader sees them: four groups, each decided here, none by whoever renders them.
+
+    available      what the project holds now (asset_state)
+    app_generates  what a later step makes for this plan - never something to go and find
+    missing        the plan's missing_assets: checked against the project when the plan was made
+    proposed       what the model asked for that nothing in the project can confirm; a suggestion
+
+    A plan from before proposals were checked (`reviewed` false) had its
+    "missing" list written by the model alone, so it is shown as proposals.
+    """
+    plan = dict(plan or {})
+    kind = str(assets.get("source_kind") or "")
+    state = asset_state(assets)
+    # The same pictures are said once: a listing's as product images, a
+    # collection's as its source images (they are the uploads, not more of them).
+    skip = {"product": {"source_images"}, "image_collection": {"product_images", "user_images"}}.get(kind, {"product_images"})
+    available = [
+        {"category": category, "label": ASSET_LABELS[category], "detail": counted}
+        for category, (present, counted) in state.items() if present and category not in skip
+    ]
+    reviewed = "ai_proposed_assets" in plan
+    proposals = list(plan.get("ai_proposed_assets") or [])
+    made: list[dict[str, str]] = []
+    if plan.get("content_structure"):
+        media = plan.get("media_strategy") or {}
+        used = [*(media.get("primary_sources") or []), *(media.get("supporting_sources") or [])]
+        labels = [*_MADE_ALWAYS, *[label for key, label in _MADE_MEDIA.items() if key in used]]
+        if _clean(plan.get("music_strategy")):
+            labels.append("Nhạc nền")
+        made = [{"label": label, "source": "plan"} for label in labels]
+        made += [{"label": item["asset"], "source": "ai_proposed"} for item in proposals if item.get("verdict") == APP_GENERATES]
+    if reviewed:
+        missing = [dict(item) for item in plan.get("missing_assets") or []]
+        proposed = [
+            {key: item.get(key) for key in ("asset", "why", "category", "required_by_ai", "note")}
+            for item in proposals if item.get("verdict") == UNVERIFIED
+        ]
+    else:
+        missing = []
+        proposed = [
+            {"asset": _clean(item.get("asset"), 200), "why": _clean(item.get("why"), 300), "category": "other",
+             "required_by_ai": bool(item.get("required")), "note": "Kế hoạch này được lập trước khi app đối chiếu tài nguyên với dự án."}
+            for item in plan.get("missing_assets") or [] if isinstance(item, dict) and _clean(item.get("asset"))
+        ]
+    return {"available": available, "app_generates": made, "missing": missing, "proposed": proposed,
+            "reviewed": reviewed or not plan.get("content_structure")}
+
+
 def _number(value: Any) -> float | None:
     try:
         number = float(value)

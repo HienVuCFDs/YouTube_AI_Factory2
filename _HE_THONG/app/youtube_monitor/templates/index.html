@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>YouTube AI Factory - Giám sát</title>
-  <link rel="stylesheet" href="/static/app.css?v=20261001-sources9" />
+  <link rel="stylesheet" href="/static/app.css?v=20261003-plan3" />
 </head>
 <body>
 <div class="app">
@@ -87,8 +87,14 @@
           <div class="studio-actions studio-step1-next"><button id="studioStep1NextButton" class="btn primary" type="button" disabled onclick="setStudioStep(2)">Tiếp tục Kế hoạch →</button></div>
         </div>
         <div id="studioStep2" class="studio-step" data-studio-step="2" hidden>
-          <div id="studioAnalysisResult" class="studio-result"><div class="studio-empty">Chưa có kết quả phân tích.</div></div>
-          <div class="studio-actions"><button class="btn ghost" onclick="setStudioStep(1)">← Chọn lại video</button><button id="studioToScriptButton" class="btn primary" onclick="setStudioStep(3)">Tiếp tục viết kịch bản →</button></div>
+          <div class="studio-step-intro">
+            <div><span class="studio-kicker">BƯỚC 02</span><h3>Kế hoạch</h3><p>Làm video gì, cho ai, theo góc nào và cần những gì</p></div>
+          </div>
+          <section id="studioPlanHead" class="studio-work-card studio-plan-top"><div class="studio-empty">Chưa chọn nguồn. Chọn nguồn trong Nguồn tham khảo rồi phân tích ở Bước 1.</div></section>
+          <div id="studioPlanBody" class="studio-plan-body"></div>
+          <!-- Kết quả phân tích hiện ở Bước 1; phần tử này chỉ còn là chỗ ghi của bản xem cũ. -->
+          <div id="studioAnalysisResult" class="studio-result" hidden></div>
+          <div class="studio-actions"><button class="btn ghost" type="button" onclick="setStudioStep(1)">← Phân tích</button><button id="studioToScriptButton" class="btn primary" type="button" disabled title="Kế hoạch chưa sẵn sàng" onclick="setStudioStep(3)">Tiếp tục Kịch bản →</button></div>
         </div>
         <div id="studioStep3" class="studio-step" data-studio-step="3" hidden><div class="studio-lane-split" data-lane-step="studioStep3"><div class="studio-lane-tabs" role="tablist" data-lane-step="studioStep3" hidden><button type="button" role="tab" class="studio-lane-tab active" data-lane="long" aria-selected="true" onclick="setStudioLaneTab('long')">Video dài</button><button type="button" role="tab" class="studio-lane-tab" data-lane="short" aria-selected="false" onclick="setStudioLaneTab('short')">Short</button></div><div class="studio-lane-pane" data-lane-step="studioStep3" data-lane="long">
           <div class="studio-grid">
@@ -463,10 +469,10 @@
   </div>
 </div>
 
-<script src="/static/core.js?v=20261001-sources9"></script>
-  <script src="/static/studio-lanes.js?v=20261001-sources9"></script>
-  <script src="/static/project-detail.js?v=20261001-sources9"></script>
-  <script src="/static/library.js?v=20261001-sources9"></script>
-  <script src="/static/publish.js?v=20261001-sources9"></script>
+<script src="/static/core.js?v=20261003-plan3"></script>
+  <script src="/static/studio-lanes.js?v=20261003-plan3"></script>
+  <script src="/static/project-detail.js?v=20261003-plan3"></script>
+  <script src="/static/library.js?v=20261003-plan3"></script>
+  <script src="/static/publish.js?v=20261003-plan3"></script>
 </body>
 </html>

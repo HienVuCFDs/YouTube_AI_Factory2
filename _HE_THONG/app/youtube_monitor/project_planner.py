@@ -964,6 +964,17 @@ def current_plan(database: Any, project_id: int, analysis_created_at: str) -> di
             "effective_status": plan_engine.STALE if stale else plan.get("status")}
 
 
+def plan_resources(
+    database: Any, project: dict[str, Any], video: dict[str, Any], analysis: dict[str, Any] | None,
+    plan: dict[str, Any] | None, report: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """What the project has, what the app will make and what is missing, for the plan as it stands (plan_engine.resources)."""
+    stored = (plan or {}).get("plan") or {}
+    kind = str(stored.get("source_kind") or "") or insight_engine.reasoning_kind(video, (report or {}).get("report") or {})
+    assets = plan_engine.available_assets(database, project, video, analysis or {}, source_kind=kind)
+    return plan_engine.resources(stored, assets)
+
+
 def step_outcome(plan: dict[str, Any] | None) -> dict[str, Any] | None:
     """Where Bước 2 stands, from the plan `current_plan` returned. None before any plan.
 

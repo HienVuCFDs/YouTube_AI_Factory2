@@ -1381,6 +1381,68 @@ class MissingAssetsOnTheStepTests(_ReasonCase):
         self.assertEqual(result["status"], "needs_user_decision")
 
 
+class ResourcesViewTests(_ReasonCase):
+    """GET …/plan sorts the plan's resources into what a reader sees; no page works it out again."""
+
+    def _resources(self, project_id: int) -> dict:
+        return self._stored(project_id)["resources"]
+
+    def test_before_any_plan_it_lists_what_the_project_has(self) -> None:
+        project_id = _project(self.database, self.channel_id)
+        view = self._resources(project_id)
+        self.assertEqual([item["category"] for item in view["available"]], ["source_footage", "transcript", "source_audio"])
+        self.assertIn("62 giây hình", view["available"][0]["detail"])
+        self.assertEqual((view["app_generates"], view["missing"], view["proposed"], view["reviewed"]), ([], [], [], True))
+
+    def test_a_plan_sorts_what_the_model_proposed_into_the_four_groups(self) -> None:
+        self.model.plan = partial(plan_answer, proposed=MissingAssetTests.PROPOSED)
+        project_id = _project(self.database, self.channel_id)
+        self._ok(project_id)
+        view = self._resources(project_id)
+        self.assertEqual([item["category"] for item in view["available"]], ["source_footage", "transcript", "source_audio"])
+        made = [item["label"] for item in view["app_generates"]]
+        self.assertEqual(made[:6], ["Kịch bản", "Giọng đọc", "Phụ đề", "Hình AI", "Đồ hoạ", "Nhạc nền"])
+        self.assertIn("Giọng đọc tiếng Việt mới", made, "what the model asked for and the app makes itself")
+        self.assertEqual([(item["asset"], item["required"]) for item in view["missing"]],
+                         [("Cảnh quay thử nghiệm thật", True), ("Ảnh chụp bao bì", False)])
+        self.assertEqual([item["asset"] for item in view["proposed"]], ["Tài liệu khoa học đã kiểm chứng"])
+        # An asset the project has is in neither list, whatever the model said.
+        named = " ".join(item["asset"] for item in [*view["missing"], *view["proposed"]])
+        self.assertNotIn("Cảnh quay gốc", named)
+        self.assertNotIn("Transcript", named)
+        self.assertTrue(view["reviewed"])
+
+    def test_each_kind_of_source_has_what_it_has_and_no_more(self) -> None:
+        listing = self._resources(_project(self.database, self.channel_id, kind="product"))
+        self.assertEqual([item["category"] for item in listing["available"]], ["product_images"])
+        self.assertIn("3 ảnh từ trang bán", listing["available"][0]["detail"])
+        spoken = self._resources(_project(self.database, self.channel_id, kind="audio", seconds=120))
+        self.assertEqual([item["category"] for item in spoken["available"]], ["transcript", "source_audio"])
+        written = self._resources(_project(self.database, self.channel_id, kind="article"))
+        self.assertEqual([item["category"] for item in written["available"]], ["source_images"])
+        for view in (listing, spoken, written):
+            self.assertNotIn("source_footage", [item["category"] for item in view["available"]])
+        # A collection's pictures are its uploads: said once, as the source.
+        pictures = plan_engine.resources(None, _assets(source_kind="image_collection", source_has_picture=False,
+                                                       source_images=2, project_assets={"image": 2},
+                                                       has_transcript=False, has_dialogue=False))
+        self.assertEqual([item["category"] for item in pictures["available"]], ["source_images"])
+
+    def test_a_plan_from_before_proposals_were_checked_shows_them_as_proposals(self) -> None:
+        project_id = _project(self.database, self.channel_id)
+        old = {"source_kind": "video", "content_structure": [{"name": "Mở đầu", "estimated_seconds": 60}],
+               "media_strategy": {"primary_sources": ["ai_media"], "supporting_sources": []},
+               "missing_assets": [{"asset": "Lời dẫn tiếng Việt mới", "why": "AI tự nêu", "required": True}]}
+        self.database.create_project_plan(
+            project_id, status="needs_attention", research_report_id=None, analysis_created_at=main._project_analysis_time(project_id),
+            engine_version="plan-phase3", plan=old, feasibility={"status": "needs_attention", "checks": []},
+        )
+        view = self._resources(project_id)
+        self.assertEqual(view["missing"], [], "a list the model wrote alone is not a list of what is missing")
+        self.assertEqual([(item["asset"], item["required_by_ai"]) for item in view["proposed"]], [("Lời dẫn tiếng Việt mới", True)])
+        self.assertFalse(view["reviewed"])
+
+
 class StepStateTests(_ReasonCase):
     """ok/adjusted → completed; needs_attention → needs_user_decision; blocked; stale. Only completed is done."""
 

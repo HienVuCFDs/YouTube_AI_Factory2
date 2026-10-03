@@ -445,6 +445,690 @@
       <details class="studio-result-card"><summary>Xem dữ liệu phân tích đầy đủ (JSON)</summary><pre class="studio-json">${esc(JSON.stringify(result, null, 2))}</pre></details>`;
   }
 
+  // ---- Bước 2 · Kế hoạch ----
+  //
+  // Một bước với người dùng. Bên trong, server đi qua nghiên cứu → insight →
+  // góc nội dung → kế hoạch → kiểm tra khả thi; trang chỉ vẽ lại điều server trả về:
+  //   GET  /api/projects/{id}/steps        dòng "plan": đang chạy hay không, và `outcome`
+  //   GET  /api/projects/{id}/plan         kế hoạch, nghiên cứu, insight, `resources`
+  //   POST /api/projects/{id}/steps/plan   {mode, settings, primary_angle_id}
+  // Không có luật khả thi, tài nguyên hay độ liên quan nào ở đây: thứ gì "thiếu",
+  // thứ gì "cần quyết định" là do server nói.
+  const STUDIO_PLAN_POLL_MS = 5000;
+  const STUDIO_PLAN_HIDDEN_POLL_MS = 30000;
+  const STUDIO_PLAN_STATUS = {
+    none: ['', 'Chưa lập kế hoạch'],
+    draft: ['', 'Chưa lập kế hoạch'],
+    running: ['cyan', 'Đang lập kế hoạch…'],
+    completed: ['green', 'Sẵn sàng'],
+    needs_user_decision: ['orange', 'Cần bạn quyết định'],
+    blocked: ['red', 'Chưa thể thực hiện'],
+    stale: ['orange', 'Kế hoạch đã cũ'],
+    failed: ['red', 'Chưa lập được kế hoạch'],
+  };
+  // Lập lại theo góc hoặc theo cài đặt: server dùng lại nghiên cứu và insight đã
+  // lưu, chỉ lập phần kế hoạch. Ba bước này khi đó không chạy.
+  const STUDIO_PLAN_KEPT_STAGES = ['research', 'insights', 'angles'];
+  const STUDIO_PLAN_PLATFORMS = {youtube: 'YouTube', tiktok: 'TikTok', instagram: 'Instagram', facebook: 'Facebook'};
+  const STUDIO_PLAN_LANGUAGES = {vi: 'Tiếng Việt', en: 'Tiếng Anh'};
+  const STUDIO_PLAN_MEDIA = {
+    source_footage: 'Cảnh quay từ nguồn', product_images: 'Ảnh sản phẩm', source_images: 'Ảnh từ nguồn',
+    screenshots: 'Ảnh chụp màn hình', b_roll: 'B-roll', ai_media: 'Hình AI', diagrams: 'Sơ đồ', graphics: 'Đồ hoạ',
+  };
+  const STUDIO_PLAN_INSIGHTS = {
+    audience_need: 'Nhu cầu người xem', audience_question: 'Câu hỏi của người xem', pain_point: 'Điều gây khó chịu',
+    objection: 'Điều khiến người mua e ngại', positive_signal: 'Điều được khen', channel_pattern: 'Cách làm của kênh nguồn',
+    competitor_pattern: 'Cách làm của nội dung tương tự', performance_pattern: 'Điểm chung ở nội dung nhiều lượt xem',
+    content_gap: 'Khoảng trống nội dung', opportunity: 'Cơ hội', selling_point: 'Điểm bán hàng', product_risk: 'Rủi ro về sản phẩm',
+    fact: 'Dữ kiện', disputed_fact: 'Dữ kiện còn tranh cãi', uncertainty: 'Điều chưa rõ',
+  };
+  const STUDIO_PLAN_FACT_STATUS = {
+    confirmed: 'đã xác nhận', reported: 'mới một nguồn đưa', disputed: 'các nguồn nói khác nhau', unknown: 'chưa xác nhận',
+  };
+  const STUDIO_PLAN_SOURCES = {
+    source: 'Nguồn của dự án', video_meta: 'Video tương tự', channel_stats: 'Hồ sơ kênh nguồn', comment_sample: 'Bình luận mẫu',
+    article: 'Bài viết', official: 'Trang chính thức', product_page: 'Trang sản phẩm', review: 'Bài đánh giá',
+    search_result: 'Kết quả tìm kiếm (chưa mở trang)', transcript: 'Phụ đề của video tương tự',
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    const watch = state.studioPlan?.watch;
+    if (document.hidden || !watch?.tick) return;
+    clearTimeout(watch.timer);
+    void watch.tick();
+  });
+
+  function studioPlanState(projectId = state.studioProjectId) {
+    if (!state.studioPlan || Number(state.studioPlan.projectId) !== Number(projectId)) {
+      clearTimeout(state.studioPlan?.watch?.timer);
+      // runKind: lượt đang chạy là gì, khi chính trang này bắt đầu nó ('replan' | 'full');
+      // null khi lượt chạy được tìm thấy trên server. seen: các bước trang đã thấy chạy.
+      state.studioPlan = {projectId: projectId || null, row: null, bundle: null, error: '', running: false, requesting: false,
+        watch: null, runKind: null, seen: []};
+    }
+    return state.studioPlan;
+  }
+
+  // Đổi nguồn hoặc dự án: bỏ mọi thứ đang giữ về kế hoạch của dự án trước.
+  function resetStudioPlan() {
+    clearTimeout(state.studioPlan?.watch?.timer);
+    state.studioPlan = null;
+    renderStudioPlan();
+  }
+
+  async function studioPlanRow(projectId) {
+    const body = await api(`/api/projects/${projectId}/steps`);
+    return (body.steps || []).find((row) => row.key === 'plan') || null;
+  }
+
+  // Đọc trạng thái và kế hoạch từ server. Trả true khi dự án đã có kế hoạch
+  // hoặc đang lập, để lúc mở lại dự án biết dừng ở Bước 2.
+  async function loadStudioPlan(projectId = state.studioProjectId) {
+    if (!projectId) { renderStudioPlan(); return false; }
+    const plan = studioPlanState(projectId);
+    let row = null;
+    let bundle = null;
+    try {
+      [row, bundle] = await Promise.all([studioPlanRow(projectId), api(`/api/projects/${projectId}/plan`)]);
+    } catch (error) {
+      if (state.studioPlan !== plan) return false;
+      if (!plan.bundle) plan.error = studioPlanErrorText(error);
+      renderStudioPlan();
+      return false;
+    }
+    if (state.studioPlan !== plan) return false;
+    plan.row = row;
+    plan.bundle = bundle;
+    // Một lượt chạy từ trước khi tải lại trang, từ tab khác hay từ AI điều phối.
+    if (row?.state === 'running') {
+      plan.running = true;
+      noteStudioPlanStage(plan, row);
+      watchStudioPlan(projectId);
+    } else if (!plan.requesting) {
+      plan.running = false;
+      plan.runKind = null;
+      plan.seen = [];
+    }
+    renderStudioPlan();
+    return row?.state === 'running' || Boolean(row?.outcome && row.outcome.status !== 'draft');
+  }
+
+  // Chỉ bước nào trang thật sự thấy server đang chạy mới được coi là đã chạy.
+  function noteStudioPlanStage(plan, row) {
+    const stage = row?.run?.stage;
+    if (stage && !plan.seen.includes(stage)) plan.seen.push(stage);
+  }
+
+  // "Đang chạy" đọc từ server, không giữ trong trang: tải lại trang chỉ bỏ
+  // request, không bỏ việc. Tab đang ẩn hỏi thưa hơn và hỏi ngay khi mở lại.
+  function watchStudioPlan(projectId) {
+    const plan = studioPlanState(projectId);
+    if (plan.watch) return;
+    const watch = {timer: null, tick: null, busy: false};
+    plan.watch = watch;
+    const later = () => setTimeout(watch.tick, document.hidden ? STUDIO_PLAN_HIDDEN_POLL_MS : STUDIO_PLAN_POLL_MS);
+    watch.tick = async () => {
+      if (state.studioPlan !== plan || plan.watch !== watch || watch.busy) return;
+      watch.busy = true;
+      let row = null;
+      try { row = await studioPlanRow(projectId); } catch (_) { /* app tạm không trả lời: hỏi lại sau */ }
+      watch.busy = false;
+      if (state.studioPlan !== plan || plan.watch !== watch) return;
+      if (!row || row.state === 'running') {
+        if (row) { plan.row = row; noteStudioPlanStage(plan, row); renderStudioPlanHead(); }
+        watch.timer = later();
+        return;
+      }
+      plan.watch = null;
+      // Request của chính trang này còn mở: câu trả lời của nó sẽ kết thúc lượt chạy.
+      if (plan.requesting) return;
+      plan.running = false;
+      if (row.last_run?.status === 'failed') {
+        plan.error = studioPlanErrorText({status: row.last_run.status_code, message: row.last_run.error});
+      }
+      await loadStudioPlan(projectId);
+      announceStudioPlan();
+    };
+    watch.timer = later();
+  }
+
+  function stopStudioPlanWatch(plan) {
+    clearTimeout(plan?.watch?.timer);
+    if (plan) plan.watch = null;
+  }
+
+  // Một lần lập kế hoạch. `options` đi nguyên vào POST …/steps/plan.
+  async function runStudioPlan(options = {}) {
+    const projectId = state.studioProjectId;
+    if (!projectId) return setMessage('Hãy chọn nguồn và phân tích ở Bước 1 trước.', 'error');
+    const plan = studioPlanState(projectId);
+    if (plan.running) return;
+    plan.running = true;
+    plan.requesting = true;
+    plan.error = '';
+    plan.runKind = options.primary_angle_id || options.mode === 'replan' ? 'replan' : 'full';
+    plan.seen = [];
+    renderStudioPlan();
+    watchStudioPlan(projectId);
+    let failure = null;
+    try {
+      await api(`/api/projects/${projectId}/steps/plan`, {method: 'POST', body: JSON.stringify({options})});
+    } catch (error) {
+      failure = error;
+    }
+    if (state.studioPlan !== plan) return;
+    plan.requesting = false;
+    if (failure) {
+      // Request hỏng nhưng server vẫn đang lập (một lượt khác đã chạy trước,
+      // hoặc mất kết nối giữa chừng): theo dõi lượt đang có.
+      let row = null;
+      try { row = await studioPlanRow(projectId); } catch (_) { /* không hỏi được: coi như lượt này đã dừng */ }
+      if (state.studioPlan !== plan) return;
+      if (row?.state === 'running') {
+        // Lượt đang chạy là của nơi khác: trang không biết nó thuộc loại nào.
+        plan.row = row;
+        plan.runKind = null;
+        plan.seen = [];
+        noteStudioPlanStage(plan, row);
+        watchStudioPlan(projectId);
+        renderStudioPlanHead();
+        if (Number(failure.status) === 409) setMessage('Đang có một lần lập kế hoạch khác.', 'error');
+        return;
+      }
+      plan.error = studioPlanErrorText(failure);
+    }
+    stopStudioPlanWatch(plan);
+    plan.running = false;
+    await loadStudioPlan(projectId);
+    announceStudioPlan();
+  }
+
+  function announceStudioPlan() {
+    const plan = state.studioPlan;
+    if (!plan) return;
+    if (plan.error) return setMessage(plan.error, 'error');
+    const status = studioPlanStatus(plan);
+    if (status === 'completed') setMessage('Đã lập kế hoạch.', 'success');
+    else if (status === 'needs_user_decision') setMessage('Đã lập kế hoạch. Còn điểm cần bạn quyết định.');
+    else if (status === 'blocked') setMessage('Kế hoạch chưa thể thực hiện.', 'error');
+  }
+
+  // Lỗi viết bằng lời thường; không mã HTTP, không tên chế độ, không traceback.
+  function studioPlanErrorText(error) {
+    const status = Number(error?.status || 0);
+    const text = String(error?.message || '');
+    if (status === 409 && /đang chạy/i.test(text)) return 'Đang có một lần lập kế hoạch khác.';
+    if (status === 409 && /insight|nghiên cứu/i.test(text)) return 'Dữ liệu của kế hoạch đã thay đổi. Bấm “Lập lại kế hoạch” rồi thử lại.';
+    if (status === 409) return 'Chưa phân tích nguồn. Hãy làm Bước 1 trước.';
+    if (status === 400 && /góc nội dung|primary_angle/i.test(text)) return 'Góc này không còn trong danh sách. Hãy chọn một góc đang hiển thị, hoặc lập lại kế hoạch.';
+    if (status === 502) return 'AI lập kế hoạch chưa chạy được lúc này. Thử lại sau ít phút.';
+    if (!status && /fetch|network/i.test(text)) return 'Không kết nối được app. Hãy mở lại app rồi thử lại.';
+    return studioPlainText(text).replace(/\bmode=\w+\b/g, '').slice(0, 200) || 'Có lỗi khi lập kế hoạch. Thử lại sau.';
+  }
+
+  // Trạng thái là của server: `outcome.status` trên dòng "plan" của GET …/steps.
+  function studioPlanStatus(plan = state.studioPlan) {
+    if (!plan) return 'none';
+    if (plan.running || plan.row?.state === 'running') return 'running';
+    const status = String(plan.row?.outcome?.status || '');
+    if (STUDIO_PLAN_STATUS[status]) return status;
+    return plan.error ? 'failed' : 'none';
+  }
+
+  // Lập mới, lập lại, thử lại: cùng một lượt đầy đủ. Server tự dùng lại nghiên
+  // cứu còn mới và giữ các cài đặt đã chọn.
+  function startStudioPlan() { return runStudioPlan({mode: 'auto'}); }
+
+  // Đổi góc: server lập lại từ nghiên cứu và insight đã lưu, không nghiên cứu lại.
+  function chooseStudioPlanAngle(angleId) {
+    if (!angleId) return null;
+    return runStudioPlan({primary_angle_id: String(angleId)});
+  }
+
+  // Đổi thời lượng / định dạng: chỉ gửi điều người dùng thật sự đổi.
+  function applyStudioPlanSettings() {
+    const plan = state.studioPlan;
+    const stored = plan?.bundle?.plan?.plan || {};
+    const settings = {};
+    const profile = $('studioPlanProfile')?.value || '';
+    const seconds = Math.round(Number($('studioPlanSeconds')?.value || 0));
+    if (profile && profile !== stored.output_profile) settings.output_profile = profile;
+    if (seconds > 0 && seconds !== Number(stored.target_duration_seconds || 0)) settings.target_duration_seconds = seconds;
+    if (!Object.keys(settings).length) return setMessage('Chưa đổi thời lượng hay định dạng.', 'error');
+    // Kế hoạch đã cũ thì phải lập lại đầy đủ; còn dùng được thì chỉ lập lại phần kế hoạch.
+    const mode = studioPlanStatus(plan) === 'stale' ? 'auto' : 'replan';
+    return runStudioPlan({mode, settings});
+  }
+
+  function scrollStudioPlan(id) {
+    $(id)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+
+  function studioPlanText(value) { return esc(studioProse(value)); }
+
+  function studioPlanItems(items, limit = 5) {
+    const rows = (items || []).map((item) => studioProse(item)).filter(Boolean);
+    if (!rows.length) return '';
+    const line = (item) => `<li>${esc(item)}</li>`;
+    const rest = rows.slice(limit);
+    return `<ul class="studio-result-list">${rows.slice(0, limit).map(line).join('')}</ul>`
+      + (rest.length ? `<details class="studio-more"><summary>Xem thêm ${rest.length}</summary><ul class="studio-result-list">${rest.map(line).join('')}</ul></details>` : '');
+  }
+
+  function studioPlanField(label, value) {
+    const text = studioProse(value);
+    return text ? `<div class="studio-plan-field"><span>${esc(label)}</span><p>${esc(text)}</p></div>` : '';
+  }
+
+  function studioPlanWhen(value) {
+    const at = value ? new Date(value) : null;
+    return at && !Number.isNaN(at.getTime())
+      ? at.toLocaleString('vi-VN', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit'}) : '';
+  }
+
+  function studioPlanFormat(profile) {
+    return (typeof PUBLISH_PROFILE_LABELS === 'object' && PUBLISH_PROFILE_LABELS[profile]) || String(profile || '');
+  }
+
+  // ---- Phần đầu: nguồn, trạng thái, nút. Vẽ lại mỗi lần hỏi server. ----
+  function studioPlanActions(status, plan) {
+    const busy = status === 'running';
+    const button = (label, action, kind = 'primary') =>
+      `<button class="btn ${kind}" type="button" ${busy ? 'disabled' : ''} onclick="${action}">${esc(label)}</button>`;
+    if (busy) return `<button class="btn primary" type="button" disabled>${esc(studioPlanRunningLabel(plan))}</button>`;
+    if (status === 'completed') return button('Chọn góc khác', "scrollStudioPlan('studioPlanAngles')", 'ghost') + button('Lập lại kế hoạch', 'startStudioPlan()', 'ghost');
+    if (status === 'needs_user_decision') return button('Giải quyết vấn đề', "scrollStudioPlan('studioPlanDecisions')") + button('Lập lại kế hoạch', 'startStudioPlan()', 'ghost');
+    if (status === 'blocked' || status === 'failed') return button('Thử lại', 'startStudioPlan()');
+    if (status === 'stale') return button('Lập lại kế hoạch', 'startStudioPlan()');
+    return studioPlanNeedsAnalysis(plan)
+      ? '<button class="btn primary" type="button" onclick="setStudioStep(1)">Phân tích nguồn trước</button>'
+      : button('Lập kế hoạch', 'startStudioPlan()');
+  }
+
+  // Kế hoạch lập từ nguồn đã phân tích: chưa có dự án, hoặc server nói còn thiếu bước Phân tích.
+  function studioPlanNeedsAnalysis(plan = state.studioPlan) {
+    return !state.studioProjectId || (plan?.row?.missing || []).includes('analyze');
+  }
+
+  // Đã có kế hoạch thì lượt chạy là lập lại.
+  function studioPlanRunningLabel(plan) {
+    return (plan?.bundle?.plan?.plan?.content_structure || []).length ? 'Đang lập lại kế hoạch…' : 'Đang lập kế hoạch…';
+  }
+
+  // Dòng các bước nói đúng điều đã xảy ra, không suy ra từ thứ tự: bước đang chạy
+  // (server báo), bước trang đã thấy chạy, và - khi chính trang này gọi lập lại
+  // theo góc / cài đặt - ba bước server giữ nguyên không chạy.
+  function studioPlanRunning(plan) {
+    const run = plan.row?.run || {};
+    const stages = run.stages || plan.bundle?.stages || [];
+    const replan = plan.runKind === 'replan';
+    const started = run.started_at ? new Date(run.started_at) : null;
+    const elapsed = started && !Number.isNaN(started.getTime()) ? Math.max(0, Math.round((Date.now() - started.getTime()) / 1000)) : 0;
+    const chips = stages.map((item) => {
+      const kept = replan && STUDIO_PLAN_KEPT_STAGES.includes(item.key);
+      const mark = item.key === run.stage ? 'now' : kept ? 'kept' : (plan.seen || []).includes(item.key) ? 'past' : '';
+      return `<span class="studio-plan-stage ${mark}">${esc(item.label)}${mark === 'kept' ? ' · giữ nguyên' : ''}</span>`;
+    }).join('');
+    const timing = `${run.stage_label ? `${esc(run.stage_label)} · ` : ''}${elapsed ? `đã chạy ${formatStudioDuration(elapsed)} · ` : ''}`;
+    return `<div class="studio-plan-running" aria-live="polite">
+        <div class="studio-plan-stages">${chips}</div>
+        ${replan ? '<div class="studio-plan-note">Nghiên cứu và insight hiện tại được giữ nguyên; app chỉ lập lại phần kế hoạch.</div>' : ''}
+        <div class="studio-plan-note">${timing}${replan ? 'thường mất khoảng 1 phút' : 'thường mất 2–3 phút'}. Có thể rời trang, việc vẫn chạy.</div>
+      </div>`;
+  }
+
+  function studioPlanReason(status, plan) {
+    const outcome = plan?.row?.outcome || {};
+    if (status === 'stale') {
+      return `<div class="studio-analyze-notice">Kế hoạch này được lập trước khi dữ liệu thay đổi${outcome.reason ? `: ${studioPlanText(outcome.reason)}` : ''}. Hãy lập lại kế hoạch.</div>`;
+    }
+    if (!studioSelectedVideo()) {
+      return '<div class="studio-empty">Chưa chọn nguồn. Chọn nguồn trong Nguồn tham khảo rồi phân tích ở Bước 1.</div>';
+    }
+    if ((status === 'none' || status === 'failed') && studioPlanNeedsAnalysis(plan)) {
+      return '<div class="studio-empty">Chưa có kết quả phân tích. Kế hoạch được lập từ nguồn đã phân tích ở Bước 1.</div>';
+    }
+    if (status === 'none' || status === 'draft') {
+      return '<div class="studio-empty">Chưa có kế hoạch cho nguồn này. Bấm “Lập kế hoạch”: app sẽ tìm hiểu thêm về chủ đề, đề xuất vài góc nội dung và lập kế hoạch cho video.</div>';
+    }
+    return '';
+  }
+
+  function renderStudioPlanHead() {
+    const box = $('studioPlanHead');
+    if (!box) return;
+    const plan = state.studioPlan;
+    const status = studioPlanStatus(plan);
+    const [tone, named] = STUDIO_PLAN_STATUS[status];
+    const label = status === 'running' ? studioPlanRunningLabel(plan) : named;
+    const video = studioSelectedVideo();
+    const source = video ? studioSourceKind(video) : null;
+    const stored = plan?.bundle?.plan;
+    const updated = stored && status !== 'none' && status !== 'draft' ? studioPlanWhen(stored.created_at) : '';
+    box.innerHTML = `
+      <div class="studio-plan-head">
+        <div class="studio-plan-source">
+          <div class="primary-text">${esc(video?.title || 'Chưa chọn nguồn')}</div>
+          <div class="secondary-text">${esc([source?.label, source?.platform].filter(Boolean).join(' · '))}${updated ? ` · kế hoạch cập nhật ${esc(updated)}` : ''}</div>
+        </div>
+        <span class="status-badge ${tone}">${esc(label)}</span>
+        <div class="studio-plan-actions">${video ? studioPlanActions(status, plan) : ''}</div>
+      </div>
+      ${status === 'running' ? studioPlanRunning(plan) : ''}
+      ${plan?.error && status !== 'running' ? `<div class="studio-analyze-notice">⚠ ${esc(plan.error)}</div>` : ''}
+      ${studioPlanReason(status, plan)}`;
+    syncStudioPlanStep(status);
+  }
+
+  // Tab Bước 2 và nút sang Bước 3 nói đúng trạng thái: chỉ "Sẵn sàng" mới là xong.
+  function syncStudioPlanStep(status = studioPlanStatus()) {
+    const tab = document.querySelector('[data-studio-tab="2"]');
+    if (tab) {
+      tab.dataset.planState = status;
+      tab.classList.toggle('done', status === 'completed' && Number(state.studioStep) > 2);
+    }
+    const next = $('studioToScriptButton');
+    if (next) {
+      next.disabled = status !== 'completed';
+      next.title = status === 'completed' ? '' : 'Kế hoạch chưa sẵn sàng';
+    }
+    syncStudioScriptGate();
+  }
+
+  // ---- Phần thân: vẽ lại khi kế hoạch đổi, không vẽ lại theo từng lần hỏi. ----
+  function studioPlanDecisions(status, plan) {
+    const outcome = plan.row?.outcome || {};
+    const feasibility = plan.bundle?.plan?.feasibility || {};
+    if (!['completed', 'needs_user_decision', 'blocked'].includes(status)) return '';
+    const mark = {ok: '✓', adjusted: '✓', needs_attention: '!', blocked: '✕'};
+    const checks = (feasibility.checks || []).map((item) =>
+      `<li class="studio-plan-check ${esc(item.status)}"><b>${mark[item.status] || '·'}</b> ${studioPlanText(item.detail)}</li>`).join('');
+    const adjusted = (feasibility.adjustments || []).map((item) => studioProse(item.why)).filter(Boolean);
+    const decisions = (outcome.decisions || []).map((item) => `
+      <div class="studio-plan-decision">
+        <p>${studioPlanText(item.detail)}</p>
+        ${(item.options || []).length ? `<div class="studio-plan-note">Bạn có thể:</div>${studioPlanItems(item.options, 6)}` : ''}
+      </div>`).join('');
+    const head = status === 'completed'
+      ? '<p>Kế hoạch làm được với những gì dự án đang có.</p>'
+      : status === 'blocked'
+        ? '<p><b>Chưa thể thực hiện kế hoạch này.</b> Bước 2 chưa xong cho tới khi xử lý các điểm dưới đây.</p>'
+        : '<p><b>Cần bạn quyết định.</b> App không tự chọn thay bạn; Bước 2 chưa xong cho tới khi các điểm dưới đây được xử lý.</p>';
+    const next = status === 'completed' ? '' : `
+      <div class="studio-actions">
+        <button class="btn small ghost" type="button" onclick="scrollStudioPlan('studioPlanAdjust')">Đổi thời lượng / định dạng</button>
+        <button class="btn small ghost" type="button" onclick="scrollStudioPlan('studioPlanAngles')">Chọn góc khác</button>
+        <button class="btn small ghost" type="button" onclick="startStudioPlan()">Lập lại kế hoạch</button>
+      </div>`;
+    return `<section id="studioPlanDecisions" class="studio-work-card studio-plan-card ${esc(status)}">
+        <div class="studio-card-head"><div><b>Khả năng thực hiện</b></div></div>
+        ${head}${decisions}
+        ${adjusted.length ? `<div class="studio-plan-note">App đã điều chỉnh nhỏ: ${esc(adjusted.join(' '))}</div>` : ''}
+        ${next}
+        ${checks ? `<details class="studio-more"><summary>Các điểm đã kiểm tra</summary><ul class="studio-plan-checks">${checks}</ul></details>` : ''}
+      </section>`;
+  }
+
+  // Một dòng về nguồn, theo loại nguồn mà server ghi trên kế hoạch (source_kind).
+  function studioPlanSourceLine(kind, analysis) {
+    const video = studioSelectedVideo();
+    const seconds = Number(video?.duration_seconds || 0);
+    if (kind === 'product') {
+      const facts = analysis?.source_facts || {};
+      const price = studioMoney(facts.price, facts.price_text);
+      const read = studioPlanWhen(facts.captured_at);
+      return price ? `giá ${price}${read ? ` (đọc lúc ${read})` : ''}` : 'chưa đọc được giá';
+    }
+    if (kind === 'article' || kind === 'web') return studioSourceHost(video);
+    if (kind === 'audio') return seconds ? `âm thanh ${formatStudioDuration(seconds)}, không có hình` : 'âm thanh, không có hình';
+    if (kind === 'video') return seconds ? `video ${formatStudioDuration(seconds)}` : '';
+    return '';
+  }
+
+  function studioPlanSummary(stored, analysis, locked) {
+    const seconds = Number(stored.target_duration_seconds || 0);
+    const length = seconds ? `${formatStudioDuration(seconds)} ${stored.target_duration_from === 'project' ? '(bạn đặt)' : '(app đề xuất)'}` : '';
+    const facts = [
+      ['Nền tảng', STUDIO_PLAN_PLATFORMS[stored.platform] || stored.platform],
+      ['Loại video', stored.video_type],
+      ['Thời lượng', length],
+      ['Khung hình', stored.aspect_ratio],
+      ['Ngôn ngữ', STUDIO_PLAN_LANGUAGES[stored.language] || stored.language],
+    ].filter(([, value]) => String(value || '').trim());
+    const topic = studioProse(analysis?.topic || '');
+    const source = studioPlanSourceLine(stored.source_kind, analysis);
+    const profiles = typeof PUBLISH_PROFILE_LABELS === 'object' ? Object.keys(PUBLISH_PROFILE_LABELS) : [];
+    return `<section class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Định hướng</b></div></div>
+        ${topic ? `<div class="studio-plan-note">Từ nguồn đã phân tích: ${esc(topic)}${source ? ` · ${esc(source)}` : ''}</div>` : ''}
+        <div class="studio-plan-columns">
+          ${studioPlanField('Mục tiêu nội dung', stored.goal)}
+          ${studioPlanField('Dành cho', stored.target_audience)}
+        </div>
+        <div class="studio-plan-facts">${facts.map(([name, value]) => `<div><span>${esc(name)}</span><b>${esc(value)}</b></div>`).join('')}</div>
+        <details id="studioPlanAdjust" class="studio-more studio-plan-adjust">
+          <summary>Đổi thời lượng / định dạng</summary>
+          <div class="studio-plan-adjust-row">
+            <label>Định dạng<select id="studioPlanProfile">${profiles.map((key) =>
+              `<option value="${esc(key)}" ${key === stored.output_profile ? 'selected' : ''}>${esc(studioPlanFormat(key))}</option>`).join('')}</select></label>
+            <label>Thời lượng (giây)<input id="studioPlanSeconds" type="number" min="8" max="3600" step="1" value="${esc(seconds || '')}"></label>
+            <button class="btn small primary" type="button" ${locked ? 'disabled' : ''} onclick="applyStudioPlanSettings()">Lập lại với cài đặt này</button>
+          </div>
+          <div class="studio-plan-note">Góc đang chọn được giữ nguyên và app không nghiên cứu lại.</div>
+        </details>
+      </section>`;
+  }
+
+  // Các góc là những lựa chọn ngang nhau: không xếp hạng, không điểm.
+  function studioPlanAngles(stored, insight, status) {
+    const chosen = stored.primary_angle || {};
+    const angles = [chosen, ...(stored.alternative_angles || [])].filter((item) => item?.id)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, {numeric: true}));
+    if (!angles.length) return '';
+    const statements = Object.fromEntries((insight?.insights || []).map((item) => [item.id, item.statement]));
+    const locked = status === 'running' || status === 'stale';
+    const cards = angles.map((angle) => {
+      const current = angle.id === chosen.id;
+      const support = (angle.supporting_insight_ids || []).map((id) => statements[id]).filter(Boolean);
+      return `<article class="studio-plan-angle ${current ? 'current' : ''}" data-angle="${esc(angle.id)}">
+          ${current ? '<span class="tag green">GÓC ĐANG CHỌN</span>' : ''}
+          <h4>${studioPlanText(angle.statement)}</h4>
+          ${studioPlanField('Dành cho', angle.target_audience)}
+          ${studioPlanField('Nhu cầu / vấn đề', angle.need_or_problem)}
+          ${studioPlanField('Điểm khác biệt', angle.differentiation)}
+          ${studioPlanField('Hợp nền tảng', angle.platform_fit)}
+          ${(angle.risks || []).length ? `<div class="studio-plan-field"><span>Rủi ro</span>${studioPlanItems(angle.risks, 3)}</div>` : ''}
+          ${support.length ? `<details class="studio-more"><summary>Dựa trên ${support.length} điều app tìm hiểu được</summary>${studioPlanItems(support, 8)}</details>` : ''}
+          ${current || !/^[\w-]+$/.test(String(angle.id)) ? '' : `<button class="btn small primary" type="button" ${locked ? 'disabled' : ''} onclick="chooseStudioPlanAngle('${esc(angle.id)}')">Chọn góc này</button>`}
+        </article>`;
+    }).join('');
+    const note = status === 'stale' ? 'Kế hoạch đã cũ: lập lại kế hoạch trước khi chọn góc.'
+      : 'Chọn góc khác thì app lập lại kế hoạch theo góc đó, không nghiên cứu lại.';
+    return `<section id="studioPlanAngles" class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Góc nội dung</b><span>${esc(note)}</span></div></div>
+        <div class="studio-plan-angles">${cards}</div>
+      </section>`;
+  }
+
+  function studioPlanStructure(stored) {
+    const sections = stored.content_structure || [];
+    if (!sections.length && !stored.hook_strategy) return '';
+    const total = sections.reduce((sum, item) => sum + Number(item.estimated_seconds || 0), 0);
+    const target = Number(stored.target_duration_seconds || 0);
+    let at = 0;
+    const rows = sections.map((item) => {
+      const from = at;
+      at += Number(item.estimated_seconds || 0);
+      return `<div class="studio-plan-section">
+          <div class="studio-plan-time">${formatStudioDuration(from)}–${formatStudioDuration(at)}</div>
+          <div><b>${studioPlanText(item.name)}</b>
+            ${item.purpose ? `<p>Mục tiêu: ${studioPlanText(item.purpose)}</p>` : ''}
+            ${studioPlanItems(item.key_points, 6)}</div>
+        </div>`;
+    }).join('');
+    const bar = total ? `<div class="studio-plan-bar">${sections.map((item) =>
+      `<span style="flex:${Math.max(1, Number(item.estimated_seconds || 0))}" title="${esc(item.name)}"></span>`).join('')}</div>` : '';
+    return `<section class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Kế hoạch nội dung</b><span>Tổng ${formatStudioDuration(total)}${target ? ` · mục tiêu ${formatStudioDuration(target)}` : ''}</span></div></div>
+        ${stored.hook_strategy ? `<div class="studio-plan-hook"><span>HOOK</span><p>${studioPlanText(stored.hook_strategy)}</p></div>` : ''}
+        ${bar}${rows}
+      </section>`;
+  }
+
+  function studioPlanProduction(stored) {
+    const media = stored.media_strategy || {};
+    const edit = stored.edit_direction || {};
+    const names = (items) => (items || []).map((key) => STUDIO_PLAN_MEDIA[key] || key).join(', ');
+    const shot = Number(edit.average_shot_length_seconds || 0);
+    const groups = [
+      ['Hình ảnh / media', [
+        studioPlanField('Tư liệu chính', names(media.primary_sources)),
+        studioPlanField('Tư liệu hỗ trợ', names(media.supporting_sources)),
+        studioPlanField('Cách dùng', media.notes),
+      ]],
+      ['Dựng', [
+        studioPlanField('Nhịp', edit.pacing),
+        studioPlanField('Kiểu cắt', edit.cut_style),
+        studioPlanField('Chuyển cảnh', edit.transitions),
+        studioPlanField('Chữ và điểm nhấn', [edit.text_animation, edit.callouts].filter(Boolean).join(' ')),
+        studioPlanField('Phóng / zoom', edit.zoom_punch_in),
+        studioPlanField('B-roll và đồ hoạ', [edit.broll_usage, edit.graphics].filter(Boolean).join(' ')),
+        shot ? studioPlanField('Độ dài cảnh trung bình', `${shot} giây`) : '',
+      ]],
+      ['Phụ đề', [studioPlanField('Cách làm', stored.subtitle_strategy), studioPlanField('Kiểu chữ', edit.subtitle_style)]],
+      ['Âm thanh', [studioPlanField('Nhạc', stored.music_strategy), studioPlanField('Hiệu ứng', stored.sfx_strategy)]],
+      ['Lời kêu gọi', [studioPlanField('CTA', stored.cta)]],
+    ].map(([title, fields]) => [title, fields.filter(Boolean).join('')]).filter(([, body]) => body);
+    if (!groups.length) return '';
+    return `<section class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Chiến lược sản xuất</b><span>Ở mức định hướng; cảnh và lời cụ thể thuộc các bước sau.</span></div></div>
+        <div class="studio-plan-grid">${groups.map(([title, body]) => `<div class="studio-result-card"><h3>${esc(title)}</h3>${body}</div>`).join('')}</div>
+      </section>`;
+  }
+
+  function studioPlanCautions(stored) {
+    const groups = [
+      ['Phải giữ đúng', stored.factual_guardrails],
+      ['Không được nói', stored.claims_to_avoid],
+      ['Cần thêm bằng chứng trước khi nói', stored.claims_needing_proof],
+    ].filter(([, items]) => (items || []).length);
+    if (!groups.length) return '';
+    return `<section class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Lưu ý khi làm nội dung</b></div></div>
+        <div class="studio-plan-grid">${groups.map(([title, items]) =>
+          `<div class="studio-result-card"><h3>${esc(title)}</h3>${studioPlanItems(items, 4)}</div>`).join('')}</div>
+      </section>`;
+  }
+
+  // Bốn nhóm do server chia sẵn (`resources`); trang không tự xét thứ gì thiếu.
+  function studioPlanResources(resources) {
+    if (!resources) return '';
+    const group = (icon, title, tone, rows, empty) => `
+      <div class="studio-plan-resource ${rows.length ? tone : ''}">
+        <h3>${icon} ${esc(title)}</h3>
+        ${rows.length ? `<ul class="studio-result-list">${rows.join('')}</ul>` : `<div class="studio-plan-note">${esc(empty)}</div>`}
+      </div>`;
+    const available = (resources.available || []).map((item) => `<li><b>${esc(item.label)}</b> — ${studioPlanText(item.detail)}</li>`);
+    const made = (resources.app_generates || []).map((item) => `<li>${studioPlanText(item.label)}</li>`);
+    const missing = (resources.missing || []).map((item) =>
+      `<li><b>${studioPlanText(item.asset)}</b>${item.required ? ' <span class="tag orange">BẮT BUỘC</span>' : ''}${item.why ? `<br>${studioPlanText(item.why)}` : ''}</li>`);
+    const proposed = (resources.proposed || []).map((item) =>
+      `<li><b>${studioPlanText(item.asset)}</b>${item.why ? `<br>${studioPlanText(item.why)}` : ''}</li>`);
+    return `<section id="studioPlanResources" class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>Tài nguyên</b></div></div>
+        ${resources.reviewed === false ? '<div class="studio-plan-note">Kế hoạch này được lập trước khi app đối chiếu tài nguyên với dự án. Lập lại kế hoạch để có danh sách chính xác.</div>' : ''}
+        <div class="studio-plan-grid">
+          ${group('✓', 'Đã có', 'have', available, 'Dự án chưa có tư liệu nào của riêng nó.')}
+          ${group('🤖', 'App sẽ tự tạo', 'made', made, 'Chưa có kế hoạch để biết app sẽ tạo gì.')}
+          ${group('⚠', 'Cần bổ sung', 'need', missing, 'Không thiếu tư liệu nào.')}
+          ${group('ℹ', 'Chưa xác minh — chỉ là đề xuất', 'idea', proposed, 'Không có đề xuất nào thêm.')}
+        </div>
+      </section>`;
+  }
+
+  // Nghiên cứu và insight không phải bước riêng: gấp lại, mở khi muốn xem.
+  function studioPlanResearch(bundle) {
+    const research = bundle.research_report?.report || {};
+    const insight = bundle.insight_report?.report || {};
+    const stored = bundle.plan?.plan || {};
+    const coverage = research.coverage || {};
+    const counted = [
+      [coverage.videos, 'video'], [coverage.comments_sampled, 'bình luận mẫu'], [coverage.articles, 'bài viết đã đọc'],
+      [coverage.product_pages, 'trang sản phẩm'],
+    ].filter(([count]) => Number(count) > 0).map(([count, name]) => `${Number(count).toLocaleString('vi-VN')} ${name}`);
+    const host = (url) => { try { return new URL(String(url)).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
+    const used = Object.values(insight.evidence_index || {}).map((item) => {
+      const name = studioProse(item.title) || host(item.source_url) || 'Nguồn';
+      const kind = STUDIO_PLAN_SOURCES[item.source_kind] || '';
+      const sample = Number(item.sample_size) ? ` · ${Number(item.sample_size)} bình luận` : '';
+      const link = /^https?:/i.test(String(item.source_url || ''))
+        ? `<a class="studio-source-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">${esc(name)} ↗</a>` : esc(name);
+      return `<li>${link}<span class="secondary-text"> ${esc(kind)}${esc(sample)}</span></li>`;
+    });
+    const byType = {};
+    for (const item of insight.insights || []) {
+      if (!byType[item.type]) byType[item.type] = [];
+      byType[item.type].push(item);
+    }
+    const learned = Object.entries(byType).map(([type, items]) => `
+      <div class="studio-plan-field"><span>${esc(STUDIO_PLAN_INSIGHTS[type] || 'Ghi nhận khác')}</span>
+        <ul class="studio-result-list">${items.map((item) =>
+          `<li>${studioPlanText(item.statement)}${item.fact_status ? ` <span class="secondary-text">(${esc(STUDIO_PLAN_FACT_STATUS[item.fact_status] || '')})</span>` : ''}</li>`).join('')}</ul>
+      </div>`).join('');
+    const guesses = (insight.hypotheses || []).map((item) => item.statement);
+    const unread = [...new Set((research.failed_sources || [])
+      .filter((item) => item.collector_status === 'blocked').map((item) => host(item.source)).filter(Boolean))];
+    const limits = [
+      ...(research.limitations || []).map((item) => studioPlainText(item)),
+      ...(unread.length ? [`Không đọc được vì trang chặn hoặc không trả lời: ${unread.join(', ')}.`] : []),
+    ].filter(Boolean);
+    const blocks = [
+      counted.length ? `<div class="studio-plan-field"><span>Dữ liệu đã thu thập</span><p>${esc(counted.join(' · '))}</p></div>` : '',
+      used.length ? `<div class="studio-plan-field"><span>Nguồn được dùng cho kế hoạch</span><ul class="studio-result-list">${used.slice(0, 12).join('')}</ul>${used.length > 12 ? `<details class="studio-more"><summary>Xem thêm ${used.length - 12}</summary><ul class="studio-result-list">${used.slice(12).join('')}</ul></details>` : ''}</div>` : '',
+      learned ? `<div class="studio-plan-field"><span>Điều app tìm hiểu được</span></div>${learned}` : '',
+      guesses.length ? `<div class="studio-plan-field"><span>Phỏng đoán — chưa có bằng chứng, không dùng như sự thật</span>${studioPlanItems(guesses, 6)}</div>` : '',
+      limits.length ? `<div class="studio-plan-field"><span>Giới hạn nghiên cứu</span>${studioPlanItems(limits, 6)}</div>` : '',
+      (stored.limitations || []).length ? `<div class="studio-plan-field"><span>Giới hạn của kế hoạch</span>${studioPlanItems(stored.limitations, 6)}</div>` : '',
+    ].filter(Boolean).join('');
+    if (!blocks) return '';
+    return `<details class="studio-option-card studio-plan-research">
+        <summary>Chi tiết nghiên cứu</summary>
+        ${blocks}
+        <details class="studio-advanced-json"><summary>Nâng cao: dữ liệu kế hoạch (JSON)</summary><pre class="studio-json">${esc(JSON.stringify({outcome: bundle.outcome, plan: bundle.plan}, null, 2))}</pre></details>
+      </details>`;
+  }
+
+  function renderStudioPlan() {
+    renderStudioPlanHead();
+    const body = $('studioPlanBody');
+    if (!body) return;
+    const plan = state.studioPlan;
+    const bundle = plan?.bundle;
+    const stored = bundle?.plan?.plan || {};
+    const status = studioPlanStatus(plan);
+    // Kế hoạch khung (chỉ có nghiên cứu) chưa phải kế hoạch để đọc.
+    if (!bundle || !(stored.content_structure || []).length) {
+      body.innerHTML = '';
+      return;
+    }
+    // Trong lúc đang lập lại, kế hoạch cũ vẫn hiện với trạng thái của nó.
+    const shown = status === 'running' ? String(plan.row?.outcome?.status || 'completed') : status;
+    const feasibility = studioPlanDecisions(shown, plan);
+    const waiting = shown === 'needs_user_decision' || shown === 'blocked';
+    body.innerHTML = [
+      waiting ? feasibility : '',
+      studioPlanSummary(stored, state.studioAnalysis?.result, status === 'running'),
+      studioPlanAngles(stored, bundle.insight_report?.report, status),
+      studioPlanStructure(stored),
+      studioPlanProduction(stored),
+      studioPlanCautions(stored),
+      studioPlanResources(bundle.resources),
+      waiting ? '' : feasibility,
+      studioPlanResearch({...bundle, outcome: plan.row?.outcome}),
+    ].join('');
+  }
+  // ---- hết Bước 2 · Kế hoạch ----
+
   function renderStudioScript(script, writerPayload = state.studioWriter) {
     if (!script) return;
     state.scriptId = script.id || state.scriptId;

@@ -3137,9 +3137,13 @@ def get_project_plan(project_id: int) -> dict[str, Any]:
     """The latest ProjectPlan and the ResearchReport it was built from.
 
     Kept apart on purpose: research can be reused or redone without the plan,
-    and a plan names the report version it relied on.
+    and a plan names the report version it relied on. `resources` is the
+    plan's assets as a reader sees them - what the project has, what the app
+    will make, what is missing, what is only a suggestion - decided by
+    plan_engine so no page has to work it out again.
     """
-    if not database.get_production_project(project_id):
+    project = database.get_production_project(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     plan = _current_project_plan(project_id)
     report_id = (plan or {}).get("research_report_id")
@@ -3147,7 +3151,11 @@ def get_project_plan(project_id: int) -> dict[str, Any]:
     # The insights the plan was reasoned from; with no plan yet, the latest ones.
     insight_id = (plan or {}).get("insight_report_id")
     insight = database.get_insight_report(int(insight_id)) if insight_id else _current_project_insight(project_id)
+    video_id = _project_source_video_id(project)
+    video = (database.get_video(video_id) or {}) if video_id else {}
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
     return {"project_id": project_id, "plan": plan, "research_report": report, "insight_report": insight,
+            "resources": project_planner.plan_resources(database, project, video, analysis, plan, report),
             "stages": [{"key": key, "label": label} for key, label in project_planner.STAGES]}
 
 

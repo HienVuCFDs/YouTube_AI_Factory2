@@ -1531,9 +1531,37 @@
     box.hidden = false;
   }
 
+  // Kịch bản được viết từ kế hoạch, nên Bước 3 chỉ mở khi Bước 2 đã "Sẵn sàng":
+  // server nói kế hoạch của đúng dự án này đã completed và không có lượt lập nào đang chạy.
+  const STUDIO_SCRIPT_GATE_MESSAGE = 'Bạn cần hoàn thành Kế hoạch trước khi viết kịch bản.';
+
+  function studioPlanReady() {
+    const plan = state.studioPlan;
+    return Boolean(plan && state.studioProjectId && Number(plan.projectId) === Number(state.studioProjectId)
+      && !plan.running && plan.row?.state !== 'running' && plan.row?.outcome?.completed === true);
+  }
+
+  // Tab Bước 3 nói trước là nó đang khoá, để không ai phải bấm mới biết.
+  function syncStudioScriptGate() {
+    const tab = document.querySelector('[data-studio-tab="3"]');
+    if (!tab) return;
+    const ready = studioPlanReady();
+    tab.classList.toggle('locked', !ready);
+    tab.title = ready ? '' : STUDIO_SCRIPT_GATE_MESSAGE;
+    tab.setAttribute('aria-disabled', ready ? 'false' : 'true');
+  }
+
   function setStudioStep(step) {
     normalizeStudioWorkflowForSource();
-    const next = Math.max(1, Math.min(7, Number(step) || 1));
+    let next = Math.max(1, Math.min(7, Number(step) || 1));
+    // Mọi lối sang bước khác - tab, nút "Tiếp tục", nút "← Kịch bản", khôi phục
+    // phiên - đều đi qua hàm này, nên chặn ở đây là không lối nào vòng qua được.
+    // Bị chặn thì ở lại bước đang đứng; đang đứng ở chính Bước 3 thì về Kế hoạch.
+    if (next === 3 && !studioPlanReady()) {
+      setMessage(STUDIO_SCRIPT_GATE_MESSAGE, 'error');
+      const here = Number(state.studioStep) || 2;
+      next = here === 3 ? 2 : here;
+    }
     // Each step gets its own tab. Folding voice and the build workshop into
     // the storyboard tab hid two steps behind a label that named neither, so
     // the only way to learn they existed was to press a button inside a
@@ -1554,14 +1582,19 @@
     // the project was opened no longer describes it: without this the panel
     // still says there is no video and offers nothing to publish.
     if (next === 7 && state.studioProjectId) void refreshStudioPublish(state.studioProjectId);
+    // Bước 2 đọc kế hoạch từ server mỗi lần mở: nó có thể đã đổi từ lần trước
+    // (phân tích lại, một lượt lập ở tab khác hay của AI điều phối).
+    if (next === 2) void loadStudioPlan(state.studioProjectId);
     document.querySelectorAll('[data-studio-step]').forEach((panel) => { panel.hidden = Number(panel.dataset.studioStep) !== visiblePanelStep; });
     document.querySelectorAll('[data-studio-tab]').forEach((tab) => {
       const value = Number(tab.dataset.studioTab);
       tab.classList.toggle('active', value === next);
-      tab.classList.toggle('done', value < next);
+      // Bước 2 chỉ "xong" khi kế hoạch thật sự sẵn sàng.
+      tab.classList.toggle('done', value < next && (value !== 2 || studioPlanReady()));
       const label = tab.querySelector('strong');
       if (label && stepLabels[value]) label.textContent = stepLabels[value];
     });
+    syncStudioScriptGate();
     // Hang nao khong gan data-wf thi thuoc ca hai quy trinh.
     document.querySelectorAll('[data-wf]').forEach((row) => {
       row.hidden = row.dataset.wf !== state.studioWorkflow;
@@ -1881,6 +1914,7 @@
     state.studioProjectId = null;
     // Whether this source is being analysed is read from the server below.
     stopStudioAnalyzeWatch();
+    resetStudioPlan();
     state.studioAnalyzing = false;
     state.studioAnalyzeError = '';
     renderStudioVideoPreview();
@@ -1933,6 +1967,8 @@
         renderStudioAnalysis(state.studioAnalysis);
         nextStep = 1;
       }
+      // Dự án đã có kế hoạch, hoặc đang lập: lượt chạy sống trên server qua lần tải lại trang.
+      if (await loadStudioPlan(existingProject.id)) nextStep = 2;
       if (bundle.latest_script) {
         state.studioWriter = bundle.writer_content || state.studioWriter;
         state.scriptId = bundle.latest_script.id || null;
@@ -1965,6 +2001,9 @@
     } catch (_) {
       // The wizard remains usable even if a previous project was removed.
     }
+    // Dự án đã có kịch bản, cảnh hay video từ trước nhưng kế hoạch chưa sẵn sàng:
+    // mở ở Kế hoạch - việc còn dang dở - chứ không nhảy qua nó; không báo lỗi.
+    if (nextStep >= 3 && !studioPlanReady()) nextStep = 2;
     setStudioStep(nextStep);
     saveStudioSession();
   }
@@ -2000,5 +2039,5 @@
     await selectStudioVideo(savedProject?.id || saved.projectId || null);
     const availableStep = state.studioStep;
     const savedStep = Number(saved.studioStep || 0);
-    if (savedStep && savedStep <= availableStep) setStudioStep(savedStep);
+    if (savedStep && savedStep <= availableStep && (savedStep !== 3 || studioPlanReady())) setStudioStep(savedStep);
   }

@@ -574,6 +574,65 @@
     .studio-source-link { display: inline-block; margin-top: 8px; color: var(--accent); font-size: 12px; }
     .studio-advanced { margin-bottom: 12px; } .studio-advanced > summary { cursor: pointer; font-weight: 700; }
     .studio-advanced-json { margin-top: 10px; } .studio-advanced-json summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    /* Bước 2 · Kế hoạch */
+    .studio-plan-top { margin-bottom: 12px; }
+    .studio-plan-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .studio-plan-source { flex: 1 1 260px; min-width: 0; }
+    .studio-plan-source .primary-text { font-size: 16px; font-weight: 700; }
+    .studio-plan-head .status-badge { font-size: 13px; padding: 5px 12px; }
+    .studio-plan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .studio-plan-top .studio-empty, .studio-plan-top .studio-analyze-notice { margin: 12px 0 0; }
+    .studio-plan-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .studio-plan-running { margin-top: 12px; }
+    .studio-plan-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+    .studio-plan-stage { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; }
+    .studio-plan-stage.past { color: #86efac; border-color: rgba(34,197,94,.25); }
+    .studio-plan-stage.kept { color: #9aa6b6; border-style: dashed; }
+    .studio-plan-stage.now { color: #05233a; border-color: transparent; background: var(--cyan); font-weight: 700; }
+    .studio-plan-body { display: grid; gap: 12px; margin-bottom: 12px; }
+    .studio-plan-body:empty { display: none; }
+    .studio-plan-card p { margin: 0 0 6px; color: #c4ccd7; font-size: 13px; line-height: 1.6; }
+    .studio-plan-card.needs_user_decision { border-color: rgba(245,158,11,.55); }
+    .studio-plan-card.blocked { border-color: rgba(240,82,82,.55); }
+    .studio-plan-decision { margin: 8px 0; padding: 10px 12px; border-left: 3px solid rgba(245,158,11,.7); border-radius: 0 8px 8px 0; background: rgba(245,158,11,.06); }
+    .studio-plan-card.blocked .studio-plan-decision { border-left-color: rgba(240,82,82,.8); background: rgba(240,82,82,.06); }
+    .studio-plan-checks { list-style: none; margin: 8px 0 0; padding: 0; color: #c4ccd7; font-size: 12px; line-height: 1.7; }
+    .studio-plan-check b { display: inline-block; width: 16px; color: #86efac; }
+    .studio-plan-check.needs_attention b { color: #ffd18a; } .studio-plan-check.blocked b { color: #fca5a5; }
+    .studio-plan-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+    .studio-plan-field { margin-top: 8px; }
+    .studio-plan-field > span { display: block; margin-bottom: 2px; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    .studio-plan-field p { margin: 0; color: #dbe3ee; font-size: 13px; line-height: 1.6; }
+    .studio-plan-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 12px 0 4px; }
+    .studio-plan-facts div { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.02); }
+    .studio-plan-facts span { display: block; color: var(--muted); font-size: 11px; }
+    .studio-plan-facts b { font-size: 14px; }
+    .studio-plan-adjust-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 8px 0 4px; }
+    .studio-plan-adjust-row label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    .studio-plan-adjust-row input { width: 130px; }
+    .studio-plan-angles { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+    .studio-plan-angle { display: flex; flex-direction: column; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(21,26,34,.76); }
+    .studio-plan-angle.current { border-color: rgba(34,197,94,.6); background: rgba(34,197,94,.07); }
+    .studio-plan-angle h4 { margin: 6px 0 2px; font-size: 14px; line-height: 1.45; }
+    .studio-plan-angle .tag { align-self: flex-start; }
+    .studio-plan-angle > .btn { align-self: flex-start; margin-top: 12px; }
+    .studio-plan-hook { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid rgba(34,211,238,.3); border-radius: 10px; background: rgba(34,211,238,.06); }
+    .studio-plan-hook span { padding-top: 2px; color: var(--cyan); font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+    .studio-plan-hook p { margin: 0; }
+    .studio-plan-bar { display: flex; gap: 2px; height: 8px; margin-bottom: 4px; }
+    .studio-plan-bar span { min-width: 4px; border-radius: 3px; background: rgba(34,211,238,.45); }
+    .studio-plan-section { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+    .studio-plan-bar + .studio-plan-section { border-top: 0; }
+    .studio-plan-time { padding-top: 2px; color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .studio-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: start; }
+    .studio-plan-resource { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(21,26,34,.76); }
+    .studio-plan-resource h3 { margin: 0 0 8px; font-size: 13px; }
+    .studio-plan-resource.have { border-color: rgba(34,197,94,.3); }
+    .studio-plan-resource.need { border-color: rgba(245,158,11,.5); background: rgba(245,158,11,.05); }
+    .studio-plan-research { margin-bottom: 12px; } .studio-plan-research > summary { cursor: pointer; font-weight: 700; }
+    .studio-step-tab[data-plan-state="needs_user_decision"] strong::after, .studio-step-tab[data-plan-state="stale"] strong::after { content: " •"; color: #ffd18a; }
+    .studio-step-tab[data-plan-state="blocked"] strong::after { content: " •"; color: #fca5a5; }
+    .studio-step-tab.locked { opacity: .55; cursor: not-allowed; }
     .studio-step1-next { justify-content: flex-end; }
     @media (max-width: 800px) { .studio-source-card, .studio-product-card { grid-template-columns: 1fr; } .studio-analyze-cta { min-width: 0; width: 100%; } }
     /* Nguồn tham khảo · tab bar */
