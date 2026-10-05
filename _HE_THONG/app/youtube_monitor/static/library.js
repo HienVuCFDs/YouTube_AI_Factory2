@@ -2529,14 +2529,20 @@
             return element.options && element.options.length > 1 ? null : stored;
           })(),
           voice_prompt_text: selected('renderVoicePromptText', 'studioVoicePromptText', current.voice_prompt_text || ''),
+          // Gemini's way of reading (speech_metadata.style). Left out - and so kept as
+          // stored - wherever the field is not on screen.
+          voice_style: usingStudio && $('studioVoiceStyleInput') ? $('studioVoiceStyleInput').value : undefined,
           subtitle_provider: selected('renderSubtitleProvider', 'studioSubtitleProviderSelect', current.subtitle_provider || 'timeline_text'),
           subtitle_model: selected('renderSubtitleModel', 'studioSubtitleModelSelect', current.subtitle_model || 'timeline'),
           publish_language: selected('renderPublishLanguage', 'studioPublishLanguageSelect', current.publish_language || 'vi'),
         }),
       });
       if (!quiet) setMessage('Đã lưu thiết lập nhạc nền và chuyển cảnh.', 'success');
+      // Bước 4 tells what is saved from what is only on screen by the server's answer.
+      if (response.settings && typeof rememberStudioVoiceSaved === 'function') rememberStudioVoiceSaved(projectId, response.settings);
       if (response.settings && state.projectId && Number(state.projectId) === Number(projectId)) await openProjectDetail(state.projectId);
-    } catch (error) { setMessage(`Không lưu được thiết lập render: ${error.message}`, 'error'); }
+      return response.settings || null;
+    } catch (error) { setMessage(`Không lưu được thiết lập render: ${error.message}`, 'error'); return null; }
   }
 
   async function createTimelineSceneJob(projectId, segmentId, promptText, provider, ratio, isVeo) {

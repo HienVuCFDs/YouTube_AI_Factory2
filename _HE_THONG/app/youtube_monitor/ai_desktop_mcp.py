@@ -417,7 +417,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
     return astra_mcp_tool_definitions() + _automation_tool_definitions() + [
         {
             "name": "youtube_factory_save_script",
-            "description": f"Lưu nguyên văn kịch bản do {CHAT_AGENT_LABEL} vừa viết vào dự án; nếu chưa có project_id thì tạo dự án mới.",
+            "description": (
+                f"Lưu nguyên văn kịch bản do {CHAT_AGENT_LABEL} vừa viết vào dự án; nếu chưa có project_id thì tạo dự án mới. "
+                "Dự án đã phân tích/đã có Kế hoạch: kịch bản được lưu qua Bước 3 như một bản nháp, bị kiểm theo Kế hoạch "
+                "(thời lượng, điều cấm, số liệu) và bị từ chối nếu không khớp hoặc Kế hoạch chưa hoàn thành."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

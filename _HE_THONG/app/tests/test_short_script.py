@@ -224,10 +224,16 @@ class TheTwoScriptsNeverMixTests(unittest.TestCase):
 
 
 class WritingStepCreatesBothScriptsTests(TheTwoScriptsNeverMixTests):
-    """The normal writing action must create both videos before production."""
+    """The normal writing action must create both videos before production.
+
+    The long script is written by Bước 3 from the completed plan (the old
+    endpoint is an adapter on that step); the Short is written beside it.
+    """
 
     def setUp(self) -> None:
         super().setUp()
+        from tests.script_fixtures import plan_project
+
         self.database.save_video_analysis(
             "video-short-1",
             {
@@ -237,6 +243,11 @@ class WritingStepCreatesBothScriptsTests(TheTwoScriptsNeverMixTests):
             analysis_type="writer",
             provider="test",
         )
+        self.database.save_video_analysis(
+            "video-short-1", {"topic": "Ngôi nhà giữa rừng", "content_summary": "Một người dựng nhà giữa rừng."},
+            analysis_type="reference", provider="test",
+        )
+        plan_project(self.database, self.project_id)
 
     def test_draft_saves_a_short_with_its_own_storyboard_and_timeline(self) -> None:
         from youtube_monitor import main
@@ -248,8 +259,11 @@ class WritingStepCreatesBothScriptsTests(TheTwoScriptsNeverMixTests):
             "main_content": "Anh biến một tấm bạt thành nơi trú qua mùa đông.",
             "cta": "Theo dõi để xem tiếp.",
         }
+        from tests.script_fixtures import Scripted
+
         with patch.object(main, "database", self.database), \
              patch.object(main, "_write_project_document"), \
+             patch.object(main, "_call_orchestrator_json", Scripted()), \
              patch.object(main, "build_short_script", return_value=short_draft) as writer:
             result = main.create_project_script_draft(
                 self.project_id,
@@ -481,7 +495,9 @@ class ShortRenderReadinessTests(unittest.TestCase):
             job_type="render_short", provider="ffmpeg_builtin",
             confirmed=True, variant="short",
         )
+        # The production gate in front of /jobs has tests of its own (test_production_gate).
         with patch.object(main.database, "get_production_project", return_value={"id": 1}), \
+             patch.object(main, "_in_plan_workflow", return_value=False), \
              patch.object(main.database, "get_latest_project_script", return_value={"id": 9}), \
              patch.object(main.database, "list_project_timeline", return_value=[{"id": 1}]), \
              patch.object(main, "_short_lane_progress", return_value={
@@ -501,6 +517,7 @@ class ShortRenderReadinessTests(unittest.TestCase):
             job_type="render", provider="ffmpeg_builtin", confirmed=True,
         )
         with patch.object(main.database, "get_production_project", return_value={"id": 1}), \
+             patch.object(main, "_in_plan_workflow", return_value=False), \
              patch.object(main.database, "get_latest_project_script", return_value={"id": 8}), \
              patch.object(main.database, "list_project_timeline", return_value=[{"id": 1}]), \
              patch.object(main, "_render_readiness", return_value={

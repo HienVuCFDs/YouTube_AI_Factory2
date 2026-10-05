@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import source_kinds, workflows
+from . import gemini_tts, source_kinds, workflows
 
 
 def utc_now() -> str:
@@ -17,6 +17,10 @@ def utc_now() -> str:
 
 
 class Database:
+    # The voice engines a project's render settings may name: the ones Bước 4 offers.
+    RENDER_VOICE_PROVIDERS = frozenset({"edge_tts", "pyvideotrans", "voxcpm", *gemini_tts.MODELS})
+    VOICE_STYLE_MAX_CHARS = gemini_tts.MAX_STYLE_CHARS
+
     def __init__(self, path: str | Path):
         self.path = str(path)
         self._event_publisher: Callable[..., Any] | None = None
@@ -855,6 +859,16 @@ class Database:
             # retelling. Editing or translating a script clears it, so the
             # badge never claims a verdict about words that have since changed.
             self._ensure_column(connection, "project_scripts", "fidelity_status", "TEXT NOT NULL DEFAULT 'unchecked'")
+            # Bước 3 writes from a plan: which plan (id and version) a script
+            # serves, and the structured ScriptDocument the old columns are
+            # now written from. Rows from before stay as they are, unlinked.
+            self._ensure_column(connection, "project_scripts", "plan_id", "INTEGER")
+            self._ensure_column(connection, "project_scripts", "plan_version", "INTEGER")
+            self._ensure_column(connection, "project_scripts", "insight_report_id", "INTEGER")
+            self._ensure_column(connection, "project_scripts", "language", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_scripts", "estimated_seconds", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "project_scripts", "document_json", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "project_scripts", "engine_version", "TEXT NOT NULL DEFAULT ''")
             # Same for the narration of a scene: whether it actually says what
             # the script asked it to say.
             self._ensure_column(connection, "project_timeline_segments", "voice_review_score", "INTEGER NOT NULL DEFAULT 0")
@@ -905,6 +919,10 @@ class Database:
             self._ensure_column(connection, "project_render_settings", "voice_rate", "TEXT NOT NULL DEFAULT '+0%'")
             self._ensure_column(connection, "project_render_settings", "voice_reference_asset_id", "INTEGER")
             self._ensure_column(connection, "project_render_settings", "voice_prompt_text", "TEXT NOT NULL DEFAULT ''")
+            # How a TTS engine that takes one is told to read (Gemini's
+            # speech_metadata.style). Its own column: voice_prompt_text is
+            # VoxCPM's transcript of its reference recording, a different thing.
+            self._ensure_column(connection, "project_render_settings", "voice_style", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "project_render_settings", "subtitle_provider", "TEXT NOT NULL DEFAULT 'timeline_text'")
             self._ensure_column(connection, "project_render_settings", "subtitle_model", "TEXT NOT NULL DEFAULT 'timeline'")
             self._ensure_column(connection, "project_render_settings", "publish_language", "TEXT NOT NULL DEFAULT 'vi'")
@@ -2265,6 +2283,14 @@ class Database:
         cta: str = "",
         status: str = "draft",
         variant: str = "long",
+        *,
+        plan_id: int | None = None,
+        plan_version: int | None = None,
+        insight_report_id: int | None = None,
+        language: str = "",
+        estimated_seconds: int = 0,
+        document: dict[str, Any] | None = None,
+        engine_version: str = "",
     ) -> dict[str, Any] | None:
         if not self.get_production_project(project_id):
             return None
@@ -2284,8 +2310,9 @@ class Database:
                 """
                 INSERT INTO project_scripts (
                     project_id, version, script_title, hook, intro, main_content,
-                    cta, status, created_at, updated_at, variant
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cta, status, created_at, updated_at, variant,
+                    plan_id, plan_version, insight_report_id, language, estimated_seconds, document_json, engine_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -2299,6 +2326,13 @@ class Database:
                     now,
                     now,
                     variant,
+                    plan_id,
+                    plan_version,
+                    insight_report_id,
+                    language,
+                    int(estimated_seconds or 0),
+                    json.dumps(document, ensure_ascii=False) if document else "",
+                    engine_version,
                 ),
             )
             connection.execute(
@@ -2367,7 +2401,11 @@ class Database:
         main_content: str | None = None,
         cta: str | None = None,
         status: str | None = None,
+        *,
+        document: dict[str, Any] | None = None,
+        estimated_seconds: int | None = None,
     ) -> dict[str, Any] | None:
+        """Edit a script in place. A ScriptDocument, when given, is written in the same statement as the columns."""
         existing = self.get_project_script(script_id)
         if not existing:
             return None
@@ -2378,13 +2416,15 @@ class Database:
             "main_content": existing["main_content"] if main_content is None else main_content.strip(),
             "cta": existing["cta"] if cta is None else cta.strip(),
             "status": existing["status"] if status is None else status,
+            "document_json": existing.get("document_json") or "" if document is None else json.dumps(document, ensure_ascii=False),
+            "estimated_seconds": int(existing.get("estimated_seconds") or 0) if estimated_seconds is None else int(estimated_seconds),
         }
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE project_scripts
                 SET script_title = ?, hook = ?, intro = ?, main_content = ?,
-                    cta = ?, status = ?, updated_at = ?
+                    cta = ?, status = ?, document_json = ?, estimated_seconds = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -2394,6 +2434,8 @@ class Database:
                     values["main_content"],
                     values["cta"],
                     values["status"],
+                    values["document_json"],
+                    values["estimated_seconds"],
                     utc_now(),
                     script_id,
                 ),
@@ -3527,7 +3569,7 @@ class Database:
                 SELECT s.project_id, s.music_asset_id, s.music_volume,
                        s.transition_style, s.output_profile, s.voice_provider,
                        s.voice_model, s.voice_rate, s.voice_reference_asset_id, s.voice_prompt_text,
-                       s.subtitle_provider, s.subtitle_model,
+                       s.voice_style, s.subtitle_provider, s.subtitle_model,
                        s.publish_language, s.updated_at,
                        a.original_name AS music_asset_name,
                        a.file_path AS music_file_path,
@@ -3556,6 +3598,7 @@ class Database:
                 "voice_reference_asset_name": "",
                 "voice_reference_file_path": "",
                 "voice_prompt_text": "",
+                "voice_style": "",
                 "subtitle_provider": "timeline_text",
                 "subtitle_model": "timeline",
                 "publish_language": "vi",
@@ -3577,7 +3620,9 @@ class Database:
         subtitle_provider: str = "timeline_text",
         subtitle_model: str = "timeline",
         publish_language: str = "vi",
+        voice_style: str | None = None,
     ) -> dict[str, Any] | None:
+        """Save the project's render settings. `voice_style` None keeps the stored one."""
         if not self.get_production_project(project_id):
             return None
         if music_asset_id is not None:
@@ -3591,7 +3636,7 @@ class Database:
         if profile not in {"youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"}:
             raise ValueError("Định dạng đầu ra không được hỗ trợ")
         provider = voice_provider.strip().lower()
-        if provider not in {"edge_tts", "pyvideotrans", "voxcpm"}:
+        if provider not in self.RENDER_VOICE_PROVIDERS:
             raise ValueError("Model lồng tiếng chưa được tích hợp")
         model = voice_model.strip()
         rate = voice_rate.strip()
@@ -3619,15 +3664,20 @@ class Database:
         language = publish_language.strip()
         if language not in {"vi", "en", "th", "pt-BR", "es", "fr", "de", "ja", "ko", "zh-CN", "id"}:
             raise ValueError("Ngôn ngữ xuất bản chưa được hỗ trợ")
+        if voice_style is None:
+            voice_style = str(self.get_project_render_settings(project_id).get("voice_style") or "")
+        reading = voice_style.strip()
+        if len(reading) > self.VOICE_STYLE_MAX_CHARS:
+            raise ValueError(f"Kiểu đọc dài tối đa {self.VOICE_STYLE_MAX_CHARS} ký tự")
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO project_render_settings (
                     project_id, music_asset_id, music_volume, transition_style, output_profile,
                     voice_provider, voice_model, voice_rate, voice_reference_asset_id, voice_prompt_text,
-                    subtitle_provider, subtitle_model, publish_language,
+                    voice_style, subtitle_provider, subtitle_model, publish_language,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     music_asset_id = excluded.music_asset_id,
                     music_volume = excluded.music_volume,
@@ -3638,6 +3688,7 @@ class Database:
                     voice_rate = excluded.voice_rate,
                     voice_reference_asset_id = excluded.voice_reference_asset_id,
                     voice_prompt_text = excluded.voice_prompt_text,
+                    voice_style = excluded.voice_style,
                     subtitle_provider = excluded.subtitle_provider,
                     subtitle_model = excluded.subtitle_model,
                     publish_language = excluded.publish_language,
@@ -3654,6 +3705,7 @@ class Database:
                     rate,
                     voice_reference_asset_id,
                     prompt,
+                    reading,
                     subtitle_source,
                     subtitle_engine,
                     language,

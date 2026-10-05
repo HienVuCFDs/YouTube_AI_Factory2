@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from fastapi import File, Form, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis_queue import AnalysisQueue
 from .agent_system import ORCHESTRATOR_ROLE, AgentPipeline, AgentTaskWorker, DEFAULT_AGENTS
@@ -40,7 +40,7 @@ from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available, render_timeline_with_ffmpeg
 from .ffmpeg_renderer import video_frame_size
-from . import operations, usage_limits, workflows
+from . import gemini_tts, operations, tts_catalog, usage_limits, workflows
 from . import languages
 from .fidelity_guard import unsourced_details
 from .graphic_overlays import normalize_graphic_overlays
@@ -60,7 +60,7 @@ from .oauth import status as oauth_status
 from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_for_provider
 from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
-from . import plan_engine, project_planner, research_collectors, source_detector, source_identity, source_kinds
+from . import plan_engine, project_planner, research_collectors, script_engine, source_detector, source_identity, source_kinds
 from .channel_research import ChannelResearchError, ChannelResearchService
 from .youtube_quota import YouTubeQuota
 from .run_registry import RunRegistry
@@ -664,11 +664,16 @@ class RenderSettingsRequest(BaseModel):
     music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
     transition_style: Literal["none", "fade"] = "fade"
     output_profile: Literal["youtube_landscape", "youtube_shorts", "instagram_reels", "tiktok", "facebook_reels", "facebook_feed"] = "youtube_landscape"
-    voice_provider: Literal["edge_tts", "google_tts", "piper", "pyvideotrans", "voxcpm"] = "edge_tts"
+    voice_provider: Literal[
+        "edge_tts", "google_tts", "piper", "pyvideotrans", "voxcpm",
+        "google_gemini_3_8_flash_tts", "google_gemini_3_8_flash_lite_tts",
+    ] = "edge_tts"
     voice_model: str = Field(default="vi-VN-HoaiMyNeural", min_length=1, max_length=120)
     voice_rate: Literal["-25%", "-15%", "-8%", "+0%", "+8%", "+15%", "+25%"] = "+0%"
     voice_reference_asset_id: int | None = Field(default=None, ge=1)
     voice_prompt_text: str = Field(default="", max_length=5000)
+    # How the narration is read (Gemini's speech_metadata.style). None keeps what is stored.
+    voice_style: str | None = Field(default=None, max_length=gemini_tts.MAX_STYLE_CHARS)
     subtitle_provider: Literal["timeline_text", "faster_whisper_local"] = "timeline_text"
     subtitle_model: str = Field(default="timeline", min_length=1, max_length=120)
     publish_language: Literal["vi", "en", "th", "pt-BR", "es", "fr", "de", "ja", "ko", "zh-CN", "id"] = "vi"
@@ -702,8 +707,17 @@ class CreateProductionJobRequest(BaseModel):
 
 
 class ScriptDraftRequest(BaseModel):
-    """Create the long script and, optionally, a standalone Short from one brief."""
+    """Create the long script and, optionally, a standalone Short from one brief.
 
+    Kept for the clients that still post here. The long script itself is
+    written by Bước 3 from the plan, so only what the plan does not decide is
+    taken: which runtime writes, and the Short beside it. Anything else is
+    collected, not silently obeyed - see create_project_script_draft.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    provider: str = Field(default="", max_length=80)
     create_standalone_short: bool = False
     short_seconds: int = Field(
         default=DEFAULT_SHORT_SCRIPT_SECONDS,
@@ -2049,18 +2063,23 @@ def _steps_done(project_id: int) -> set[str]:
         return done
     video_id = _project_source_video_id(project)
     analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    project_plan = None
     if analysis:
         done.add("analyze")
         # Bước 2 is done only when its plan is `completed`: feasibility ok or
         # adjusted, and nothing under it changed since. A plan waiting on a
         # person's decision, a blocked one and a stale one are all not done.
-        outcome = project_planner.step_outcome(
-            project_planner.current_plan(database, project_id, str(analysis.get("created_at") or "")))
+        project_plan = project_planner.current_plan(database, project_id, str(analysis.get("created_at") or ""))
+        outcome = project_planner.step_outcome(project_plan)
         if outcome and outcome["completed"]:
             done.add("plan")
     script = database.get_latest_project_script(project_id)
     if script:
-        done.add("script")
+        # Bước 3 is done only by a script written from the current, completed
+        # plan. An older script stays where it is, but it is stale: nothing
+        # after it may be built on it.
+        if (script_engine.current_script(database, project_id, project_plan) or {}).get("state") == script_engine.COMPLETED:
+            done.add("script")
         script_id = int(script["id"])
         if database.list_project_shots(project_id, script_id=script_id):
             done.add("shots")
@@ -2614,8 +2633,8 @@ def _step_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-def _plan_reasoner(project_id: int, provider: str) -> Callable[..., tuple[Any, dict[str, Any]]]:
-    """The plan step's model calls, through the one orchestrator call every step uses.
+def _plan_reasoner(project_id: int, provider: str, stage: str = "orchestration") -> Callable[..., tuple[Any, dict[str, Any]]]:
+    """The plan and script steps' model calls, through the one orchestrator call every step uses.
 
     So the runtime is chosen by the stage's policy, a runtime that fails falls
     back to the next one allowed, and each attempt lands in the audit log.
@@ -2624,7 +2643,7 @@ def _plan_reasoner(project_id: int, provider: str) -> Callable[..., tuple[Any, d
         info: dict[str, Any] = {}
         try:
             parsed = _call_orchestrator_json(
-                system, prompt, schema, stage="orchestration", project_id=project_id, step=label,
+                system, prompt, schema, stage=stage, project_id=project_id, step=label,
                 provider=provider, report=info,
             )
         except ProviderNotSupported as exc:
@@ -2656,20 +2675,26 @@ def _current_project_insight(project_id: int) -> dict[str, Any] | None:
 
 
 def _describe_steps(project_id: int, done: set[str], running: Iterable[str] = ()) -> list[dict[str, Any]]:
-    """The step rows, with Bước 2 saying where its plan stands rather than only done / not done.
+    """The step rows, with Bước 2 and Bước 3 saying where they stand rather than only done / not done.
 
     A plan that exists but is not `completed` shows as needs_user_decision,
-    blocked or stale, and carries the reason and the choices in `outcome`.
+    blocked or stale; a script written from another plan (or from none)
+    shows as stale. Each carries the reason in `outcome`.
     """
     rows = steps.describe(done, running)
-    outcome = project_planner.step_outcome(_current_project_plan(project_id))
+    plan = _current_project_plan(project_id)
+    outcome = project_planner.step_outcome(plan)
+    script_outcome = script_engine.step_outcome(script_engine.current_script(database, project_id, plan))
     for row in rows:
-        if row["key"] != "plan" or not outcome:
-            continue
-        row["outcome"] = outcome
-        if row["state"] == "ready" and outcome["status"] in (
-                plan_engine.NEEDS_USER_DECISION, plan_engine.BLOCKED, plan_engine.STALE):
-            row["state"] = outcome["status"]
+        if row["key"] == "plan" and outcome:
+            row["outcome"] = outcome
+            if row["state"] == "ready" and outcome["status"] in (
+                    plan_engine.NEEDS_USER_DECISION, plan_engine.BLOCKED, plan_engine.STALE):
+                row["state"] = outcome["status"]
+        elif row["key"] == "script" and script_outcome:
+            row["outcome"] = script_outcome
+            if row["state"] == "ready" and script_outcome["status"] in (script_engine.STALE, script_engine.INVALID):
+                row["state"] = script_outcome["status"]
     return rows
 
 
@@ -2765,50 +2790,205 @@ def _step_publish(project_id: int, project: dict[str, Any], options: dict[str, A
 
 
 def _step_script(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
-    """Save the project's script, whoever wrote it.
+    """Bước 3 · Kịch bản: the words of the video, written from the completed plan.
 
-    An agent that has already written one passes it in `draft`; anything else
-    goes through the writer the buttons use. Either way the row is created
-    here, so there is one place that decides what a saved script looks like.
+    script_engine writes a ScriptDocument from the current ProjectPlan - its
+    angle, length, sections, guardrails - with one model call (and one
+    repair), then checks it by rule. Nothing here researches or re-plans.
+
+    The plan must be completed first, whoever asks: a button, the old
+    /script/draft endpoint, an orchestrator over MCP, the automation, or
+    `force`. This is the one way a long script of a planned project is made:
+
+      (nothing)   the engine writes it from the plan
+      draft       a script written outside the engine (an agent's, a pasted
+                  one) - held to the same plan, facts and length, refused if
+                  it fails
+      revision    a new version of the current script (an AI rewrite) -
+                  checked again, kept on the plan it was written from
+
+    The old writer (`/api/videos/{id}/writer`) is no longer read by this step:
+    not its words, not its scene list.
+
+    options
+      provider                one runtime instead of the script stage's policy
+      draft                   {script_title, hook, intro, main_content, cta, status}
+      revision                {base_script_id, fields: {...}, source}
+      create_standalone_short the Short beside it (short_seconds, short_direction)
     """
-    draft = options.get("draft")
-    if isinstance(draft, dict) and str(draft.get("main_content") or "").strip():
-        script = database.create_project_script(
-            project_id,
-            script_title=str(draft.get("script_title") or draft.get("title") or project.get("title") or ""),
-            hook=str(draft.get("hook") or ""),
-            intro=str(draft.get("intro") or ""),
-            main_content=str(draft.get("main_content") or ""),
-            cta=str(draft.get("cta") or ""),
-            status=str(draft.get("status") or "review"),
-        )
-        if not script:
-            raise HTTPException(status_code=404, detail="Không lưu được kịch bản")
-        return {"script_id": int(script["id"]), "script": script}
-
-    # Nobody handed one over, so it has to be written. The draft endpoint only
-    # assembles what the writer already produced: called on its own it returns
-    # in no time at all, having quietly turned the analysis notes into
-    # "narration" - SEO advice where the spoken words should be.
+    plan = _current_project_plan(project_id)
     video_id = _project_source_video_id(project)
-    if video_id and not (database.get_video_analysis(video_id, analysis_type="writer") or {}).get("result"):
-        generate_video_writer_content(
-            video_id,
-            WriterRequest(
-                provider=str(options.get("provider") or "") or None,
-                creative_direction=str(options.get("creative_direction") or ""),
-                remake_mode=str(options.get("remake_mode") or "new_angle_same_topic"),
-                output_language=str(options.get("language") or languages.DEFAULT_LANGUAGE),
-                target_duration_text=str(options.get("target_duration") or ""),
-            ),
+    video = (database.get_video(video_id) or {}) if video_id else {}
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+
+    def progress(key: str, label: str) -> None:
+        _step_registry.update((project_id, "script"), stage=key, stage_label=label,
+                              stages=[{"key": name, "label": text} for name, text in script_engine.STAGES])
+
+    try:
+        plan = script_engine.ready_plan(plan)
+        if not (analysis or {}).get("result"):
+            raise script_engine.ScriptError("Chưa có kết quả phân tích nguồn để viết kịch bản.", 409)
+        draft = options.get("draft")
+        revision = options.get("revision")
+        if isinstance(revision, dict):
+            base = database.get_project_script(int(revision.get("base_script_id") or 0))
+            if not base or int(base.get("project_id") or 0) != project_id or str(base.get("variant") or "long") != "long":
+                raise script_engine.ScriptError("Không tìm thấy kịch bản cần sửa trong dự án này.", 404)
+            result = script_engine.save_revision(
+                database, project, analysis, plan, base, dict(revision.get("fields") or {}),
+                source=str(revision.get("source") or "revision"),
+            )
+        elif isinstance(draft, dict) and str(draft.get("main_content") or "").strip():
+            result = script_engine.save_draft(database, project, analysis, plan, draft)
+        else:
+            result = script_engine.run(
+                database, project, video, analysis, plan,
+                reasoner=_plan_reasoner(project_id, str(options.get("provider") or "").strip().lower(), stage="script"),
+                progress=progress,
+            )
+    except script_engine.ScriptError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    script = result.get("script") or {}
+    if script:
+        _write_project_document(project_id, "kich-ban.md", script_to_markdown(script, project))
+        if options.get("create_standalone_short"):
+            result = {**result, **_companion_short(project_id, script, options)}
+    return result
+
+
+def _companion_short(project_id: int, script: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+    """The Short written beside a new long script.
+
+    An artifact of its own - a `short` script with its own scenes - written
+    from the long script just made. It is never a second long script, and it
+    reads the plan without changing it. A Short that cannot be written does
+    not undo the long one; the failure is returned, not hidden.
+    """
+    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
+    seconds = min(MAX_SHORT_SCRIPT_SECONDS, max(MIN_SHORT_SCRIPT_SECONDS,
+                                                int(options.get("short_seconds") or DEFAULT_SHORT_SCRIPT_SECONDS)))
+    try:
+        if not bundle:
+            raise ShortScriptError("Không tìm thấy dự án")
+        short = _create_standalone_short(
+            project_id, bundle, script, seconds=seconds, direction=str(options.get("short_direction") or ""),
         )
-    return create_project_script_draft(
-        project_id,
-        ScriptDraftRequest(
-            create_standalone_short=bool(options.get("create_standalone_short", False)),
-            short_direction=str(options.get("short_direction") or ""),
-        ),
-    )
+        return {"short": short, "short_error": ""}
+    except Exception as exc:
+        return {"short": None, "short_error": str(exc)}
+
+
+def _in_plan_workflow(project_id: int, project: dict[str, Any] | None = None) -> bool:
+    """Whether the project goes Plan → Script → Storyboard.
+
+    Every project with a source analysis or a plan does. What does not is a
+    project made from pasted words alone (Kịch bản nhập thủ công): there is
+    no source to plan from, so it keeps the path it always had and never
+    reaches the plan's work.
+    """
+    if database.get_latest_project_plan(project_id):
+        return True
+    project = project or database.get_production_project(project_id)
+    video_id = _project_source_video_id(project) if project else ""
+    return bool(video_id and database.get_video_analysis(video_id, analysis_type="reference"))
+
+
+def _require_current_script(project_id: int, project: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The production gate (Script Freshness Gate): nothing goes past Bước 3 except on the current script.
+
+    The one check every way of continuing a planned project calls before it
+    makes anything - storyboard, timeline, voice and render jobs, translation,
+    publishing, the Short: the plan completed; no script being written; a
+    script written from this plan (same id and version) by the Script Engine
+    or as a checked draft; not stale, not left invalid by an edit. Otherwise
+    409, in the same words whichever door was used - and `force` does not
+    open it, nor does an older script or the old writer's scene list.
+
+    Returns the script, or None for a project outside the plan workflow,
+    which keeps the path it always had.
+    """
+    if not _in_plan_workflow(project_id, project):
+        return None
+    script, reason = _script_gate(project_id)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+    return script
+
+
+def _production_block(project_id: int, project: dict[str, Any] | None = None) -> str:
+    """The same gate for code that must not raise (a hook after a task): the reason, or empty when it may go on."""
+    if not _in_plan_workflow(project_id, project):
+        return ""
+    return _script_gate(project_id)[1]
+
+
+def _script_gate(project_id: int) -> tuple[dict[str, Any] | None, str]:
+    """(the current script, why nothing may be built on it - empty when it may)."""
+    plan = _current_project_plan(project_id)
+    running, _ = _step_runs(project_id, "script")
+    script = script_engine.current_script(database, project_id, plan)
+    _, message = script_engine.production_block(plan, script, running=bool(running))
+    return script, message
+
+
+def _artifact_gate(
+    project_id: int, row: dict[str, Any] | None, project: dict[str, Any] | None = None, *, recut: bool = False,
+) -> str:
+    """The production gate for one thing being made from one script row - a job, a scene, an export, a Short.
+
+    First the project's gate (plan, running, the current script), then that the
+    row is the current script itself - or, for a Short, that its provenance
+    is that script and plan; for a re-cut Short (`recut`), that the stored
+    re-cut plan's provenance is. Empty when it may go on, and always empty
+    outside the plan workflow.
+    """
+    if not _in_plan_workflow(project_id, project):
+        return ""
+    current, reason = _script_gate(project_id)
+    if reason:
+        return reason
+    record = database.get_project_short(project_id) if recut else None
+    return script_engine.artifact_block(row, current, recut=record)[1]
+
+
+def _require_current_artifact(
+    project_id: int, row: dict[str, Any] | None, project: dict[str, Any] | None = None, *, recut: bool = False,
+) -> None:
+    reason = _artifact_gate(project_id, row, project, recut=recut)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
+def _job_gate_reason(job: dict[str, Any]) -> str:
+    """The gate for a production job: at /jobs/{id}/retry, and in the worker the moment it claims the job."""
+    if str(job.get("job_type") or "") == "voice_preview":
+        # Reads a fixed sample sentence to audition voices, never the script.
+        return ""
+    row = database.get_project_script(int(job.get("script_id") or 0))
+    return _artifact_gate(int(job["project_id"]), row, recut=str(job.get("job_type") or "") == "render_short")
+
+
+def _scene_job_gate_reason(job: dict[str, Any]) -> str:
+    """The gate for a scene-generation job: the script its scene belongs to must be the current one (or its Short's)."""
+    segment = database.get_project_timeline_segment(int(job.get("timeline_segment_id") or 0))
+    row = database.get_project_script(int(segment["script_id"])) if segment else None
+    return _artifact_gate(int(job["project_id"]), row)
+
+
+def _publication_gate_reason(project_id: int, variant: str) -> str:
+    """The gate for publishing: the project's script is current, and a Short being published was made from it."""
+    row = database.get_latest_project_script(project_id, variant="short" if variant == "short" else "long")
+    return _artifact_gate(project_id, row)
+
+
+# Each worker asks the gate again the moment it takes a job, so a job queued
+# while its script was current cannot run after the plan or the script moved on.
+production_worker.set_production_gate(_job_gate_reason)
+scene_generation_worker.set_production_gate(_scene_job_gate_reason)
+publisher_worker.set_production_gate(
+    lambda publication: _publication_gate_reason(int(publication["project_id"]), str(publication.get("video_variant") or "long"))
+)
 
 
 def _step_script_review(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
@@ -2819,7 +2999,8 @@ def _step_shots(project_id: int, project: dict[str, Any], options: dict[str, Any
     """Save the scene list, whether an agent wrote it or the planner did."""
     supplied = options.get("shots")
     if isinstance(supplied, list) and supplied:
-        script = database.get_latest_project_script(project_id)
+        # An agent's own scene list passes the same gate as the planner's.
+        script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để chia cảnh")
         saved = database.create_project_shots(
@@ -2832,7 +3013,7 @@ def _step_shots(project_id: int, project: dict[str, Any], options: dict[str, Any
 def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
     supplied = options.get("segments")
     if isinstance(supplied, list) and supplied:
-        script = database.get_latest_project_script(project_id)
+        script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để dựng timeline")
         timeline = database.create_project_timeline(
@@ -2935,7 +3116,7 @@ _STEP_RUNNERS: dict[str, Any] = {
 # here, in the process doing it, so a page asks instead of remembering - and
 # a second click, a second tab or an orchestrator cannot start the same work
 # twice. It goes with a restart, together with the work it describes.
-_SINGLE_RUN_STEPS = frozenset({"analyze", "plan"})
+_SINGLE_RUN_STEPS = frozenset({"analyze", "plan", "script"})
 _step_registry = RunRegistry()
 
 
@@ -2968,10 +3149,26 @@ def run_project_step(project_id: int, step: str, options: dict[str, Any] | None 
         )
         return HTTPException(status_code=status_code, detail=detail)
 
+    # Nothing after Bước 3 runs on a script that is not the current plan's -
+    # not with `force` either. The orchestrator, MCP and the automation all
+    # come through here, so none of them can continue an older script.
+    if "script" in steps.upstream(definition.key) and _in_plan_workflow(project_id, project):
+        _, reason = _script_gate(project_id)
+        if reason:
+            raise refuse(409, reason)
+
     missing = steps.unmet_requirements(definition.key, _steps_done(project_id))
     if missing and not options.get("force"):
         labels = ", ".join((steps.get(name).label if steps.get(name) else name) for name in missing)
-        raise refuse(409, f"Chưa làm xong bước trước: {labels}")
+        detail = f"Chưa làm xong bước trước: {labels}"
+        if "plan" in missing:
+            # A plan can exist and still not be done: say which way, in the
+            # words Bước 3 uses everywhere.
+            try:
+                script_engine.ready_plan(_current_project_plan(project_id))
+            except script_engine.ScriptError as exc:
+                detail = str(exc)
+        raise refuse(409, detail)
 
     # Spending is exactly what the automatic run used to do without asking,
     # because it wrote to the database instead of calling the endpoint that
@@ -3266,10 +3463,49 @@ def get_project_handoff(
 
 @app.get("/api/projects/{project_id}/script")
 def get_latest_project_script(project_id: int) -> dict[str, Any]:
-    if not database.get_production_project(project_id):
+    """The latest long script, and where Bước 3 stands with it.
+
+    The row's own fields are kept as they were (`status` is still the
+    approval status), with: the ScriptDocument (`document`), the plan it was
+    written from, whether that is still the current completed plan (`state`,
+    `stale`, `stale_reasons`), and the generation run (`generation`).
+
+    And what Bước 3's page shows and offers, in the gate's own words, so no
+    page has to work it out again: `current` only when production may go on
+    from this script; `blocked_reason`, the production gate's message when it
+    may not; `write_blocked_reason`, why the script cannot be written now
+    (the plan is not ready) - empty when it can.
+    """
+    project = database.get_production_project(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    script = database.get_latest_project_script(project_id)
-    return script or {"project_id": project_id, "status": "missing"}
+    plan = _current_project_plan(project_id)
+    script = script_engine.current_script(database, project_id, plan)
+    running, last = _step_runs(project_id, "script")
+    generation = {"status": "running" if running else (last or {}).get("status") or "idle", "run": running, "last_run": last}
+    current_plan = {"id": plan.get("id"), "version": plan.get("version"), "status": plan.get("effective_status")} if plan else None
+    blocked = _production_block(project_id, project)
+    try:
+        script_engine.ready_plan(plan)
+        write_blocked = ""
+    except script_engine.ScriptError as exc:
+        write_blocked = str(exc)
+    gate = {"current": bool(script) and not blocked, "blocked_reason": blocked, "write_blocked_reason": write_blocked}
+    if not script:
+        return {"project_id": project_id, "status": "missing", "state": script_engine.MISSING, "stale": False,
+                "document": None, "generation": generation, "current_plan": current_plan, **gate}
+    body = {key: value for key, value in script.items() if key != "document_json"}
+    return {**body, "approval_status": script.get("status"), "generation": generation, "current_plan": current_plan, **gate}
+
+
+class GenerateScriptRequest(BaseModel):
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/api/projects/{project_id}/script/generate")
+def generate_project_script(project_id: int, payload: GenerateScriptRequest = GenerateScriptRequest()) -> dict[str, Any]:
+    """Write the script from the plan: the same step a button or an orchestrator runs (run_step("script"))."""
+    return run_project_step(project_id, "script", payload.options)
 
 
 @app.get("/api/projects/{project_id}/scripts")
@@ -3279,10 +3515,17 @@ def list_project_scripts(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_scripts(project_id)
 
 
-def _short_direction_from_bundle(bundle: dict[str, Any], direction: str = "") -> str:
-    """Keep the standalone Short anchored to the same creative brief."""
+def _short_direction_from_bundle(bundle: dict[str, Any], direction: str = "", long_script: dict[str, Any] | None = None) -> str:
+    """Keep the standalone Short anchored to the same creative brief.
+
+    A long script written from the plan carries the plan's angle, and that is
+    the brief; the old writer's direction is read only for older scripts.
+    """
     if direction.strip():
         return direction.strip()
+    document = script_engine.decode(long_script)
+    if document and str((document.get("plan") or {}).get("primary_angle") or "").strip():
+        return str(document["plan"]["primary_angle"]).strip()[:4000]
     writer = dict(bundle.get("writer_content") or {})
     result = dict(writer.get("result") or writer)
     return str(
@@ -3311,10 +3554,17 @@ def _create_standalone_short(
         bundle["project"],
         long_script,
         seconds=seconds,
-        direction=_short_direction_from_bundle(bundle, direction),
+        direction=_short_direction_from_bundle(bundle, direction, long_script),
         use_model=use_model,
     )
-    script = database.create_project_script(project_id, **draft, variant="short")
+    # A Short written from a script of the plan records which one - script id
+    # and version, plan id and version - so it cannot pass for a Short of a
+    # later script. Kept in its own row (plan columns + document_json).
+    made_from = script_engine.provenance(long_script) if long_script.get("id") and long_script.get("plan_id") else None
+    script = database.create_project_script(
+        project_id, **draft, variant="short",
+        plan_id=(made_from or {}).get("plan_id"), plan_version=(made_from or {}).get("plan_version"), document=made_from,
+    )
     if not script:
         raise ShortScriptError("Không lưu được kịch bản short")
     shots = database.create_project_shots(
@@ -3340,41 +3590,62 @@ def _create_standalone_short(
     }
 
 
+# What an old client may still post to /script/draft, sorted by who decides it now.
+# The plan decides these; the endpoint refuses to be told them.
+_PLAN_OWNED_FIELDS = frozenset({
+    "prompt", "creative_direction", "direction", "duration", "target_duration", "target_duration_seconds",
+    "target_duration_text", "language", "output_language", "remake_mode", "angle", "angle_id", "primary_angle",
+    "primary_angle_id", "content_structure", "structure", "sections", "cta", "hook", "hook_strategy", "audience",
+    "target_audience", "goal", "guardrails", "factual_guardrails", "claims_to_avoid", "platform", "aspect_ratio",
+    "output_profile", "video_type",
+})
+# These meant something to the old writer and mean nothing now; they are
+# accepted so an old page does not break, and named in the reply as ignored.
+_IGNORED_DRAFT_FIELDS = frozenset({"model", "force", "draft", "use_web_research", "managed_channel_id", "workflow"})
+
+
 @app.post("/api/projects/{project_id}/script/draft")
 def create_project_script_draft(
     project_id: int,
     payload: ScriptDraftRequest = ScriptDraftRequest(),
 ) -> dict[str, Any]:
-    """Save both scripts at the writing step, before either video is built."""
-    bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
-    if not bundle:
+    """Write the long script (and the Short beside it): the same step as run_step("script").
+
+    Kept for the clients that post here. It holds no logic of its own: the
+    long script is written by Bước 3 from the completed plan - same gate,
+    same engine, same checks, same run lock and log as a button or an
+    orchestrator. The plan decides the angle, length, structure, CTA,
+    audience, guardrails and format; a request that tries to set them is
+    refused rather than quietly overruling the plan.
+    """
+    if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    draft = build_script_draft(bundle)
-    script = database.create_project_script(project_id, **draft)
-    if not script:
-        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    _write_project_document(project_id, "kich-ban.md", script_to_markdown(script, bundle["project"]))
-    short: dict[str, Any] | None = None
-    short_error = ""
-    if payload.create_standalone_short:
-        try:
-            short = _create_standalone_short(
-                project_id,
-                bundle,
-                script,
-                seconds=payload.short_seconds,
-                direction=payload.short_direction,
-            )
-        except Exception as exc:
-            # The long script is still usable if its companion Short cannot be
-            # planned. Return the failure explicitly so the UI never claims it
-            # was written when it was not.
-            short_error = str(exc)
+    extra = dict(payload.model_extra or {})
+    overriding = sorted(key for key, value in extra.items() if key in _PLAN_OWNED_FIELDS and value not in (None, "", [], {}))
+    if overriding:
+        raise HTTPException(
+            status_code=422,
+            detail=("Các trường này do Kế hoạch (Bước 2) quyết định, không đặt được khi viết kịch bản: "
+                    + ", ".join(overriding) + ". Hãy sửa ở Bước 2 rồi viết lại kịch bản."),
+        )
+    options: dict[str, Any] = {
+        "create_standalone_short": payload.create_standalone_short,
+        "short_seconds": payload.short_seconds,
+        "short_direction": payload.short_direction,
+    }
+    if payload.provider.strip():
+        options["provider"] = payload.provider.strip()
+    ran = run_project_step(project_id, "script", options)
+    result = dict(ran.get("result") or {})
+    script = result.pop("script", None)
     return {
         "status": "saved",
         "script": script,
-        "short": short,
-        "short_error": short_error,
+        "short": result.pop("short", None),
+        "short_error": result.pop("short_error", ""),
+        "engine_version": (script or {}).get("engine_version"),
+        "result": result,
+        "ignored_fields": sorted(key for key in extra if key not in _PLAN_OWNED_FIELDS),
     }
 
 
@@ -3410,10 +3681,23 @@ def import_pasted_script(payload: ImportScriptRequest) -> dict[str, Any]:
             "Kịch bản nhập thủ công", title=payload.title.strip() or "Kịch bản đã dán", language=payload.language,
         )
     project_id = int(project["id"])
-    script = database.create_project_script(
-        project_id, script_title=payload.title.strip() or str(project.get("title") or "Kịch bản đã dán"),
-        hook="", intro="", main_content=narration, cta="", variant=payload.variant,
-    )
+    if payload.variant == "long" and _in_plan_workflow(project_id, project):
+        # A planned project has one way to a long script: Bước 3. Pasted words
+        # (or an agent's, over MCP) go in as a draft, held to the plan and
+        # refused with the reasons if they do not fit it.
+        ran = run_project_step(project_id, "script", {"draft": {
+            "script_title": payload.title.strip() or str(project.get("title") or "Kịch bản đã dán"),
+            "main_content": narration, "status": "draft", "source": "import",
+        }})
+        script = (ran.get("result") or {}).get("script")
+        if not script:
+            raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
+        script = _require_current_script(project_id, project) or script
+    else:
+        script = database.create_project_script(
+            project_id, script_title=payload.title.strip() or str(project.get("title") or "Kịch bản đã dán"),
+            hook="", intro="", main_content=narration, cta="", variant=payload.variant,
+        )
     if not script:
         raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
     # New rows belong only to this script version; previous audio and visuals
@@ -3437,6 +3721,15 @@ def create_director_draft(
     bundle = database.get_production_project_bundle(project_id, transcript_text_limit=50_000)
     if not bundle:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    if _in_plan_workflow(project_id, bundle.get("project")):
+        # This writes a script with the old writer and cuts its storyboard from
+        # the writer's own scene list: past the plan, the Script Engine and the
+        # gate in one call. Kept for projects outside the plan workflow only.
+        raise HTTPException(
+            status_code=409,
+            detail=("AI Đạo diễn cũ viết kịch bản và storyboard không qua Kế hoạch, nên không dùng cho dự án này. "
+                    "Hãy hoàn thành Kế hoạch (Bước 2), viết kịch bản (Bước 3) rồi tạo storyboard."),
+        )
     direction = payload.creative_direction.strip()
     if not direction:
         raise HTTPException(
@@ -3530,15 +3823,43 @@ def create_director_draft(
 
 @app.patch("/api/scripts/{script_id}")
 def update_script(script_id: int, payload: UpdateScriptRequest) -> dict[str, Any]:
-    script = database.update_project_script(
-        script_id,
-        script_title=payload.script_title,
-        hook=payload.hook,
-        intro=payload.intro,
-        main_content=payload.main_content,
-        cta=payload.cta,
-        status=payload.status,
-    )
+    existing = database.get_project_script(script_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
+    edits = {key: getattr(payload, key) for key in ("script_title", "hook", "intro", "main_content", "cta")
+             if getattr(payload, key) is not None}
+    validation: dict[str, Any] | None = None
+    if script_engine.decode(existing) is not None and edits:
+        # A script written from the plan: the edit goes into its document, is
+        # checked again against the plan it belongs to, and the columns are
+        # written back from the document - so the two never disagree. The
+        # plan link is not the editor's to change: a stale script stays stale.
+        project = database.get_production_project(int(existing["project_id"])) or {}
+        video_id = _project_source_video_id(project) if project else ""
+        analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+        plan_row = database.get_project_plan(int(existing["plan_id"])) if existing.get("plan_id") else None
+        if not plan_row or not (analysis or {}).get("result"):
+            raise HTTPException(status_code=409, detail="Không đọc được kế hoạch hoặc bản phân tích mà kịch bản này được viết từ.")
+        try:
+            revised = script_engine.revise(database, existing, edits, plan_row=plan_row, analysis=analysis,
+                                           video_id=video_id, source="patch")
+        except script_engine.ScriptError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        validation = revised["document"]["validation"]
+        script = database.update_project_script(
+            script_id, **revised["fields"], status=payload.status,
+            document=revised["document"], estimated_seconds=revised["document"].get("estimated_seconds"),
+        )
+    else:
+        script = database.update_project_script(
+            script_id,
+            script_title=payload.script_title,
+            hook=payload.hook,
+            intro=payload.intro,
+            main_content=payload.main_content,
+            cta=payload.cta,
+            status=payload.status,
+        )
     if not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy kịch bản")
     # Editing the words invalidates any earlier verdict about them: a checked
@@ -3548,7 +3869,10 @@ def update_script(script_id: int, payload: UpdateScriptRequest) -> dict[str, Any
     project = database.get_production_project(int(script["project_id"]))
     if project:
         _write_project_document(int(script["project_id"]), "kich-ban.md", script_to_markdown(script, project))
-    return {"status": "saved", "script": script}
+    if validation is None:
+        return {"status": "saved", "script": script}
+    return {"status": "saved", "script": script, "validation": validation,
+            "state": script_engine.INVALID if not validation["ok"] else script_engine.COMPLETED}
 
 
 @app.post("/api/scripts/{script_id}/approve")
@@ -3567,11 +3891,26 @@ def revise_project_script_from_chat(
     project_id: int,
     payload: ScriptChatRequest,
 ) -> dict[str, Any]:
-    """Revise the latest saved script through the selected AI writer provider."""
+    """Revise the latest saved script through the selected AI writer provider.
+
+    In a planned project only the current script can be revised, and the
+    rewrite becomes a new version of it through Bước 3 (checked, kept on the
+    same plan). A script from an older plan, or from before plans, is written
+    again instead - refused before any model is asked.
+    """
     project = database.get_production_project(project_id)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
         raise HTTPException(status_code=404, detail="Project chưa có kịch bản để chỉnh sửa")
+    if _in_plan_workflow(project_id, project):
+        plan = _current_project_plan(project_id)
+        try:
+            script_engine.ready_plan(plan)
+        except script_engine.ScriptError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        current = script_engine.current_script(database, project_id, plan)
+        if not current or current["state"] == script_engine.STALE:
+            raise HTTPException(status_code=409, detail=script_engine.STALE_SCRIPT_MESSAGE)
     video = database.get_video(str(project["youtube_video_id"]))
     if not video:
         raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn của project")
@@ -3591,14 +3930,18 @@ def revise_project_script_from_chat(
             transcript_text=transcript.get("content_text") if transcript else None,
             workflow_context=workflow_context,
         )
-        saved = database.create_project_script(
-            project_id,
-            script_title=revised["script_title"],
-            hook=revised["hook"],
-            intro=revised["intro"],
-            main_content=revised["main_content"],
-            cta=revised["cta"],
-        )
+        fields = {key: str(revised.get(key) or "") for key in ("script_title", "hook", "intro", "main_content", "cta")}
+        if script_engine.decode(script) is not None:
+            # A script written from the plan: the rewrite is a new version of
+            # it, checked again and kept on the same plan - through the one
+            # step that makes long scripts.
+            ran = run_project_step(project_id, "script", {"revision": {
+                "base_script_id": int(script["id"]), "fields": fields, "source": "chat",
+            }})
+            result = ran.get("result") or {}
+            return {"status": "saved", "provider": revised["provider"], "script": result.get("script"),
+                    "validation": result.get("validation"), "state": result.get("status")}
+        saved = database.create_project_script(project_id, **fields)
         if not saved:
             raise HTTPException(status_code=404, detail="Không thể lưu phiên bản kịch bản mới")
         _write_project_document(project_id, "kich-ban.md", script_to_markdown(saved, project))
@@ -3641,10 +3984,16 @@ def generate_project_shots(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
-    script = database.get_latest_project_script(project_id)
+    # Script Freshness Gate: a planned project's storyboard is cut from its
+    # current script only.
+    script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo shot list")
-    writer_analysis = database.get_video_analysis(str(project["youtube_video_id"]), analysis_type="writer")
+    # A script from Bước 3 is words only. The old writer's scene list - its
+    # picture prompts, cameras and asset types - belongs to whatever that
+    # writer wrote, never to this script, so it is not even read.
+    writer_analysis = None if script.get("engine_version") else database.get_video_analysis(
+        str(project["youtube_video_id"]), analysis_type="writer")
     # Scene blueprints are only valid for the exact writer response that made
     # this script.  Saving/translating a script in place keeps version 1, but
     # its updated timestamp moves past the analysis; reusing blueprints then
@@ -3850,9 +4199,13 @@ def generate_project_timeline(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    if payload.variant == "long":
+        _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo timeline")
+    if payload.variant == "short":
+        _require_current_artifact(project_id, script, project)
     shots = database.list_project_shots(project_id, script_id=int(script["id"]))
     if not shots:
         raise HTTPException(status_code=400, detail="Project chưa có shot list để tạo timeline")
@@ -4310,6 +4663,7 @@ def update_project_render_settings(
             subtitle_provider=payload.subtitle_provider,
             subtitle_model=payload.subtitle_model,
             publish_language=payload.publish_language,
+            voice_style=payload.voice_style,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4471,6 +4825,54 @@ def stream_edge_voice_preview(voice: str, rate: str = Query(default="+0%")) -> F
             detail = (result.stderr or result.stdout or "Edge TTS không trả về audio").strip()[-1000:]
             raise HTTPException(status_code=502, detail=f"Không tạo được bản nghe thử Edge TTS: {detail}")
     return FileResponse(output, media_type="audio/mpeg")
+
+
+def _gemini_voice_preview_path(provider: str, voice: str, style: str, language: str) -> Path:
+    digest = hashlib.sha1(f"{style}|{language}".encode("utf-8")).hexdigest()[:12]
+    safe_voice = re.sub(r"[^A-Za-z0-9_-]", "_", voice)[:60]
+    return PRODUCTION_ARTIFACT_DIR / "_voice_previews" / f"gemini-{gemini_tts.model_for(provider).model}-{safe_voice}-{digest}.wav"
+
+
+@app.get("/api/voice-previews/gemini/{provider}")
+def stream_gemini_voice_preview(
+    provider: str,
+    voice: str = Query(default=gemini_tts.DEFAULT_VOICE, max_length=120),
+    style: str = Query(default="", max_length=gemini_tts.MAX_STYLE_CHARS),
+    language: str = Query(default="vi", max_length=12),
+) -> FileResponse:
+    """A short real Gemini TTS audition of one voice, read in a style.
+
+    The fixed sample sentence - never a script, and no production job. Cached
+    per model, voice, style and language, since every audition is a paid call.
+    """
+    if provider not in gemini_tts.MODELS:
+        raise HTTPException(status_code=404, detail="Không phải model Gemini TTS")
+    _refuse_unready_gemini_tts(provider)
+    try:
+        # Never an audition of Kore under the name of the voice that was picked.
+        chosen, replaced = gemini_tts.voice_for(settings.gemini_config()[0], voice, language)
+    except gemini_tts.GeminiTtsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    output = _gemini_voice_preview_path(provider, chosen, style.strip(), language)
+    if not output.is_file() or output.stat().st_size == 0:
+        sample = _EDGE_PREVIEW_TEXTS.get(language.split("-")[0].lower(), _EDGE_PREVIEW_TEXT)
+        try:
+            spoken = gemini_tts.synthesize(sample, output, provider=provider, api_key=settings.gemini_config()[0],
+                                           voice=chosen, language=language, style=style)
+        except gemini_tts.GeminiTtsError as exc:
+            status = 429 if exc.kind in {"quota", "rate_limit"} else 400 if exc.kind in {"input", "auth"} else 502
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        try:
+            database.record_provider_usage(
+                provider=provider, capability=tts_catalog.PREVIEW_CAPABILITY, status="used",
+                metadata={"vendor": gemini_tts.VENDOR, "model": spoken["model"], "voice": spoken["voice"],
+                          "voice_fallback_from": replaced, "language": language,
+                          "voice_language": spoken.get("voice_language"), "style": style.strip(),
+                          "sample": True, "attempts": spoken.get("attempts"), "usage": spoken.get("usage")},
+            )
+        except Exception:
+            pass
+    return FileResponse(output, media_type="audio/wav")
 
 
 @app.get("/api/voice-library")
@@ -5242,9 +5644,11 @@ def generate_project_thumbnails(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id, variant=payload.video_variant)
     if not script:
         raise HTTPException(status_code=400, detail="Chưa có kịch bản cho bản video đã chọn")
+    _require_current_artifact(project_id, script, project)
     prompt = payload.prompt.strip() or str((script or {}).get("script_title") or project.get("title") or "")
     output_dir = ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["assets"] / "thumbnails" / uuid.uuid4().hex[:10]
     if payload.mode == "ai":
@@ -6975,6 +7379,8 @@ def plan_project_edit(
     viewer is meant to read something, a pull-back where the frame is opening
     out.
     """
+    if database.get_production_project(project_id):
+        _require_current_script(project_id)
     script = database.get_latest_project_script(project_id)
     if not database.get_production_project(project_id) or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
@@ -7843,7 +8249,12 @@ def orchestrate_project(project_id: int, payload: OrchestrateRequest) -> dict[st
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     if payload.mode == "agent":
+        # An agent goal may be "write the script again", so it is not gated
+        # here; every tool it calls (run_step, jobs, publish) is.
         return _queue_orchestrator_goal(project_id, payload)
+    # Every tool this mode runs works on the scenes of the current script, so
+    # the production gate comes before the model is even asked to plan.
+    _require_current_script(project_id)
 
     catalogue = "\n".join(
         f"- {name}: {spec['description']}\n  Tham so: {spec['args']}\n  Chi phi: {spec['cost']}"
@@ -8431,6 +8842,7 @@ def plan_timeline_edit_beats(segment_id: int, payload: PlanEditBeatsRequest) -> 
     segment = database.get_project_timeline_segment(segment_id)
     if not segment:
         raise HTTPException(status_code=404, detail="Không tìm thấy cảnh storyboard")
+    _require_current_artifact(int(segment["project_id"]), database.get_project_script(int(segment["script_id"])))
     duration = float(segment.get("duration_seconds") or 1)
     system_prompt = (
         "Ban la editor video. Hay chia MOT canh storyboard thanh cac nhip hinh lien tuc de minh hoa loi doc. "
@@ -8546,13 +8958,15 @@ def _queue_edit_beat_image(
 def generate_edit_beat_image(segment_id: int, beat_index: int, payload: GenerateEditBeatRequest) -> dict[str, Any]:
     if not payload.confirmed:
         raise HTTPException(status_code=400, detail="Tạo ảnh AI có thể dùng hạn mức; cần confirmed=true")
-    if payload.image_provider not in _IMAGE_CAPABLE_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Provider này không tạo ảnh")
-    _require_scene_provider_config(payload.image_provider)
     segment = database.get_project_timeline_segment(segment_id)
     beat = next((item for item in database.list_timeline_edit_beats(segment_id) if int(item.get("beat_index") or 0) == beat_index), None)
     if not segment or not beat:
         raise HTTPException(status_code=404, detail="Không tìm thấy nhịp dựng")
+    # Production gate first: the beat belongs to a scene of a script that must be the current one.
+    _require_current_artifact(int(segment["project_id"]), database.get_project_script(int(segment["script_id"])))
+    if payload.image_provider not in _IMAGE_CAPABLE_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Provider này không tạo ảnh")
+    _require_scene_provider_config(payload.image_provider)
     _enforce_provider_billing_policy(payload.image_provider, int(segment["project_id"]))
     job = _queue_edit_beat_image(segment, beat, payload.image_provider, payload.ratio)
     return {"status": "delegated" if payload.image_provider in database.EXTERNAL_SIDECAR_PROVIDERS else "queued", "job": job}
@@ -8620,6 +9034,10 @@ def queue_scene_generation_job(
             status_code=400,
             detail="Tao canh AI se goi dich vu cloud va phat sinh chi phi; can confirmed=true",
         )
+    # Production gate first: the scene belongs to a script, which must be the current one (or its Short's).
+    segment = database.get_project_timeline_segment(payload.timeline_segment_id)
+    if segment and int(segment.get("project_id") or 0) == project_id:
+        _require_current_artifact(project_id, database.get_project_script(int(segment["script_id"])))
     _require_scene_provider_config(payload.provider)
     _enforce_provider_billing_policy(payload.provider, project_id)
     is_video_provider = payload.provider in _VIDEO_CAPABLE_PROVIDERS
@@ -8666,6 +9084,7 @@ def queue_scene_generation_job(
 def queue_scene_generation_batch(project_id: int, payload: BatchSceneGenerationRequest) -> dict[str, Any]:
     if not payload.confirmed:
         raise HTTPException(status_code=400, detail="Tạo toàn bộ cảnh AI có thể phát sinh chi phí; cần confirmed=true")
+    _require_current_script(project_id)
     # Preserve order while removing duplicates, so the round-robin below
     # doesn't hand one provider twice the share.
     providers = list(dict.fromkeys(payload.providers)) or [payload.provider]
@@ -9247,6 +9666,8 @@ def build_timeline_from_dialogue(
     script = database.get_latest_project_script(project_id)
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    # The cut replaces the storyboard of the current script: the same gate.
+    _require_current_script(project_id, project)
 
     # This replaces every scene, so anything attached to the current ones is
     # gone. A confirm in the page is not enough: a browser left open still
@@ -9384,6 +9805,8 @@ def plan_timeline_source_cues(project_id: int) -> dict[str, Any]:
     the AI reads what is being said when, and matches it to the narration.
     """
     project = database.get_production_project(project_id)
+    if project:
+        _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
@@ -9520,9 +9943,52 @@ _EDGE_VOICE_CACHE: dict[str, Any] = {"fetched_at": 0.0, "voices": []}
 _EDGE_VOICE_TTL_SECONDS = 3600.0
 
 
+def _tts_provider_status(provider: str) -> dict[str, Any]:
+    """Whether one voice engine of Bước 4 can be used now: ready, not_configured, quota or error.
+
+    Read from what is already known - the runtime probes, GEMINI_API_KEY, the
+    recorded usage limits, the last failure - without calling anyone.
+    """
+    if provider in gemini_tts.MODELS:
+        return gemini_tts.status(provider, api_key=settings.gemini_config()[0],
+                                 usage_limit=database.get_provider_usage_limit(provider))
+    engine = tts_catalog.engine(provider)
+    ready = {
+        "edge_tts": EDGE_TTS_RUNTIME_READY,
+        "pyvideotrans": bool(settings.pyvideotrans_runtime_status(wait=False)[1]),
+        "voxcpm": bool(voxcpm_runtime_status(wait=False)[0]),
+    }.get(provider, False)
+    return {"key": provider, "vendor": engine.vendor if engine else provider, "model": engine.model if engine else provider,
+            "label": engine.label if engine else provider,
+            "status": "ready" if ready else "not_configured",
+            "status_label": "Sẵn sàng" if ready else "Chưa cấu hình", "detail": ""}
+
+
+def _tts_provider_statuses() -> list[dict[str, Any]]:
+    return [_tts_provider_status(key) for key in tts_catalog.STUDIO_ENGINES]
+
+
+def _refuse_unready_gemini_tts(provider: str) -> None:
+    """A Gemini model with no key, or one that is out of quota, takes no job: it would fail every scene."""
+    if provider not in gemini_tts.MODELS:
+        return
+    ready = _tts_provider_status(provider)
+    if ready["status"] in {"not_configured", "quota"}:
+        raise HTTPException(status_code=400, detail=f"{ready['label']}: {ready['status_label']}. {ready['detail']}".strip())
+
+
 @app.get("/api/tts/voices")
-def list_tts_voices(refresh: bool = Query(default=False)) -> dict[str, Any]:
-    """Ask Edge TTS what voices it actually has, rather than guessing.
+def list_tts_voices(
+    refresh: bool = Query(default=False),
+    provider: str = Query(default="edge_tts", max_length=60),
+    language: str = Query(default="vi", max_length=12),
+) -> dict[str, Any]:
+    """Ask the engine what voices it actually has, rather than guessing.
+
+    Gemini's come from its voice catalog (GET /v1beta/voices, prebuilt only,
+    cached for an hour); without a key, or when it cannot be read, the
+    documented prebuilt voices are listed and the reason is given. Edge's
+    are asked of edge-tts, as below.
 
     The picker listed seven voices written into the page by hand. Microsoft
     publishes 322, so most were simply unreachable - and the two Vietnamese
@@ -9532,6 +9998,13 @@ def list_tts_voices(refresh: bool = Query(default=False)) -> dict[str, Any]:
     Cached for an hour: the list changes rarely and the call goes over the
     network, while the voice picker is drawn on every project open.
     """
+    if provider in gemini_tts.MODELS:
+        chosen = gemini_tts.model_for(provider)
+        found = gemini_tts.list_voices(settings.gemini_config()[0], language, refresh=refresh)
+        return {"provider": provider, "vendor": gemini_tts.VENDOR, "model": chosen.model, "total": len(found["voices"]),
+                "default_voice": gemini_tts.DEFAULT_VOICE, **found}
+    if provider != "edge_tts":
+        raise HTTPException(status_code=400, detail=f"Chưa có danh sách giọng cho {provider}")
     now = time.monotonic()
     cached = _EDGE_VOICE_CACHE["voices"]
     if cached and not refresh and now - float(_EDGE_VOICE_CACHE["fetched_at"]) < _EDGE_VOICE_TTL_SECONDS:
@@ -9936,8 +10409,11 @@ def translate_project_narration(
     the boundaries fixed; only the words change. The pre-translation wording
     is kept so a translated line can still be checked against what was said.
     """
+    project = database.get_production_project(project_id)
+    if project:
+        _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id)
-    if not database.get_production_project(project_id) or not script:
+    if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
     pending = [item for item in timeline if str(item.get("voice_text") or "").strip()]
@@ -10474,6 +10950,9 @@ def retry_scene_job(job_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Không tìm thấy job tạo cảnh")
     if job["status"] not in {"error", "cancelled"}:
         raise HTTPException(status_code=409, detail="Chỉ có thể chạy lại job lỗi hoặc đã hủy")
+    reason = _scene_job_gate_reason(job)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
     provider = str(job.get("provider") or "")
     if provider in database.EXTERNAL_SIDECAR_PROVIDERS:
         # Not consumed by scene_generation_worker's in-process queue — the
@@ -10505,6 +10984,10 @@ def queue_project_job(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    # Production gate before anything is queued: voice, render, the Short's
+    # too - the Short is written from the long script, so it stands or falls
+    # with it. `force` only means "redo", never "skip the gate".
+    _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not script:
         raise HTTPException(
@@ -10514,13 +10997,17 @@ def queue_project_job(
                 if payload.variant == "short" else "Project chưa có kịch bản"
             ),
         )
+    # The row the job will run on: the current script itself, or a Short (or
+    # re-cut) made from it.
+    if payload.job_type != "voice_preview":
+        _require_current_artifact(project_id, script, project, recut=payload.job_type == "render_short")
     if not database.list_project_timeline(project_id, script_id=int(script["id"])):
         raise HTTPException(status_code=400, detail="Project chưa có timeline")
 
     provider = payload.provider.strip().lower()
     allowed = {
-        "voiceover": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
-        "voiceover_segment": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm"},
+        "voiceover": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm", *gemini_tts.MODELS},
+        "voiceover_segment": {"dry_run", "preview", "mock", "pyvideotrans", "py_video_trans", "edge_tts", "voxcpm", *gemini_tts.MODELS},
         "source_visuals": {"dry_run", "preview", "mock", "source_video", "source", "local_source"},
         "render_short": {"ffmpeg_builtin"},
         "render": {
@@ -10566,6 +11053,7 @@ def queue_project_job(
         ready, detail = voxcpm_runtime_status()
         if not ready:
             raise HTTPException(status_code=400, detail=f"VoxCPM chưa sẵn sàng: {detail}")
+    _refuse_unready_gemini_tts(provider)
     if provider == "edge_tts" and not EDGE_TTS_RUNTIME_READY:
         raise HTTPException(status_code=400, detail="Edge TTS chưa sẵn sàng trong môi trường local")
     if provider in {"ffmpeg", "ffmpeg_command"} and not FFMPEG_RENDER_COMMAND:
@@ -11027,6 +11515,10 @@ def queue_project_publication(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    _require_current_script(project_id, project)
+    reason = _publication_gate_reason(project_id, payload.video_variant)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
 
     managed_id = payload.managed_channel_id or project.get("managed_channel_id")
     channel = database.get_managed_channel(int(managed_id)) if managed_id else None
@@ -11188,6 +11680,9 @@ def retry_publication(publication_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Không tìm thấy publication")
     if publication.get("status") not in {"error", "cancelled"}:
         raise HTTPException(status_code=400, detail="Chỉ có thể chạy lại publication lỗi hoặc đã hủy")
+    reason = _publication_gate_reason(int(publication["project_id"]), str(publication.get("video_variant") or "long"))
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
     retried = database.retry_project_publication(publication_id)
     return {"status": str((retried or {}).get("status") or "queued"), "publication": retried, "publisher": publisher_worker.status()}
 
@@ -11347,6 +11842,10 @@ def retry_project_job(job_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Không tìm thấy production job")
     if job["status"] not in {"error", "cancelled"}:
         raise HTTPException(status_code=409, detail="Chỉ có thể chạy lại job lỗi hoặc đã hủy")
+    # The job is retried for the script it was made for; that must still be the current one.
+    reason = _job_gate_reason(job)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
     retry_job = production_worker.enqueue(
         int(job["project_id"]),
         int(job["script_id"]),
@@ -11372,6 +11871,8 @@ def production_queue_status() -> dict[str, Any]:
         "voxcpm_model": VOXCPM_MODEL,
         "voxcpm_device": VOXCPM_DEVICE,
         "edge_tts_runtime_ready": EDGE_TTS_RUNTIME_READY,
+        # Every voice engine Bước 4 offers, and whether it can be chosen now.
+        "tts_providers": _tts_provider_statuses(),
         "ffmpeg_configured": bool(FFMPEG_RENDER_COMMAND),
         "ffmpeg_builtin_available": ffmpeg_available(FFMPEG_BINARY),
         "openmontage_runtime_ready": bool(openmontage_adapter.status()["ready"]),
@@ -11393,6 +11894,8 @@ def export_premiere_package(
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    # A new export package of the storyboard: the same gate as the render.
+    _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản")
@@ -12645,30 +13148,23 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         )
 
     if role == "script":
-        result = ask(
-            (
-                "Bạn là Script Agent. Viết một kịch bản YouTube nguyên bản, hook rõ, mạch logic, "
-                "giữ chân tốt, không sao chép. main_content phải là lời kể hoàn chỉnh, không chỉ outline. "
-                "Không đưa thông tin chưa kiểm chứng thành sự thật. Trả JSON đúng schema."
-            ),
-            f"Yêu cầu:\n{goal}\n\nKết quả Research Agent:\n{json.dumps(previous, ensure_ascii=False)[:50000]}",
-            _AGENT_SCRIPT_SCHEMA,
-        )
-        # The agent wrote it; the shared step saves it, so a script created by
-        # the automatic run is the same row, with the same checks, as one
-        # created by the button.
-        saved = run_project_step(project_id, "script", {"draft": {
-            "script_title": str(result.get("title") or project.get("title") or ""),
-            "hook": str(result.get("hook") or ""),
-            "intro": str(result.get("intro") or ""),
-            "main_content": str(result.get("main_content") or ""),
-            "cta": str(result.get("cta") or ""),
-            "status": "review",
-        }})
-        script_id = int((saved.get("result") or {}).get("script_id") or 0)
+        # The Script Agent is Bước 3: the script is written by the Script
+        # Engine from the completed plan, through the same step a button or
+        # an orchestrator runs - not from a prompt of its own. Without a ready
+        # plan the step refuses, before any model is called.
+        saved = run_project_step(project_id, "script", {})
+        result = saved.get("result") or {}
+        script = result.get("script") or {}
+        script_id = int(result.get("script_id") or 0)
         if not script_id:
             raise RuntimeError("Script Agent không lưu được kịch bản")
-        return {**result, "script_id": script_id, "goal": goal, "pipeline": payload.get("pipeline") or {}}
+        return {
+            "title": str(script.get("script_title") or ""), "hook": str(script.get("hook") or ""),
+            "intro": str(script.get("intro") or ""), "main_content": str(script.get("main_content") or ""),
+            "cta": str(script.get("cta") or ""), "script_id": script_id,
+            "engine_version": script.get("engine_version"), "plan_id": result.get("plan_id"),
+            "plan_version": result.get("plan_version"), "goal": goal, "pipeline": payload.get("pipeline") or {},
+        }
 
     if role == "director":
         script = database.get_latest_project_script(project_id)
@@ -12749,6 +13245,8 @@ def _execute_agent_task(task: dict[str, Any], agent: str) -> dict[str, Any]:
         }
 
     if role == "media":
+        # Before any model call or job: the same gate as every other door.
+        _require_current_script(project_id, project)
         script = database.get_latest_project_script(project_id)
         timeline = database.list_project_timeline(project_id, script_id=int(script["id"]) if script else None)
         if not timeline:
@@ -13082,7 +13580,13 @@ def _agent_pipeline_completed(task: dict[str, Any]) -> None:
         options = dict((task.get("input") or {}).get("pipeline") or output.get("pipeline") or {})
         if output.get("ready_for_render") and options.get("auto_render"):
             script = database.get_latest_project_script(project_id)
-            if script:
+            blocked = _production_block(project_id)
+            if blocked:
+                _record_orchestrator_step(
+                    project_id=project_id, stage="render", step="Tự dựng video", status="refused",
+                    why="auto_render", error=blocked,
+                )
+            elif script:
                 production_worker.enqueue(project_id, int(script["id"]), "render", "ffmpeg_builtin")
         policy = settings.automation_policy()
         if policy.get("require_final_approval"):
@@ -13347,10 +13851,15 @@ def get_project_short_script(project_id: int) -> dict[str, Any]:
         database.list_project_timeline(project_id, script_id=int(script["id"]))
         if script else []
     )
+    reason = _artifact_gate(project_id, script) if script else ""
     return {
         "script": script,
         "timeline": timeline,
         "estimated_seconds": estimated_short_seconds(script) if script else 0,
+        # What it was made from, and whether that is still the current script.
+        "provenance": script_engine.short_provenance(script),
+        "current": not reason,
+        "blocked_reason": reason,
     }
 
 
@@ -13365,7 +13874,11 @@ def write_project_short_script(project_id: int, payload: ShortScriptRequest) -> 
     # single queue wearing the name of a parallel one: nothing about a short
     # written for its own sake depends on the long video existing, and a
     # project may only ever want the short.
-    brief = database.get_latest_project_script(project_id) or build_script_draft(bundle)
+    # In a planned project the Short is written from the current script and
+    # nothing else - not whatever long script happens to be newest. Outside
+    # the plan workflow it keeps its own brief, as it always has.
+    gated = _require_current_script(project_id, bundle["project"])
+    brief = gated or database.get_latest_project_script(project_id) or build_script_draft(bundle)
     try:
         short = _create_standalone_short(
             project_id,
@@ -13399,6 +13912,7 @@ def plan_project_short(project_id: int, payload: ShortPlanRequest) -> dict[str, 
     project = database.get_production_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    _require_current_script(project_id, project)
     script = database.get_latest_project_script(project_id)
     timeline = database.list_project_timeline(
         project_id, script_id=int(script["id"]) if script else None
@@ -13424,7 +13938,12 @@ def plan_project_short(project_id: int, payload: ShortPlanRequest) -> dict[str, 
     except ShortsPlanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     seconds = plan_duration_seconds(timeline, plan.segment_ids)
-    record = database.save_project_short(project_id, plan.as_dict(), duration_seconds=seconds)
+    # The re-cut records the script it was cut from, inside its own plan_json
+    # (ShortPlan ignores keys it does not know, so older plans read as before).
+    stored = plan.as_dict()
+    if script and script.get("plan_id"):
+        stored["provenance"] = script_engine.provenance(script)
+    record = database.save_project_short(project_id, stored, duration_seconds=seconds)
     database.emit_domain_event(
         "short.planned",
         project_id=project_id,
@@ -13706,8 +14225,9 @@ _CHAT_ROLE_INSTRUCTIONS = {
         "Sau đó hoàn tất task với output có goal, findings và recommendations."
     ),
     "script": (
-        "Viết kịch bản trong chính cuộc trò chuyện này. Gọi youtube_factory_save_script để lưu; "
-        "sau đó hoàn tất task với output chứa project_id và script_id vừa nhận."
+        "Kịch bản được viết từ Kế hoạch đã hoàn thành: gọi youtube_factory_run_step với step='script' "
+        "để app viết (cùng đường với nút bấm). Nếu bị từ chối vì Kế hoạch chưa xong, báo lại đúng lý do. "
+        "Hoàn tất task với output chứa project_id và script_id vừa nhận."
     ),
     "director": (
         "Gọi youtube_factory_get_storyboard, kiểm tra từng cảnh và dùng youtube_factory_update_shot "

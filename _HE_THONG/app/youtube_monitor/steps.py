@@ -67,10 +67,13 @@ STEPS: tuple[StepDefinition, ...] = (
         key="script",
         label="Viết kịch bản",
         stage="script",
-        # Analysis is context, not a gate: a project started from an idea has
-        # no source video to analyse, and requiring it would block that whole
-        # kind of project from ever being written.
+        # The script is written from the plan, and only a completed plan
+        # counts as done: one that waits on a decision, is blocked or is
+        # stale does not. A project started from an idea is analysed and
+        # planned like any other before it is written.
+        requires=("plan",),
         spends=True,
+        note="Viết lời cho video từ Kế hoạch đã sẵn sàng: đúng góc, thời lượng và cấu trúc. Không nghiên cứu lại.",
     ),
     StepDefinition(
         key="script_review",
@@ -148,6 +151,19 @@ def unmet_requirements(key: str, done: Iterable[str]) -> list[str]:
         return []
     finished = {str(item) for item in done}
     return [name for name in step.requires if name not in finished]
+
+
+def upstream(key: str) -> set[str]:
+    """Every step this one waits on, directly or through another."""
+    found: set[str] = set()
+    pending = list((get(key).requires if get(key) else ()))
+    while pending:
+        name = pending.pop()
+        if name in found:
+            continue
+        found.add(name)
+        pending.extend(get(name).requires if get(name) else ())
+    return found
 
 
 def plan_for(key: str, done: Iterable[str]) -> list[str]:

@@ -35,12 +35,12 @@ class TheSharedListOfStepsTests(unittest.TestCase):
 
         self.assertEqual(spending, {"script", "voice", "media", "render", "publish"})
 
-    def test_analysis_never_blocks_writing(self) -> None:
-        """A project started from an idea has no source video to analyse, so
-        requiring it would block that whole kind of project from being
-        written at all."""
-        self.assertEqual(steps.get("script").requires, ())
-        self.assertEqual(steps.unmet_requirements("script", done=set()), [])
+    def test_writing_waits_for_the_plan(self) -> None:
+        """The script is written from the plan (Bước 2), and only a completed
+        plan counts as done - so nothing is written before there is one."""
+        self.assertEqual(steps.get("script").requires, ("plan",))
+        self.assertEqual(steps.unmet_requirements("script", done=set()), ["plan"])
+        self.assertEqual(steps.unmet_requirements("script", done={"analyze", "plan"}), [])
 
     def test_the_edit_plan_is_planned_after_the_voice_exists(self) -> None:
         """Overlay and SFX timing is planned against the length of each scene,
@@ -66,7 +66,7 @@ class PlanningAWholeRunTests(unittest.TestCase):
         """"Làm video từ link này" is one sentence, not a refusal."""
         plan = steps.plan_for("render", done=set())
 
-        self.assertEqual(plan, ["script", "shots", "timeline", "render"])
+        self.assertEqual(plan, ["analyze", "plan", "script", "shots", "timeline", "render"])
 
     def test_work_already_done_is_not_planned_again(self) -> None:
         plan = steps.plan_for("render", done={"script", "shots", "timeline"})
@@ -76,7 +76,7 @@ class PlanningAWholeRunTests(unittest.TestCase):
     def test_the_plan_reaches_back_through_every_level(self) -> None:
         plan = steps.plan_for("edit_plan", done=set())
 
-        self.assertEqual(plan, ["script", "shots", "timeline", "voice", "edit_plan"])
+        self.assertEqual(plan, ["analyze", "plan", "script", "shots", "timeline", "voice", "edit_plan"])
         self.assertLess(plan.index("voice"), plan.index("edit_plan"))
 
 
@@ -125,7 +125,8 @@ class TheSameDoorForEveryDriverTests(unittest.TestCase):
         keys = [row["key"] for row in body["steps"]]
         self.assertEqual(keys, list(steps.STEP_KEYS))
         by_key = {row["key"]: row for row in body["steps"]}
-        self.assertEqual(by_key["script"]["state"], "ready")
+        # No plan yet: the script waits for it, and the scenes wait for the script.
+        self.assertEqual((by_key["script"]["state"], by_key["script"]["missing"]), ("blocked", ["plan"]))
         self.assertEqual(by_key["shots"]["state"], "blocked")
         self.assertEqual(by_key["shots"]["missing"], ["script"])
 

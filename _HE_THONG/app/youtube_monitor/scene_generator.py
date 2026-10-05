@@ -689,6 +689,7 @@ class SceneGenerationWorker:
         # be called off once started. Injected from main.py, which owns the
         # orchestrator, so this module needn't import back into it.
         self._prompt_crafter: Callable[[dict[str, Any]], str] | None = None
+        self._production_gate: Callable[[dict[str, Any]], str] | None = None
         self.stale_seconds = max(60, int(os.getenv("SCENE_JOB_STALE_SECONDS", "900")))
         self.watchdog_interval_seconds = max(5, int(os.getenv("SCENE_WATCHDOG_INTERVAL_SECONDS", "30")))
 
@@ -706,6 +707,10 @@ class SceneGenerationWorker:
     ) -> None:
         """Choose another adapter after a bounded provider failure."""
         self._failure_router = callback
+
+    def set_production_gate(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        """Ask `callback(job)` before a scene job runs - before its prompt is written; a non-empty answer refuses it."""
+        self._production_gate = callback
 
     def _provider_lock(self, provider: str) -> Lock:
         key = str(provider or "").strip() or "unknown"
@@ -860,6 +865,17 @@ class SceneGenerationWorker:
     def _process(self, job_id: int) -> None:
         job = self.database.claim_scene_generation_job(job_id)
         if not job:
+            return
+        # The execution boundary: a job queued while its script was current may
+        # be picked up after the plan or the script has moved on. Refused here,
+        # nothing is asked of a model or a provider, and no asset is made.
+        try:
+            refusal = self._production_gate(job) if self._production_gate else ""
+        except Exception as exc:
+            refusal = f"Không kiểm tra được điều kiện sản xuất: {exc}"
+        if refusal:
+            self.database.finalize_scene_provider_usage(job_id, "failed", metadata={"failure_kind": "production_gate", "error": refusal})
+            self.database.finish_scene_generation_job(job_id, "error", error=refusal, failure_kind="production_gate")
             return
         capability = ""
         try:

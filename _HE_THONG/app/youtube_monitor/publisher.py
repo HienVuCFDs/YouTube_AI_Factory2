@@ -5,7 +5,7 @@ import time
 import mimetypes
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -235,6 +235,13 @@ class PublisherWorker:
         self._thread: threading.Thread | None = None
         self.last_error = ""
         self.last_run_at: str | None = None
+        # The app's production gate, asked again the moment a publication is
+        # uploaded. None (the default) asks nothing.
+        self._production_gate: Callable[[dict[str, Any]], str] | None = None
+
+    def set_production_gate(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        """Ask `callback(publication)` before an upload; a non-empty answer refuses it with that reason."""
+        self._production_gate = callback
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -267,6 +274,14 @@ class PublisherWorker:
         ):
             claimed = self.database.claim_project_publication(int(publication["id"]))
             if not claimed:
+                continue
+            try:
+                refusal = self._production_gate(claimed) if self._production_gate else ""
+            except Exception as exc:
+                refusal = f"Không kiểm tra được điều kiện sản xuất: {exc}"
+            if refusal:
+                # Not uploaded: the publication ends with the gate's reason.
+                self.database.finish_project_publication(int(claimed["id"]), "error", error=refusal)
                 continue
             try:
                 result = self.publisher.upload_video(claimed)

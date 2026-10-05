@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from queue import Queue
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import Any, Callable
 
 from .database import Database
 from .shorts import (
@@ -21,7 +21,7 @@ from .shorts import (
     is_vertical,
     profile_size,
 )
-from . import google_tts, piper_tts, settings as app_settings
+from . import gemini_tts, google_tts, piper_tts, settings as app_settings, tts_catalog
 from .ffmpeg_renderer import generate_local_visual_draft, media_duration_seconds, render_timeline_with_ffmpeg
 from .premiere_export import build_premiere_export_package
 from .project_layout import ensure_project_layout
@@ -358,15 +358,52 @@ def run_voxcpm_voice_preview_job(
 # Edge is the default and the only one that needs nothing configured, but it
 # ships two Vietnamese voices and answers from a public endpoint that
 # intermittently returns no audio at all. Google adds the rest of the vi-VN
-# voices; Piper adds one that cannot be taken away.
-VOICE_PROVIDERS: frozenset[str] = frozenset(
-    {"pyvideotrans", "py_video_trans", "edge_tts", "voxcpm", "google_tts", "piper"}
-)
+# voices; Piper adds one that cannot be taken away; Gemini 3.8 TTS adds a
+# narrator that can be told how to read. tts_catalog names them all.
+VOICE_PROVIDERS: frozenset[str] = frozenset(tts_catalog.ENGINES)
 # Which of them write straight to the file the caller asked for, rather than
 # into a directory that then has to be searched.
 _DIRECT_OUTPUT_PROVIDERS: frozenset[str] = frozenset(
-    {"edge_tts", "voxcpm", "google_tts", "piper"}
+    {"edge_tts", "voxcpm", "google_tts", "piper", *gemini_tts.MODELS}
 )
+
+
+def _record_voice_usage(database: Database, job: dict[str, Any], segment: dict[str, Any], provider: str, *,
+                        voice: str, language: str, audio_path: Path, style: str = "",
+                        spoken: dict[str, Any] | None = None) -> None:
+    """Write which engine, model, voice and language read this scene - into the usage ledger.
+
+    The same ledger the scene providers and the YouTube Data API write to, so
+    a finished video can always be traced to the voice that read it. No key,
+    header or secret is part of it. It must never be the reason a job fails.
+    """
+    try:
+        engine = tts_catalog.engine(provider)
+        spoken = spoken or {}
+        metadata: dict[str, Any] = {
+            "vendor": engine.vendor if engine else provider,
+            "model": spoken.get("model") or (engine.model if engine else provider),
+            "voice": spoken.get("voice") or voice,
+            "language": language,
+            "speaker": str(segment.get("speaker") or ""),
+            "segment_id": int(segment["id"]),
+            "segment_index": int(segment.get("segment_index") or 0),
+            "job_id": int(job["id"]) if job.get("id") is not None else None,
+            "job_type": str(job.get("job_type") or ""),
+            "script_id": int(job["script_id"]) if job.get("script_id") is not None else None,
+            "audio_path": str(audio_path),
+        }
+        if style:
+            metadata["style"] = style[: gemini_tts.MAX_STYLE_CHARS]
+        for key in ("voice_fallback_from", "voice_language", "attempts", "usage", "sample_rate", "mime_type"):
+            if spoken.get(key):
+                metadata[key] = spoken[key]
+        database.record_provider_usage(
+            provider=provider, capability=tts_catalog.VOICE_CAPABILITY, status="used",
+            project_id=int(job["project_id"]), metadata=metadata,
+        )
+    except Exception:
+        pass
 
 
 def run_voiceover_job(
@@ -402,6 +439,10 @@ def run_voiceover_job(
     voxcpm_prompt_text = str(
         render_settings.get("voice_prompt_text") or voxcpm_prompt_text
     ).strip()
+    # How Gemini is told to read (speech_metadata.style), kept apart from the
+    # words: the project's voice_style - never voice_prompt_text, which is
+    # VoxCPM's transcript of its reference recording.
+    voice_style = str(render_settings.get("voice_style") or "").strip()
     subtitle_provider = str(render_settings.get("subtitle_provider") or "timeline_text").strip().lower()
     subtitle_model = str(render_settings.get("subtitle_model") or "").strip().lower()
     subtitle_model = subtitle_model.removeprefix("faster-whisper-") or None
@@ -484,8 +525,9 @@ def run_voiceover_job(
         duration = max(0.1, float(item.get("duration_seconds") or 1))
         srt_path = project_dir / f"segment-{index:03d}.srt"
         text_path = project_dir / f"segment-{index:03d}.txt"
-        suffix = "mp3" if provider in {"edge_tts", "google_tts"} else "wav"
+        suffix = tts_catalog.ENGINES[provider].suffix
         output_path = audio_dir / f"segment-{index:03d}.{suffix}"
+        spoken: dict[str, Any] = {}
         output_dir = project_dir / f"tts-output-{index:03d}"
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_voiceover_srt(srt_path, voice_text, duration)
@@ -534,6 +576,21 @@ def run_voiceover_job(
                     rate=float(voice_rate or 1.0),
                 )
             except google_tts.GoogleTtsError as exc:
+                raise ProductionJobError(str(exc)) from exc
+        elif provider in gemini_tts.MODELS:
+            # The scene's words are the transcript as they stand; the project's
+            # voice style goes alongside them, never into them.
+            try:
+                spoken = gemini_tts.synthesize(
+                    voice_text, output_path,
+                    provider=provider,
+                    api_key=app_settings.gemini_config()[0],
+                    voice=voice_role,
+                    language=language,
+                    style=voice_style,
+                    speaker=str(item.get("speaker") or ""),
+                )
+            except gemini_tts.GeminiTtsError as exc:
                 raise ProductionJobError(str(exc)) from exc
         elif provider == "piper":
             piper_binary, piper_model = app_settings.piper_config()
@@ -609,6 +666,10 @@ def run_voiceover_job(
             # finished scene read as "voice only" right after the voiceover
             # and "asset only" right after the cut, which looked like the
             # other half had been lost.
+        )
+        _record_voice_usage(
+            database, job, item, provider, voice=voice_role, language=language, audio_path=output_path,
+            style=voice_style if provider in gemini_tts.MODELS else "", spoken=spoken,
         )
     database.resync_timeline_segment_states(int(project["id"]))
     return str(audio_dir)
@@ -1109,6 +1170,14 @@ class ProductionWorker:
         # together is what once left this app with pictures and no sound,
         # each job overwriting rows the other had just written.
         self._busy_scripts: set[int] = set()
+        # The app's production gate, asked again the moment a job runs: a job
+        # queued while its script was current may be picked up after the plan
+        # or the script has moved on. None (the default) asks nothing.
+        self._production_gate: Callable[[dict[str, Any]], str] | None = None
+
+    def set_production_gate(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        """Ask `callback(job)` before a job runs; a non-empty answer refuses it with that reason."""
+        self._production_gate = callback
 
     @property
     def _thread(self) -> Thread | None:
@@ -1231,6 +1300,16 @@ class ProductionWorker:
     def _process(self, job_id: int) -> None:
         job = self.database.claim_project_job(job_id)
         if not job:
+            return
+        # The execution boundary: nothing below runs - no TTS, no render, no
+        # file - for a job the gate now refuses. The job ends as an error with
+        # the gate's reason; whatever earlier jobs produced is left as it is.
+        try:
+            refusal = self._production_gate(job) if self._production_gate else ""
+        except Exception as exc:
+            refusal = f"Không kiểm tra được điều kiện sản xuất: {exc}"
+        if refusal:
+            self.database.finish_project_job(job_id, "error", error=refusal)
             return
         try:
             if job["job_type"] in ("voiceover", "voiceover_segment"):

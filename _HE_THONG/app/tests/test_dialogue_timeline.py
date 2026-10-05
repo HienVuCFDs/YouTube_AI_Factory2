@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
+from tests.script_fixtures import plan_project, write_current_script
 from youtube_monitor.main import build_timeline_from_dialogue, database
 from youtube_monitor.shot_planner import build_shot_plan
 from youtube_monitor.timeline_builder import build_timeline
@@ -34,7 +35,13 @@ def _project(slug: str, turns: list[dict] | None = None) -> dict:
             video_id, {"dialogue": turns}, analysis_type="reference", provider="antigravity"
         )
     project = database.create_production_project(video_id, title="Reup")
-    database.create_project_script(int(project["id"]), script_title="x")
+    if turns is None:
+        database.create_project_script(int(project["id"]), script_title="x")
+    else:
+        # An analysed source is in the plan workflow: the cut is made on the
+        # script Bước 3 wrote from a completed plan, as in the app.
+        plan_project(database, int(project["id"]))
+        write_current_script(database, int(project["id"]))
     return project
 
 
@@ -223,6 +230,9 @@ def test_the_edit_planner_is_told_what_the_source_looks_like(monkeypatch) -> Non
         return {"scenes": [], "pacing": "", "music_mood": ""}
 
     monkeypatch.setattr(main, "_call_orchestrator_json", capture)
+    # The analysis was just rewritten, which makes the plan stale; the gate in
+    # front of the edit planner has tests of its own (test_production_gate_worker).
+    monkeypatch.setattr(main, "_require_current_script", lambda *args, **kwargs: None)
     main.plan_project_edit(int(project["id"]))
 
     assert "phụ đề tiếng Hán" in seen["user"], "mo ta hinh anh nguon phai di kem"

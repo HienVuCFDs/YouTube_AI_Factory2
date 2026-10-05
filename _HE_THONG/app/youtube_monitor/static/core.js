@@ -138,14 +138,77 @@
       group.innerHTML = (result.voices || []).map((voice) => {
         const gender = voice.gender === 'Female' ? 'Nữ' : voice.gender === 'Male' ? 'Nam' : '';
         const name = String(voice.short_name || '').replace(/Neural$/, '').split('-').slice(2).join('-');
-        return `<option value="${esc(voice.short_name)}">${esc(voiceLocaleLabel(voice.locale))} · ${esc(name)}${gender ? ' · ' + gender : ''}</option>`;
+        // What Microsoft lists, kept on the option for the Bước 4 voice list.
+        const facts = ` data-name="${esc(name)}" data-locale="${esc(voice.locale || '')}" data-gender="${esc(String(voice.gender || '').toLowerCase())}"`;
+        return `<option value="${esc(voice.short_name)}"${facts}>${esc(voiceLocaleLabel(voice.locale))} · ${esc(name)}${gender ? ' · ' + gender : ''}</option>`;
       }).join('');
       group.label = `Edge TTS · ${result.total} giọng, ${result.locales} ngôn ngữ`;
       const select = $('studioVoiceModelSelect');
       if (select && chosen) select.value = chosen;
       state.edgeVoiceCount = result.total;
+      state.edgeVoiceLocales = result.locales;
       syncStudioVoiceModelOptions();
     } catch (_) { /* giữ hai giọng tiếng Việt mặc định nếu không hỏi được */ }
+  }
+
+  // Giọng Gemini lấy từ danh mục của Google qua server (cache một giờ), và chỉ
+  // khi người dùng thật sự chọn một model Gemini - mở trang không hỏi gì cả.
+  // Trả về lượt tải đang chạy (một lượt cho mỗi model và ngôn ngữ), để ai cần lưu
+  // giọng thì chờ danh sách xong và giọng đã chọn xong rồi mới lưu.
+  function loadGeminiVoices(provider) {
+    const group = $('studioGeminiVoiceGroup');
+    if (!group || !provider) return Promise.resolve();
+    const language = $('studioPublishLanguageSelect')?.value || 'vi';
+    const key = `${provider}|${language}`;
+    if (state.geminiVoicesKey === key) return state.geminiVoicesLoading || Promise.resolve();
+    state.geminiVoicesKey = key;
+    state.geminiVoicesBusy = true;
+    if (typeof renderStudioVoiceDesk === 'function') renderStudioVoiceDesk();
+    state.geminiVoicesLoading = (async () => {
+      try {
+        const result = await api(`/api/tts/voices?provider=${encodeURIComponent(provider)}&language=${encodeURIComponent(language)}`);
+        const select = $('studioVoiceModelSelect');
+        const chosen = select?.value || '';
+        // The project's own saved voice (marked when step 4 is hydrated) stays chosen
+        // even when this list does not name it - Kore is a prebuilt voice the vi-VN
+        // catalog does not list. The page's placeholder or another engine's voice does not.
+        const stored = select?.selectedOptions?.[0]?.dataset?.stored === '1' ? chosen : '';
+        group.innerHTML = (result.voices || []).map((voice) => {
+          const extra = [voice.gender, voice.persona || voice.description].filter(Boolean).join(' · ');
+          // The catalog's own fields, for the Bước 4 voice list - nothing it did not say.
+          const facts = ['name', 'gender', 'persona', 'description', 'language_code']
+            .map((field) => (voice[field] ? ` data-${field === 'language_code' ? 'language' : field}="${esc(field === 'gender' ? String(voice[field]).toLowerCase() : voice[field])}"` : '')).join('');
+          return `<option value="${esc(voice.id)}"${facts}>${esc(voice.name || voice.id)}${extra ? ` · ${esc(extra)}` : ''}</option>`;
+        }).join('') || `<option value="${esc(result.default_voice || 'Kore')}">${esc(result.default_voice || 'Kore')}</option>`;
+        group.label = `Google Gemini · ${result.total || 0} giọng${result.source === 'builtin' ? ' dựng sẵn' : ''}`;
+        state.geminiCatalog = {total: result.total || 0, source: result.source || '', stale: Boolean(result.stale),
+          language_code: result.language_code || '', error: result.error || ''};
+        const listed = [...group.querySelectorAll('option')].map((option) => option.value);
+        if (stored && !listed.includes(stored)) {
+          const option = document.createElement('option');
+          option.value = stored;
+          option.textContent = `${stored} · giọng đã chọn`;
+          option.dataset.outside = '1';
+          group.appendChild(option);
+          listed.push(stored);
+        }
+        if (select) {
+          // Otherwise: the chosen voice if it is listed, else the default if it is,
+          // else the first one - never nothing.
+          select.value = listed.includes(chosen) ? chosen
+            : listed.includes(result.default_voice) ? result.default_voice : (listed[0] || '');
+          if (stored && select.selectedOptions?.[0]) select.selectedOptions[0].dataset.stored = '1';
+        }
+        state.geminiVoicesBusy = false;
+        syncStudioVoiceModelOptions();
+      } catch (error) {
+        state.geminiVoicesKey = '';
+        state.geminiVoicesBusy = false;
+        if (typeof renderStudioVoiceDesk === 'function') renderStudioVoiceDesk();
+        setMessage(error.message, 'error');
+      }
+    })();
+    return state.geminiVoicesLoading;
   }
 
   function voiceLocaleLabel(locale) {
@@ -174,6 +237,9 @@
         const option = document.createElement('option');
         option.value = voice;
         option.textContent = label;
+        // The same facts the label states, for the Bước 4 voice list.
+        const [, name, gender] = label.split(' · ');
+        Object.assign(option.dataset, {name, locale: voice.split('-').slice(0, 2).join('-'), gender: gender === 'Nữ' ? 'female' : 'male'});
         group.appendChild(option);
       }
     }

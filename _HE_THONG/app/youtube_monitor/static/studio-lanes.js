@@ -39,8 +39,16 @@
   // re-run reports honestly instead of staying green from last time.
   async function loadShortLane() {
     const projectId = Number(state.studioProjectId || state.projectId || 0);
-    if (!projectId) { state.shortLane = null; syncStudioLaneTabs(); return; }
-    try { renderShortLane(await api(`/api/projects/${projectId}/short-lane`)); }
+    if (!projectId) { state.shortLane = null; state.shortScript = null; syncStudioLaneTabs(); return; }
+    try {
+      // Short được viết từ kịch bản nào, và còn khớp kịch bản hiện hành không: server nói (GET …/short-script).
+      const [lane, short] = await Promise.all([
+        api(`/api/projects/${projectId}/short-lane`),
+        api(`/api/projects/${projectId}/short-script`).catch(() => null),
+      ]);
+      state.shortScript = short;
+      renderShortLane(lane);
+    }
     catch (_) { syncStudioLaneTabs(); }
   }
 
@@ -51,6 +59,7 @@
     const projectId = Number(state.studioProjectId || state.projectId || 0);
     const script = lane?.script;
     const scenes = lane?.scenes || 0;
+    const held = shortLaneHeld(script);
     const sourceAction = [...document.querySelectorAll('button')].find((button) =>
       button.getAttribute('onclick')?.includes('cutShortSourceScenes()'));
     const buildAction = [...document.querySelectorAll('button')].find((button) =>
@@ -96,9 +105,12 @@
 
     const scriptView = $('studioShortScriptView');
     if (scriptView) {
+      const made = script && Number(state.shortScript?.script?.id) === Number(script.id) ? state.shortScript?.provenance : null;
       scriptView.innerHTML = script
-        ? `<h4 style="margin:0 0 4px">${esc(script.script_title || 'Bản Short')}</h4>`
+        ? (held ? `<div class="studio-analyze-notice">${esc(held)}</div>` : '')
+          + `<h4 style="margin:0 0 4px">${esc(script.script_title || 'Bản Short')}</h4>`
           + `<div class="studio-model-note">Khoảng ${lane.estimated_seconds || 0} giây · ${scenes} cảnh</div>`
+          + (made ? `<div class="studio-model-note">Viết từ kịch bản v${esc(made.source_script_version)} · Kế hoạch v${esc(made.plan_version ?? '—')}</div>` : '')
           + `<p style="margin:8px 0 0"><b>Hook:</b> ${esc(script.hook || '')}</p>`
           + `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(script.main_content || '')}</p>`
           + (script.cta ? `<p style="margin:6px 0 0"><b>Kết:</b> ${esc(script.cta)}</p>` : '')
@@ -152,6 +164,27 @@
         if (note) note.hidden = false;
       });
     }
+
+    // Everything downstream of a Short made from an earlier script - its voice,
+    // pictures, render, publishing - waits until it is written again from the
+    // current one. The server says when, and in what words.
+    const managed = new Set([sourceAction, buildAction, renderAction].filter(Boolean));
+    const downstream = [...document.querySelectorAll('button')].filter((button) =>
+      /queueShortVariantJob\(|cutShortSourceScenes\(\)|openPublishDialog\('short'\)/.test(button.getAttribute('onclick') || ''));
+    if (renderAction && !downstream.includes(renderAction)) downstream.push(renderAction);
+    downstream.forEach((button) => {
+      if (held) { button.disabled = true; button.title = held; button.dataset.shortHeld = '1'; return; }
+      if (!button.dataset.shortHeld) return;
+      delete button.dataset.shortHeld;
+      if (!managed.has(button)) { button.disabled = false; button.title = ''; }
+    });
+  }
+
+  // A Short made from an earlier script (or plan) is held: the server says so and why.
+  function shortLaneHeld(script) {
+    const short = state.shortScript;
+    if (!script || !short?.script || Number(short.script.id) !== Number(script.id)) return '';
+    return short.current === false ? String(short.blocked_reason || '') : '';
   }
 
   function stopShortVoiceSequence() {
@@ -202,6 +235,8 @@
         body: JSON.stringify({seconds, use_model: true}),
       });
       renderShortScriptState(result);
+      // Nguồn gốc của Short mới (kịch bản và Kế hoạch nó được viết từ) đọc lại từ server.
+      await loadShortLane();
       setMessage(`Đã viết bản short ${result.estimated_seconds}s với ${(result.timeline || []).length} cảnh.`, 'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }
@@ -1477,12 +1512,10 @@
   function renderStudioVideoPreview() {
     const container = $('studioVideoPreview');
     const button = $('studioAnalyzeButton');
-    const writerButton = $('studioWriteButton');
     const video = studioSelectedVideo();
     if (!container || !button) return;
     button.disabled = !video || Boolean(state.studioAnalyzing);
     button.textContent = state.studioAnalysis?.result ? 'Phân tích lại' : 'Phân tích';
-    if (writerButton && !state.scriptId) writerButton.disabled = !video;
     if (!state.studioAnalysis?.result) renderStudioStep1Result(null);
     renderStudioAnalyzeState();
     if (!video) {
@@ -1585,6 +1618,8 @@
     // Bước 2 đọc kế hoạch từ server mỗi lần mở: nó có thể đã đổi từ lần trước
     // (phân tích lại, một lượt lập ở tab khác hay của AI điều phối).
     if (next === 2) void loadStudioPlan(state.studioProjectId);
+    // Bước 3 cũng vậy: kịch bản có thể đã được viết, sửa hay trở thành cũ ở nơi khác.
+    if (next === 3) void loadStudioScript(state.studioProjectId);
     document.querySelectorAll('[data-studio-step]').forEach((panel) => { panel.hidden = Number(panel.dataset.studioStep) !== visiblePanelStep; });
     document.querySelectorAll('[data-studio-tab]').forEach((tab) => {
       const value = Number(tab.dataset.studioTab);
@@ -1684,17 +1719,28 @@
         if (modelValue && ![...modelSelect.options].some((option) => option.value === modelValue)) {
           const option = document.createElement('option');
           option.value = modelValue;
-          option.textContent = 'VoxCPM2 · preset đã chọn';
-          modelSelect.appendChild(option);
+          const gemini = GEMINI_TTS_PROVIDERS.includes(settings.voice_provider) ? $('studioGeminiVoiceGroup') : null;
+          option.textContent = gemini ? `${modelValue} · giọng đã chọn` : 'VoxCPM2 · preset đã chọn';
+          if (gemini) option.dataset.outside = '1';
+          (gemini || modelSelect).appendChild(option);
         }
         modelSelect.value = modelValue;
+        // The project's own Gemini voice: loadGeminiVoices keeps it chosen when it draws the list.
+        $('studioGeminiVoiceGroup')?.querySelectorAll('option').forEach((option) => { delete option.dataset.stored; });
+        if (GEMINI_TTS_PROVIDERS.includes(settings.voice_provider) && modelSelect.selectedOptions[0]) {
+          modelSelect.selectedOptions[0].dataset.stored = '1';
+        }
       }
       if ($('studioVoiceRateSelect')) $('studioVoiceRateSelect').value = settings.voice_rate || $('studioVoiceRateSelect').value;
       if ($('studioPublishLanguageSelect')) $('studioPublishLanguageSelect').value = settings.publish_language || 'vi';
       if ($('studioVoicePromptText')) $('studioVoicePromptText').value = settings.voice_prompt_text || '';
+      if ($('studioVoiceStyleInput')) $('studioVoiceStyleInput').value = settings.voice_style || '';
       if ($('studioSubtitleModelSelect')) $('studioSubtitleModelSelect').value = settings.subtitle_model || 'timeline';
       syncStudioVoiceModelOptions();
+      syncStudioGeminiTts();
       syncStudioSubtitleOptions();
+      // What the project holds now: the desk tells "đã lưu" from "đang chọn" against it.
+      if (typeof rememberStudioVoiceSaved === 'function') rememberStudioVoiceSaved(state.studioProjectId, settings);
       await refreshStudioVoicePreviews();
     } catch (_) {
       // The rest of the voice form remains usable if the project was just created.
@@ -1788,7 +1834,7 @@
     const select = $('studioVoiceModelSelect');
     if (!select) return;
     document.querySelectorAll('[data-voice-provider-panel]').forEach((panel) => {
-      panel.hidden = panel.dataset.voiceProviderPanel !== provider;
+      panel.hidden = !String(panel.dataset.voiceProviderPanel || '').split(/\s+/).includes(provider);
     });
     const providerNote = $('studioVoiceProviderNote');
     if (providerNote) {
@@ -1796,7 +1842,9 @@
         ? 'VoxCPM2 tạo giọng theo preset hoặc file giọng mẫu, để mọi cảnh giữ cùng một người đọc.'
         : provider === 'pyvideotrans'
           ? 'pyVideoTrans chạy local GPU. Chỉ hiển thị các giọng tương thích với engine hiện tại.'
-          : 'Edge TTS dùng giọng Microsoft Neural. Chọn giọng rồi bấm Nghe thử.';
+          : provider.startsWith('google_gemini_')
+            ? 'Gemini 3.8 TTS đọc đúng từng chữ của kịch bản; “Kiểu đọc” chỉ nói cách đọc. Chọn giọng rồi bấm Nghe thử.'
+            : 'Edge TTS dùng giọng Microsoft Neural. Chọn giọng rồi bấm Nghe thử.';
     }
     [...select.querySelectorAll('optgroup')].forEach((group) => {
       const providers = group.dataset.voiceProviders || '';
@@ -1810,9 +1858,16 @@
       }
     });
     if (select.selectedOptions[0]?.hidden) {
-      const available = [...select.options].find((option) => !option.hidden);
+      // Back on an engine whose voice was picked earlier on this page (Gemini → Edge →
+      // Gemini): that voice, while it is still listed - not the first one in the list.
+      const picked = typeof state === 'undefined' ? {} : (state.studioVoiceByFamily || {});
+      const remembered = Object.entries(picked).find(([family]) => family.split(/\s+/).includes(provider))?.[1];
+      const again = remembered ? [...select.options].find((option) => option.value === remembered && !option.hidden) : null;
+      const available = again || [...select.options].find((option) => !option.hidden);
       if (available) select.value = available.value;
     }
+    // The Bước 4 desk draws itself from what this just settled.
+    if (typeof renderStudioVoiceDesk === 'function') renderStudioVoiceDesk();
   }
 
   function syncStudioSubtitleOptions() {
@@ -1822,51 +1877,561 @@
     provider.value = engineSelect.value === 'timeline' ? 'timeline_text' : 'faster_whisper_local';
   }
 
+  // Gemini TTS ở Bước 4: model nào chọn được là do server nói (tts_providers của
+  // /api/production-queue: Sẵn sàng / Chưa cấu hình / Hết quota / Lỗi kết nối), và
+  // danh sách giọng chỉ được hỏi khi người dùng thật sự chọn một model Gemini.
+  const GEMINI_TTS_PROVIDERS = ['google_gemini_3_8_flash_tts', 'google_gemini_3_8_flash_lite_tts'];
+
+  function studioTtsStatus(provider) {
+    return (state.productionQueue?.tts_providers || []).find((item) => item.key === provider) || null;
+  }
+
+  // Returns the voice list's load for a Gemini model (nothing otherwise), so a save can wait for it.
+  function syncStudioGeminiTts() {
+    const select = $('studioVoiceProviderSelect');
+    if (!select) return undefined;
+    [...select.options].forEach((option) => {
+      if (!GEMINI_TTS_PROVIDERS.includes(option.value)) return;
+      const status = studioTtsStatus(option.value);
+      option.dataset.label = option.dataset.label || option.textContent;
+      option.textContent = status ? `${option.dataset.label} · ${status.status_label}` : option.dataset.label;
+      // Chưa có khóa, hoặc đã hết quota: model đó sẽ hỏng ở mọi cảnh, nên không chọn được.
+      option.disabled = Boolean(status) && ['not_configured', 'quota'].includes(status.status);
+      option.title = status?.detail || '';
+    });
+    const provider = select.value;
+    // Readiness may have changed for any engine: the cards show it.
+    if (typeof renderStudioVoiceDesk === 'function') renderStudioVoiceDesk();
+    if (!GEMINI_TTS_PROVIDERS.includes(provider)) return undefined;
+    const status = studioTtsStatus(provider);
+    const note = $('studioVoiceProviderNote');
+    if (note && status) {
+      note.textContent = `Gemini 3.8 TTS đọc đúng từng chữ của kịch bản; “Kiểu đọc” chỉ nói cách đọc. Trạng thái: ${status.status_label}${status.detail ? ` — ${status.detail}` : ''}.`;
+    }
+    return loadGeminiVoices(provider);
+  }
+
+  // ---- Bước 4 · bàn giọng đọc ----
+  // A view over the form it replaced. The provider, voice and rate selects stay
+  // the source of truth - the save, the hydrate, the catalog load and their race
+  // fixes all read them - so the cards, the voice list and the speed slider only
+  // show what those selects hold, and choosing in them sets the select and fires
+  // the change a dropdown would. Readiness is the server's (tts_providers); what
+  // an engine can do is what the app does with it, kept to a tooltip.
+  const STUDIO_VOICE_ENGINES = {
+    edge_tts: {group: 'cloud', vendor: 'Microsoft', model: 'Edge TTS', mark: 'E',
+      abilities: ['Giọng Microsoft Neural', 'Chỉnh tốc độ đọc', 'Không dùng Kiểu đọc']},
+    google_gemini_3_8_flash_tts: {group: 'cloud', vendor: 'Google Gemini', model: '3.8 Flash TTS', mark: 'G',
+      abilities: ['Đọc theo Kiểu đọc', 'Danh mục giọng của Google', 'Mỗi cảnh một giọng', 'Tính phí theo token']},
+    google_gemini_3_8_flash_lite_tts: {group: 'cloud', vendor: 'Google Gemini', model: '3.8 Flash-Lite TTS', mark: 'G',
+      abilities: ['Đọc theo Kiểu đọc', 'Danh mục giọng của Google', 'Mỗi cảnh một giọng', 'Tính phí theo token']},
+    pyvideotrans: {group: 'local', vendor: 'TTS cục bộ', model: 'pyVideoTrans', mark: '',
+      abilities: ['Chạy trên GPU của máy', 'Không dùng Kiểu đọc']},
+    voxcpm: {group: 'local', vendor: 'TTS cục bộ', model: 'VoxCPM2', mark: '',
+      abilities: ['Preset hoặc file giọng mẫu', 'Một giọng cho mọi cảnh', 'Chạy trên GPU của máy', 'Không dùng Kiểu đọc']},
+  };
+  const STUDIO_TTS_TONE = {ready: 'green', not_configured: 'orange', quota: 'red', error: 'red'};
+  const STUDIO_TTS_VENDORS = {microsoft: 'Microsoft', google: 'Google Gemini', openbmb: 'TTS cục bộ', pyvideotrans: 'TTS cục bộ'};
+  const STUDIO_VOICE_CHIP = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>';
+  const STUDIO_VOICE_CHECK = '<span class="voice-check" aria-hidden="true">✓</span>';
+  const studioVoiceDeskHtml = new Map();
+
+  // Edge and Gemini readiness is definite (the runtime, the key, a recorded quota);
+  // a local engine's is a probe that may still be running, so it is shown, never
+  // used to lock it. /jobs refuses an engine that cannot run either way.
+  function studioTtsBlocked(key, status) {
+    return Boolean(status) && ['not_configured', 'quota'].includes(status.status) && !['pyvideotrans', 'voxcpm'].includes(key);
+  }
+
+  function studioLocalEngines(select) {
+    return [...(select?.options || [])].map((option) => option.value).filter((key) => (STUDIO_VOICE_ENGINES[key]?.group || 'local') === 'local');
+  }
+
+  // Redraw a block only when it changed, keeping the focus on the same control.
+  function setStudioVoiceDeskHtml(element, html) {
+    if (!element || studioVoiceDeskHtml.get(element.id) === html) return;
+    const active = document.activeElement;
+    const keyOf = (node) => node.dataset.voiceEngine || node.dataset.voiceValue || node.dataset.voiceLocal || '';
+    const focusKey = active && element.contains(active) ? keyOf(active) : '';
+    element.innerHTML = html;
+    studioVoiceDeskHtml.set(element.id, html);
+    if (focusKey) [...element.querySelectorAll('[data-voice-engine], [data-voice-value], [data-voice-local]')].find((node) => keyOf(node) === focusKey)?.focus();
+  }
+
+  function studioVoiceBadge(status) {
+    return status ? `<span class="status-badge ${STUDIO_TTS_TONE[status.status] || ''}">${esc(status.status_label)}</span>`
+      : '<span class="status-badge">Đang kiểm tra…</span>';
+  }
+
+  function studioVoiceEngineCard(key, provider) {
+    const meta = STUDIO_VOICE_ENGINES[key] || {vendor: '', model: key, mark: '', abilities: []};
+    const status = studioTtsStatus(key);
+    const blocked = studioTtsBlocked(key, status);
+    const chosen = key === provider;
+    const spoken = [`${meta.vendor} ${meta.model}`.trim(), status?.status_label || 'đang kiểm tra',
+      blocked && status?.detail ? `không dùng được: ${status.detail}` : ''].filter(Boolean).join(', ');
+    const tip = blocked && status?.detail ? status.detail : meta.abilities.join(' · ');
+    return `<button type="button" class="voice-engine${chosen ? ' selected' : ''}" data-voice-engine="${esc(key)}" aria-pressed="${chosen}"${blocked ? ' disabled' : ''} aria-label="${esc(spoken)}" title="${esc(tip)}">`
+      + `<span class="voice-mark" aria-hidden="true">${esc(meta.mark)}</span>`
+      + `<span class="voice-engine-name"><span class="voice-engine-vendor">${esc(meta.vendor)}</span><strong>${esc(meta.model)}</strong></span>`
+      + `${studioVoiceBadge(status)}${chosen ? STUDIO_VOICE_CHECK : ''}</button>`;
+  }
+
+  // The local engines share one card; it opens their choice rather than choosing one.
+  function studioVoiceLocalCard(locals, provider) {
+    const chosen = locals.includes(provider);
+    const open = chosen || Boolean(state.studioVoiceLocalOpen);
+    const name = chosen ? STUDIO_VOICE_ENGINES[provider].model : locals.map((key) => STUDIO_VOICE_ENGINES[key]?.model || key).join(' / ');
+    return `<button type="button" class="voice-engine voice-engine-local${chosen ? ' selected' : ''}" data-voice-local="1" aria-expanded="${open}" aria-controls="studioVoiceLocalChoice" aria-label="TTS cục bộ: ${esc(name)}" title="VoxCPM2 · pyVideoTrans">`
+      + `<span class="voice-mark" aria-hidden="true">${STUDIO_VOICE_CHIP}</span>`
+      + `<span class="voice-engine-name"><strong>TTS cục bộ</strong><span class="voice-engine-vendor">${esc(name)}</span></span>`
+      + `${chosen ? studioVoiceBadge(studioTtsStatus(provider)) : '<span class="voice-engine-more" aria-hidden="true">▾</span>'}${chosen ? STUDIO_VOICE_CHECK : ''}</button>`;
+  }
+
+  function renderStudioVoiceEngines(select, provider) {
+    const keys = [...select.options].map((option) => option.value);
+    const locals = studioLocalEngines(select);
+    const html = keys.filter((key) => !locals.includes(key)).map((key) => studioVoiceEngineCard(key, provider)).join('')
+      + (locals.length ? studioVoiceLocalCard(locals, provider) : '');
+    setStudioVoiceDeskHtml($('studioVoiceEngineCards'), html);
+    const choice = $('studioVoiceLocalChoice');
+    if (!choice) return;
+    choice.hidden = !locals.length || !(locals.includes(provider) || state.studioVoiceLocalOpen);
+    setStudioVoiceDeskHtml(choice, locals.map((key) => {
+      const status = studioTtsStatus(key);
+      const label = status?.status_label || 'Đang kiểm tra…';
+      return `<button type="button" class="voice-chip voice-local-option" data-voice-engine="${esc(key)}" aria-pressed="${key === provider}" aria-label="${esc(`${STUDIO_VOICE_ENGINES[key]?.model || key}, ${label}`)}" title="${esc((STUDIO_VOICE_ENGINES[key]?.abilities || []).join(' · '))}">`
+        + `${esc(STUDIO_VOICE_ENGINES[key]?.model || key)} <span class="voice-dot ${STUDIO_TTS_TONE[status?.status] || ''}" aria-hidden="true"></span><span class="voice-chip-note">${esc(label)}</span></button>`;
+    }).join(''));
+  }
+
+  // What a voice option says about itself: the catalog's own fields when the
+  // list came with them, otherwise only its label - nothing is guessed.
+  function studioVoiceFacts(option) {
+    const data = option.dataset || {};
+    const gender = String(data.gender || '').toLowerCase();
+    const label = String(option.textContent || '').replace(/ · giọng đã chọn$/, '');
+    const genderLabel = gender === 'male' ? 'Nam' : gender === 'female' ? 'Nữ' : '';
+    const facts = [genderLabel, data.persona || '', data.locale ? voiceLocaleLabel(data.locale) : ''].filter(Boolean);
+    const name = data.name || label || option.value;
+    return {
+      value: option.value, name, gender, facts, locale: data.locale || '', initial: (name.trim()[0] || '?').toUpperCase(),
+      description: data.description || '', outside: data.outside === '1',
+    };
+  }
+
+  // A row says who; the chosen voice also says what the catalog describes it as.
+  function studioVoiceIdentity(voice, tag = 'span', {full = true} = {}) {
+    const id = voice.value !== voice.name ? `<code>${esc(voice.value)}</code>` : '';
+    const shown = full ? voice.facts : voice.facts.filter((fact) => ['Nam', 'Nữ'].includes(fact) || fact === voiceLocaleLabel(voice.locale || ''));
+    const facts = shown.length ? `<span class="voice-facts">${shown.map(esc).join(' · ')}</span>` : '';
+    return `<span class="voice-avatar" aria-hidden="true">${esc(voice.initial)}</span>`
+      + `<span class="voice-who"><${tag} class="voice-name">${esc(voice.name)}</${tag}>${id || facts ? `<span class="voice-sub">${id}${facts}</span>` : ''}</span>`;
+  }
+
+  function renderStudioVoiceList(voices, provider) {
+    const list = $('studioVoiceList');
+    if (!list) return;
+    const all = [...voices.options].filter((option) => !option.hidden);
+    const query = String(state.studioVoiceQuery || '').trim().toLowerCase();
+    const wanted = state.studioVoiceGender || '';
+    const shown = all.map(studioVoiceFacts).filter((voice) => {
+      if (wanted === 'male' || wanted === 'female') { if (voice.gender !== wanted) return false; }
+      else if (wanted === 'other' && ['male', 'female'].includes(voice.gender)) return false;
+      if (!query) return true;
+      return [voice.name, voice.value, voice.description, ...voice.facts].join(' ').toLowerCase().includes(query);
+    });
+    // While the catalog loads, the group still holds the page's placeholder: nothing to pick yet.
+    const loading = GEMINI_TTS_PROVIDERS.includes(provider) && state.geminiVoicesBusy;
+    const rows = loading ? '' : shown.map((voice) => {
+      const selected = voice.value === voices.value;
+      const badge = selected ? '<span class="voice-badge selected">✓ Đang chọn</span>'
+        : voice.outside ? '<span class="voice-badge outside" title="Giọng dự án đã lưu, không có trong danh sách vừa tải">Ngoài danh mục</span>'
+          : '<span class="voice-badge">Có sẵn</span>';
+      return `<button type="button" class="voice-row${selected ? ' selected' : ''}" role="option" aria-selected="${selected}" data-voice-value="${esc(voice.value)}" title="${esc([...voice.facts, voice.description].filter(Boolean).join(' · '))}">`
+        + `${studioVoiceIdentity(voice, 'span', {full: selected})}${badge}</button>`;
+    }).join('');
+    const empty = loading ? 'Đang tải giọng…' : all.length ? 'Không có giọng khớp.' : 'Chưa có giọng cho ngôn ngữ này.';
+    setStudioVoiceDeskHtml(list, rows || `<div class="voice-empty">${esc(empty)}</div>`);
+    const count = $('studioVoiceListCount');
+    if (count) count.textContent = loading ? '' : shown.length === all.length ? `${all.length} giọng` : `${shown.length}/${all.length} giọng`;
+    document.querySelectorAll('[data-voice-gender]').forEach((chip) => chip.setAttribute('aria-pressed', String((chip.dataset.voiceGender || '') === wanted)));
+  }
+
+  // Only a list the page could not refresh is worth a word; the cause stays one click away.
+  function renderStudioVoiceCatalogNotice(provider) {
+    const box = $('studioVoiceCatalogNotice');
+    if (!box) return;
+    const catalog = state.geminiCatalog;
+    const show = GEMINI_TTS_PROVIDERS.includes(provider) && Boolean(catalog) && (catalog.stale || catalog.source === 'builtin');
+    box.hidden = !show;
+    setStudioVoiceDeskHtml(box, show
+      ? `<span>${catalog.stale ? 'Đang dùng danh sách giọng gần nhất.' : 'Đang dùng danh sách giọng dựng sẵn.'}</span>`
+        + `${catalog.error ? `<details><summary>Chi tiết</summary><code>${esc(catalog.error)}</code></details>` : ''}`
+      : '');
+  }
+
+  // What is on screen against what the project last saved (the hydrate, or a save's answer).
+  function rememberStudioVoiceSaved(projectId, settings) {
+    if (!settings || !projectId || Number(projectId) !== Number(state.studioProjectId)) return;
+    const reference = settings.voice_provider === 'voxcpm' && settings.voice_reference_asset_id;
+    state.studioVoiceSaved = {
+      projectId: Number(projectId), provider: settings.voice_provider || '',
+      voice: reference ? `asset:${settings.voice_reference_asset_id}` : (settings.voice_model || ''),
+      style: String(settings.voice_style || '').trim(), rate: settings.voice_rate || '',
+      language: settings.publish_language || '', subtitle: settings.subtitle_model || '',
+    };
+    renderStudioVoiceDesk();
+  }
+
+  function studioVoiceUnsaved() {
+    const saved = state.studioVoiceSaved;
+    if (!state.studioProjectId || !saved || saved.projectId !== Number(state.studioProjectId)) return null;
+    const now = {
+      provider: $('studioVoiceProviderSelect')?.value || '', voice: $('studioVoiceModelSelect')?.value || '',
+      style: String($('studioVoiceStyleInput')?.value || '').trim(), rate: $('studioVoiceRateSelect')?.value || '',
+      language: $('studioPublishLanguageSelect')?.value || '', subtitle: $('studioSubtitleModelSelect')?.value || '',
+    };
+    const names = {provider: 'công nghệ', voice: 'giọng', style: 'kiểu đọc', rate: 'tốc độ', language: 'ngôn ngữ', subtitle: 'phụ đề'};
+    return Object.keys(names).filter((key) => now[key] !== saved[key]).map((key) => names[key]);
+  }
+
+  function studioVoiceStyleName(style) {
+    const chip = [...document.querySelectorAll('[data-voice-style]')].find((node) => node.dataset.voiceStyle === style);
+    return chip ? chip.textContent : '';
+  }
+
+  function renderStudioVoiceCurrent(provider) {
+    const card = $('studioVoiceCurrent');
+    if (card) {
+      const meta = STUDIO_VOICE_ENGINES[provider] || {vendor: '', model: provider, mark: ''};
+      const status = studioTtsStatus(provider);
+      const option = $('studioVoiceModelSelect')?.selectedOptions?.[0];
+      const loading = GEMINI_TTS_PROVIDERS.includes(provider) && state.geminiVoicesBusy;
+      const style = String($('studioVoiceStyleInput')?.value || '').trim();
+      const extra = GEMINI_TTS_PROVIDERS.includes(provider)
+        ? (style ? `<span class="voice-tag">✦ ${esc(studioVoiceStyleName(style) || 'Tùy chỉnh')}</span>` : '')
+        : `<span class="voice-tag">Tốc độ · ${esc($('studioVoiceRateSelect')?.selectedOptions?.[0]?.textContent || '')}</span>`;
+      setStudioVoiceDeskHtml(card,
+        `<div class="voice-current-model"><span class="voice-mark" aria-hidden="true">${meta.mark ? esc(meta.mark) : STUDIO_VOICE_CHIP}</span>`
+        + `<span class="voice-engine-name"><span class="voice-engine-vendor">${esc(meta.vendor)}</span><strong>${esc(meta.model)}</strong></span>`
+        + `${status && status.status !== 'ready' ? studioVoiceBadge(status) : ''}</div>`
+        + `<div class="voice-current-voice">${loading ? '<span class="voice-muted">Đang tải giọng…</span>' : option ? studioVoiceIdentity(studioVoiceFacts(option), 'strong') : '—'}</div>`
+        + (extra ? `<div class="voice-current-extra">${extra}</div>` : ''));
+    }
+    const badge = $('studioVoiceSavedBadge');
+    if (badge) {
+      const unsaved = studioVoiceUnsaved();
+      const [tone, text, tip] = !state.studioProjectId ? ['cyan', 'Chưa mở dự án', 'Thay đổi chỉ để xem thử']
+        : unsaved === null ? ['', 'Đang tải…', '']
+          : unsaved.length ? ['orange', 'Chưa lưu', `Chưa lưu: ${unsaved.join(', ')}`] : ['green', 'Đã lưu', ''];
+      badge.className = `status-badge ${tone}`;
+      badge.textContent = text;
+      badge.title = tip;
+    }
+  }
+
+  // The speed slider is the rate select drawn as a slider: its steps are the select's options.
+  function renderStudioVoiceSpeed() {
+    const select = $('studioVoiceRateSelect');
+    const range = $('studioVoiceRateRange');
+    if (!select || !range) return;
+    range.max = String(Math.max(0, select.options.length - 1));
+    range.value = String(Math.max(0, select.selectedIndex));
+    const text = select.selectedOptions?.[0]?.textContent || '';
+    range.setAttribute('aria-valuetext', text);
+    const label = $('studioVoiceRateLabel');
+    if (label) label.textContent = text;
+  }
+
+  function renderStudioVoiceAdvanced(provider) {
+    const summary = $('studioVoiceAdvancedSummary');
+    if (summary) {
+      const subtitle = $('studioSubtitleModelSelect');
+      const language = $('studioPublishLanguageSelect')?.selectedOptions?.[0]?.textContent || '';
+      const caption = subtitle?.value === 'timeline' ? 'Phụ đề timeline' : (subtitle?.selectedOptions?.[0]?.textContent || '').split(' · ')[0];
+      summary.textContent = [caption, language, provider === 'voxcpm' ? 'VoxCPM2' : ''].filter(Boolean).join(' · ');
+    }
+    const tech = $('studioVoiceTechDetail');
+    if (!tech) return;
+    const status = studioTtsStatus(provider);
+    const catalog = state.geminiCatalog;
+    const lines = [
+      `Engine: ${provider}${status?.model ? ` · ${status.model}` : ''}${status?.detail ? ` · ${status.detail}` : ''}`,
+      ...(STUDIO_VOICE_ENGINES[provider]?.abilities || []),
+      GEMINI_TTS_PROVIDERS.includes(provider) && catalog
+        ? `Danh mục: ${catalog.total} giọng · ${catalog.language_code} · ${catalog.source}${catalog.stale ? ' (danh sách cũ)' : ''}${catalog.error ? ` · ${catalog.error}` : ''}` : '',
+      provider === 'edge_tts' && state.edgeVoiceCount ? `Microsoft: ${state.edgeVoiceCount} giọng · ${state.edgeVoiceLocales || '?'} ngôn ngữ` : '',
+    ].filter(Boolean);
+    setStudioVoiceDeskHtml(tech, `<ul>${lines.map((line) => `<li>${esc(line)}</li>`).join('')}</ul>`);
+  }
+
+  function renderStudioVoiceSaveState(provider) {
+    const notice = $('studioVoiceProjectNotice');
+    if (notice) notice.hidden = Boolean(state.studioProjectId);
+    const button = $('studioSaveVoiceButton');
+    if (!button || button.dataset.busy === '1') return;
+    const loading = GEMINI_TTS_PROVIDERS.includes(provider) && Boolean(state.geminiVoicesBusy);
+    const unsaved = studioVoiceUnsaved();
+    button.disabled = !state.studioProjectId || loading;
+    button.title = !state.studioProjectId ? 'Chưa mở dự án' : loading ? 'Đang tải giọng' : '';
+    button.innerHTML = unsaved && !unsaved.length ? 'Đã lưu ✓' : '<span aria-hidden="true">💾</span> Lưu cấu hình';
+  }
+
+  function syncStudioVoiceStylePresets() {
+    const style = String($('studioVoiceStyleInput')?.value || '').trim();
+    document.querySelectorAll('[data-voice-style]').forEach((chip) => chip.setAttribute('aria-pressed', String(chip.dataset.voiceStyle === style)));
+  }
+
+  function bindStudioVoiceDesk() {
+    const cards = $('studioVoiceEngineCards');
+    if (!cards || cards.dataset.bound === '1') return;
+    cards.dataset.bound = '1';
+    cards.addEventListener('click', (event) => {
+      const card = event.target.closest('[data-voice-engine], [data-voice-local]');
+      if (!card || card.disabled) return;
+      if (card.dataset.voiceLocal) { state.studioVoiceLocalOpen = !state.studioVoiceLocalOpen; renderStudioVoiceDesk(); return; }
+      chooseStudioVoiceEngine(card.dataset.voiceEngine);
+    });
+    $('studioVoiceLocalChoice')?.addEventListener('click', (event) => {
+      const option = event.target.closest('[data-voice-engine]');
+      if (option && !option.disabled) chooseStudioVoiceEngine(option.dataset.voiceEngine);
+    });
+    const list = $('studioVoiceList');
+    list?.addEventListener('click', (event) => {
+      const row = event.target.closest('[data-voice-value]');
+      if (row) chooseStudioVoice(row.dataset.voiceValue);
+    });
+    list?.addEventListener('keydown', (event) => {
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      const rows = [...list.querySelectorAll('[data-voice-value]')];
+      if (!rows.length) return;
+      const at = rows.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+        : Math.max(0, Math.min(rows.length - 1, at + (event.key === 'ArrowDown' ? 1 : -1)));
+      rows[next].focus();
+      event.preventDefault();
+    });
+    $('studioVoiceSearch')?.addEventListener('input', (event) => { state.studioVoiceQuery = event.target.value; renderStudioVoiceDesk(); });
+    document.querySelectorAll('[data-voice-gender]').forEach((chip) => chip.addEventListener('click', () => {
+      state.studioVoiceGender = chip.dataset.voiceGender || '';
+      renderStudioVoiceDesk();
+    }));
+    // A preset only fills the style box, as if it had been typed there.
+    document.querySelectorAll('[data-voice-style]').forEach((chip) => chip.addEventListener('click', () => {
+      const input = $('studioVoiceStyleInput');
+      if (!input) return;
+      input.value = chip.dataset.voiceStyle;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+    }));
+    // The slider moves the rate select and fires its change, as picking in it would.
+    $('studioVoiceRateRange')?.addEventListener('input', (event) => {
+      const select = $('studioVoiceRateSelect');
+      const index = Number(event.target.value);
+      if (!select || !select.options[index] || select.selectedIndex === index) return;
+      select.selectedIndex = index;
+      select.dispatchEvent(new Event('change', {bubbles: true}));
+    });
+  }
+
+  function chooseStudioVoiceEngine(key) {
+    const select = $('studioVoiceProviderSelect');
+    const option = select ? [...select.options].find((item) => item.value === key) : null;
+    if (!option || option.disabled || studioTtsBlocked(key, studioTtsStatus(key)) || select.value === key) return;
+    select.value = key;
+    select.dispatchEvent(new Event('change', {bubbles: true}));
+  }
+
+  function chooseStudioVoice(value) {
+    const select = $('studioVoiceModelSelect');
+    if (!select || ![...select.options].some((option) => option.value === value) || select.value === value) return;
+    select.value = value;
+    select.dispatchEvent(new Event('change', {bubbles: true}));
+    renderStudioVoiceDesk();
+  }
+
+  function renderStudioVoiceDesk() {
+    const select = $('studioVoiceProviderSelect');
+    const voices = $('studioVoiceModelSelect');
+    if (!select || !voices || !$('studioVoiceEngineCards')) return;
+    bindStudioVoiceDesk();
+    const provider = select.value;
+    // Each engine family's voice, kept so walking to another engine and back returns to it.
+    const voice = voices.selectedOptions?.[0];
+    const family = voice?.parentElement?.dataset?.voiceProviders || '';
+    if (family && !voice.hidden && !(GEMINI_TTS_PROVIDERS.includes(provider) && state.geminiVoicesBusy)) {
+      state.studioVoiceByFamily = {...(state.studioVoiceByFamily || {}), [family]: voice.value};
+    }
+    renderStudioVoiceEngines(select, provider);
+    renderStudioVoiceList(voices, provider);
+    renderStudioVoiceCatalogNotice(provider);
+    renderStudioVoiceCurrent(provider);
+    renderStudioVoiceSpeed();
+    renderStudioVoiceAdvanced(provider);
+    renderStudioVoiceSaveState(provider);
+    syncStudioVoiceStylePresets();
+    syncStudioVoicePlayer();
+  }
+
+  // ---- Nghe thử: one player, the sample read in the voice on screen ----
+  function setStudioVoicePreviewState(kind, text, detail = '') {
+    const status = $('studioVoicePreviewState');
+    if (status) { status.textContent = text; status.dataset.kind = kind; }
+    const box = $('studioVoicePreviewDetail');
+    const code = $('studioVoicePreviewDetailText');
+    if (box && code) { box.hidden = !detail; code.textContent = detail; }
+  }
+
+  function studioVoiceClock(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  }
+
+  // The server's words, without the HTTP tail a person cannot act on; that part
+  // stays one click away (and in the console) for whoever has to find the cause.
+  function studioVoiceErrorParts(message) {
+    const text = String(message || '');
+    const cut = text.indexOf(' (HTTP');
+    if (cut > 0) console.warn('Nghe thử giọng:', text);
+    return cut > 0 ? {text: `${text.slice(0, cut)}.`, detail: text.slice(cut + 1)} : {text, detail: ''};
+  }
+
+  // The file a preview route answers with carries its own date: one written well
+  // before this answer was served came from the server's cache, not a new call.
+  function studioVoicePreviewWasCached(response) {
+    const modified = Date.parse(response?.headers?.get('last-modified') || '');
+    const served = Date.parse(response?.headers?.get('date') || '');
+    return Number.isFinite(modified) && Number.isFinite(served) && served - modified > 15000;
+  }
+
+  // What a sample depends on: the same five answers mean the sample already loaded is the one wanted.
+  function studioVoicePreviewKey() {
+    return [$('studioVoiceProviderSelect')?.value, $('studioVoiceModelSelect')?.value, String($('studioVoiceStyleInput')?.value || '').trim(),
+      $('studioVoiceRateSelect')?.value, $('studioPublishLanguageSelect')?.value].join('|');
+  }
+
+  function syncStudioVoicePlayer() {
+    const loaded = state.studioVoiceAudio && state.studioVoiceAudioKey === studioVoicePreviewKey() ? state.studioVoiceAudio : null;
+    // A sample of another voice is not this one's: it stops when the choice moves on.
+    if (state.studioVoiceAudio && !loaded && !state.studioVoiceAudio.paused) state.studioVoiceAudio.pause();
+    const playing = Boolean(loaded && !loaded.paused && !loaded.ended);
+    const button = document.querySelector('[onclick="previewStudioSelectedVoice()"]');
+    if (button && !button.disabled) {
+      button.innerHTML = `<span aria-hidden="true">${playing ? '❚❚' : '▶'}</span>`;
+      button.setAttribute('aria-label', playing ? 'Tạm dừng' : 'Nghe thử');
+      button.classList.toggle('playing', playing);
+    }
+    const duration = loaded && Number.isFinite(loaded.duration) ? loaded.duration : 0;
+    const at = loaded ? loaded.currentTime : 0;
+    const percent = duration ? Math.min(100, (at / duration) * 100) : 0;
+    const bar = $('studioVoicePreviewBar');
+    if (bar) {
+      if (bar.firstElementChild) bar.firstElementChild.style.width = `${percent}%`;
+      bar.setAttribute('aria-valuenow', String(Math.round(percent)));
+    }
+    const clock = $('studioVoicePreviewTime');
+    if (clock) clock.textContent = playing ? `${studioVoiceClock(at)} / ${studioVoiceClock(duration)}` : studioVoiceClock(duration);
+  }
+
+  function playStudioVoicePreview(src, origin = '', {revoke = false} = {}) {
+    const previous = state.studioVoiceAudio;
+    if (previous) previous.pause();
+    if (state.studioVoiceAudioUrl) URL.revokeObjectURL(state.studioVoiceAudioUrl);
+    const audio = new Audio(src);
+    Object.assign(state, {studioVoiceAudio: audio, studioVoiceAudioUrl: revoke ? src : '', studioVoiceAudioKey: studioVoicePreviewKey()});
+    ['loadedmetadata', 'timeupdate', 'play', 'pause', 'ended'].forEach((type) => audio.addEventListener(type, syncStudioVoicePlayer));
+    audio.addEventListener('playing', () => setStudioVoicePreviewState('playing', origin ? `Đang phát · ${origin}` : 'Đang phát…'));
+    audio.addEventListener('ended', () => setStudioVoicePreviewState('done', ''));
+    return audio;
+  }
+
   async function previewStudioSelectedVoice() {
     const choice = $('studioVoiceModelSelect')?.value || '';
     const provider = $('studioVoiceProviderSelect')?.value || 'edge_tts';
+    // The sample already loaded for this exact choice: play or pause it, ask nobody again.
+    const loaded = state.studioVoiceAudio;
+    if (loaded && state.studioVoiceAudioKey === studioVoicePreviewKey()) {
+      if (!loaded.paused && !loaded.ended) { loaded.pause(); return undefined; }
+      if (loaded.ended) loaded.currentTime = 0;
+      return loaded.play().catch(() => setMessage('Trình duyệt đang chặn phát âm thanh. Hãy bấm nút Nghe thử một lần nữa.', 'error'));
+    }
     if (choice.startsWith('library:')) {
       const key = choice.slice('library:'.length);
-      const audio = new Audio(`/api/voice-library/${encodeURIComponent(key)}/audio`);
-      audio.addEventListener('error', () => setMessage('Không tải được bản nghe thử của giọng này.', 'error'), {once: true});
+      setStudioVoicePreviewState('loading', 'Đang tải…');
+      const audio = playStudioVoicePreview(`/api/voice-library/${encodeURIComponent(key)}/audio`);
+      audio.addEventListener('error', () => { setMessage('Không tải được bản nghe thử của giọng này.', 'error'); setStudioVoicePreviewState('error', 'Không tải được bản nghe thử.'); }, {once: true});
       return audio.play().catch(() => setMessage('Trình duyệt đang chặn phát âm thanh. Hãy bấm nút Nghe thử một lần nữa.', 'error'));
     }
     if (choice.startsWith('preset:')) {
       if (!state.studioProjectId) return setMessage('Hãy tạo hoặc mở dự án trước khi nghe preset Vox.', 'error');
       const key = choice.slice('preset:'.length);
-      const audio = new Audio(`/api/projects/${state.studioProjectId}/voice-previews/${encodeURIComponent(key)}/audio`);
-      audio.addEventListener('error', () => setMessage('Preset này chưa được tạo. Bấm “Tạo 6 mẫu Vox” trước.', 'error'), {once: true});
+      setStudioVoicePreviewState('loading', 'Đang tải…');
+      const audio = playStudioVoicePreview(`/api/projects/${state.studioProjectId}/voice-previews/${encodeURIComponent(key)}/audio`);
+      audio.addEventListener('error', () => { setMessage('Preset này chưa được tạo. Bấm “Tạo 6 mẫu Vox” trước.', 'error'); setStudioVoicePreviewState('error', 'Preset này chưa được tạo.'); }, {once: true});
       return audio.play().catch(() => setMessage('Preset này chưa được tạo. Bấm “Tạo 6 mẫu Vox” trước.', 'error'));
     }
     if (choice.startsWith('asset:')) {
       const assetId = choice.slice('asset:'.length);
-      const audio = new Audio(`/api/assets/${encodeURIComponent(assetId)}/download`);
-      audio.addEventListener('error', () => setMessage('Không tải được file giọng này.', 'error'), {once: true});
+      setStudioVoicePreviewState('loading', 'Đang tải…');
+      const audio = playStudioVoicePreview(`/api/assets/${encodeURIComponent(assetId)}/download`);
+      audio.addEventListener('error', () => { setMessage('Không tải được file giọng này.', 'error'); setStudioVoicePreviewState('error', 'Không tải được file giọng.'); }, {once: true});
       return audio.play().catch(() => setMessage('Trình duyệt đang chặn phát âm thanh. Hãy bấm nút Nghe thử một lần nữa.', 'error'));
+    }
+    if (GEMINI_TTS_PROVIDERS.includes(provider)) {
+      const button = document.querySelector('[onclick="previewStudioSelectedVoice()"]');
+      if (button) button.disabled = true;
+      try {
+        setMessage('Đang tạo bản nghe thử bằng Gemini TTS (câu mẫu cố định, không phải kịch bản)…');
+        setStudioVoicePreviewState('loading', 'Đang tạo…');
+        const query = new URLSearchParams({
+          voice: choice, style: $('studioVoiceStyleInput')?.value || '', language: $('studioPublishLanguageSelect')?.value || 'vi',
+        });
+        const response = await fetch(`/api/voice-previews/gemini/${encodeURIComponent(provider)}?${query}`);
+        const data = response.ok ? null : await response.json().catch(() => ({}));
+        if (!response.ok) throw apiError(data, response);
+        const cached = studioVoicePreviewWasCached(response);
+        const audio = playStudioVoicePreview(URL.createObjectURL(await response.blob()), cached ? 'từ bộ nhớ đệm' : '', {revoke: true});
+        audio.addEventListener('error', () => { setMessage('Không phát được bản nghe thử.', 'error'); setStudioVoicePreviewState('error', 'Không phát được bản nghe thử.'); }, {once: true});
+        await audio.play();
+        setMessage('Đang phát bản nghe thử Gemini.', 'success');
+      } catch (error) {
+        const said = studioVoiceErrorParts(error.message);
+        setMessage(said.text, 'error');
+        setStudioVoicePreviewState('error', said.text, said.detail);
+      } finally {
+        if (button) button.disabled = false;
+        syncStudioVoicePlayer();
+      }
+      return;
     }
     if (provider === 'edge_tts' || provider === 'pyvideotrans') {
       const button = document.querySelector('[onclick="previewStudioSelectedVoice()"]');
       if (button) button.disabled = true;
       try {
         setMessage('Đang tạo bản nghe thử bằng Edge TTS…');
+        setStudioVoicePreviewState('loading', 'Đang tạo…');
         const rate = $('studioVoiceRateSelect')?.value || '+0%';
         const response = await fetch(`/api/voice-previews/edge/${encodeURIComponent(choice)}?rate=${encodeURIComponent(rate)}`);
         const data = response.ok ? null : await response.json().catch(() => ({}));
         if (!response.ok) throw apiError(data, response);
-        const url = URL.createObjectURL(await response.blob());
-        const audio = new Audio(url);
-        audio.addEventListener('ended', () => URL.revokeObjectURL(url), {once: true});
-        audio.addEventListener('error', () => { URL.revokeObjectURL(url); setMessage('Không phát được bản nghe thử.', 'error'); }, {once: true});
+        const cached = studioVoicePreviewWasCached(response);
+        const audio = playStudioVoicePreview(URL.createObjectURL(await response.blob()), cached ? 'từ bộ nhớ đệm' : '', {revoke: true});
+        audio.addEventListener('error', () => { setMessage('Không phát được bản nghe thử.', 'error'); setStudioVoicePreviewState('error', 'Không phát được bản nghe thử.'); }, {once: true});
         await audio.play();
         setMessage('Đang phát bản nghe thử.', 'success');
       } catch (error) {
-        setMessage(error.message, 'error');
+        const said = studioVoiceErrorParts(error.message);
+        setMessage(said.text, 'error');
+        setStudioVoicePreviewState('error', said.text, said.detail);
       } finally {
         if (button) button.disabled = false;
+        syncStudioVoicePlayer();
       }
       return;
     }
     setMessage('Chọn một preset hoặc giọng mẫu VoxCPM2 để nghe thử.', 'info');
+    setStudioVoicePreviewState('idle', 'Chọn preset hoặc giọng mẫu để nghe thử.');
   }
 
   async function selectStudioSharedVoiceSample(key) {
@@ -1910,11 +2475,11 @@
     state.scriptId = null;
     state.studioAnalysis = null;
     state.studioReference = null;
-    state.studioWriter = null;
     state.studioProjectId = null;
     // Whether this source is being analysed is read from the server below.
     stopStudioAnalyzeWatch();
     resetStudioPlan();
+    resetStudioScript();
     state.studioAnalyzing = false;
     state.studioAnalyzeError = '';
     renderStudioVideoPreview();
@@ -1969,10 +2534,10 @@
       }
       // Dự án đã có kế hoạch, hoặc đang lập: lượt chạy sống trên server qua lần tải lại trang.
       if (await loadStudioPlan(existingProject.id)) nextStep = 2;
+      // Bước 3 đọc từ server: ScriptDocument, trạng thái của nó và lượt viết đang chạy (nếu có).
+      if (await loadStudioScript(existingProject.id)) nextStep = 3;
       if (bundle.latest_script) {
-        state.studioWriter = bundle.writer_content || state.studioWriter;
         state.scriptId = bundle.latest_script.id || null;
-        renderStudioScript(bundle.latest_script, state.studioWriter);
         nextStep = 3;
       }
       // Outside that branch on purpose: the short is written from the source

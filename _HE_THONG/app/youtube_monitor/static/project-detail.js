@@ -1129,31 +1129,6 @@
   }
   // ---- hết Bước 2 · Kế hoạch ----
 
-  function renderStudioScript(script, writerPayload = state.studioWriter) {
-    if (!script) return;
-    state.scriptId = script.id || state.scriptId;
-    state.studioProjectId = script.project_id || state.studioProjectId;
-    const writer = writerPayload?.result || writerPayload || {};
-    const productionScenes = Array.isArray(writer.scene_blueprints) ? writer.scene_blueprints
-      : (state.shots || []).filter((shot) => Number(shot.script_id) === Number(script.id));
-    const productionSeconds = productionScenes.reduce((total, scene) => total + Number(scene.duration_seconds || 0), 0);
-    const productionWords = productionScenes.reduce((total, scene) => total + String(scene.narration || '').trim().split(/\s+/).filter(Boolean).length, 0);
-    const targetSeconds = Number(writer.target_duration_seconds || 0);
-    const titles = (writer.new_titles || []).map((item) => `<li>${esc(item)}</li>`).join('') || '<li>Đã chuyển thành kịch bản bên dưới.</li>';
-    const hashtags = (writer.hashtags || []).map((item) => `<span class="keyword">#${esc(item)}</span>`).join('') || '<span class="secondary-text">Chưa có hashtag</span>';
-    $('studioScriptResult').innerHTML = `
-      <div class="studio-result-columns"><div class="studio-result-card"><h3>Câu chuyện mới do AI tạo</h3><p><b>Ý tưởng:</b> ${esc(writer.new_story_concept || writer.summary || '—')}\n<b>Hướng biến tấu:</b> ${esc(writer.creative_direction || '—')}</p><div class="eyebrow" style="margin-top:10px">Tiêu đề gợi ý</div><ul class="studio-result-list">${titles}</ul></div><div class="studio-result-card"><h3>Mô tả &amp; phong cách áp dụng</h3><p>${esc(writer.new_description || '—')}</p><div class="keyword-list" style="margin-top:9px">${(writer.style_application || []).map((item) => `<span class="keyword">${esc(item)}</span>`).join('') || hashtags}</div></div></div>
-      <div class="studio-summary-grid"><div class="studio-summary-card"><label>Kịch bản để đọc</label><strong>${productionScenes.length} cảnh · ${productionWords.toLocaleString('vi-VN')} từ</strong></div><div class="studio-summary-card"><label>Thời lượng storyboard</label><strong>${formatStudioDuration(productionSeconds || targetSeconds)}${targetSeconds ? ` / mục tiêu ${formatStudioDuration(targetSeconds)}` : ''}</strong></div></div>
-      <div class="studio-checklist"><div class="studio-check"><b>✓</b><span><b>Nguồn giọng đọc:</b> lời dẫn trong từng cảnh của Storyboard — không lấy từ ô “Mô tả &amp; phong cách áp dụng”. Sau khi sửa kịch bản, hãy tạo lại Storyboard để đồng bộ lời dẫn.</span></div></div>
-      <div class="studio-result-card studio-script"><h3>Kịch bản có thể chỉnh sửa · phiên bản ${esc(script.version || '—')}</h3><div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(script.script_title || '')}"></div><div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(script.hook || '')}</textarea></div><div class="studio-field"><label for="studioScriptIntroInput">Mở đầu</label><textarea id="studioScriptIntroInput">${esc(script.intro || '')}</textarea></div><div class="studio-field"><label for="studioScriptMainInput">Nội dung chính</label><textarea id="studioScriptMainInput" name="main_content">${esc(script.main_content || '')}</textarea></div><div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(script.cta || '')}</textarea></div><div class="studio-actions"><button class="btn small primary" onclick="saveStudioScript()">Lưu phiên bản này</button><button class="btn small ghost" onclick="reviewStudioScript()">Chuyển sang chờ duyệt</button><button class="btn small" onclick="aiReviewStudioScript()">AI duyệt kịch bản</button><span data-wf="reup" hidden><button class="btn small" onclick="checkStudioFidelity()">Soát đúng nội dung gốc</button><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" onclick="translateStudioNarration()">Dịch lời bình</button></span><button class="btn small ghost" onclick="approveStudioScript()">Duyệt kịch bản</button></div></div>`;
-    $('studioChatBox').hidden = false;
-    $('studioToRenderButton').disabled = false;
-    if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
-    $('studioGenerateStoryboardButton').disabled = false;
-    if ($('studioProjectSummary')) $('studioProjectSummary').textContent = `#${state.studioProjectId}`;
-    if ($('studioScriptSummary')) $('studioScriptSummary').textContent = `v${script.version || '1'}`;
-  }
-
   // The short's storyboard is the same thing as the long video's - shots
   // joined to their segments - so it is drawn by the same code. Rendered as a
   // plain list instead, it had no picture, no player to hear the voice and no
@@ -2219,18 +2194,29 @@
   }
 
   async function saveStudioVoiceSettings() {
-    if (!state.studioProjectId) return setMessage('Hãy tạo project từ bước kịch bản trước.', 'error');
+    if (!state.studioProjectId) return setMessage('Chưa có dự án nào được mở. Thay đổi hiện tại chỉ là xem thử.', 'error');
     const button = $('studioSaveVoiceButton');
     button.disabled = true;
+    button.dataset.busy = '1';
+    button.textContent = 'Đang lưu…';
     try {
+      // A Gemini voice is known only once its list has loaded and a voice is chosen;
+      // saving before that would store the page's placeholder.
+      if (GEMINI_TTS_PROVIDERS.includes($('studioVoiceProviderSelect')?.value)) await (state.geminiVoicesLoading || Promise.resolve());
       setStudioProgress(20, 'Đang lưu giọng đọc và phụ đề...');
-      await saveRenderSettings(state.studioProjectId);
+      const saved = await saveRenderSettings(state.studioProjectId);
+      // saveRenderSettings has already said why, in the server's words.
+      if (!saved) { setStudioProgress(0, 'Lưu cấu hình thất bại.', 'error'); return; }
       if ($('studioVoiceSummary')) $('studioVoiceSummary').innerHTML = `<div class="studio-check"><b>✓</b><span>Đã lưu ${esc($('studioVoiceProviderSelect').selectedOptions[0]?.textContent || '')} · ${esc($('studioVoiceModelSelect').selectedOptions[0]?.textContent || '')} · phụ đề ${esc($('studioSubtitleModelSelect').selectedOptions[0]?.textContent || '')} · ${esc($('studioPublishLanguageSelect').selectedOptions[0]?.textContent || '')}</span></div>`;
       if ($('studioGenerateVoiceoverButton')) $('studioGenerateVoiceoverButton').disabled = false;
       setStudioProgress(100, 'Đã lưu cấu hình giọng đọc và phụ đề.');
       setMessage('Đã lưu model giọng, phụ đề và ngôn ngữ cho project.', 'success');
     } catch (error) { setStudioProgress(0, `Lưu cấu hình thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
-    finally { button.disabled = false; }
+    finally {
+      delete button.dataset.busy;
+      button.disabled = false;
+      if (typeof renderStudioVoiceDesk === 'function') renderStudioVoiceDesk();
+    }
   }
 
   async function generateStudioVoiceover() {
@@ -2500,10 +2486,10 @@
       await saveRenderSettings(state.studioProjectId, {quiet: true});
       if (variant === 'long') {
         state.scriptId = result.script.id;
-        state.studioWriter = null;
         state.shots = result.shots || [];
         state.timeline = result.timeline || [];
-        renderStudioScript(result.script, null);
+        // Server nói kịch bản đã lưu ở trạng thái nào (bản nháp đã kiểm theo Kế hoạch, hay kịch bản thường).
+        await loadStudioScript(state.studioProjectId);
         renderStudioStoryboard(state.shots, state.timeline);
       } else {
         if ($('studioCreateStandaloneShort')) $('studioCreateStandaloneShort').checked = true;
@@ -2517,71 +2503,554 @@
     finally { if (button) button.disabled = false; }
   }
 
-  async function writeStudioScript() {
-    if (!state.studioVideoId) return setMessage('Hãy chọn video trước khi viết kịch bản.', 'error');
-    const narrationLanguage = $('studioScriptLanguage')?.value || 'vi';
-    const provider = $('studioWriterProviderSelect').value || 'codex_cli';
-    const button = $('studioWriteButton');
-    button.disabled = true;
-    // WF Lồng tiếng kể lại đúng nội dung nguồn, nên nó không đi qua chế độ
-    // sáng tác lại - chế độ đó được viết để ĐỔI nhân vật và tình tiết.
-    // Chế độ viết thuộc về định nghĩa WF, không suy ra bằng so chuỗi ở đây.
-    const flow = currentWorkflow();
-    const retelling = flow.script_mode === 'faithful_retell';
-    setStudioProgress(10, retelling
-      ? 'AI đang viết lại cách dẫn chuyện, giữ nguyên nội dung gốc...'
-      : 'AI đang viết câu chuyện mới từ ý tưởng của bạn...');
-    setMessage(retelling
-      ? 'Đang kể lại đúng nội dung video gốc bằng một cách dẫn khác...'
-      : 'Đang viết một câu chuyện mới và blueprint cảnh AI...');
-    try {
-      const prompt = $('studioScriptInstructionInput')?.value || '';
-      const durationInput = $('studioTargetDurationSeconds')?.value.trim() || '';
-      const localDuration = parseStudioDuration(durationInput);
-      if (durationInput && !localDuration) return setMessage('Thời lượng cần nhập theo dạng 00:00:00 (giờ:phút:giây).', 'error');
-      if (localDuration && (localDuration < 30 || localDuration > 1800)) return setMessage('Thời lượng cần nằm trong khoảng 00:00:30 đến 00:30:00.', 'error');
-      const response = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/writer`, {method: 'POST', body: JSON.stringify({provider, managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null, creative_direction: prompt, remake_mode: retelling ? flow.script_mode : (flow.script_mode || 'new_angle_same_topic'), output_language: $('studioScriptLanguage')?.value || 'vi', target_duration_seconds: null, target_duration_text: durationInput, use_web_research: flow.uses_web_research === false ? false : $('studioFolkloreResearchEnabled')?.checked !== false})});
-      state.studioWriter = response;
-      // The writer is told how long the video should be and its output is
-      // already measured against that, but the answer went nowhere. A script
-      // half the length of its source then quietly became a video half the
-      // length, discovered only after a voiceover and a render.
-      reportScriptLengthWarnings(response);
-      setStudioProgress(60, 'Đã có câu chuyện mới, đang tạo dự án...');
-      const projectResponse = await api(`/api/videos/${encodeURIComponent(state.studioVideoId)}/project`, {method: 'POST', body: JSON.stringify({managed_channel_id: $('studioManagedChannelSelect')?.value ? Number($('studioManagedChannelSelect').value) : null})});
-      state.studioProjectId = projectResponse.project?.id || projectResponse.id || null;
-      if (state.studioProjectId) {
-        await api(`/api/projects/${state.studioProjectId}/workflow`, {
-          method: 'PATCH', body: JSON.stringify({workflow: state.studioWorkflow}),
-        }).catch(() => {});
-      }
-      const createStandaloneShort = Boolean($('studioCreateStandaloneShort')?.checked);
-      const shortSeconds = Number($('studioShortScriptSeconds')?.value || 45);
-      setStudioProgress(80, createStandaloneShort ? 'Đang tạo kịch bản dài và Short riêng từ cùng brief...' : 'Đang tạo kịch bản dài...');
-      const scriptResponse = await api(`/api/projects/${state.studioProjectId}/script/draft`, {
-        method: 'POST',
-        body: JSON.stringify({
-          create_standalone_short: createStandaloneShort,
-          short_seconds: shortSeconds,
-          short_direction: prompt,
-        }),
-      });
-      renderStudioScript(scriptResponse.script, response);
-      syncStudioNarrationLanguage(narrationLanguage);
-      await saveRenderSettings(state.studioProjectId, {quiet: true});
-      if (scriptResponse.short) renderShortScriptState(scriptResponse.short);
-      else if (scriptResponse.short_error) setMessage(`Kịch bản dài đã tạo, nhưng Short riêng chưa tạo được: ${scriptResponse.short_error}`, 'error');
-      setStudioStep(3);
-      setStudioProgress(100, scriptResponse.short ? 'Đã tạo kịch bản dài và Short riêng.' : 'Kịch bản dài đã tạo xong.');
-      if (scriptResponse.short) {
-        setMessage(`Đã tạo kịch bản dài và Short riêng ${scriptResponse.short.estimated_seconds || shortSeconds}s từ cùng brief.`, 'success');
-      } else if (!scriptResponse.short_error) {
-        setMessage('Đã tạo kịch bản dài. Bạn có thể bật tạo Short rồi viết lại kịch bản tại bước này nếu cần.', 'success');
-      }
-      void Promise.all([loadSummary(), loadVideos(), loadProjects()]);
-    } catch (error) { setStudioProgress(0, `Viết kịch bản thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
-    finally { button.disabled = false; }
+  // ---- Bước 3 · Kịch bản ----
+  //
+  // Lời của video, viết từ Kế hoạch đã sẵn sàng. Trang chỉ vẽ lại điều server trả về:
+  //   GET   /api/projects/{id}/steps          dòng "script": đang chạy hay không (run, last_run)
+  //   GET   /api/projects/{id}/script         ScriptDocument, trạng thái, current, lý do bị chặn
+  //   POST  /api/projects/{id}/steps/script   {create_standalone_short, short_seconds, provider}
+  //   PATCH /api/scripts/{id}                 sửa lời; server kiểm lại theo Kế hoạch
+  // Trạng thái (completed / stale / mismatch / invalid), "dùng tiếp được không"
+  // và mọi lời từ chối là của server: trang không tự suy ra, không đặt lại câu chữ.
+  // Không có writer cũ hay danh sách cảnh của nó ở đây: hình thuộc Storyboard (Bước 5).
+  const STUDIO_SCRIPT_POLL_MS = 5000;
+  const STUDIO_SCRIPT_HIDDEN_POLL_MS = 30000;
+  const STUDIO_SCRIPT_STATUS = {
+    none: ['', 'Chưa có kịch bản'],
+    running: ['cyan', 'Đang viết kịch bản…'],
+    completed: ['green', 'Sẵn sàng'],
+    stale: ['orange', 'Kịch bản đã cũ'],
+    mismatch: ['orange', 'Không khớp kế hoạch'],
+    invalid: ['red', 'Không còn hợp lệ'],
+    held: ['orange', 'Chưa dùng tiếp được'],
+    no_plan: ['', 'Chưa có kế hoạch'],
+    needs_user_decision: ['orange', 'Kế hoạch cần bạn quyết định'],
+    blocked: ['red', 'Kế hoạch chưa thể thực hiện'],
+    plan_stale: ['orange', 'Kế hoạch đã cũ'],
+    failed: ['red', 'Chưa viết được kịch bản'],
+  };
+  // Kế hoạch chưa sẵn sàng (server nói qua current_plan.status) thì bước này mang trạng thái của Kế hoạch.
+  const STUDIO_SCRIPT_PLAN_STATES = {needs_user_decision: 'needs_user_decision', blocked: 'blocked', stale: 'plan_stale'};
+  const STUDIO_SCRIPT_WAITING_ON_PLAN = ['no_plan', 'needs_user_decision', 'blocked', 'plan_stale'];
+
+  document.addEventListener('visibilitychange', () => {
+    const watch = state.studioScript?.watch;
+    if (document.hidden || !watch?.tick) return;
+    clearTimeout(watch.timer);
+    void watch.tick();
+  });
+
+  function studioScriptState(projectId = state.studioProjectId) {
+    if (!state.studioScript || Number(state.studioScript.projectId) !== Number(projectId)) {
+      clearTimeout(state.studioScript?.watch?.timer);
+      state.studioScript = {projectId: projectId || null, row: null, body: null, error: '', running: false, requesting: false,
+        watch: null, seen: [], editing: false};
+    }
+    return state.studioScript;
   }
+
+  // Đổi nguồn hoặc dự án: bỏ mọi thứ đang giữ về kịch bản của dự án trước.
+  function resetStudioScript() {
+    clearTimeout(state.studioScript?.watch?.timer);
+    state.studioScript = null;
+    renderStudioScript();
+  }
+
+  async function studioScriptRow(projectId) {
+    const body = await api(`/api/projects/${projectId}/steps`);
+    return (body.steps || []).find((row) => row.key === 'script') || null;
+  }
+
+  // Đọc trạng thái và kịch bản từ server. Trả true khi dự án đã có kịch bản
+  // hoặc đang viết, để lúc mở lại dự án biết dừng ở Bước 3.
+  async function loadStudioScript(projectId = state.studioProjectId) {
+    if (!projectId) { renderStudioScript(); return false; }
+    const view = studioScriptState(projectId);
+    let row = null;
+    let body = null;
+    try {
+      [row, body] = await Promise.all([studioScriptRow(projectId), api(`/api/projects/${projectId}/script`)]);
+    } catch (error) {
+      if (state.studioScript !== view) return false;
+      if (!view.body) view.error = studioScriptErrorText(error);
+      renderStudioScript();
+      return false;
+    }
+    if (state.studioScript !== view) return false;
+    view.row = row;
+    view.body = body;
+    if (body?.id) state.scriptId = body.id;
+    // Một lượt viết từ trước khi tải lại trang, từ tab khác hay từ AI điều phối.
+    if (row?.state === 'running' || body?.generation?.status === 'running') {
+      view.running = true;
+      noteStudioScriptStage(view, row);
+      watchStudioScript(projectId);
+    } else if (!view.requesting) {
+      view.running = false;
+      view.seen = [];
+    }
+    renderStudioScript();
+    return view.running || Boolean(body?.id);
+  }
+
+  // Chỉ bước nào trang thật sự thấy server đang chạy mới được coi là đã chạy.
+  function noteStudioScriptStage(view, row) {
+    const stage = row?.run?.stage;
+    if (stage && !view.seen.includes(stage)) view.seen.push(stage);
+  }
+
+  // "Đang viết" đọc từ server, không giữ trong trang: tải lại trang chỉ bỏ
+  // request, không bỏ việc. Tab đang ẩn hỏi thưa hơn và hỏi ngay khi mở lại.
+  function watchStudioScript(projectId) {
+    const view = studioScriptState(projectId);
+    if (view.watch) return;
+    const watch = {timer: null, tick: null, busy: false};
+    view.watch = watch;
+    const later = () => setTimeout(watch.tick, document.hidden ? STUDIO_SCRIPT_HIDDEN_POLL_MS : STUDIO_SCRIPT_POLL_MS);
+    watch.tick = async () => {
+      if (state.studioScript !== view || view.watch !== watch || watch.busy) return;
+      watch.busy = true;
+      let row = null;
+      try { row = await studioScriptRow(projectId); } catch (_) { /* app tạm không trả lời: hỏi lại sau */ }
+      watch.busy = false;
+      if (state.studioScript !== view || view.watch !== watch) return;
+      if (!row || row.state === 'running') {
+        if (row) { view.row = row; noteStudioScriptStage(view, row); renderStudioScriptHead(); }
+        watch.timer = later();
+        return;
+      }
+      view.watch = null;
+      // Request của chính trang này còn mở: câu trả lời của nó sẽ kết thúc lượt chạy.
+      if (view.requesting) return;
+      view.running = false;
+      if (row.last_run?.status === 'failed') {
+        view.error = studioScriptErrorText({status: row.last_run.status_code, message: row.last_run.error});
+      }
+      await loadStudioScript(projectId);
+      announceStudioScript();
+    };
+    watch.timer = later();
+  }
+
+  function stopStudioScriptWatch(view) {
+    clearTimeout(view?.watch?.timer);
+    if (view) view.watch = null;
+  }
+
+  // Một lần viết. `options` đi nguyên vào POST …/steps/script - chỉ những gì
+  // bước đó nhận. Góc, thời lượng, cấu trúc, CTA, nền tảng là của Kế hoạch.
+  async function writeStudioScript() {
+    const projectId = state.studioProjectId;
+    if (!projectId) return setMessage('Hãy chọn nguồn và lập Kế hoạch ở Bước 2 trước.', 'error');
+    const view = studioScriptState(projectId);
+    // Đang viết (trang này, tab khác hay AI điều phối): không gửi lượt thứ hai.
+    if (view.requesting || studioScriptStatus(view) === 'running') return;
+    // Kế hoạch chưa sẵn sàng: nói đúng lời server và không gửi gì; không có cờ nào vượt qua được.
+    if (view.body?.write_blocked_reason) return setMessage(view.body.write_blocked_reason, 'error');
+    const createStandaloneShort = Boolean($('studioCreateStandaloneShort')?.checked);
+    const shortSeconds = Number($('studioShortScriptSeconds')?.value || 45);
+    const options = {create_standalone_short: createStandaloneShort, short_seconds: shortSeconds};
+    const provider = $('studioWriterProviderSelect')?.value || 'auto';
+    if (provider !== 'auto') options.provider = provider;
+    view.running = true;
+    view.requesting = true;
+    view.error = '';
+    view.editing = false;
+    view.seen = [];
+    renderStudioScript();
+    watchStudioScript(projectId);
+    let failure = null;
+    let response = null;
+    try {
+      response = await api(`/api/projects/${projectId}/steps/script`, {method: 'POST', body: JSON.stringify({options})});
+    } catch (error) {
+      failure = error;
+    }
+    if (state.studioScript !== view) return;
+    view.requesting = false;
+    if (failure) {
+      // Request hỏng nhưng server vẫn đang viết (một lượt khác đã chạy trước,
+      // hoặc mất kết nối giữa chừng): theo dõi lượt đang có.
+      let row = null;
+      try { row = await studioScriptRow(projectId); } catch (_) { /* không hỏi được: coi như lượt này đã dừng */ }
+      if (state.studioScript !== view) return;
+      if (row?.state === 'running') {
+        view.row = row;
+        view.seen = [];
+        noteStudioScriptStage(view, row);
+        watchStudioScript(projectId);
+        renderStudioScriptHead();
+        setMessage(studioScriptErrorText(failure), 'error');
+        return;
+      }
+      view.error = studioScriptErrorText(failure);
+    }
+    stopStudioScriptWatch(view);
+    view.running = false;
+    await loadStudioScript(projectId);
+    announceStudioScript();
+    if (!failure) await finishStudioScriptRun(projectId, response?.result || {});
+  }
+
+  // Sau một lượt viết thành công: giọng đọc theo ngôn ngữ của kịch bản, và Short nếu có viết kèm.
+  async function finishStudioScriptRun(projectId, result) {
+    const language = state.studioScript?.body?.document?.language || state.studioScript?.body?.language || '';
+    if (language) {
+      syncStudioNarrationLanguage(language);
+      try { await saveRenderSettings(projectId, {quiet: true}); } catch (_) { /* cấu hình giọng lưu lại được ở Bước 4 */ }
+    }
+    if (result.short || result.short_error) await loadShortLane();
+    if (result.short_error) setMessage(`Kịch bản dài đã viết xong, nhưng Short riêng chưa tạo được: ${result.short_error}`, 'error');
+  }
+
+  function announceStudioScript() {
+    const view = state.studioScript;
+    if (!view) return;
+    if (view.error) return setMessage(view.error, 'error');
+    const status = studioScriptStatus(view);
+    if (status === 'completed') setMessage('Đã viết kịch bản từ Kế hoạch.', 'success');
+    else if (view.body?.blocked_reason) setMessage(view.body.blocked_reason, 'error');
+  }
+
+  // Lời từ chối của server (409 của gate, 422 của bản nháp…) giữ nguyên câu chữ;
+  // chỉ khi server không nói gì mới dùng lời của trang.
+  function studioScriptErrorText(error) {
+    const status = Number(error?.status || 0);
+    const text = String(error?.message || '').trim();
+    if (!status && /fetch|network/i.test(text)) return 'Không kết nối được app. Hãy mở lại app rồi thử lại.';
+    if (!text || /^HTTP \d{3}$/.test(text)) return 'Có lỗi khi viết kịch bản. Thử lại sau.';
+    return text;
+  }
+
+  // Trạng thái là của server: lượt chạy trên dòng "script" của GET …/steps, và
+  // state / current / write_blocked_reason của GET …/script.
+  function studioScriptStatus(view = state.studioScript) {
+    if (!view) return 'none';
+    if (view.running || view.row?.state === 'running' || view.body?.generation?.status === 'running') return 'running';
+    const body = view.body;
+    if (!body) return view.error ? 'failed' : 'none';
+    if (body.write_blocked_reason) return STUDIO_SCRIPT_PLAN_STATES[String(body.current_plan?.status || '')] || 'no_plan';
+    if (body.state === 'missing' || !body.id) return view.error ? 'failed' : 'none';
+    if (body.state === 'invalid') return 'invalid';
+    if (body.state === 'stale') return body.stale_kind === 'mismatch' ? 'mismatch' : 'stale';
+    return body.state === 'completed' && body.current === true ? 'completed' : 'held';
+  }
+
+  // ---- Phần đầu: trạng thái, phiên bản, nút. Vẽ lại mỗi lần hỏi server. ----
+  function studioScriptActions(status) {
+    const button = (label, action, kind = 'primary') => `<button class="btn ${kind}" type="button" onclick="${action}">${esc(label)}</button>`;
+    if (status === 'running') return '<button class="btn primary" type="button" disabled>Đang viết…</button>';
+    if (STUDIO_SCRIPT_WAITING_ON_PLAN.includes(status)) return button('Xem lại Kế hoạch', 'setStudioStep(2)', 'ghost');
+    if (status === 'completed') {
+      return button('Chỉnh sửa', 'editStudioScript()') + button('Tạo Short', 'createStudioShort()', 'ghost')
+        + button('Viết lại kịch bản', 'writeStudioScript()', 'ghost');
+    }
+    if (status === 'invalid') return button('Viết lại kịch bản', 'writeStudioScript()') + button('Sửa lại', 'editStudioScript()', 'ghost');
+    if (['stale', 'mismatch', 'held'].includes(status)) return button('Viết lại kịch bản', 'writeStudioScript()');
+    return button('Viết kịch bản', 'writeStudioScript()');
+  }
+
+  function studioScriptMeta(body) {
+    if (!body?.id) return '';
+    const parts = [`Phiên bản ${body.version}`];
+    if (body.plan_version) parts.push(`viết theo Kế hoạch v${body.plan_version}`);
+    const now = body.current_plan?.version;
+    if (now && Number(now) !== Number(body.plan_version)) parts.push(`Kế hoạch hiện tại v${now}`);
+    parts.push(body.approval_status === 'approved' ? 'đã duyệt' : 'chưa duyệt');
+    return parts.join(' · ');
+  }
+
+  function studioScriptRunning(view) {
+    const run = view.row?.run || view.body?.generation?.run || {};
+    const started = run.started_at ? new Date(run.started_at) : null;
+    const elapsed = started && !Number.isNaN(started.getTime()) ? Math.max(0, Math.round((Date.now() - started.getTime()) / 1000)) : 0;
+    const chips = (run.stages || []).map((item) => {
+      const mark = item.key === run.stage ? 'now' : (view.seen || []).includes(item.key) ? 'past' : '';
+      return `<span class="studio-plan-stage ${mark}">${esc(item.label)}</span>`;
+    }).join('');
+    const timing = `${run.stage_label ? `${esc(run.stage_label)} · ` : ''}${elapsed ? `đã chạy ${formatStudioDuration(elapsed)} · ` : ''}`;
+    return `<div class="studio-plan-running" aria-live="polite">
+        ${chips ? `<div class="studio-plan-stages">${chips}</div>` : ''}
+        <div class="studio-plan-note">${timing}thường mất 1–2 phút. Có thể rời trang, việc vẫn chạy.</div>
+      </div>`;
+  }
+
+  function studioScriptList(items) {
+    const rows = (items || []).map((item) => String(item || '').trim()).filter(Boolean);
+    return rows.length ? `<ul class="studio-result-list">${rows.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : '';
+  }
+
+  // Vì sao bước này chưa xong: đúng câu của server, kèm các lý do server liệt kê.
+  function studioScriptReason(status, view) {
+    const body = view?.body || {};
+    if (STUDIO_SCRIPT_WAITING_ON_PLAN.includes(status)) return `<div class="studio-analyze-notice">${esc(body.write_blocked_reason)}</div>`;
+    if (['stale', 'mismatch', 'held'].includes(status)) {
+      return `<div class="studio-analyze-notice">${esc(body.blocked_reason)}${studioScriptList(body.stale_reasons)}</div>`;
+    }
+    if (status === 'invalid') return `<div class="studio-analyze-notice">${esc(body.blocked_reason)}${studioScriptList(body.validation_errors)}</div>`;
+    if (status === 'none') {
+      return '<div class="studio-empty">Chưa có kịch bản cho Kế hoạch này. Bấm “Viết kịch bản”: app viết lời theo đúng góc nội dung, thời lượng và cấu trúc của Kế hoạch.</div>';
+    }
+    return '';
+  }
+
+  // Lượt viết gần nhất hỏng ở nơi khác (tab khác, AI điều phối): nói lời của server.
+  function studioScriptLastFailure(status, view) {
+    const last = view?.body?.generation?.last_run;
+    if (status === 'running' || view?.error || last?.status !== 'failed' || !last.error) return '';
+    return `<div class="studio-analyze-notice">Lần viết gần nhất không thành công: ${esc(last.error)}</div>`;
+  }
+
+  function renderStudioScriptHead() {
+    const box = $('studioScriptHead');
+    if (!box) return;
+    const view = state.studioScript;
+    const status = studioScriptStatus(view);
+    const [tone, label] = STUDIO_SCRIPT_STATUS[status] || STUDIO_SCRIPT_STATUS.none;
+    const body = view?.body || {};
+    box.innerHTML = `
+      <div class="studio-plan-head">
+        <div class="studio-plan-source">
+          <div class="primary-text">${esc(body.document?.title || body.script_title || 'Kịch bản video dài')}</div>
+          <div class="secondary-text">${esc(studioScriptMeta(body))}</div>
+        </div>
+        <span class="status-badge ${tone}">${esc(label)}</span>
+        <div class="studio-plan-actions">${state.studioProjectId ? studioScriptActions(status) : ''}</div>
+      </div>
+      ${status === 'running' ? studioScriptRunning(view) : ''}
+      ${view?.error && status !== 'running' ? `<div class="studio-analyze-notice">⚠ ${esc(view.error)}</div>` : ''}
+      ${studioScriptLastFailure(status, view)}
+      ${studioScriptReason(status, view)}`;
+    syncStudioScriptStep(status);
+  }
+
+  // Các bước sau chỉ mở khi server nói kịch bản này dùng tiếp được (current).
+  function syncStudioScriptStep(status = studioScriptStatus()) {
+    const body = state.studioScript?.body || {};
+    const usable = body.current === true && status !== 'running';
+    const tab = document.querySelector('[data-studio-tab="3"]');
+    if (tab) tab.dataset.scriptState = status;
+    const next = $('studioToRenderButton');
+    if (next) {
+      next.disabled = !usable;
+      next.title = usable ? '' : String(body.blocked_reason || body.write_blocked_reason || '');
+    }
+    const storyboard = $('studioGenerateStoryboardButton');
+    if (storyboard) storyboard.disabled = !usable;
+    const chat = $('studioChatBox');
+    if (chat) chat.hidden = !(usable || status === 'invalid');
+    if (usable) {
+      if ($('studioProjectSummary')) $('studioProjectSummary').textContent = `#${state.studioProjectId}`;
+      if ($('studioScriptSummary')) $('studioScriptSummary').textContent = `v${body.version || '1'}`;
+    }
+  }
+
+  // ---- Phần thân: ScriptDocument đúng thứ tự của nó. ----
+  function studioScriptLines(lines) {
+    const rows = (lines || []).filter((line) => String(line?.text || '').trim());
+    if (!rows.length) return '<p class="secondary-text">(không có lời)</p>';
+    return rows.map((line) => {
+      const speaker = line.speaker && line.speaker !== 'narrator' ? `<b>${esc(line.speaker)}:</b> ` : '';
+      const price = line.price_captured_at ? ` <span class="secondary-text">(giá đọc lúc ${esc(studioPlanWhen(line.price_captured_at) || line.price_captured_at)})</span>` : '';
+      return `<p>${speaker}${esc(line.text)}${price}</p>`;
+    }).join('');
+  }
+
+  function studioScriptScreen(items) {
+    const rows = (items || []).map((item) => String(item || '').trim()).filter(Boolean);
+    return rows.length ? `<div class="studio-plan-field"><span>Chữ trên màn hình</span><p>${esc(rows.join(' · '))}</p></div>` : '';
+  }
+
+  // insight_ids / evidence_ids của mỗi phần: giữ lại, gập vào "Dựa trên".
+  function studioScriptBasis(part) {
+    const insights = part?.insight_ids || [];
+    const evidence = part?.evidence_ids || [];
+    if (!insights.length && !evidence.length) return '';
+    return `<details class="studio-more"><summary>Dựa trên</summary>
+        ${insights.length ? `<div class="studio-plan-field"><span>Insight</span><p>${esc(insights.join(', '))}</p></div>` : ''}
+        ${evidence.length ? `<div class="studio-plan-field"><span>Bằng chứng</span><p>${esc(evidence.join(', '))}</p></div>` : ''}
+      </details>`;
+  }
+
+  function studioScriptPart(label, part, title = '') {
+    if (!part) return '';
+    return `<div class="studio-plan-section">
+        <div class="studio-plan-time">${esc(label)}</div>
+        <div>${title}${studioScriptLines(part.spoken_lines)}${studioScriptScreen(part.on_screen_text)}${studioScriptBasis(part)}</div>
+      </div>`;
+  }
+
+  function studioScriptFooter(body, status) {
+    if (status !== 'completed') return '';
+    const reup = state.studioWorkflow === 'reup' ? '' : 'hidden';
+    return `<div class="studio-actions">
+        ${body.approval_status === 'approved' ? '' : '<button class="btn small primary" type="button" onclick="approveStudioScript()">Duyệt kịch bản</button>'}
+        <button class="btn small" type="button" onclick="aiReviewStudioScript()">AI đọc lại kịch bản</button>
+        <span data-wf="reup" ${reup}><button class="btn small" type="button" onclick="checkStudioFidelity()">Soát đúng nội dung gốc</button><select id="studioTranslateLanguage" aria-label="Ngôn ngữ đích"><option value="vi">Dịch sang tiếng Việt</option><option value="en">Dịch sang tiếng Anh</option><option value="zh">Dịch sang tiếng Trung</option><option value="ja">Dịch sang tiếng Nhật</option><option value="ko">Dịch sang tiếng Hàn</option></select><button class="btn small primary" type="button" onclick="translateStudioNarration()">Dịch lời bình</button></span>
+      </div>`;
+  }
+
+  function studioScriptDocument(body, status) {
+    const doc = body.document;
+    if (!doc) {
+      // Một dòng kịch bản không do Bước 3 viết (trước khi có Kế hoạch): chỉ có các cột cũ.
+      const field = (label, value) => (String(value || '').trim() ? `<div class="studio-plan-field"><span>${esc(label)}</span><p>${esc(value)}</p></div>` : '');
+      return `<section class="studio-work-card studio-plan-card">
+          <div class="studio-card-head"><div><b>Kịch bản</b><span>không do Bước 3 viết từ Kế hoạch</span></div></div>
+          ${field('Hook', body.hook)}${field('Mở đầu', body.intro)}${field('Nội dung', body.main_content)}${field('CTA', body.cta)}
+        </section>`;
+    }
+    const sections = doc.sections || [];
+    const facts = [
+      ['Ngôn ngữ', STUDIO_PLAN_LANGUAGES[doc.language] || doc.language || '—'],
+      ['Thời lượng mục tiêu', doc.target_duration_seconds ? formatStudioDuration(doc.target_duration_seconds) : '—'],
+      ['Ước tính khi đọc', doc.estimated_seconds ? formatStudioDuration(doc.estimated_seconds) : '—'],
+      ['Phiên bản', `v${body.version}`],
+      ['Kế hoạch', body.plan_version ? `v${body.plan_version}` : '—'],
+    ].map(([label, value]) => `<div><span>${esc(label)}</span><b>${esc(value)}</b></div>`).join('');
+    const rows = sections.map((section, index) => {
+      const budget = section.budget_seconds ? ` / ${formatStudioDuration(section.budget_seconds)} theo kế hoạch` : '';
+      const title = `<p><b>${esc(section.name || `Phần ${index + 1}`)}</b> <span class="secondary-text">· ${esc(section.plan_section_id || section.id || '')} · ${esc(formatStudioDuration(section.estimated_seconds || 0))}${esc(budget)}</span></p>`;
+      return studioScriptPart(`Phần ${index + 1}`, section, title);
+    }).join('');
+    const notes = [...(doc.missing_information || []), ...(doc.limitations || [])];
+    return `<section class="studio-work-card studio-plan-card">
+        <div class="studio-card-head"><div><b>${esc(doc.title || body.script_title || 'Kịch bản')}</b><span>${sections.length} phần · ước tính ${esc(formatStudioDuration(doc.estimated_seconds || 0))}</span></div></div>
+        <div class="studio-plan-facts">${facts}</div>
+        ${studioScriptPart('HOOK', doc.hook)}
+        ${rows}
+        ${studioScriptPart('CTA', doc.cta)}
+        ${notes.length ? `<details class="studio-more"><summary>Ghi chú của kịch bản</summary>${studioScriptList(notes)}</details>` : ''}
+        ${studioScriptFooter(body, status)}
+        <details class="studio-advanced-json"><summary>Nâng cao: dữ liệu kịch bản (JSON)</summary><pre class="studio-json">${esc(JSON.stringify(doc, null, 2))}</pre></details>
+      </section>`;
+  }
+
+  // Ô sửa chỉ có lời: tiêu đề, hook, nội dung (mỗi dòng một câu đọc), CTA.
+  // Không có ô nào cho plan_id, plan_version, góc, thời lượng, nền tảng hay tỉ lệ khung.
+  function studioScriptEditor(body) {
+    return `<section class="studio-work-card studio-plan-card studio-script">
+        <div class="studio-card-head"><div><b>Sửa kịch bản · phiên bản ${esc(body.version)}</b><span>Mỗi dòng là một câu đọc. Góc nội dung, thời lượng và cấu trúc do Kế hoạch quyết định; sau khi lưu, app kiểm lại kịch bản theo Kế hoạch.</span></div></div>
+        <div class="studio-field"><label for="studioScriptTitleInput">Tiêu đề</label><input id="studioScriptTitleInput" value="${esc(body.script_title || '')}"></div>
+        <div class="studio-field"><label for="studioScriptHookInput">Hook</label><textarea id="studioScriptHookInput">${esc(body.hook || '')}</textarea></div>
+        <div class="studio-field"><label for="studioScriptMainInput">Nội dung</label><textarea id="studioScriptMainInput" name="main_content" rows="14">${esc(body.main_content || '')}</textarea></div>
+        <div class="studio-field"><label for="studioScriptCtaInput">CTA</label><textarea id="studioScriptCtaInput">${esc(body.cta || '')}</textarea></div>
+        <div class="studio-actions"><button class="btn small primary" type="button" onclick="saveStudioScript()">Lưu và kiểm lại</button><button class="btn small ghost" type="button" onclick="cancelStudioScriptEdit()">Huỷ</button></div>
+      </section>`;
+  }
+
+  function renderStudioScript() {
+    renderStudioScriptHead();
+    const box = $('studioScriptResult');
+    if (!box) return;
+    const view = state.studioScript;
+    const body = view?.body;
+    if (!body?.id) { box.innerHTML = ''; return; }
+    box.innerHTML = view.editing ? studioScriptEditor(body) : studioScriptDocument(body, studioScriptStatus(view));
+  }
+
+  function editStudioScript() {
+    const view = state.studioScript;
+    if (!view?.body?.id) return;
+    view.editing = true;
+    renderStudioScript();
+    $('studioScriptResult')?.scrollIntoView?.({behavior: 'smooth', block: 'start'});
+  }
+
+  function cancelStudioScriptEdit() {
+    if (state.studioScript) state.studioScript.editing = false;
+    renderStudioScript();
+  }
+
+  function studioScriptPayload() {
+    return {
+      script_title: $('studioScriptTitleInput')?.value || '',
+      hook: $('studioScriptHookInput')?.value || '',
+      main_content: $('studioScriptMainInput')?.value || '',
+      cta: $('studioScriptCtaInput')?.value || '',
+    };
+  }
+
+  // PATCH /api/scripts/{id}: server ghi lời vào ScriptDocument và kiểm lại.
+  // Lưu được không có nghĩa là còn hợp lệ - trạng thái mới đọc lại từ server.
+  async function saveStudioScript() {
+    const view = state.studioScript;
+    // Chỉ lưu khi đang sửa trên màn hình: không có ô sửa thì không gửi gì.
+    if (!view?.editing || !view.body?.id || !$('studioScriptMainInput')) return;
+    try {
+      await api(`/api/scripts/${view.body.id}`, {method: 'PATCH', body: JSON.stringify(studioScriptPayload())});
+    } catch (error) {
+      return setMessage(studioScriptErrorText(error), 'error');
+    }
+    if (state.studioScript !== view) return;
+    view.editing = false;
+    await loadStudioScript(view.projectId);
+    if (studioScriptStatus() === 'completed') setMessage('Đã lưu kịch bản. Kịch bản vẫn khớp Kế hoạch.', 'success');
+    else setMessage(state.studioScript?.body?.blocked_reason || 'Đã lưu kịch bản.', 'error');
+    void loadProjects();
+  }
+
+  async function approveStudioScript() {
+    const view = state.studioScript;
+    if (!view?.body?.id || !confirm('Duyệt kịch bản này để chuyển sang bước dựng?')) return;
+    try {
+      await api(`/api/scripts/${view.body.id}/approve`, {method: 'POST'});
+    } catch (error) {
+      return setMessage(studioScriptErrorText(error), 'error');
+    }
+    await loadStudioScript(view.projectId);
+    setMessage('Đã duyệt kịch bản.', 'success');
+  }
+
+  async function aiReviewStudioScript() {
+    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    setMessage('AI đang đọc lại kịch bản...');
+    try {
+      const result = await api(`/api/projects/${state.studioProjectId}/script/review`, {method: 'POST'});
+      const review = result.review || {};
+      const target = $('studioScriptResult');
+      if (target) {
+        const card = document.createElement('div');
+        card.className = 'studio-result-card';
+        card.innerHTML = `<h3>AI đọc lại kịch bản · ${esc(review.score ?? '—')}/10${review.should_rewrite ? ' · nên viết lại' : ''}</h3>
+          ${review.hook_verdict ? `<p class="hint"><b>Hook:</b> ${esc(review.hook_verdict)}</p>` : ''}
+          ${(review.issues || []).length ? `<p class="hint"><b>Vấn đề</b></p>${studioScriptList(review.issues)}` : ''}
+          ${(review.suggestions || []).length ? `<p class="hint"><b>Đề xuất</b></p>${studioScriptList(review.suggestions)}` : ''}`;
+        target.prepend(card);
+      }
+      setMessage(`AI chấm ${review.score ?? '—'}/10.`, 'success');
+      void loadProjects();
+    } catch (error) { setMessage(studioScriptErrorText(error), 'error'); }
+  }
+
+  // Chat là một lượt sửa (revision) của kịch bản hiện hành, giữ nguyên Kế hoạch; server kiểm lại.
+  async function chatStudioScript() {
+    const projectId = state.studioProjectId;
+    if (!projectId) return setMessage('Chưa có project để chỉnh sửa kịch bản.', 'error');
+    const message = $('studioChatMessage')?.value.trim();
+    if (!message) return setMessage('Hãy nhập yêu cầu chỉnh sửa cho AI.', 'error');
+    const button = $('studioChatButton');
+    if (button) button.disabled = true;
+    setMessage('AI đang chỉnh sửa kịch bản theo yêu cầu...');
+    try {
+      const response = await api(`/api/projects/${projectId}/script/chat`, {method: 'POST', body: JSON.stringify({provider: $('studioChatProviderSelect')?.value || 'codex_cli', message})});
+      if ($('studioChatMessage')) $('studioChatMessage').value = '';
+      await loadStudioScript(projectId);
+      if (studioScriptStatus() === 'completed') setMessage(`Đã tạo phiên bản kịch bản mới${response.provider ? ` bằng ${response.provider}` : ''}.`, 'success');
+      else setMessage(state.studioScript?.body?.blocked_reason || 'Đã lưu phiên bản mới.', 'error');
+      void loadProjects();
+    } catch (error) { setMessage(studioScriptErrorText(error), 'error'); }
+    finally { if (button) button.disabled = false; }
+  }
+
+  // Short viết từ kịch bản hiện hành (POST …/short-script); server tự chặn khi kịch bản không dùng tiếp được.
+  async function createStudioShort() {
+    const body = state.studioScript?.body;
+    if (body?.current !== true) return setMessage(body?.blocked_reason || body?.write_blocked_reason || 'Chưa có kịch bản dùng tiếp được.', 'error');
+    await writeShortScript();
+    setStudioLaneTab('short');
+  }
+  // ---- hết Bước 3 · Kịch bản ----
 
   function parseStudioDuration(value) {
     const text = String(value || '').trim().toLowerCase();
@@ -2650,51 +3119,6 @@
     if (inferred >= 30 && inferred <= 1800) input.value = studioClock(inferred);
   }
 
-  function studioScriptPayload(status = null) {
-    const payload = {
-      script_title: $('studioScriptTitleInput')?.value || '',
-      hook: $('studioScriptHookInput')?.value || '',
-      intro: $('studioScriptIntroInput')?.value || '',
-      main_content: $('studioScriptMainInput')?.value || '',
-      cta: $('studioScriptCtaInput')?.value || '',
-    };
-    if (status) payload.status = status;
-    return payload;
-  }
-
-  async function saveStudioScript(status = null) {
-    if (!state.scriptId) return;
-    try {
-      const response = await api(`/api/scripts/${state.scriptId}`, {method: 'PATCH', body: JSON.stringify(studioScriptPayload(status))});
-      renderStudioScript(response.script, state.studioWriter);
-      setMessage(`Đã lưu kịch bản v${response.script.version}.`, 'success');
-      await loadProjects();
-    } catch (error) { setMessage(error.message, 'error'); }
-  }
-
-  async function aiReviewStudioScript() {
-    if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
-    setMessage('AI đang đọc lại kịch bản...');
-    try {
-      const result = await api(`/api/projects/${state.studioProjectId}/script/review`, {method: 'POST'});
-      const review = result.review || {};
-      const issues = (review.issues || []).map((item) => `<li>${esc(item)}</li>`).join('');
-      const suggestions = (review.suggestions || []).map((item) => `<li>${esc(item)}</li>`).join('');
-      const target = $('studioScriptResult');
-      if (target) {
-        const card = document.createElement('div');
-        card.className = 'studio-result-card';
-        card.innerHTML = `<h3>AI duyệt kịch bản · ${esc(review.score ?? '—')}/10${review.should_rewrite ? ' · nên viết lại' : ''}</h3>
-          ${review.hook_verdict ? `<p class="hint"><b>Hook:</b> ${esc(review.hook_verdict)}</p>` : ''}
-          ${issues ? `<p class="hint"><b>Vấn đề</b></p><ul>${issues}</ul>` : ''}
-          ${suggestions ? `<p class="hint"><b>Đề xuất</b></p><ul>${suggestions}</ul>` : ''}`;
-        target.prepend(card);
-      }
-      setMessage(`AI chấm ${review.score ?? '—'}/10. Kịch bản chuyển sang chờ duyệt.`, 'success');
-      await loadProjects();
-    } catch (error) { setMessage(`Không duyệt được kịch bản: ${error.message}`, 'error'); }
-  }
-
   async function reviewStudioVoiceover() {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
     const button = $('studioReviewVoiceButton');
@@ -2711,34 +3135,6 @@
       }
     } catch (error) { setMessage(`Không kiểm tra được giọng đọc: ${error.message}`, 'error'); }
     finally { if (button) button.disabled = false; }
-  }
-
-  async function reviewStudioScript() { await saveStudioScript('review'); }
-
-  async function approveStudioScript() {
-    if (!state.scriptId || !confirm('Duyệt kịch bản này để chuyển sang bước dựng?')) return;
-    try {
-      const response = await api(`/api/scripts/${state.scriptId}/approve`, {method: 'POST'});
-      renderStudioScript(response.script, state.studioWriter);
-      setMessage('Đã duyệt kịch bản.', 'success');
-    } catch (error) { setMessage(error.message, 'error'); }
-  }
-
-  async function chatStudioScript() {
-    if (!state.studioProjectId) return setMessage('Chưa có project để chỉnh sửa kịch bản.', 'error');
-    const message = $('studioChatMessage')?.value.trim();
-    if (!message) return setMessage('Hãy nhập yêu cầu chỉnh sửa cho AI.', 'error');
-    const button = $('studioChatButton');
-    button.disabled = true;
-    setMessage('AI đang chỉnh sửa kịch bản theo yêu cầu...');
-    try {
-      const response = await api(`/api/projects/${state.studioProjectId}/script/chat`, {method: 'POST', body: JSON.stringify({provider: $('studioChatProviderSelect').value || 'codex_cli', message})});
-      renderStudioScript(response.script, state.studioWriter);
-      $('studioChatMessage').value = '';
-      setMessage(`Đã tạo phiên bản kịch bản mới bằng ${response.provider}.`, 'success');
-      await loadProjects();
-    } catch (error) { setMessage(error.message, 'error'); }
-    finally { button.disabled = false; }
   }
 
   async function resumeStudioProject(projectId) {

@@ -74,8 +74,16 @@ class ScriptLengthWarningReachesTheUserTests(unittest.TestCase):
     def test_the_page_has_somewhere_to_show_them(self) -> None:
         self.assertIn('id="studioWriterWarnings"', self.page)
 
-    def test_the_writer_response_is_checked_for_them(self) -> None:
-        self.assertIn("reportScriptLengthWarnings(response);", self.page)
+    def test_step_three_shows_the_length_check_the_script_engine_made(self) -> None:
+        """Bước 3 no longer goes through the old writer, so there is no writer reply to read warnings from.
+
+        The Script Engine measures the length itself (the whole within ±15%,
+        each section within its budget) and a script that misses it is refused
+        or left invalid; the page shows the server's own reasons for that.
+        """
+        step3 = self.page[self.page.index("  // ---- Bước 3 · Kịch bản ----"):self.page.index("  // ---- hết Bước 3 · Kịch bản ----")]
+        self.assertNotIn("reportScriptLengthWarnings(response);", self.page)
+        self.assertIn("studioScriptList(body.validation_errors)", step3)
         self.assertIn("quality_warnings", self.page)
 
     def test_it_explains_what_governs_the_length(self) -> None:

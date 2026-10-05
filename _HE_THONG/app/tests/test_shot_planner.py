@@ -88,7 +88,10 @@ def test_a_freshly_written_script_keeps_the_scene_list_it_came_with() -> None:
     ]}
     analysis = {"created_at": str(script["created_at"]), "result": blueprints}
 
-    with patch.object(database, "get_video_analysis", return_value=analysis):
+    # Only the writer's analysis: a project with no source analysis and no
+    # plan is a manual one, outside the plan workflow, where this still holds.
+    with patch.object(database, "get_video_analysis",
+                      side_effect=lambda video_id, analysis_type="reference": analysis if analysis_type == "writer" else None):
         result = generate_project_shots(project_id, GenerateShotsRequest(force=True))
 
     assert [shot["section"] for shot in result["shots"]] == ["hook", "main", "cta"]
@@ -113,7 +116,8 @@ def test_a_script_edited_after_it_was_written_drops_the_scene_list() -> None:
     edited["updated_at"] = "2099-01-01T00:00:00+00:00"
 
     with patch.object(database, "get_video_analysis",
-                      return_value={"created_at": str(script["created_at"]), "result": stale}),             patch.object(database, "get_latest_project_script", return_value=edited):
+                      side_effect=lambda video_id, analysis_type="reference": (
+                          {"created_at": str(script["created_at"]), "result": stale} if analysis_type == "writer" else None)),             patch.object(database, "get_latest_project_script", return_value=edited):
         result = generate_project_shots(project_id, GenerateShotsRequest(force=True))
 
     assert "viet lai" in result["shots"][0]["narration"]

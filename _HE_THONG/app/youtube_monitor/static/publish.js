@@ -962,6 +962,7 @@
     const previous = state.productionQueue;
     state.productionQueue = await api('/api/production-queue');
     syncStudioRenderProvider();
+    syncStudioGeminiTts();
     await refreshStudioAfterFinishedJobs(previous, state.productionQueue);
   }
 
@@ -1432,9 +1433,17 @@
   });
   $('studioPublishLanguageSelect')?.addEventListener('change', () => {
     syncStudioVoiceModelOptions();
+    syncStudioGeminiTts();
     saveStudioSession();
   });
-  $('studioWriteButton').addEventListener('click', writeStudioScript);
+  // The way Gemini reads is a project setting: written down as it is changed.
+  $('studioVoiceStyleInput')?.addEventListener('change', () => {
+    if (state.studioProjectId) void saveRenderSettings(state.studioProjectId, {quiet: true});
+  });
+  // The Bước 4 desk follows the fields it sums up as they change; this saves nothing.
+  ['studioVoiceModelSelect', 'studioVoiceRateSelect', 'studioSubtitleModelSelect', 'studioPublishLanguageSelect']
+    .forEach((id) => $(id)?.addEventListener('change', () => renderStudioVoiceDesk()));
+  $('studioVoiceStyleInput')?.addEventListener('input', () => renderStudioVoiceDesk());
   $('studioChatButton').addEventListener('click', chatStudioScript);
   $('studioGenerateStoryboardButton').addEventListener('click', generateStudioStoryboard);
   $('studioGenerateImagesButton').addEventListener('click', generateStudioSceneImagesBatch);
@@ -1451,7 +1460,6 @@
   $('studioRenderReupButton')?.addEventListener('click', () => void renderStudioReup());
   $('studioSceneImageProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
   $('studioSceneVideoProviderSelect').addEventListener('change', updateStudioSceneGenerationAvailability);
-  $('studioScriptInstructionInput').addEventListener('input', inferStudioDurationFromPrompt);
   $('studioTargetDurationSeconds')?.addEventListener('input', maskStudioDurationInput);
   $('studioTargetDurationSeconds')?.addEventListener('blur', () => { normaliseStudioDurationInput(); saveStudioSession(); });
   $('studioSaveVoiceButton').addEventListener('click', saveStudioVoiceSettings);
@@ -1471,13 +1479,17 @@
   });
   $('studioVoiceProviderSelect')?.addEventListener('change', () => {
     syncStudioVoiceModelOptions();
+    const voices = syncStudioGeminiTts();
     saveStudioSession();
     // Entering step 4 rehydrates this dropdown from the project's saved
     // settings, so a choice that lived only in the page was overwritten the
     // next time the user walked back into the step - picking Edge TTS and
     // finding VoxCPM again. Writing the choice down as it is made means the
-    // rehydrate reads back the same answer.
-    if (state.studioProjectId) void saveRenderSettings(state.studioProjectId, {quiet: true});
+    // rehydrate reads back the same answer. For a Gemini model the voice is
+    // only known once its list has loaded: saving before that stored the
+    // page's placeholder (Kore) while the list then showed another voice.
+    const projectId = state.studioProjectId;
+    if (projectId) void Promise.resolve(voices).then(() => saveRenderSettings(projectId, {quiet: true}));
   });
   $('studioSubtitleModelSelect')?.addEventListener('change', () => {
     syncStudioSubtitleOptions();

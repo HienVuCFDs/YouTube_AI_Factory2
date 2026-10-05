@@ -334,7 +334,9 @@ class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
         ]
 
     def _call(self, voiced: int, force: bool = False):
-        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}):
+        # The Script Freshness Gate in front of the cut has tests of its own (test_script_paths).
+        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}), \
+                mock.patch.object(main, "_require_current_script", return_value=None):
             with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 9}):
                 with mock.patch.object(main.database, "list_project_timeline", return_value=self._timeline(voiced)):
                     with mock.patch.object(main.database, "get_video_analysis", return_value=None):
@@ -376,7 +378,8 @@ class DialogueCutRefusesToDestroyVoiceTests(unittest.TestCase):
 
     def test_an_empty_timeline_has_nothing_to_protect(self) -> None:
         """The first cut on a fresh project must not need confirming."""
-        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}):
+        with mock.patch.object(main.database, "get_production_project", return_value={"id": 1, "youtube_video_id": "v"}), \
+                mock.patch.object(main, "_require_current_script", return_value=None):
             with mock.patch.object(main.database, "get_latest_project_script", return_value={"id": 9}):
                 with mock.patch.object(main.database, "list_project_timeline", return_value=[]):
                     with mock.patch.object(main.database, "get_video_analysis", return_value=None):

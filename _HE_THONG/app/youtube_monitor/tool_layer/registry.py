@@ -235,8 +235,11 @@ ASTRA_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
                         "Tuy chon cua buoc. provider: AI/engine se lam (vd codex_cli, claude_code_cli, antigravity; "
                         "xem youtube_factory_get_ai_runtimes). analyze voi nguon san pham: browser_session=profile:<nen tang> "
                         "hoac extension:browser (xem youtube_factory_list_connections). "
-                        "script: draft={script_title,hook,intro,main_content,cta} "
-                        "de luu kich ban tu viet. shots: shots=[...] de luu danh sach canh tu viet. force: lam lai. "
+                        "script: app viet tu Ke hoach da hoan thanh (Script Engine); draft={script_title,hook,intro,main_content,cta} "
+                        "de luu kich ban tu viet - van bi kiem theo Ke hoach, khong khop thi bi tu choi; "
+                        "create_standalone_short=true (short_seconds, short_direction) de viet kem Short. "
+                        "Ke hoach chua hoan thanh thi buoc script bi tu choi, ke ca khi co force/draft. "
+                        "shots: shots=[...] de luu danh sach canh tu viet. force: lam lai. "
                         "confirmed: dong y tieu luot."
                     ),
                 },
