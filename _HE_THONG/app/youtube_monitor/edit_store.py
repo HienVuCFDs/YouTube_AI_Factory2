@@ -276,6 +276,11 @@ def _carried(database: Any, project_id: int, script_id: int) -> dict[str, Any] |
     return None
 
 
+def _read_now(document: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """What a document was judged against, scene by scene: its row and its voice now (with `fits`)."""
+    return [(item.get("scene_key"), item.get("segment_id"), item.get("voice")) for item in document["scenes"]]
+
+
 def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any]) -> dict[str, Any]:
     """The script's EditDocument for this storyboard, built from what came before and kept - nothing applied.
 
@@ -304,9 +309,10 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
     except edit_document.EditDocumentError as exc:
         raise EditStoreError(str(exc)) from exc
     if own is not None and own["document"]["provenance"] == document["provenance"] \
-            and [item.get("segment_id") for item in own["document"]["scenes"]] \
-            == [item.get("segment_id") for item in document["scenes"]]:
+            and _read_now(own["document"]) == _read_now(document):
         # Nothing the engine reads has moved since the latest version: it is still the current one.
+        # The provenance alone does not say so: whether a voice still fits (its record, the
+        # project's voice settings) can change while the audio and its length stay the same.
         return {"state": CURRENT, "created": False, "mode": "unchanged", **own}
     stored = save(database, project_id, script_id, document, storyboard_row=storyboard_row,
                   expected_parent=own["document_hash"] if own else None,
@@ -317,10 +323,12 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
 
 def plan_scene(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], scene_key: str,
                value: dict[str, Any] | None = None) -> dict[str, Any]:
-    """One scene's edit made for it (edit_document.plan_scene) on the current document, kept as the next version."""
-    found = current(database, project_id, script_id, storyboard_row)
-    if found["state"] != CURRENT:
-        raise EditStoreError("Chưa có EditDocument của storyboard hiện hành: hãy đồng bộ trước khi lập lớp dựng")
+    """One scene's edit made for it (edit_document.plan_scene) on the current document, kept as the next version.
+
+    The document is synced first, so the edit is made for the scene's voice
+    as it is now - never for the one an older version recorded.
+    """
+    found = sync(database, project_id, script_id, storyboard_row)
     try:
         document = edit_document.plan_scene(found["document"], found["storyboard"], scene_key, value)
     except edit_document.EditDocumentError as exc:
