@@ -1,3 +1,11 @@
+"""The legacy shot planner: one scene per line of the old four script columns.
+
+Compatibility boundary (Bước 5.1): a project in the plan workflow whose script
+is a ScriptDocument is cut by storyboard_engine, never here. This planner is
+kept for what has no ScriptDocument - a project outside the plan workflow
+(pasted words alone, the old writer's scene list) and the Short.
+"""
+
 from __future__ import annotations
 
 import re

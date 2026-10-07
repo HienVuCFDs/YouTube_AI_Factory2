@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -406,6 +407,81 @@ def _record_voice_usage(database: Database, job: dict[str, Any], segment: dict[s
         pass
 
 
+# Which of the project's voice settings change the sound of a TTS engine's output.
+_RATE_PROVIDERS = frozenset({"edge_tts", "google_tts", "pyvideotrans", "py_video_trans"})
+VOICE_RECORD_SUFFIX = ".voice.json"
+
+
+def voice_config(provider: str, render_settings: dict[str, Any]) -> dict[str, Any]:
+    """What a voice file depends on besides its words and speaker: engine, voice, language, and the settings that engine reads.
+
+    Built from the project's render settings alone, so the worker that makes a
+    voice and the storyboard that later asks whether it still fits (Bước 5.2)
+    describe it the same way.
+    """
+    provider = str(provider or "").strip().lower()
+    config: dict[str, Any] = {
+        "provider": provider,
+        "voice": str(render_settings.get("voice_model") or ""),
+        "language": str(render_settings.get("publish_language") or ""),
+    }
+    if provider in _RATE_PROVIDERS:
+        config["rate"] = str(render_settings.get("voice_rate") or "")
+    if provider in gemini_tts.MODELS:
+        config["style"] = str(render_settings.get("voice_style") or "").strip()
+    if provider == "voxcpm":
+        config["reference"] = str(render_settings.get("voice_reference_file_path") or "")
+        config["prompt_text"] = str(render_settings.get("voice_prompt_text") or "").strip()
+    return config
+
+
+def voice_fingerprint(provider: str, render_settings: dict[str, Any]) -> str:
+    payload = json.dumps(voice_config(provider, render_settings), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _voice_stem(item: dict[str, Any], fingerprint: str) -> str:
+    """The name a scene's voice files are written under: its own timeline row and what was spoken, never its place.
+
+    By place (segment-003) the next voice made for whatever scene sat at place
+    3 overwrote a file another row still pointed to - and a reconciled
+    storyboard (Bước 5.2) keeps a scene's voice when the scene only moves. Row
+    ids are never reused (AUTOINCREMENT), and the content part means even a
+    reused id could not overwrite other words or another voice.
+    """
+    content = json.dumps([str(item.get("voice_text") or "").strip(), str(item.get("speaker") or ""), fingerprint],
+                         ensure_ascii=False)
+    return f"voice-s{int(item['id'])}-{hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]}"
+
+
+def voice_record_path(audio_path: str | Path) -> Path:
+    path = Path(str(audio_path))
+    return path.with_name(path.name + VOICE_RECORD_SUFFIX)
+
+
+def write_voice_record(audio_path: str | Path, *, voice_text: str, speaker: str, fingerprint: str,
+                       config: dict[str, Any], segment_id: int) -> None:
+    """Beside each voice file: the words it says, who says them, and the voice settings it was made with."""
+    try:
+        voice_record_path(audio_path).write_text(json.dumps({
+            "voice_text": voice_text, "speaker": speaker, "fingerprint": fingerprint, "config": config,
+            "segment_id": segment_id,
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # The voice itself is made; without its record it is treated as unverified, never as matching.
+
+
+def read_voice_record(audio_path: str | Path) -> dict[str, Any] | None:
+    """The record written beside a voice file, or None (a file uploaded by hand, or made before Bước 5.2)."""
+    if not str(audio_path or "").strip():
+        return None
+    try:
+        record = json.loads(voice_record_path(audio_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def run_voiceover_job(
     database: Database,
     job: dict[str, Any],
@@ -466,6 +542,9 @@ def run_voiceover_job(
         raise ProductionJobError(f"Voiceover provider không được hỗ trợ: {job['provider']}")
     if provider == "edge_tts" and not edge_tts_command.strip():
         raise ProductionJobError("Chưa cấu hình EDGE_TTS_COMMAND")
+    # What this voice is made with, written beside every file it makes (Bước 5.2).
+    config = voice_config(provider, render_settings)
+    fingerprint = voice_fingerprint(provider, render_settings)
 
     # A timeline built before the planner learned to drop them can still
     # hold scenes whose whole narration is a section label. Reading
@@ -494,11 +573,10 @@ def run_voiceover_job(
             voice_text = str(item.get("voice_text") or "").strip()
             if not voice_text:
                 raise ProductionJobError(f"Segment {item.get('segment_index')} has no voiceover text")
-            index = int(item.get("segment_index") or 1)
             duration = max(0.1, float(item.get("duration_seconds") or 1))
-            srt_path = project_dir / f"segment-{index:03d}.srt"
+            srt_path = project_dir / f"{_voice_stem(item, fingerprint)}.srt"
             _write_voiceover_srt(srt_path, voice_text, duration)
-            output_path = audio_dir / f"segment-{index:03d}.wav"
+            output_path = audio_dir / f"{_voice_stem(item, fingerprint)}.wav"
             voxcpm_requests.append(
                 {
                     "text": voice_text,
@@ -522,13 +600,14 @@ def run_voiceover_job(
         if not voice_text:
             raise ProductionJobError(f"Segment {item.get('segment_index')} chưa có lời voiceover")
         index = int(item.get("segment_index") or 1)
+        stem = _voice_stem(item, fingerprint)
         duration = max(0.1, float(item.get("duration_seconds") or 1))
-        srt_path = project_dir / f"segment-{index:03d}.srt"
-        text_path = project_dir / f"segment-{index:03d}.txt"
+        srt_path = project_dir / f"{stem}.srt"
+        text_path = project_dir / f"{stem}.txt"
         suffix = tts_catalog.ENGINES[provider].suffix
-        output_path = audio_dir / f"segment-{index:03d}.{suffix}"
+        output_path = audio_dir / f"{stem}.{suffix}"
         spoken: dict[str, Any] = {}
-        output_dir = project_dir / f"tts-output-{index:03d}"
+        output_dir = project_dir / f"tts-output-{stem}"
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_voiceover_srt(srt_path, voice_text, duration)
         if provider == "edge_tts":
@@ -652,7 +731,7 @@ def run_voiceover_job(
             if not subtitle_result["segments"]:
                 raise ProductionJobError(f"Faster-Whisper không nhận được lời nói ở segment {index}")
             subtitle_text = str(subtitle_result.get("text") or voice_text).strip()
-            subtitle_path_obj = subtitle_dir / f"segment-{index:03d}.srt"
+            subtitle_path_obj = subtitle_dir / f"{stem}.srt"
             subtitle_path_obj.write_text(subtitle_result["srt"], encoding="utf-8")
             subtitle_path = str(subtitle_path_obj)
         database.update_project_timeline_segment(
@@ -667,6 +746,8 @@ def run_voiceover_job(
             # and "asset only" right after the cut, which looked like the
             # other half had been lost.
         )
+        write_voice_record(output_path, voice_text=voice_text, speaker=str(item.get("speaker") or ""),
+                           fingerprint=fingerprint, config=config, segment_id=int(item["id"]))
         _record_voice_usage(
             database, job, item, provider, voice=voice_role, language=language, audio_path=output_path,
             style=voice_style if provider in gemini_tts.MODELS else "", spoken=spoken,

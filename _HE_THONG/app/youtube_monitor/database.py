@@ -16,6 +16,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Bước 5.3 · T2: EditDocuments are kept as director artifacts of this kind - never in
+# project_edit_plans, which belongs to the legacy Edit Plan and its routes.
+EDIT_DOCUMENT_KIND = "edit_document"
+
+
+class StoredEditDocumentError(ValueError):
+    """A stored EditDocument artifact that cannot be read as one (broken JSON, missing fields)."""
+
+
+class EditDocumentConflict(RuntimeError):
+    """A save that does not follow the latest stored EditDocument of the script it is for."""
+
+
 class Database:
     # The voice engines a project's render settings may name: the ones Bước 4 offers.
     RENDER_VOICE_PROVIDERS = frozenset({"edge_tts", "pyvideotrans", "voxcpm", *gemini_tts.MODELS})
@@ -976,6 +989,38 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_audience_observations_channel "
                 "ON audience_observations(channel_ref, captured_at DESC)"
             )
+            self._create_storyboard_tables(connection)
+
+    @staticmethod
+    def _create_storyboard_tables(connection: sqlite3.Connection) -> None:
+        """Bước 5: the StoryboardDocument of a script, with what it was cut from.
+
+        Append-only: a new cut is a new row, and the latest row of a script is
+        the one compared against the current script and plan. project_shots is
+        written from it and is never its source. New table only - nothing that
+        exists is altered.
+        """
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS project_storyboards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES production_projects(id) ON DELETE CASCADE,
+                script_id INTEGER NOT NULL REFERENCES project_scripts(id) ON DELETE CASCADE,
+                script_version INTEGER NOT NULL,
+                script_fingerprint TEXT NOT NULL,
+                plan_id INTEGER,
+                plan_version INTEGER,
+                document_hash TEXT NOT NULL,
+                engine_version TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'valid',
+                document_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_storyboards_script
+                ON project_storyboards(project_id, script_id, id DESC);
+            """
+        )
 
     @staticmethod
     def _backfill_source_identity(connection: sqlite3.Connection) -> None:
@@ -2461,6 +2506,355 @@ class Database:
                 (now, existing["project_id"]),
             )
         return self.get_project_script(script_id)
+
+    def save_project_storyboard(self, project_id: int, script_id: int, storyboard: dict[str, Any]) -> dict[str, Any] | None:
+        """Keep one cut of a script. The same document again (same hash) is the row already there, not a new one."""
+        script = self.get_project_script(script_id)
+        if not script or int(script["project_id"]) != int(project_id):
+            return None
+        latest = self.get_latest_project_storyboard(project_id, script_id=script_id)
+        if latest and latest["document_hash"] == storyboard["document_hash"]:
+            return latest
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO project_storyboards (
+                    project_id, script_id, script_version, script_fingerprint, plan_id, plan_version,
+                    document_hash, engine_version, status, document_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(project_id), int(script_id), int(storyboard["script_version"]), str(storyboard["script_fingerprint"]),
+                    storyboard.get("plan_id"), storyboard.get("plan_version"), str(storyboard["document_hash"]),
+                    str(storyboard.get("engine_version") or ""), str(storyboard.get("status") or ""),
+                    json.dumps(storyboard, ensure_ascii=False), now, now,
+                ),
+            )
+            storyboard_id = int(cursor.lastrowid)
+        return self.get_project_storyboard(storyboard_id)
+
+    def get_project_storyboard(self, storyboard_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM project_storyboards WHERE id = ?", (storyboard_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_latest_project_storyboard(self, project_id: int, script_id: int | None = None) -> dict[str, Any] | None:
+        """The newest cut - of one script when given, else of any script of the project."""
+        query = "SELECT * FROM project_storyboards WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if script_id is not None:
+            query += " AND script_id = ?"
+            params.append(script_id)
+        with self._connect() as connection:
+            row = connection.execute(query + " ORDER BY id DESC LIMIT 1", params).fetchone()
+        return dict(row) if row else None
+
+    def list_project_storyboards(self, project_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM project_storyboards WHERE project_id = ? ORDER BY id DESC", (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_project_storyboard_by_hash(self, project_id: int, document_hash: str) -> dict[str, Any] | None:
+        """The newest stored cut of the project with this document hash (the same hash is the same document)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM project_storyboards WHERE project_id = ? AND document_hash = ? ORDER BY id DESC LIMIT 1",
+                (int(project_id), str(document_hash or "")),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Bước 5.3 · T2 · EditDocuments (project_director_artifacts, kind "edit_document")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _edit_document_entries(connection: sqlite3.Connection, project_id: int,
+                               script_id: int | None) -> list[dict[str, Any]]:
+        """The project's stored EditDocuments, newest first (id order), of one script when given.
+
+        Every row of the kind is read before filtering: a row that cannot be
+        read cannot be said to belong to another script, so it is refused,
+        never skipped - skipping it would hand back an older version as the
+        latest.
+        """
+        rows = connection.execute(
+            "SELECT id, payload_json, created_at FROM project_director_artifacts "
+            "WHERE project_id = ? AND kind = ? ORDER BY id DESC",
+            (int(project_id), EDIT_DOCUMENT_KIND),
+        ).fetchall()
+        found: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError) as exc:
+                raise StoredEditDocumentError(f"EditDocument #{row['id']} đã lưu không đọc được (JSON hỏng)") from exc
+            if not isinstance(payload, dict) or isinstance(payload.get("script_id"), bool) \
+                    or not isinstance(payload.get("script_id"), int) \
+                    or not isinstance(payload.get("document_hash"), str) or not payload["document_hash"]:
+                raise StoredEditDocumentError(f"EditDocument #{row['id']} đã lưu thiếu script_id hoặc document_hash")
+            if script_id is None or payload["script_id"] == int(script_id):
+                found.append({"id": int(row["id"]), "created_at": row["created_at"], "payload": payload})
+        return found
+
+    def list_edit_documents(self, project_id: int, script_id: int | None = None) -> list[dict[str, Any]]:
+        """Stored EditDocuments, newest first: {"id", "created_at", "payload"}. Raises StoredEditDocumentError on a broken row."""
+        with self._connect() as connection:
+            return self._edit_document_entries(connection, project_id, script_id)
+
+    def get_latest_edit_document(self, project_id: int, script_id: int) -> dict[str, Any] | None:
+        """The newest stored EditDocument of one script (highest id), or None."""
+        found = self.list_edit_documents(project_id, script_id)
+        return found[0] if found else None
+
+    def save_edit_document(
+        self, project_id: int, script_id: int, document: dict[str, Any], *, storyboard_id: int | None,
+        expected_parent: str | None, carried_from: str | None = None,
+    ) -> dict[str, Any]:
+        """Keep one version of a script's EditDocument, after the latest one - in one transaction.
+
+        `expected_parent` is the document_hash of the latest stored version the
+        caller built on (None: there is none yet). It must still be the latest
+        when the row is written, or nothing is written (EditDocumentConflict).
+        The same document as the latest is the row already there; a document
+        already further back in the history is not stored again. `parent_hash`
+        is the stored version before this one - not the document's own
+        `based_on`, which says what the engine built it from.
+        """
+        document_hash = str(document.get("document_hash") or "")
+        if not document_hash:
+            raise StoredEditDocumentError("EditDocument chưa có document_hash nên không lưu được")
+        with self._connect() as connection:
+            # Take the write lock before reading the latest version, so no other save slips in between.
+            connection.execute("BEGIN IMMEDIATE")
+            entries = self._edit_document_entries(connection, project_id, script_id)
+            latest = entries[0] if entries else None
+            latest_hash = latest["payload"]["document_hash"] if latest else None
+            if latest_hash == document_hash:
+                return {**latest, "created": False}
+            if any(entry["payload"]["document_hash"] == document_hash for entry in entries):
+                raise EditDocumentConflict("EditDocument này đã có trong lịch sử, không phải bản mới nhất: không lưu lại")
+            if expected_parent != latest_hash:
+                raise EditDocumentConflict(
+                    "EditDocument đã được lưu một phiên bản mới hơn từ lúc bản này được lập. Hãy lập lại từ bản mới nhất.")
+            payload = {
+                "schema": 1, "script_id": int(script_id), "storyboard_id": storyboard_id,
+                "storyboard_hash": (document.get("provenance") or {}).get("storyboard_hash"),
+                "document_hash": document_hash, "parent_hash": latest_hash, "carried_from": carried_from,
+                "document": document,
+            }
+            text = json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+            now = utc_now()
+            cursor = connection.execute(
+                "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (int(project_id), EDIT_DOCUMENT_KIND, text, now),
+            )
+            artifact_id = int(cursor.lastrowid)
+        return {"id": artifact_id, "created_at": now, "payload": json.loads(text), "created": True}
+
+    # What a timeline row is (its place and its words) - never copied from an
+    # older row - and what belongs to the voice spoken from those words.
+    _SEGMENT_IDENTITY = frozenset({"id", "project_id", "script_id", "shot_id", "segment_index", "section", "voice_text",
+                                   "subtitle_text", "speaker", "start_seconds", "end_seconds", "created_at", "updated_at"})
+    _SEGMENT_VOICE = frozenset({"audio_path", "subtitle_path", "voice_review_score", "voice_review_note", "source_voice_text",
+                                "duration_seconds", "status"})
+    # Layers timed against a row's length (the render scales them from it): retimed with it when a reconcile changes it.
+    # The graphic direction keeps its own length and scales itself.
+    _SEGMENT_TIMED = ("overlays", "sound_cues")
+
+    @staticmethod
+    def _retimed(raw: Any, ratio: float) -> Any:
+        """A JSON list of timed items (overlays, sound cues), each start and end scaled by `ratio`; anything else as it was."""
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(items, list) or not items:
+            return raw
+        return json.dumps([{**item, **{key: round(float(item[key]) * ratio, 3) for key in ("start_seconds", "end_seconds")
+                                       if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)}}
+                           if isinstance(item, dict) else item for item in items], ensure_ascii=False)
+
+    def _retime(self, segment: dict[str, Any], length: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        """A row's timed layers scaled from its old length to `length`, into `values` - the same scale every time.
+
+        A reconcile that drops a voice sets the row back to its scene's estimated
+        length; overlays and sound cues planned against the old length would
+        otherwise fall outside the scene (an overlay past its end stops the
+        render). Returns what was done, or None when the length did not change.
+        """
+        before = float(segment.get("duration_seconds") or 0)
+        if before <= 0 or abs(before - float(length)) < 1e-9:
+            return None
+        ratio = float(length) / before
+        for column in self._SEGMENT_TIMED:
+            if column in segment:
+                values[column] = self._retimed(segment[column], ratio)
+        return {"from_seconds": before, "to_seconds": float(length), "ratio": ratio}
+
+    @staticmethod
+    def _retime_beats(connection: sqlite3.Connection, segment_id: int, retimed: dict[str, Any] | None) -> None:
+        if retimed:
+            connection.execute(
+                "UPDATE project_timeline_edit_beats SET start_seconds = ROUND(start_seconds * ?, 3), "
+                "duration_seconds = ROUND(duration_seconds * ?, 3) WHERE timeline_segment_id = ?",
+                (retimed["ratio"], retimed["ratio"], segment_id),
+            )
+
+    def apply_storyboard_reconcile(
+        self, project_id: int, script_id: int, entries: list[dict[str, Any]], removed: list[dict[str, Any]], *,
+        source_script_id: int | None, with_timeline: bool, report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bring project_shots and the timeline of one script in line with its storyboard, in one transaction.
+
+        `entries`, in the new order: {"shot": the row's fields from the storyboard,
+        "source_shot_id", "source_segment_id", "keep_voice"}.
+
+        In place (`source_script_id` is this script) the rows a scene lines up
+        with are updated, never replaced: their ids, pictures, edit layers and
+        edit beats stay, and so does their voice while it still says the scene's
+        words; a row whose words changed loses its voice and nothing else - its
+        length goes back to the scene's estimate, and its overlays, sound cues
+        and edit beats are retimed to that length, the same scale for all.
+        Whether they still fit what is said is the reconcile's `inherit`, kept
+        in the record per scene - a match is not leave to keep them unseen.
+        Carried over (a new script) new rows are made, copying what the old
+        rows had on the same terms; the old script's rows are not touched.
+        Removed rows (in place) are copied into the reconcile record - with
+        their edit beats and scene jobs - before they leave. No file is deleted.
+        """
+        now = utc_now()
+        in_place = source_script_id is not None and int(source_script_id) == int(script_id)
+        with self._connect() as connection:
+            segment_columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_timeline_segments)")]
+            beat_columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_timeline_edit_beats)")
+                            if row["name"] not in {"id", "timeline_segment_id"}]
+
+            def one(table: str, row_id: Any) -> dict[str, Any] | None:
+                if row_id is None:
+                    return None
+                found = connection.execute(f"SELECT * FROM {table} WHERE id = ? AND project_id = ?", (int(row_id), project_id)).fetchone()
+                return dict(found) if found else None
+
+            archived: list[dict[str, Any]] = []
+            if in_place:
+                for item in removed:
+                    segment = one("project_timeline_segments", item.get("segment_id"))
+                    archived.append({
+                        "shot": one("project_shots", item.get("shot_id")),
+                        "segment": segment,
+                        "edit_beats": [dict(row) for row in connection.execute(
+                            "SELECT * FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (int(segment["id"]),))]
+                        if segment else [],
+                        "scene_jobs": [dict(row) for row in connection.execute(
+                            "SELECT * FROM scene_generation_jobs WHERE timeline_segment_id = ?", (int(segment["id"]),))]
+                        if segment else [],
+                    })
+                # Free every index before renumbering: UNIQUE(script_id, *_index).
+                connection.execute("UPDATE project_shots SET shot_index = -id WHERE project_id = ? AND script_id = ?",
+                                   (project_id, script_id))
+                connection.execute("UPDATE project_timeline_segments SET segment_index = -id WHERE project_id = ? AND script_id = ?",
+                                   (project_id, script_id))
+                for item in removed:
+                    if item.get("segment_id") is not None:
+                        connection.execute("DELETE FROM project_timeline_segments WHERE id = ? AND script_id = ?",
+                                           (int(item["segment_id"]), script_id))
+                    if item.get("shot_id") is not None:
+                        connection.execute("DELETE FROM project_shots WHERE id = ? AND script_id = ?", (int(item["shot_id"]), script_id))
+
+            # Where each scene landed, in entry order: the lineage the timeline itself gives (Bước 5.3).
+            placed: list[dict[str, Any]] = []
+            for entry in entries:
+                shot = entry["shot"]
+                source_shot = one("project_shots", entry.get("source_shot_id"))
+                if in_place and source_shot:
+                    connection.execute(
+                        "UPDATE project_shots SET shot_index = ?, section = ?, narration = ?, speaker = ?, duration_seconds = ?, "
+                        "updated_at = ? WHERE id = ?",
+                        (int(shot["shot_index"]), shot["section"], shot["narration"], shot["speaker"], int(shot["duration_seconds"]),
+                         now, int(source_shot["id"])),
+                    )
+                    shot_id = int(source_shot["id"])
+                else:
+                    carried = source_shot or {}
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO project_shots (
+                            project_id, script_id, shot_index, section, narration, speaker, visual_prompt, asset_type,
+                            duration_seconds, status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (project_id, script_id, int(shot["shot_index"]), shot["section"], shot["narration"], shot["speaker"],
+                         str(carried.get("visual_prompt", shot["visual_prompt"]) or ""),
+                         str(carried.get("asset_type") or shot["asset_type"]), int(shot["duration_seconds"]),
+                         str(carried.get("status") or shot["status"]), now, now),
+                    )
+                    shot_id = int(cursor.lastrowid)
+                placed.append({"shot_id": shot_id, "segment_id": None})
+                if not with_timeline:
+                    continue
+                source_segment = one("project_timeline_segments", entry.get("source_segment_id"))
+                keep = bool(entry.get("keep_voice")) and source_segment is not None
+                if in_place and source_segment:
+                    values: dict[str, Any] = {"segment_index": int(shot["shot_index"]), "section": shot["section"],
+                                              "voice_text": shot["narration"], "speaker": shot["speaker"], "shot_id": shot_id,
+                                              "updated_at": now}
+                    if not keep:
+                        values.update(subtitle_text=shot["narration"], audio_path="", subtitle_path="", voice_review_score=0,
+                                      voice_review_note="", source_voice_text="", duration_seconds=int(shot["duration_seconds"]),
+                                      status="planned")
+                        placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
+                    connection.execute(
+                        f"UPDATE project_timeline_segments SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
+                        [*values.values(), int(source_segment["id"])],
+                    )
+                    self._retime_beats(connection, int(source_segment["id"]), placed[-1].get("retimed"))
+                    placed[-1]["segment_id"] = int(source_segment["id"])
+                    continue
+                values = {
+                    "project_id": project_id, "script_id": script_id, "shot_id": shot_id, "segment_index": int(shot["shot_index"]),
+                    "section": shot["section"], "voice_text": shot["narration"], "subtitle_text": shot["narration"],
+                    "speaker": shot["speaker"], "visual_prompt": shot["visual_prompt"], "asset_type": shot["asset_type"],
+                    "duration_seconds": int(shot["duration_seconds"]), "start_seconds": 0, "end_seconds": int(shot["duration_seconds"]),
+                    "audio_path": "", "visual_path": "", "status": "planned", "created_at": now, "updated_at": now,
+                }
+                if source_segment:
+                    for column in segment_columns:
+                        if column not in self._SEGMENT_IDENTITY and (keep or column not in self._SEGMENT_VOICE):
+                            values[column] = source_segment[column]
+                    if keep:
+                        values["subtitle_text"] = source_segment["subtitle_text"]
+                    else:
+                        placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
+                cursor = connection.execute(
+                    f"INSERT INTO project_timeline_segments ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
+                    list(values.values()),
+                )
+                placed[-1]["segment_id"] = int(cursor.lastrowid)
+                if source_segment and beat_columns:
+                    connection.execute(
+                        f"INSERT INTO project_timeline_edit_beats (timeline_segment_id, {', '.join(beat_columns)}) "
+                        f"SELECT ?, {', '.join(beat_columns)} FROM project_timeline_edit_beats WHERE timeline_segment_id = ?",
+                        (int(cursor.lastrowid), int(source_segment["id"])),
+                    )
+                    self._retime_beats(connection, int(cursor.lastrowid), placed[-1].get("retimed"))
+            if with_timeline:
+                self._reflow_project_timeline(connection, project_id, script_id)
+            connection.execute("UPDATE production_projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            record = {**report, "script_id": script_id, "source_script_id": source_script_id,
+                      "mode": "in_place" if in_place else ("carried_over" if source_script_id is not None else "new"),
+                      "archived": archived}
+            if isinstance(report.get("scenes"), list):
+                record["scenes"] = [{**scene, "new_shot_id": landed["shot_id"], "new_segment_id": landed["segment_id"],
+                                     "retimed": landed.get("retimed")}
+                                    for scene, landed in zip(report["scenes"], placed)]
+            connection.execute(
+                "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (project_id, "storyboard_reconcile", json.dumps(record, ensure_ascii=False, default=str), now),
+            )
+        return record
 
     def create_project_shots(
         self,

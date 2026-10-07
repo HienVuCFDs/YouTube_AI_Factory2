@@ -61,6 +61,7 @@ from .openmontage_adapter import OpenMontageAdapter, OpenMontageError, runtime_f
 from . import agent_loop, agent_runtime, claude_agent_bridge, codex_agent_bridge, platform_connections
 from . import browser_recipes, contact_sheet, orchestrator_runtime, page_source, source_brief, steps, web_research
 from . import plan_engine, project_planner, research_collectors, script_engine, source_detector, source_identity, source_kinds
+from . import storyboard_engine, storyboard_reconcile
 from .channel_research import ChannelResearchError, ChannelResearchService
 from .youtube_quota import YouTubeQuota
 from .run_registry import RunRegistry
@@ -69,6 +70,8 @@ from .production_worker import (
     ProductionWorker,
     VOXCPM_PREVIEW_TEXT,
     VOXCPM_VOICE_PRESETS,
+    read_voice_record,
+    voice_fingerprint,
 )
 from .publisher import PublisherError, PublisherWorker, next_channel_schedule
 from .project_layout import ensure_project_layout
@@ -2081,11 +2084,22 @@ def _steps_done(project_id: int) -> set[str]:
         if (script_engine.current_script(database, project_id, project_plan) or {}).get("state") == script_engine.COMPLETED:
             done.add("script")
         script_id = int(script["id"])
-        if database.list_project_shots(project_id, script_id=script_id):
-            done.add("shots")
         timeline = database.list_project_timeline(project_id, script_id=script_id)
+        if script_engine.decode(script) is not None and _in_plan_workflow(project_id, project):
+            # Bước 5.2: a planned script's scenes are done only when its storyboard
+            # is current and the shots (and timeline) say it - having rows is not it.
+            gate, _ = _storyboard_gate(project_id)
+            reup = gate["mode"] == storyboard_engine.REUP_MODE
+            if reup or not storyboard_engine.refusal_for(gate, need="shots"):
+                done.add("shots")
+            if timeline and (reup or gate["state"] == storyboard_engine.CURRENT):
+                done.add("timeline")
+        else:
+            if database.list_project_shots(project_id, script_id=script_id):
+                done.add("shots")
+            if timeline:
+                done.add("timeline")
         if timeline:
-            done.add("timeline")
             if any(str(item.get("audio_path") or "").strip() for item in timeline):
                 done.add("voice")
             if any(str(item.get("visual_path") or "").strip() for item in timeline):
@@ -2695,6 +2709,14 @@ def _describe_steps(project_id: int, done: set[str], running: Iterable[str] = ()
             row["outcome"] = script_outcome
             if row["state"] == "ready" and script_outcome["status"] in (script_engine.STALE, script_engine.INVALID):
                 row["state"] = script_outcome["status"]
+        elif row["key"] == "shots" and script_outcome and script_outcome["completed"]:
+            # Bước 5.2: the Storyboard Gate's own answer, with its reasons.
+            gate, _ = _storyboard_gate(project_id)
+            row["outcome"] = {key: gate.get(key) for key in (
+                "state", "reasons", "shots_in_sync", "timeline_in_sync", "mode", "storyboard_id")}
+            if row["state"] == "ready" and gate["state"] in (
+                    storyboard_engine.STALE, storyboard_engine.INVALID, storyboard_engine.OUT_OF_SYNC):
+                row["state"] = gate["state"]
     return rows
 
 
@@ -2966,7 +2988,12 @@ def _job_gate_reason(job: dict[str, Any]) -> str:
         # Reads a fixed sample sentence to audition voices, never the script.
         return ""
     row = database.get_project_script(int(job.get("script_id") or 0))
-    return _artifact_gate(int(job["project_id"]), row, recut=str(job.get("job_type") or "") == "render_short")
+    reason = _artifact_gate(int(job["project_id"]), row, recut=str(job.get("job_type") or "") == "render_short")
+    if reason or str(job.get("job_type") or "") not in _STORYBOARD_JOBS or str((row or {}).get("variant") or "long") != "long":
+        return reason
+    # Storyboard Gate (Bước 5.2), asked again by the worker as it takes the job:
+    # a job queued while the storyboard held does not run once it no longer does.
+    return _storyboard_block(int(job["project_id"]))
 
 
 def _scene_job_gate_reason(job: dict[str, Any]) -> str:
@@ -2996,11 +3023,25 @@ def _step_script_review(project_id: int, project: dict[str, Any], options: dict[
 
 
 def _step_shots(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
-    """Save the scene list, whether an agent wrote it or the planner did."""
+    """Save the scene list, whether an agent wrote it or the planner did.
+
+    In the plan workflow the scenes are the Storyboard Engine's (Bước 5): an
+    agent's own list is taken only as a way of grouping the script's lines,
+    word for word, and is checked like the engine's own cut - `force` included.
+    """
     supplied = options.get("shots")
     if isinstance(supplied, list) and supplied:
         # An agent's own scene list passes the same gate as the planner's.
-        script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
+        current = _require_current_script(project_id, project)
+        if current is not None:
+            try:
+                groups = storyboard_engine.grouping_from_shots(current.get("document") or {}, supplied)
+            except storyboard_engine.StoryboardError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            # Losing a voice or rows to an agent's regrouping takes an explicit force=true: the
+            # default is to answer "stale" with what it would do (the legacy list below keeps force=True).
+            return _sync_storyboard(project_id, project, current, force=bool(options.get("force", False)), groups=groups)
+        script = database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để chia cảnh")
         saved = database.create_project_shots(
@@ -3010,10 +3051,271 @@ def _step_shots(project_id: int, project: dict[str, Any], options: dict[str, Any
     return generate_project_shots(project_id, GenerateShotsRequest(force=bool(options.get("force", False))))
 
 
+# ---------------------------------------------------------------------------
+# Bước 5.2 · The Storyboard Gate
+# ---------------------------------------------------------------------------
+
+_REUP_CUT = "reup_dialogue_cut"
+
+
+def _in_reup_cut(project_id: int, script: dict[str, Any] | None, timeline: list[dict[str, Any]]) -> bool:
+    """Whether the script's timeline is still exactly the rows Reup's cut by dialogue made (translated or not)."""
+    if not script or not timeline:
+        return False
+    payload = (database.get_director_artifact(project_id, _REUP_CUT) or {}).get("payload") or {}
+    return int(payload.get("script_id") or 0) == int(script["id"]) \
+        and [int(item["id"]) for item in timeline] == [int(value) for value in payload.get("segment_ids") or []]
+
+
+def _storyboard_gate(project_id: int, *, with_voice: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The Storyboard Gate (Bước 5.2): (where the project's canonical storyboard stands, its stored row).
+
+    The one place that says whether a planned project's scenes may go on to
+    the timeline, the voice and the render: the latest storyboard of the
+    current script, against that script (id, version, fingerprint) and the
+    current plan (id, version), its own hash and checks, and what downstream
+    actually reads - project_shots and the timeline. Every door asks here.
+
+    `with_voice` also reads the record beside every voice file to count the
+    voices made with other settings (`voice_outdated`) - one file per scene,
+    so only the read-only status asks for it, not every job, step or worker.
+    """
+    plan = _current_project_plan(project_id)
+    script = script_engine.current_script(database, project_id, plan)
+    row = database.get_latest_project_storyboard(project_id, script_id=int(script["id"])) if script else None
+    row = row or database.get_latest_project_storyboard(project_id)
+    shots = database.list_project_shots(project_id, script_id=int(script["id"])) if script else []
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"])) if script else []
+    if not _in_plan_workflow(project_id):
+        mode = storyboard_engine.LEGACY_MODE
+    elif _in_reup_cut(project_id, script, timeline):
+        mode = storyboard_engine.REUP_MODE
+    else:
+        mode = storyboard_engine.PLAN_MODE
+    status = storyboard_engine.gate(row, script, plan, shots=shots, timeline=timeline, mode=mode)
+    if with_voice:
+        current = _current_voice_fingerprint(project_id)
+        # Informational: voices made with settings that are no longer the project's (re-voiced on the next reconcile).
+        status["voice_outdated"] = sum(
+            1 for record in _voice_records(timeline).values() if record.get("fingerprint") not in (None, current))
+    return status, row
+
+
+def _current_voice_fingerprint(project_id: int) -> str:
+    """How a voice made now would be made: the project's voice engine and the settings it reads."""
+    render_settings = database.get_project_render_settings(project_id)
+    return voice_fingerprint(str(render_settings.get("voice_provider") or ""), render_settings)
+
+
+def _voice_records(timeline: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Segment id → the record written beside its voice file (what it says, how it was made), where there is one."""
+    records: dict[int, dict[str, Any]] = {}
+    for segment in timeline:
+        record = read_voice_record(segment.get("audio_path"))
+        if record is not None:
+            records[int(segment["id"])] = record
+    return records
+
+
+def _storyboard_block(project_id: int, project: dict[str, Any] | None = None, *, need: str = "timeline") -> str:
+    """The gate's refusal for a planned project's long video - "" when it may go on, and always "" outside the plan workflow.
+
+    Asked after the script gate: by the job routes, by the workers when they
+    take a job, by the timeline build and by run_step.
+    """
+    if not _in_plan_workflow(project_id, project):
+        return ""
+    return storyboard_engine.refusal_for(_storyboard_gate(project_id)[0], need=need)
+
+
+def _require_storyboard(project_id: int, project: dict[str, Any] | None = None, *, need: str = "timeline") -> None:
+    reason = _storyboard_block(project_id, project, need=need)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
+# Jobs that read the narration of the long video: they run only on a current storyboard.
+_STORYBOARD_JOBS = frozenset({"voiceover", "voiceover_segment", "render", "premiere_draft", "director_production"})
+
+
+def _kept_grouping(project_id: int, script: dict[str, Any]) -> list[list[str]] | None:
+    """An agent's own grouping (checked when it was given) while it still fits the script word for word; else None (the engine's cut).
+
+    Re-cutting the same script - to build the timeline, say - must not quietly
+    swap the scenes an agent chose for the engine's. A script that changed
+    gets the engine's cut again.
+    """
+    stored = storyboard_engine.decode(database.get_latest_project_storyboard(project_id, script_id=int(script["id"])))
+    document = script.get("document") if isinstance(script.get("document"), dict) else script_engine.decode(script)
+    plan_row = _current_project_plan(project_id) or {}
+    if not stored or stored.get("grouping") != "supplied" or stored.get("engine_version") != storyboard_engine.ENGINE_VERSION \
+            or not document or stored.get("script_fingerprint") != storyboard_engine.script_fingerprint(document):
+        return None
+    # Kept only for the plan it was given under: same plan, same scene length and media strategy.
+    if (stored.get("plan_id"), stored.get("plan_version")) != (plan_row.get("id"), plan_row.get("version")) \
+            or stored.get("plan_fingerprint") != storyboard_engine.plan_fingerprint(plan_row.get("plan") or {}):
+        return None
+    return [[str(line.get("ref") or "") for line in scene.get("spoken_lines") or []] for scene in storyboard_engine.scenes(stored)]
+
+
+def _previous_storyboard(project_id: int, script_id: int) -> dict[str, Any] | None:
+    """The latest storyboard of another script of the project - what a new script's scenes are carried over from."""
+    return next((row for row in database.list_project_storyboards(project_id) if int(row["script_id"]) != script_id), None)
+
+
+def _sync_storyboard(
+    project_id: int, project: dict[str, Any], script: dict[str, Any], *, force: bool,
+    groups: list[list[str]] | None = None, with_timeline: bool = False,
+) -> dict[str, Any]:
+    """Bước 5.1-5.2: cut a planned project's current script into its StoryboardDocument and bring what downstream reads in line.
+
+    The StoryboardDocument is cut (or an agent's grouping checked) - nothing is
+    saved from one that fails its checks. Then project_shots and the timeline
+    are reconciled to it scene by scene (storyboard_reconcile), never rebuilt
+    by position: unchanged scenes keep their rows, pictures, edit layers and
+    voice; a scene whose words or speaker changed loses its voice, and its
+    timed layers are retimed to its new length; new scenes get new rows;
+    scenes that went are recorded, then leave. What each scene may still take
+    from the old one (`inherit`) is recorded beside its lineage.
+
+    In place, a reconcile that would lose something - a voice, or rows - is
+    applied only with `force`; without it the answer is "stale" with what it
+    would do. `force` never skips a check. A new script (a revision, a new
+    plan) is carried over from the previous storyboard's rows, which stay.
+    """
+    plan_row = _current_project_plan(project_id)
+    script_id = int(script["id"])
+    if groups is None:
+        groups = _kept_grouping(project_id, script)
+    # The cut this one follows - the script's own last one, else the previous script's: its intact
+    # scenes are kept and only what changed is cut again (Bước 5.3 · T0.5, anchored cut).
+    own_row = database.get_latest_project_storyboard(project_id, script_id=script_id)
+    previous_row = own_row or _previous_storyboard(project_id, script_id)
+    try:
+        storyboard = storyboard_engine.build(
+            script, plan_row, known_ids=storyboard_engine.known_ids(database, plan_row), groups=groups,
+            previous=storyboard_engine.decode(previous_row))
+    except storyboard_engine.StoryboardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if storyboard["status"] != storyboard_engine.VALID:
+        raise HTTPException(status_code=409, detail=storyboard_engine.refusal(storyboard))
+    shots = database.list_project_shots(project_id, script_id=script_id)
+    timeline = database.list_project_timeline(project_id, script_id=script_id)
+    voice_now = _current_voice_fingerprint(project_id)
+    records = _voice_records(timeline)
+    # A voice made with other settings than the project's no longer fits, whatever the words.
+    outdated_voice = any(record.get("fingerprint") != voice_now for record in records.values())
+    in_sync = bool(shots) and storyboard_engine.shots_match(shots, storyboard) and (
+        not timeline or storyboard_engine.timeline_match(timeline, storyboard)) and not outdated_voice
+    if in_sync and (timeline or not with_timeline):
+        saved = database.save_project_storyboard(project_id, script_id, storyboard)
+        if not saved:
+            raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+        return {"status": "saved", "script_id": script_id, "stale": False, "shots": shots,
+                "storyboard": {"id": saved["id"], **storyboard_engine.summary(storyboard)},
+                "reconcile": {"counts": {storyboard_reconcile.UNCHANGED: len(shots)}, "applied": False}}
+
+    if shots or timeline:
+        source_script_id, source_shots, source_timeline = script_id, shots, timeline
+        source_board = storyboard_engine.decode(own_row)
+    else:
+        previous = _previous_storyboard(project_id, script_id)
+        source_script_id = int(previous["script_id"]) if previous else None
+        source_shots = database.list_project_shots(project_id, script_id=source_script_id) if previous else []
+        source_timeline = database.list_project_timeline(project_id, script_id=source_script_id) if previous else []
+        source_board = storyboard_engine.decode(previous)
+    rows, orphans = storyboard_reconcile.source_rows(source_shots, source_timeline, source_board,
+                                                     voice_records=_voice_records(source_timeline))
+    plan = storyboard_reconcile.plan(rows, orphans, storyboard, voice_fingerprint=voice_now)
+    report = storyboard_reconcile.report(plan)
+    in_place = source_script_id == script_id
+    if in_place and storyboard_reconcile.destructive(plan) and not force:
+        return {"status": "stale", "script_id": script_id, "stale": True, "shots": shots,
+                "storyboard": _storyboard_gate(project_id)[0], "reconcile": {**report, "applied": False}}
+
+    new_shots = storyboard_engine.to_shots(storyboard)
+    entries = [{"shot": fields, "source_shot_id": (entry["row"] or {}).get("shot_id"),
+                "source_segment_id": (entry["row"] or {}).get("segment_id"), "keep_voice": entry["keep_voice"]}
+               for fields, entry in zip(new_shots, plan["entries"])]
+    # Which old scene each new one is, storyboard against storyboard - what anything kept per scene follows.
+    lineage = storyboard_reconcile.lineage(source_board, storyboard)
+    record = database.apply_storyboard_reconcile(
+        project_id, script_id, entries, plan["removed"] if in_place else [], source_script_id=source_script_id,
+        with_timeline=bool(timeline) or with_timeline or (not in_place and bool(source_timeline)),
+        report={**report, "document_hash": storyboard["document_hash"], "anchoring": storyboard.get("anchoring"),
+                "lineage": {"scenes": [{key: item[key] for key in ("scene_key", "previous_scene_key", "previous_index", "match",
+                                                                   "status", "changes", "inherit")}
+                                       for item in lineage["scenes"]],
+                            "removed": lineage["removed"], "from_document_hash": lineage["from_document_hash"]}},
+    )
+    saved = database.save_project_storyboard(project_id, script_id, storyboard)
+    if not saved:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
+    database.resync_timeline_segment_states(project_id)
+    shots = database.list_project_shots(project_id, script_id=script_id)
+    _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
+    return {"status": "saved", "script_id": script_id, "stale": False, "shots": shots,
+            "storyboard": {"id": saved["id"], **storyboard_engine.summary(storyboard)},
+            "reconcile": {**report, "scenes": record.get("scenes", report["scenes"]), "mode": record["mode"],
+                          "anchoring": storyboard.get("anchoring"), "applied": True}}
+
+
+def _storyboard_owns_shots(project_id: int, script: dict[str, Any] | None) -> bool:
+    """Whether these shots are the copy of a StoryboardDocument rather than rows to edit on their own.
+
+    True when a planned project's long script was cut by the Storyboard Engine
+    and its shots still say exactly that cut. Shots of a project outside the
+    plan workflow, of an older script without a document, of the Short, or
+    made by Reup's separate cut by dialogue are edited as before.
+    """
+    if not script or script_engine.decode(script) is None or not _in_plan_workflow(project_id):
+        return False
+    stored = storyboard_engine.decode(database.get_latest_project_storyboard(project_id, script_id=int(script["id"])))
+    return bool(stored) and storyboard_engine.shots_match(
+        database.list_project_shots(project_id, script_id=int(script["id"])), stored)
+
+
+def _storyboard_owns_timeline(project_id: int, script_id: int) -> bool:
+    """The same for a script's timeline: it says exactly its storyboard's scenes, so its words are the script's."""
+    script = database.get_project_script(script_id)
+    if not script or script_engine.decode(script) is None or not _in_plan_workflow(project_id):
+        return False
+    stored = storyboard_engine.decode(database.get_latest_project_storyboard(project_id, script_id=script_id))
+    return bool(stored) and storyboard_engine.timeline_match(
+        database.list_project_timeline(project_id, script_id=script_id), stored)
+
+
 def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
     supplied = options.get("segments")
     if isinstance(supplied, list) and supplied:
-        script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
+        current = _require_current_script(project_id, project)
+        if current is not None:
+            # An agent's own timeline may say only what the current storyboard's scenes say. Its rows are
+            # reconciled like any other - never replaced wholesale - and only its picture fields are taken.
+            status, row = _storyboard_gate(project_id)
+            stored = storyboard_engine.decode(row)
+            if storyboard_engine.refusal_for(status, need="shots") or not stored \
+                    or not storyboard_engine.segments_match(supplied, stored):
+                raise HTTPException(status_code=409, detail=storyboard_engine.SEGMENTS_LOCKED)
+            synced = _sync_storyboard(project_id, project, current, force=bool(options.get("force", False)), with_timeline=True)
+            if synced["stale"]:
+                # Bringing the timeline in line would lose a voice or rows and was not forced:
+                # nothing is written - not even the agent's picture fields - and it says what it would do.
+                return synced
+            timeline = database.list_project_timeline(project_id, script_id=int(current["id"]))
+            now = storyboard_engine.decode(database.get_latest_project_storyboard(project_id, script_id=int(current["id"])))
+            if not now or not storyboard_engine.timeline_match(timeline, now) \
+                    or not storyboard_engine.segments_match(supplied, now):
+                raise HTTPException(status_code=409, detail=storyboard_engine.SEGMENTS_LOCKED)
+            # Row for row the storyboard's scenes now, so the agent's segment n is the timeline's segment n.
+            for segment, item in zip(timeline, supplied):
+                fields = {key: str(item[key]) for key in ("visual_prompt", "asset_type")
+                          if isinstance(item, dict) and item.get(key)}
+                if fields:
+                    database.update_project_timeline_segment(int(segment["id"]), **fields)
+            return {"status": "saved", "script_id": int(current["id"]),
+                    "timeline": database.list_project_timeline(project_id, script_id=int(current["id"]))}
+        script = database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để dựng timeline")
         timeline = database.create_project_timeline(
@@ -3693,16 +3995,20 @@ def import_pasted_script(payload: ImportScriptRequest) -> dict[str, Any]:
         if not script:
             raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
         script = _require_current_script(project_id, project) or script
+        # Its scenes are the Storyboard Engine's, like any planned script's (Bước 5), carried over
+        # from the previous storyboard's rows where they still say the same words.
+        shots = _sync_storyboard(project_id, project, script, force=False, with_timeline=True)["shots"]
     else:
         script = database.create_project_script(
             project_id, script_title=payload.title.strip() or str(project.get("title") or "Kịch bản đã dán"),
             hook="", intro="", main_content=narration, cta="", variant=payload.variant,
         )
-    if not script:
-        raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
+        if not script:
+            raise HTTPException(status_code=500, detail="Không lưu được kịch bản")
+        # Outside the plan workflow pasted words keep the legacy shot planner.
+        shots = database.create_project_shots(project_id, int(script["id"]), build_shot_plan(project, script)) or []
     # New rows belong only to this script version; previous audio and visuals
     # remain attached to their original script, never to the pasted words.
-    shots = database.create_project_shots(project_id, int(script["id"]), build_shot_plan(project, script)) or []
     timeline = database.create_project_timeline(project_id, int(script["id"]), build_timeline(project, script, shots)) or []
     _write_project_document(project_id, "kich-ban-short.md" if payload.variant == "short" else "kich-ban.md", script_to_markdown(script, project))
     return {"status": "saved", "project": project, "script": script, "shots": shots, "timeline": timeline}
@@ -3986,7 +4292,14 @@ def generate_project_shots(
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     # Script Freshness Gate: a planned project's storyboard is cut from its
     # current script only.
-    script = _require_current_script(project_id, project) or database.get_latest_project_script(project_id)
+    current = _require_current_script(project_id, project)
+    if current is not None:
+        # Compatibility boundary (Bước 5.1): the plan workflow's scenes are the
+        # Storyboard Engine's, cut from the ScriptDocument, and the rows that
+        # copy them are reconciled scene by scene (5.2). What follows is the
+        # legacy shot planner, for projects outside the plan workflow only.
+        return _sync_storyboard(project_id, project, current, force=payload.force)
+    script = database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo shot list")
     # A script from Bước 3 is words only. The old writer's scene list - its
@@ -4076,6 +4389,12 @@ def generate_project_shots(
 
 @app.patch("/api/shots/{shot_id}")
 def update_shot(shot_id: int, payload: UpdateShotRequest) -> dict[str, Any]:
+    before = database.get_project_shot(shot_id)
+    # A storyboard scene says the script's words; it is reworded in Bước 3, not here.
+    if before and payload.narration is not None \
+            and " ".join(payload.narration.split()) != " ".join(str(before.get("narration") or "").split()) \
+            and _storyboard_owns_shots(int(before["project_id"]), database.get_project_script(int(before["script_id"]))):
+        raise HTTPException(status_code=409, detail=storyboard_engine.NARRATION_LOCKED)
     shot = database.update_project_shot(
         shot_id,
         narration=payload.narration,
@@ -4102,6 +4421,8 @@ def create_project_shot(project_id: int, payload: CreateShotRequest) -> dict[str
     script = database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để thêm cảnh")
+    if _storyboard_owns_shots(project_id, script):
+        raise HTTPException(status_code=409, detail=storyboard_engine.STRUCTURE_LOCKED)
     shot = database.create_project_shot(
         project_id,
         int(script["id"]),
@@ -4124,6 +4445,8 @@ def duplicate_project_shot(shot_id: int) -> dict[str, Any]:
     source = database.get_project_shot(shot_id)
     if not source:
         raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    if _storyboard_owns_shots(int(source["project_id"]), database.get_project_script(int(source["script_id"]))):
+        raise HTTPException(status_code=409, detail=storyboard_engine.STRUCTURE_LOCKED)
     shot = database.duplicate_project_shot(shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Không thể nhân bản cảnh")
@@ -4145,6 +4468,8 @@ def reorder_shots(project_id: int, payload: ReorderShotsRequest) -> dict[str, An
     script = database.get_latest_project_script(project_id)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để sắp xếp cảnh")
+    if _storyboard_owns_shots(project_id, script):
+        raise HTTPException(status_code=409, detail=storyboard_engine.STRUCTURE_LOCKED)
     try:
         shots = database.reorder_project_shots(project_id, payload.shot_ids, script_id=int(script["id"]))
     except ValueError as exc:
@@ -4158,6 +4483,8 @@ def delete_shot(shot_id: int) -> dict[str, Any]:
     shot = database.get_project_shot(shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
+    if _storyboard_owns_shots(int(shot["project_id"]), database.get_project_script(int(shot["script_id"]))):
+        raise HTTPException(status_code=409, detail=storyboard_engine.STRUCTURE_LOCKED)
     if not database.delete_project_shot(shot_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy cảnh")
     project = database.get_production_project(int(shot["project_id"]))
@@ -4166,6 +4493,30 @@ def delete_shot(shot_id: int) -> dict[str, Any]:
         shots = database.list_project_shots(int(project["id"]), script_id=int(script["id"]))
         _write_project_document(int(project["id"]), "shot-list.md", shots_to_markdown(project, script, shots))
     return {"status": "deleted", "shot_id": shot_id}
+
+
+@app.get("/api/projects/{project_id}/storyboard")
+def get_project_storyboard(project_id: int) -> dict[str, Any]:
+    """The project's StoryboardDocument (Bước 5) and the Storyboard Gate's answer for it.
+
+    mode: plan (the gate applies) | reup (Reup's cut by dialogue) | legacy
+    (outside the plan workflow). state: current | stale | invalid | missing |
+    out_of_sync for "plan", and not_applicable otherwise - never a refusal -
+    with `storyboard_state` keeping what the stored storyboard itself is.
+    `blocked` is what voice and render would be told (always "" where the gate
+    does not apply), `voice_outdated` how many voices were made with other
+    settings than the project's, and the last reconcile. Read-only.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    status, row = _storyboard_gate(project_id, with_voice=True)
+    last = database.get_director_artifact(project_id, "storyboard_reconcile")
+    reconcile = (last or {}).get("payload")
+    if isinstance(reconcile, dict):
+        reconcile = {key: value for key, value in reconcile.items() if key != "archived"} | {
+            "archived_count": len(reconcile.get("archived") or []), "at": (last or {}).get("created_at")}
+    return {**status, "blocked": storyboard_engine.refusal_for(status),
+            "storyboard": storyboard_engine.decode(row), "last_reconcile": reconcile}
 
 
 @app.get("/api/projects/{project_id}/shots/markdown")
@@ -4191,6 +4542,31 @@ def list_project_timeline(project_id: int) -> list[dict[str, Any]]:
     return database.list_project_timeline(project_id, script_id=int(script["id"]))
 
 
+def _storyboard_timeline(
+    project_id: int, project: dict[str, Any], script: dict[str, Any], gate: dict[str, Any], *, force: bool,
+) -> dict[str, Any]:
+    """The timeline of a planned project's long video (Bước 5.2): its storyboard's scenes, reconciled, never rebuilt blind.
+
+    Built only from a storyboard of the current script and plan - a missing,
+    stale or invalid one is refused, `force` or not. Shots and timeline rows
+    are brought in line with it scene by scene, so a timeline that already
+    says it is returned as it is, voice and pictures attached.
+    """
+    if gate["state"] in (storyboard_engine.MISSING, storyboard_engine.STALE, storyboard_engine.INVALID):
+        raise HTTPException(status_code=409, detail=storyboard_engine.refusal_for(gate))
+    result = _sync_storyboard(project_id, project, script, force=force, with_timeline=True)
+    timeline = database.list_project_timeline(project_id, script_id=int(script["id"]))
+    if not result["stale"]:
+        _write_project_document(project_id, "timeline.md", timeline_to_markdown(project, script, timeline))
+    return {
+        "status": result["status"], "script_id": script["id"], "variant": "long",
+        "rebuilt": bool((result.get("reconcile") or {}).get("applied")), "stale": result["stale"],
+        "shot_count": len(result["shots"]),
+        "total_duration_seconds": sum(int(item["duration_seconds"]) for item in timeline),
+        "timeline": timeline, "storyboard": result.get("storyboard"), "reconcile": result.get("reconcile"),
+    }
+
+
 @app.post("/api/projects/{project_id}/timeline/generate")
 def generate_project_timeline(
     project_id: int,
@@ -4200,7 +4576,11 @@ def generate_project_timeline(
     if not project:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
     if payload.variant == "long":
-        _require_current_script(project_id, project)
+        current = _require_current_script(project_id, project)
+        if current is not None:
+            gate, _ = _storyboard_gate(project_id)
+            if gate["mode"] != storyboard_engine.REUP_MODE:
+                return _storyboard_timeline(project_id, project, current, gate, force=payload.force)
     script = database.get_latest_project_script(project_id, variant=payload.variant)
     if not script:
         raise HTTPException(status_code=400, detail="Project chưa có kịch bản để tạo timeline")
@@ -4370,6 +4750,12 @@ def update_timeline_segment(
     segment_id: int,
     payload: UpdateTimelineRequest,
 ) -> dict[str, Any]:
+    before = database.get_project_timeline_segment(segment_id)
+    # A storyboard scene's narration is the script's; it is reworded in Bước 3, not on the timeline.
+    if before and payload.voice_text is not None \
+            and " ".join(payload.voice_text.split()) != " ".join(str(before.get("voice_text") or "").split()) \
+            and _storyboard_owns_timeline(int(before["project_id"]), int(before["script_id"])):
+        raise HTTPException(status_code=409, detail=storyboard_engine.NARRATION_LOCKED)
     segment = database.update_project_timeline_segment(
         segment_id,
         voice_text=payload.voice_text,
@@ -9667,6 +10053,9 @@ def build_timeline_from_dialogue(
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     # The cut replaces the storyboard of the current script: the same gate.
+    # Reup's cut by dialogue stays a mode of its own (Bước 5.1): its words are
+    # the source's transcript, so it is not the Storyboard Engine's and writes
+    # no StoryboardDocument - the shots it makes are edited as they always were.
     _require_current_script(project_id, project)
 
     # This replaces every scene, so anything attached to the current ones is
@@ -9782,6 +10171,13 @@ def build_timeline_from_dialogue(
         database.save_segment_source_cue(
             int(segment["id"]), start, "Cắt đúng lúc câu thoại này được nói"
         )
+    # Reup's cut by dialogue is a mode of its own (Bước 5.2): these rows - and
+    # only while they are still the script's timeline - are what the Storyboard
+    # Gate lets through as Reup, translated or not.
+    database.save_director_artifact(project_id, _REUP_CUT, {
+        "script_id": int(script["id"]),
+        "segment_ids": [int(item["id"]) for item in database.list_project_timeline(project_id, script_id=int(script["id"]))],
+    })
 
     speakers = sorted({str(item.get("speaker") or "").strip() for item in planned if item.get("speaker")})
     return {
@@ -10410,8 +10806,11 @@ def translate_project_narration(
     is kept so a translated line can still be checked against what was said.
     """
     project = database.get_production_project(project_id)
-    if project:
-        _require_current_script(project_id, project)
+    if project and _require_current_script(project_id, project) is not None \
+            and _storyboard_gate(project_id)[0]["mode"] != storyboard_engine.REUP_MODE:
+        # A planned project's narration is its script's, word for word (Bước 5.2). Only
+        # Reup's cut by dialogue - a mode of its own - translates the source's turns here.
+        raise HTTPException(status_code=409, detail=storyboard_engine.TRANSLATE_LOCKED)
     script = database.get_latest_project_script(project_id)
     if not project or not script:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
@@ -11003,6 +11402,10 @@ def queue_project_job(
         _require_current_artifact(project_id, script, project, recut=payload.job_type == "render_short")
     if not database.list_project_timeline(project_id, script_id=int(script["id"])):
         raise HTTPException(status_code=400, detail="Project chưa có timeline")
+    if payload.variant == "long" and payload.job_type in _STORYBOARD_JOBS:
+        # Storyboard Gate (Bước 5.2): what is voiced and rendered is the current
+        # storyboard, word for word - not whatever the shots or the timeline say.
+        _require_storyboard(project_id, project)
 
     provider = payload.provider.strip().lower()
     allowed = {
@@ -11303,6 +11706,10 @@ def attach_generated_voice_to_timeline(
     selected = library.get(payload.voice_key)
     if not selected:
         raise HTTPException(status_code=404, detail="Không tìm thấy file voice đã tạo trong project")
+    # A storyboard scene takes only a voice that says its own words.
+    if voice_library.normalise(selected.get("text")) != voice_library.normalise(segment.get("voice_text")) \
+            and _storyboard_owns_timeline(project_id, int(segment.get("script_id") or 0)):
+        raise HTTPException(status_code=409, detail=storyboard_engine.VOICE_MISMATCH)
     database.update_project_timeline_segment(segment_id, audio_path=str(selected["audio_path"]))
     database.resync_timeline_segment_states(project_id)
     return {"status": "attached", "segment": database.get_project_timeline_segment(segment_id)}

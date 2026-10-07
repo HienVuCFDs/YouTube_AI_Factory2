@@ -330,7 +330,11 @@ class StoryboardGateTests(_Case):
         self.assertEqual(response.status_code, 200, response.text)
         shots = response.json()["shots"]
         lines = [line["text"] for section in script["document"]["sections"] for line in section["spoken_lines"]]
-        self.assertEqual([shot["narration"] for shot in shots if shot["section"] == "main"], lines)
+        # Bước 5.1: a scene groups whole consecutive lines (no longer one line per scene) -
+        # every line once, in order, word for word.
+        body = [shot["narration"] for shot in shots if shot["section"] == "main"]
+        self.assertEqual(" ".join(body), " ".join(lines))
+        self.assertLess(len(body), len(lines))
         self.assertEqual((shots[0]["section"], shots[-1]["section"]), ("hook", "cta"))
         timeline = self.client.post(f"/api/projects/{project_id}/steps/timeline", json={"options": {}})
         self.assertEqual(timeline.status_code, 200, timeline.text)

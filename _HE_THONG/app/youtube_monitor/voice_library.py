@@ -35,7 +35,8 @@ def index_voices(work_dir: Path, audio_dir: Path) -> dict[str, dict[str, Any]]:
     library: dict[str, dict[str, Any]] = {}
     if not work_dir.is_dir() or not audio_dir.is_dir():
         return library
-    for sidecar in sorted(work_dir.glob("segment-*.txt")):
+    # segment-NNN: voices made before Bước 5.2; voice-s<row>-<content>: since.
+    for sidecar in sorted([*work_dir.glob("segment-*.txt"), *work_dir.glob("voice-*.txt")]):
         spoken = sidecar.read_text(encoding="utf-8", errors="replace").strip()
         key = normalise(spoken)
         if not key:

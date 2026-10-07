@@ -1,0 +1,832 @@
+{
+  "motion_policy": "balanced",
+  "workflow": "content",
+  "pacing": "fallback",
+  "music_mood": "",
+  "planner_error": "Không có AI được phép thực hiện công đoạn storyboard",
+  "scenes": [
+    {
+      "segment_id": 1715,
+      "shot_id": 1658,
+      "segment_index": 1,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "1 năm tuổi chó bằng 7 năm tuổi người: cách tính này không hoàn toàn sai, nhưng cũng chưa hẳn đúng. Nó dễ gây hiểu lầm, bởi tuổi chó còn phụ thuộc vào giống, kích thước và từng giai đoạn cuộc đời.",
+        "must_keep": [
+          "1 năm tuổi chó bằng 7 năm tuổi người: cách tính này không hoàn toàn sai, nhưng cũng chưa hẳn đúng. Nó dễ gây hiểu lầm, bởi tuổi chó còn phụ thuộc vào giống, kíc"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "Opening visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': high contrast, clear subject, curiosity-driven scene. 1 năm tuổi chó bằng 7 năm tuổi người: cách tính này không hoàn toàn sai, nhưng cũng chưa hẳn đúng. Nó dễ gây hiểu lầm, bởi tuổi chó còn phụ thuộc vào giống, kích thước và từng giai"
+      },
+      "visual_strategy": "motion_graphics",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "Opening visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': high contrast, clear subject, curiosity-driven scene. 1 năm tuổi chó bằng 7 năm tuổi người: cách tính này không hoàn toàn sai, nhưng cũng chưa hẳn đúng. Nó dễ gây hiểu lầm, bởi tuổi chó còn phụ thuộc vào giống, kích thước và từng giai",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "MYTH / FACT",
+          "style": "neon",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "1 năm tuổi chó bằng 7 năm tuổi người: cách tính này",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "cut",
+      "effect": "zoom_out",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "Opening visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': high contrast, clear subject, curiosity-driven scene. 1 năm tuổi chó bằng 7 năm tuổi người: cách tính này không hoàn toàn sai, nhưng cũng chưa hẳn đúng. Nó dễ gây hiểu lầm, bởi tuổi chó còn phụ thuộc vào giống, kích thước và từng giai"
+    },
+    {
+      "segment_id": 1716,
+      "shot_id": 1659,
+      "segment_index": 2,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "2 năm đầu của chó tương đương 15 năm tuổi người. Sau 20 năm, chó bắt đầu lão hóa chậm lại, chỉ còn bằng 4 đến 5 năm tuổi người. Chó nhỏ thì già chậm hơn chó to; có giống chó nhỏ thường sống lâu hơn các giống lớn như Labrado.",
+        "must_keep": [
+          "2 năm đầu của chó tương đương 15 năm tuổi người. Sau 20 năm, chó bắt đầu lão hóa chậm lại, chỉ còn bằng 4 đến 5 năm tuổi người. Chó nhỏ thì già chậm hơn chó to;"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "Context visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': simple explainer style, establish the topic clearly. 2 năm đầu của chó tương đương 15 năm tuổi người. Sau 20 năm, chó bắt đầu lão hóa chậm lại, chỉ còn bằng 4 đến 5 năm tuổi người. Chó nhỏ thì già chậm hơn chó to; có giống chó nhỏ th"
+      },
+      "visual_strategy": "text_card",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "Context visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': simple explainer style, establish the topic clearly. 2 năm đầu của chó tương đương 15 năm tuổi người. Sau 20 năm, chó bắt đầu lão hóa chậm lại, chỉ còn bằng 4 đến 5 năm tuổi người. Chó nhỏ thì già chậm hơn chó to; có giống chó nhỏ th",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "ĐIỂM MẤU CHỐT",
+          "style": "card",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "2 năm đầu của chó tương đương 15 năm tuổi người. Sau",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "fade",
+      "effect": "static",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "Context visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': simple explainer style, establish the topic clearly. 2 năm đầu của chó tương đương 15 năm tuổi người. Sau 20 năm, chó bắt đầu lão hóa chậm lại, chỉ còn bằng 4 đến 5 năm tuổi người. Chó nhỏ thì già chậm hơn chó to; có giống chó nhỏ th"
+    },
+    {
+      "segment_id": 1717,
+      "shot_id": 1660,
+      "segment_index": 3,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Cảnh 3 · Chuyển sang quan niệm về bộ não",
+        "must_keep": [
+          "Cảnh 3 · Chuyển sang quan niệm về bộ não"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 3 · Chuyển sang quan niệm về bộ não"
+      },
+      "visual_strategy": "ai_image",
+      "provider": "auto_parallel",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "image",
+          "provider": "auto_parallel",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 3 · Chuyển sang quan niệm về bộ não",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "HÌNH MINH HOẠ",
+          "style": "neon",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Cảnh 3 · Chuyển sang quan niệm về bộ não",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.288,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "cut",
+      "effect": "zoom_in",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 3 · Chuyển sang quan niệm về bộ não"
+    },
+    {
+      "segment_id": 1718,
+      "shot_id": 1661,
+      "segment_index": 4,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy, mà tính theo độ dài và cân nặng. Tiếp đến là chuyện con người chỉ sử dụng 10% bộ não. Trên mạng cứ hay nhắc đi nhắc lại điều này.",
+        "must_keep": [
+          "Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy, mà tính theo độ dài và cân nặng. Tiếp đến là chuyện con người chỉ sử dụng 10% bộ não. Trên mạng cứ hay nhắc"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy, mà tính theo độ dài và cân nặng. Tiếp đến là chuyện con người chỉ sử dụng 10% bộ não. Trên mạng cứ hay nhắc đi nhắc "
+      },
+      "visual_strategy": "motion_graphics",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy, mà tính theo độ dài và cân nặng. Tiếp đến là chuyện con người chỉ sử dụng 10% bộ não. Trên mạng cứ hay nhắc đi nhắc lại điều nà",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "MYTH / FACT",
+          "style": "card",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy,",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "fade",
+      "effect": "zoom_in",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Còn có câu đùa rằng mấy chú chẳng tính theo cách ấy, mà tính theo độ dài và cân nặng. Tiếp đến là chuyện con người chỉ sử dụng 10% bộ não. Trên mạng cứ hay nhắc đi nhắc lại điều nà"
+    },
+    {
+      "segment_id": 1719,
+      "shot_id": 1662,
+      "segment_index": 5,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Cảnh 4 · Những tiêu đề về tiềm năng bộ não",
+        "must_keep": [
+          "Cảnh 4 · Những tiêu đề về tiềm năng bộ não"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 4 · Những tiêu đề về tiềm năng bộ não"
+      },
+      "visual_strategy": "text_card",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 4 · Những tiêu đề về tiềm năng bộ não",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "ĐIỂM MẤU CHỐT",
+          "style": "neon",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Cảnh 4 · Những tiêu đề về tiềm năng bộ não",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.432,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "cut",
+      "effect": "zoom_out",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 4 · Những tiêu đề về tiềm năng bộ não"
+    },
+    {
+      "segment_id": 1720,
+      "shot_id": 1663,
+      "segment_index": 6,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Rồi lại có những tiêu đề hỏi con người sẽ thông minh thế nào nếu dùng 100% bộ não, hay làm sao khai phá 100% tiềm năng bộ não của bạn. Tôi nghĩ chuyện ấy chỉ nên dừng ở ảnh chế, vì chưa có nghiên cứu chính thống nào nói như vậy. Theo một số nguồn được nhắc tới, não thực ra đã hoạt động hết công suất.",
+        "must_keep": [
+          "Rồi lại có những tiêu đề hỏi con người sẽ thông minh thế nào nếu dùng 100% bộ não, hay làm sao khai phá 100% tiềm năng bộ não của bạn. Tôi nghĩ chuyện ấy chỉ nê"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Rồi lại có những tiêu đề hỏi con người sẽ thông minh thế nào nếu dùng 100% bộ não, hay làm sao khai phá 100% tiềm năng bộ não của bạn. Tôi nghĩ chuyện ấy chỉ nên dừng ở "
+      },
+      "visual_strategy": "ai_image",
+      "provider": "auto_parallel",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "image",
+          "provider": "auto_parallel",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Rồi lại có những tiêu đề hỏi con người sẽ thông minh thế nào nếu dùng 100% bộ não, hay làm sao khai phá 100% tiềm năng bộ não của bạn. Tôi nghĩ chuyện ấy chỉ nên dừng ở ảnh chế, vì",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "HÌNH MINH HOẠ",
+          "style": "card",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Rồi lại có những tiêu đề hỏi con người sẽ thông minh",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "fade",
+      "effect": "static",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Rồi lại có những tiêu đề hỏi con người sẽ thông minh thế nào nếu dùng 100% bộ não, hay làm sao khai phá 100% tiềm năng bộ não của bạn. Tôi nghĩ chuyện ấy chỉ nên dừng ở ảnh chế, vì"
+    },
+    {
+      "segment_id": 1721,
+      "shot_id": 1664,
+      "segment_index": 7,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Cảnh 5 · Những hoạt động do não điều khiển",
+        "must_keep": [
+          "Cảnh 5 · Những hoạt động do não điều khiển"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 5 · Những hoạt động do não điều khiển"
+      },
+      "visual_strategy": "motion_graphics",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 5 · Những hoạt động do não điều khiển",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "MYTH / FACT",
+          "style": "neon",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Cảnh 5 · Những hoạt động do não điều khiển",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.24,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "cut",
+      "effect": "zoom_in",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Cảnh 5 · Những hoạt động do não điều khiển"
+    },
+    {
+      "segment_id": 1722,
+      "shot_id": 1665,
+      "segment_index": 8,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều khiển tay chân và các hoạt động của cơ thể. Nếu chỉ hoạt động với 10%, có khi con người còn chẳng thể hít thở, bởi mọi hoạt động đều do não chỉ huy.",
+        "must_keep": [
+          "Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều khiển tay chân và các hoạt động của cơ thể. Nếu chỉ hoạt động với 10%, có khi con người còn chẳng thể hít t"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều khiển tay chân và các hoạt động của cơ thể. Nếu chỉ hoạt động với 10%, có khi con người còn chẳng thể hít thở, bởi m"
+      },
+      "visual_strategy": "text_card",
+      "provider": "motion_graphics",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "motion_graphics",
+          "provider": "motion_graphics",
+          "prompt": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều khiển tay chân và các hoạt động của cơ thể. Nếu chỉ hoạt động với 10%, có khi con người còn chẳng thể hít thở, bởi mọi hoạt độn",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "ĐIỂM MẤU CHỐT",
+          "style": "card",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "fade",
+      "effect": "zoom_in",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "B-roll or generated visual for 'Sẽ thế nào nếu con người dùng 100% bộ não??': illustrate this point with specific, useful imagery. Nhưng não đâu chỉ phục vụ việc suy nghĩ; nó còn điều khiển tay chân và các hoạt động của cơ thể. Nếu chỉ hoạt động với 10%, có khi con người còn chẳng thể hít thở, bởi mọi hoạt độn"
+    },
+    {
+      "segment_id": 1723,
+      "shot_id": 1666,
+      "segment_index": 9,
+      "kind": "image",
+      "fps": 0,
+      "reason": "Kế hoạch dự phòng khi AI lập kế hoạch không phản hồi.",
+      "content_dna": {
+        "core_point": "Còn vài trường hợp công suất não chỉ đạt 10% thì có thể kể đến lúc các cầu thủ gặp đối thủ được nhắc trong nguồn. Hoặc khi tỏ tình, với đoạn tiếp theo trong bản chép không rõ nghĩa. Hay là tôi lúc xem mấy video được nhắc ở cuối.",
+        "must_keep": [
+          "Còn vài trường hợp công suất não chỉ đạt 10% thì có thể kể đến lúc các cầu thủ gặp đối thủ được nhắc trong nguồn. Hoặc khi tỏ tình, với đoạn tiếp theo trong bản"
+        ],
+        "characters": [],
+        "facts": [],
+        "emotion": "",
+        "source_cue": "Closing frame for 'Sẽ thế nào nếu con người dùng 100% bộ não??': clean end screen, room for CTA text, warm confident mood. Còn vài trường hợp công suất não chỉ đạt 10% thì có thể kể đến lúc các cầu thủ gặp đối thủ được nhắc trong nguồn. Hoặc khi tỏ tình, với đoạn tiếp theo trong bản chép không rõ ng"
+      },
+      "visual_strategy": "ai_image",
+      "provider": "auto_parallel",
+      "source_dependency": "none",
+      "risk_level": "low",
+      "transform_actions": [
+        {
+          "type": "replace_or_cover_source",
+          "description": "Không phát lại nguyên cảnh nguồn; dùng thẻ chữ/graphic/ảnh minh hoạ làm lớp dựng mới."
+        },
+        {
+          "type": "add_kinetic_text",
+          "description": "Thêm chữ động ngắn để tạo nhịp và góc kể mới."
+        }
+      ],
+      "required_assets": [
+        {
+          "kind": "image",
+          "provider": "auto_parallel",
+          "prompt": "Closing frame for 'Sẽ thế nào nếu con người dùng 100% bộ não??': clean end screen, room for CTA text, warm confident mood. Còn vài trường hợp công suất não chỉ đạt 10% thì có thể kể đến lúc các cầu thủ gặp đối thủ được nhắc trong nguồn. Hoặc khi tỏ tình, với đoạn tiếp theo trong bản chép không rõ nghĩa",
+          "reason": "Cần visual khác nguồn để WF Content không trở thành reup."
+        }
+      ],
+      "direction": {},
+      "overlays": [
+        {
+          "kind": "title",
+          "text": "HÌNH MINH HOẠ",
+          "style": "neon",
+          "animation": "pop",
+          "position": "top_center",
+          "start_seconds": 0.15,
+          "end_seconds": 1.6,
+          "reason": "Mở cảnh bằng nhãn đồ họa rõ như Reels/TikTok."
+        },
+        {
+          "kind": "callout",
+          "text": "Còn vài trường hợp công suất não chỉ đạt 10% thì có",
+          "style": "card",
+          "animation": "slide_up",
+          "position": "center",
+          "start_seconds": 1.0,
+          "end_seconds": 3.6,
+          "reason": "Nhấn ý chính thay vì chỉ nghe voice."
+        }
+      ],
+      "sound_cues": [
+        {
+          "type": "whoosh",
+          "start_seconds": 0.15,
+          "end_seconds": 0.7,
+          "intensity": "medium",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn nhịp chữ mở cảnh"
+        },
+        {
+          "type": "pop",
+          "start_seconds": 1.0,
+          "end_seconds": 1.35,
+          "intensity": "low",
+          "asset_id": null,
+          "asset_path": "",
+          "reason": "Nhấn callout chính"
+        }
+      ],
+      "transition": "cut",
+      "effect": "zoom_out",
+      "note": "Fallback deterministic: đủ dữ liệu để sửa tay và tạo asset thiếu.",
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "cleanups": [],
+      "needs_extra_visual": true,
+      "extra_visual_note": "Closing frame for 'Sẽ thế nào nếu con người dùng 100% bộ não??': clean end screen, room for CTA text, warm confident mood. Còn vài trường hợp công suất não chỉ đạt 10% thì có thể kể đến lúc các cầu thủ gặp đối thủ được nhắc trong nguồn. Hoặc khi tỏ tình, với đoạn tiếp theo trong bản chép không rõ nghĩa"
+    }
+  ],
+  "id": 1,
+  "status": "draft",
+  "source_revision": "17ddcb4d57f70a2d14976554d82f5b3f68648e7f02b1025c88a5721a3950f607",
+  "stale": false
+}

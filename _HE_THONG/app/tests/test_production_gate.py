@@ -13,7 +13,6 @@ A project outside the plan workflow keeps the path it always had.
 
 from __future__ import annotations
 
-import re
 import unittest
 from unittest import mock
 
@@ -22,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from tests.script_fixtures import FIXTURE_78, PLAN, Scripted, planned_project
 from tests.test_script_paths import _legacy_project, _snapshot
-from youtube_monitor import ai_desktop_mcp, main, script_engine
+from youtube_monitor import ai_desktop_mcp, main, script_engine, storyboard_engine
 
 GO = script_engine.CONTINUE_MESSAGES
 STALE = script_engine.STALE_SCRIPT_MESSAGE
@@ -236,21 +235,18 @@ class VoiceRenderTests(_Case):
 # B. Translate
 # ===========================================================================
 
-def _translator(system: str, user: str, schema: dict, **options) -> dict:
-    # The prompt lists one "[segment_index] words" per line.
-    return {"lines": [{"segment_index": int(index), "text": f"Line {index} in English."}
-                      for index in re.findall(r"^\[(\d+)\]", user, flags=re.MULTILINE)]}
-
-
 class TranslateTests(_Case):
-    def test_8_a_fresh_script_is_translated(self) -> None:
+    def test_8_a_fresh_script_past_the_gate_is_not_translated_scene_by_scene(self) -> None:
+        # Bước 5.2: the narration of a planned project is its script's, word for word,
+        # so per-scene translation - which rewrote it outside the script - is refused.
         project_id = self._ready()
-        with mock.patch.object(main, "_call_orchestrator_json", _translator):
-            response = self.client.post(f"/api/projects/{project_id}/script/translate?target_language=en")
-        self.assertEqual(response.status_code, 200, response.text)
         script = self.database.get_latest_project_script(project_id)
+        before = [item["voice_text"] for item in self.database.list_project_timeline(project_id, script_id=int(script["id"]))]
+        with mock.patch.object(main, "_call_orchestrator_json", _boom):
+            response = self.client.post(f"/api/projects/{project_id}/script/translate?target_language=en")
+        self.assertEqual((response.status_code, response.json()["detail"]), (409, storyboard_engine.TRANSLATE_LOCKED))
         texts = [item["voice_text"] for item in self.database.list_project_timeline(project_id, script_id=int(script["id"]))]
-        self.assertTrue(texts and all(text.endswith("in English.") for text in texts))
+        self.assertEqual(texts, before)
 
     def test_9_and_10_a_stale_script_is_not_translated_force_or_not(self) -> None:
         project_id = self._ready()
