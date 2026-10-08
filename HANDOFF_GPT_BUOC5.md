@@ -1,10 +1,10 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 hoàn thành)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành)
 
 Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
 
 > **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
-> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), việc tiếp theo (mục 11).
+> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), **T5 hoàn thành: Planner theo storyboard** (mục 9e), việc tiếp theo (mục 11).
 
 ---
 
@@ -27,8 +27,9 @@ Quy trình từ trước tới nay:
   - storage là `project_director_artifacts`, `kind="edit_document"`;
   - bootstrap theo cách (b): lớp dựng cũ thành orphan `legacy`.
 - **T3 (Apply EditDocument → timeline) hoàn thành** (mục 9c). Người dùng đã chốt H1–H6, B1–B4.
-- **T4 (tích hợp) hoàn thành** (mục 9d): `_sync_storyboard` → `_apply_edit_document` → `edit_store.sync()` → `edit_apply.apply_scenes()` là đường ghi EditDocument → timeline trong luồng sản xuất; reconcile không chép, không `_retime` phần EditDocument sở hữu. Chỉ chạy cho project **đã có** EditDocument; T5/T6 mới tạo edit đầu tiên.
-- Việc kế tiếp: T5 (mục 11).
+- **T4 (tích hợp) hoàn thành** (mục 9d): `_sync_storyboard` → `_apply_edit_document` → `edit_store.sync()` → `edit_apply.apply_scenes()` là đường ghi EditDocument → timeline trong luồng sản xuất; reconcile không chép, không `_retime` phần EditDocument sở hữu. Chỉ chạy cho project **đã có** EditDocument.
+- **T5 (Planner theo storyboard) hoàn thành** (mục 9e): `run_step("edit_plan")` của project luồng Kế hoạch lập edit cho các cảnh của storyboard hiện hành vào EditDocument (khớp theo `segment_id`), chỉ khi đầu vào current; áp ngay chỉ khi `confirmed_apply`.
+- Việc kế tiếp: T6 (mục 11). **Chưa bắt đầu T6.**
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -65,7 +66,7 @@ Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅ · T5 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -98,7 +99,8 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  mới  _HE_THONG/app/tests/test_edit_document.py           (25 test)
  (T2, commit ec62257) _HE_THONG/app/tests/test_edit_store.py (20 test)
  (T3, commit 1225aef) _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
- (T4, commit T4)      _HE_THONG/app/tests/test_edit_integration.py (18 test); sửa main.py, database.py, edit_store.py, edit_document.py; test_edit_apply.py / test_edit_store.py (cô lập test, mục 9d)
+ (T4, commit 4555921) _HE_THONG/app/tests/test_edit_integration.py (18 test); sửa main.py, database.py, edit_store.py, edit_document.py; test_edit_apply.py / test_edit_store.py (cô lập test, mục 9d)
+ (T5, commit T5)      mới _HE_THONG/app/youtube_monitor/edit_planner.py, _HE_THONG/app/tests/test_edit_planner.py (30 test); sửa main.py, edit_store.py, edit_document.py (mục 9e)
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
@@ -673,8 +675,79 @@ Trạng thái trả về:
 3. **Ghi nhận legacy (`refresh`)** chỉ áp cho hàng reconcile hay agent vừa ghi. Mọi đường khác ghi vào hàng đã biết (Edit Plan cũ, job, sửa tay) vẫn là conflict (T7 chặn).
 4. **Caller chỉ chạy qua `_sync_storyboard`:** job giọng (`production_worker`) đổi giọng mà không gọi sync/apply, nên document chưa theo kịp cho tới lần sync kế tiếp; apply sẽ từ chối (`_fresh`) nếu bị gọi lúc đó.
 5. **Bản ghi `edit_apply` hỏng** làm reconcile (đọc ownership) dừng với lỗi: chặt, không đọc thành "không sở hữu".
-6. **Chưa có gì tạo edit trong sản xuất:** `plan_scene` chưa có caller (T5 planner, T6 sửa tay / AI), nên ở dữ liệu thật, caller T4 hiện chỉ là no-op (`no_document`) hoặc chỉ áp `needs_plan`.
+6. ~~Chưa có gì tạo edit trong sản xuất~~ — từ T5, `run_step("edit_plan")` lập edit vào EditDocument (mục 9e). Sửa tay / AI từng cảnh vẫn chờ T6.
 7. Chưa chạy trên DB thật; số liệu Windows chưa đo lại.
+
+---
+
+## 9e. T5 — Planner theo Storyboard (HOÀN THÀNH 08/10)
+
+T1–T4 không đổi luật: guard T3 (`apply_scenes`) và ownership T4 giữ nguyên; không dùng `candidate`; không ghi `project_edit_plans`; không xoá orphan; không render, ffmpeg, T6, T7.
+
+### Luồng
+
+```text
+run_step("edit_plan")  (project luồng Kế hoạch; luồng khác giữ Edit Plan cũ)
+  → _plan_edit_document
+      1. gate = _storyboard_gate(with_voice=True): phải CURRENT, row = storyboard mới nhất của script hiện hành
+         (script_engine.current_script)                         → nếu không: "not_current", không tạo document
+      2. gate.voice_outdated > 0                                → "needs_rebuild", không tạo document
+      3. edit_store.sync()  (bootstrap / follow / carried_over / unchanged — T2)
+      4. edit_planner.select(): cảnh needs_plan hoặc stale (có hàng timeline); cảnh ready / visual_review giữ nguyên
+         trừ khi replan + scene_keys; scene_key lạ → HTTP 422
+      5. MỘT lần gọi model (_EDIT_DOCUMENT_PLAN_SCHEMA: khoá theo segment_id) — chỉ các cảnh cần lập
+      6. chuẩn hoá như Edit Plan cũ (_normalise_visual_transform_fields, _scene_plan_to_edit_beats, sound cues, mark nguồn);
+         overlay qua script_engine.text_errors ("chữ trên màn hình"); khớp câu trả lời theo segment_id
+      7. edit_store.plan_scenes() → edit_document.plan_scenes(): MỘT phiên bản mới (expected_parent), based_on = bản trước
+      8. confirmed_apply và status ≠ blocked → T4 _apply_edit_document (reconcile → sync → apply_scenes)
+```
+
+### Thay đổi
+
+| File | Nội dung |
+|---|---|
+| `edit_planner.py` (mới) | Phần thuần: `select`, `overlays_through`, `scene_edit` (cột giống Edit Plan cũ, **không** `visual_path`), `outcome`, hằng trạng thái, `PlannerError` |
+| `edit_document.py` | `plan_scenes(document, storyboard, edits)`: lập nhiều cảnh trong một bản; cảnh lỗi (không có, timing stale khi chấp nhận, không vừa cảnh) được nêu tên, cảnh khác vẫn lập; không cảnh nào lập được → trả nguyên document. `plan_scene` gọi lại `plan_scenes` (giữ nguyên hành vi, 25 test T1 xanh) |
+| `edit_store.py` | `plan_scenes(...)`: đòi `current()` = CURRENT, lưu **một** phiên bản với `expected_parent`; không lập được gì → không lưu (`created` False) |
+| `main.py` | `_step_edit_plan` định tuyến luồng Kế hoạch sang `_plan_edit_document`; `_EDIT_DOCUMENT_PLAN_SCHEMA`; `_edit_document_answers` (gọi model, dùng lại chuẩn hoá cũ); `_overlay_text_check`; `_measured_source_marks`; `_edit_document_planned` → `_steps_done` coi `edit_plan` xong khi EditDocument current không còn cảnh cần lập |
+
+### Trạng thái trả về (không bao giờ báo thành công giả)
+
+- `planned`: mọi cảnh được yêu cầu đều đã lập. `unchanged`: không cảnh nào cần lập (chạy lại cùng đầu vào → không gọi model, không phiên bản mới).
+- `partial`: có cảnh lập được, có cảnh không (model bỏ sót, kế hoạch không chuẩn hoá được, không vừa cảnh) — `problems` nêu từng `scene_key`, cảnh đó giữ `needs_plan`.
+- `blocked`: không cảnh nào lập được; không lưu phiên bản; không apply kể cả khi `confirmed_apply`.
+- `error`: model lỗi (`LlmError` — **không** có template thay thế) hoặc `EditStoreError`; không ghi gì.
+- `not_current` / `needs_rebuild` / `not_applicable` (project không thuộc luồng Kế hoạch, chỉ khi gọi trực tiếp).
+- Kèm `wanted`, `left` (cảnh bỏ qua và lý do `holding` / `no_row`), `planned`, `warnings` (overlay bị loại, sound cue bị bỏ), `document_hash`, `applied` (khi `confirmed_apply`).
+
+### Versioning
+
+- Lần đầu: bootstrap (T2) + một bản đã lập. Chạy lại cùng đầu vào: `unchanged`, không phiên bản mới.
+- Storyboard đổi: `sync` đi theo (cảnh giữ nguyên giữ edit theo lineage; cảnh đổi lời → `stale_content`; cảnh mới → `needs_plan`), planner chỉ lập các cảnh đó, một phiên bản mới.
+- Thêm / bớt / đổi chỗ cảnh: theo `segment_id` + lineage T1; cảnh bị bỏ → orphan `removed`, không chuyển sang hàng khác; đổi chỗ → `unchanged`, edit giữ nguyên.
+- Cùng `segment_id`, đổi độ dài: không lập lại; `effective_edit` retime (`timing.state = retimed`).
+- Script đổi (revision mới chưa cắt storyboard) hoặc storyboard stale: `not_current`, document cũ không bị coi là current.
+
+### Test (`tests/test_edit_planner.py`, 30 test, model giả)
+
+Phủ 15 yêu cầu: storyboard current → document; idempotent; storyboard stale; script stale (revision mới); giọng stale → `needs_rebuild`; storyboard đổi phiên bản (một cảnh đổi lời); thêm cảnh; bớt cảnh; đổi chỗ; cùng `segment_id` đổi độ dài; cảnh đã sở hữu (không retime/chép bởi reconcile, lập lại rồi áp không conflict); document cũ có provenance không còn current (không lập, không áp; `plan_scenes` trên bản outdated bị từ chối); `partial` / `blocked` / `error` không báo thành công; project không có EditDocument → T4 `no_document`; document hợp lệ → T4 apply, giữ hình legacy. Thêm: khớp theo `segment_id` khi model trả ngược thứ tự; câu trả lời cho hàng lạ bị bỏ; overlay trượt `text_errors` bị loại; edit không vừa cảnh; gate trả row không phải storyboard mới nhất → `not_current`; scene_key lạ → 422; luồng ngoài Kế hoạch dùng Edit Plan cũ.
+
+- **Mutation: 17/18 đột biến bị bắt** (bỏ gate CURRENT; bỏ kiểm row/script mới nhất; bỏ `voice_outdated`; khớp theo vị trí; `select` lập lại cảnh `ready`; bỏ lọc overlay; `partial` → `planned`; bỏ `blocked`; apply khi không xác nhận; apply khi `blocked`; bỏ `based_on`; `_steps_done` bỏ kiểm cảnh còn cần lập; edit có `visual_path`; `plan_scenes` bỏ kiểm CURRENT; cảnh thiếu câu trả lời được điền mặc định; `LlmError` thành kết quả rỗng; cảnh không vừa không báo lỗi). Đột biến sống: bỏ nhánh "không lưu khi không lập được gì" trong `edit_store.plan_scenes` — tương đương, vì `save` dùng lại bản cùng hash (`created` False).
+- **Kết quả (08/10, Linux, DB tạm):** T5 **30/30**; Bước 5 **248/248**; full suite **2340 đạt · 11 đỏ · 13 bỏ qua**, 11 đỏ giống hệt danh sách trước T3/T4/T5 (2 cũ + 9 môi trường) → **không regression**.
+- **Smoke test app thật** (uvicorn 8787, DB tạm `scratchpad/smoke_t5/data/smoke.db`; seed bằng model giả: project A lập 10 cảnh qua `POST /steps/edit_plan`, project B sửa kịch bản tại chỗ):
+  - A `POST /api/projects/1/steps/edit_plan` → `unchanged`, không gọi model, vẫn 2 phiên bản, 0 `edit_apply`;
+  - A với `confirmed_apply` → `unchanged` + T4 `applied` 10 cảnh, giữ hình legacy, `edit_transition`/overlay của EditDocument; lần nữa → T4 `unchanged`;
+  - B → `not_current`, 0 document; `/steps`: A có `edit_plan`, B không;
+  - log app không có traceback; đã tắt app (pid uvicorn), không còn tiến trình uvicorn, cổng 8787 trống. Không chạy trên DB thật.
+
+### Rủi ro còn lại
+
+1. **T4 tự áp edit đã lập ở lần `_sync_storyboard` kế tiếp**, kể cả khi `run_step("edit_plan")` không có `confirmed_apply`: theo thiết kế T4 đã duyệt, project đã có EditDocument thì mọi `shots/generate`, `timeline/generate`, `run_step("shots"|"timeline")` đều apply các cảnh `ready`. `confirmed_apply` chỉ quyết định có áp **ngay** hay không. Nếu cần "chỉ áp khi người dùng xác nhận" thật sự, phải đổi T4 (cần GPT/người dùng quyết; T5 không tự đổi).
+2. **Edit Plan cũ vẫn chạy được trên project luồng Kế hoạch** qua route riêng `POST /api/projects/{id}/edit-plan` (và approve/apply cũ): nó ghi thẳng timeline, ngoài EditDocument → T4 thấy conflict ở hàng đã sở hữu. Chặn là việc của T7. `_steps_done` vẫn coi `edit_plan` xong nếu có Edit Plan cũ đã duyệt.
+3. **Cảnh không có hàng timeline** (`no_row`) không được lập; cảnh `visual_review` (orphan legacy) không lập lại trừ khi `replan` — người dùng phải xem lại (T6).
+4. Giọng đổi sau khi gate kiểm (`voice_outdated`) mà chưa sync: document lập theo độ dài giọng cũ; T4 `_fresh` sẽ từ chối apply. Không atomic (chiến lược A của T4).
+5. Overlay bị loại vì `text_errors` chỉ được ghi trong `warnings`, cảnh vẫn `planned` (không có overlay đó).
+6. Chưa chạy trên DB thật; chưa đo trên Windows; model thật chưa được gọi (mọi test và smoke dùng model giả).
 
 ---
 
@@ -694,8 +767,9 @@ Trạng thái trả về:
 2. ~~Chốt T2~~: **xong 08/10** (mục 9b). Nên chạy lại full suite trên Windows để xác nhận.
 3. ~~T3 — Apply~~: **xong 08/10** (mục 9c), đã commit và push. Nên chạy lại full suite trên Windows.
 4. ~~T4 — Nối reconcile~~: **xong 08/10** (mục 9d), theo checklist 11a.
-5. Sau đó lần lượt T5 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
-6. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
+5. ~~T5 — Planner theo storyboard~~: **xong 08/10** (mục 9e). Cần GPT review rủi ro 1 của 9e (T4 tự áp edit đã lập ở lần sync kế tiếp).
+6. Sau đó lần lượt T6 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
+7. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 ### 11a. T4 — Integration checklist bắt buộc (đã thống nhất 08/10)
 
@@ -752,7 +826,7 @@ Trạng thái trả về:
 
 ## 13. Ghi chú kỹ thuật cho Claude ở chat mới
 
-- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút. Nhóm test liên quan: `tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py` (~40 giây).
+- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút. Nhóm test Bước 5 (248 test, ~75 giây): `tests/test_edit_planner.py tests/test_edit_integration.py tests/test_edit_apply.py tests/test_edit_store.py tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py`.
 - **Không sửa file khi full suite đang chạy.** Test `test_a_freshly_imported_process_is_not_stale` kiểm thời điểm sửa file nguồn. Muốn sửa thì dừng suite trước, sửa xong chạy lại.
 - **File trong repo dùng xuống dòng LF.** Sửa bằng script Python thì dùng `read_bytes`/`write_bytes` hoặc `newline="\n"`; `Path.write_text` trên Windows đổi cả file sang CRLF. Sửa xong thì kiểm `count(b"\r\n") == 0`.
 - **Không mở DB thật bằng `Database()` hay `import main`** (`initialize()` sẽ migrate). Chỉ đọc bằng `sqlite3` với `mode=ro`, hoặc dùng bản sao.

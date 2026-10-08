@@ -41,7 +41,7 @@ from .director import DirectorError, director_to_markdown, director_to_script, d
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available, render_timeline_with_ffmpeg
 from .ffmpeg_renderer import video_frame_size
 from . import gemini_tts, operations, tts_catalog, usage_limits, workflows
-from . import edit_apply, edit_store
+from . import edit_apply, edit_planner, edit_store
 from . import languages
 from .fidelity_guard import unsourced_details
 from .graphic_overlays import normalize_graphic_overlays
@@ -2108,6 +2108,8 @@ def _steps_done(project_id: int) -> set[str]:
     plan = _current_project_edit_plan(project_id)
     if plan and str(plan.get("status") or "") in {"approved", "ready", "applied"}:
         done.add("edit_plan")
+    elif script and _edit_document_planned(project_id, int(script["id"])):
+        done.add("edit_plan")
     if _current_final_video_path(project_id):
         done.add("render")
     if database.list_project_publications(project_id):
@@ -3462,6 +3464,13 @@ def _refuse_a_script_that_failed_review(project_id: int) -> None:
 
 def _step_edit_plan(project_id: int, project: dict[str, Any], options: dict[str, Any]) -> Any:
     _refuse_a_script_that_failed_review(project_id)
+    gate, _ = _storyboard_gate(project_id)
+    if gate.get("mode") == storyboard_engine.PLAN_MODE:
+        # A planned project's edit is its EditDocument (Bước 5.3 · T5), applied only when confirmed (decision 4).
+        return _plan_edit_document(
+            project_id, project, scene_keys=options.get("scene_keys"), replan=bool(options.get("replan")),
+            motion_policy=str(options.get("motion_policy") or "balanced"),
+            confirmed_apply=bool(options.get("confirmed_apply")))
     planned = plan_project_edit(project_id, motion_policy=str(options.get("motion_policy") or "balanced"))
     if not options.get("apply", True):
         return planned
@@ -7836,6 +7845,227 @@ _ASK_FOR_AN_EDIT = (
     "va dat it nhat mot moc do hoa bam theo word timing da do. Neu mot canh that su nen dung yen, "
     "hay noi ro ly do trong truong 'reason'."
 )
+
+
+# Bước 5.3 · T5: the planner's answer names each scene by its timeline row, never by its place in the list.
+_EDIT_DOCUMENT_PLAN_SCHEMA = json.loads(json.dumps(_EDIT_PLAN_SCHEMA))
+_EDIT_DOCUMENT_PLAN_SCHEMA["properties"]["scenes"]["items"]["properties"].pop("segment_index")
+_EDIT_DOCUMENT_PLAN_SCHEMA["properties"]["scenes"]["items"]["properties"]["segment_id"] = {"type": "integer"}
+_EDIT_DOCUMENT_PLAN_SCHEMA["properties"]["scenes"]["items"]["required"] = ["segment_id", "kind", "transition", "effect"]
+
+
+def _plan_edit_document(
+    project_id: int, project: dict[str, Any], *, scene_keys: list[str] | None = None, replan: bool = False,
+    motion_policy: str = "balanced", confirmed_apply: bool = False,
+) -> dict[str, Any]:
+    """Bước 5.3 · T5: the current storyboard's scenes given an edit in the EditDocument (and applied when confirmed).
+
+    The one production planner of a planned project (run_step "edit_plan").
+    Its inputs must be current - the Storyboard Gate's current storyboard of
+    the current script, voices made with the project's settings - or nothing
+    is planned and no document is made ("not_current", "needs_rebuild"). The
+    EditDocument follows the storyboard first (edit_store.sync); then the
+    scenes without an edit, or with a stale one, are planned in one model call
+    and kept as one version (edit_store.plan_scenes). Each answer is matched to
+    its scene by timeline row (segment_id). An answer that is missing, cannot
+    be normalised, or cannot fit its scene leaves that scene unplanned and
+    named; a failed model call plans nothing ("error") - no template stands in
+    for it. Overlays pass text_errors. Applying is T4's _apply_edit_document,
+    only with `confirmed_apply`.
+    """
+    gate, row = _storyboard_gate(project_id, with_voice=True)
+    if gate.get("mode") != storyboard_engine.PLAN_MODE:
+        return {"status": edit_planner.NOT_APPLICABLE, "gate": gate.get("state")}
+    plan_row = _current_project_plan(project_id)
+    script = script_engine.current_script(database, project_id, plan_row)
+    latest = database.get_latest_project_storyboard(project_id, script_id=int(script["id"])) if script else None
+    if gate.get("state") != storyboard_engine.CURRENT or not row or not script or not latest \
+            or int(row["id"]) != int(latest["id"]) or int(row["script_id"]) != int(script["id"]):
+        return {"status": edit_planner.NOT_CURRENT, "gate": gate.get("state"),
+                "detail": "Storyboard hoặc kịch bản không phải bản hiện hành: chưa lập kế hoạch dựng"}
+    if gate.get("voice_outdated"):
+        return {"status": edit_planner.NEEDS_REBUILD, "voice_outdated": gate["voice_outdated"],
+                "detail": "Có giọng làm với cấu hình cũ: chia cảnh lại (giọng sẽ làm lại) trước khi lập kế hoạch dựng"}
+    script_id = int(script["id"])
+    try:
+        synced = edit_store.sync(database, project_id, script_id, row)
+        wanted, left = edit_planner.select(synced["document"], scene_keys=scene_keys, replan=replan)
+    except edit_store.EditStoreError as exc:
+        return {"status": edit_planner.ERROR, "detail": str(exc)}
+    except edit_planner.PlannerError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    answer: dict[str, Any] = {"script_id": script_id, "storyboard_id": int(row["id"]),
+                              "storyboard_hash": row.get("document_hash"), "document_mode": synced["mode"],
+                              "wanted": wanted, "left": left}
+    planned_keys: list[str] = []
+    problems: dict[str, str] = {}
+    warnings: list[dict[str, Any]] = []
+    document_hash = synced["document_hash"]
+    if wanted:
+        try:
+            edits, problems, warnings = _edit_document_answers(project_id, project, synced["document"], wanted,
+                                                                motion_policy=motion_policy)
+        except LlmError as exc:
+            return {**answer, "status": edit_planner.ERROR, "planner_error": str(exc),
+                    "document_hash": document_hash, "planned": [], "problems": {}}
+        if edits:
+            try:
+                kept = edit_store.plan_scenes(database, project_id, script_id, row, edits)
+            except edit_store.EditStoreError as exc:
+                return {**answer, "status": edit_planner.ERROR, "detail": str(exc), "document_hash": document_hash,
+                        "planned": [], "problems": problems}
+            problems = {**problems, **kept["problems"]}
+            planned_keys = [key for key in edits if key not in kept["problems"]]
+            document_hash = kept["document_hash"]
+    result = {**answer, "status": edit_planner.outcome(wanted, planned_keys, problems), "planned": planned_keys,
+              "problems": problems, "warnings": warnings, "document_hash": document_hash}
+    if confirmed_apply and result["status"] != edit_planner.BLOCKED:
+        result["applied"] = _apply_edit_document(project_id, script)
+    return result
+
+
+def _edit_document_answers(
+    project_id: int, project: dict[str, Any], document: dict[str, Any], wanted: list[str], *, motion_policy: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
+    """({scene_key: edit}, {scene_key: why not}, warnings): one model call for the wanted scenes, each answer normalised
+    as the legacy Edit Plan normalises it and matched to its scene by segment_id. Raises LlmError when the call fails."""
+    scenes_by_key = {item["scene_key"]: item for item in document["scenes"]}
+    rows = {int(item["id"]): item for item in database.list_project_timeline(
+        project_id, script_id=int(document["provenance"]["script_id"]))}
+    # The row as the planner sees it: the length the EditDocument's voice gives the scene, and its speech timing.
+    planned_rows: dict[int, dict[str, Any]] = {}
+    for key in wanted:
+        scene = scenes_by_key[key]
+        segment = dict(rows[int(scene["segment_id"])])
+        seconds = float(scene["voice"]["duration_seconds"])
+        timing = dict(scene_speech_timing(segment))
+        timing["duration_seconds"] = seconds
+        segment.update(duration_seconds=seconds, _speech_timing=timing)
+        planned_rows[int(scene["segment_id"])] = segment
+    timeline = list(planned_rows.values())
+    source_video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    source_analysis = (database.get_video_analysis(
+        str(project.get("youtube_video_id") or ""), analysis_type="reference") or {}).get("result", {})
+    render_settings = database.get_project_render_settings(project_id) or {}
+    workflow_key = _workflow_for_edit_plan(project, timeline)
+    lines = _edit_plan_input_lines(project, source_video, source_analysis, render_settings, [], workflow_key)
+    for segment in timeline:
+        lines.append(
+            f"[segment_id={segment['id']}] ({segment['duration_seconds']}s, asset_type: {segment.get('asset_type') or 'chua ro'}, "
+            f"loai hinh: {segment.get('visual_kind') or 'chua ro'}) Loi thoai: {str(segment.get('voice_text') or '')} || "
+            f"Hinh: {str(segment.get('visual_prompt') or '')[:220]}")
+        timing = segment["_speech_timing"]
+        lines.append(f"TIMING BASIS: {timing.get('timing_basis', 'estimated')}")
+        if timing.get("words"):
+            lines.append("WORD TIMING: " + json.dumps(timing["words"], ensure_ascii=False))
+    lines.append("TRA LOI: moi canh mot muc, ghi dung segment_id nhu tren; khong them, khong bo canh nao.")
+    system_prompt = _edit_plan_workflow_instructions(workflow_key, motion_policy)
+    result = _call_orchestrator_json(system_prompt, "\n".join(lines), _EDIT_DOCUMENT_PLAN_SCHEMA,
+                                     stage="storyboard", project_id=project_id, step="Kế hoạch dựng (EditDocument)")
+    as_index = lambda items: [{**item, "segment_index": item.get("segment_id")} for item in items if isinstance(item, dict)]  # noqa: E731
+    flat_rows = [{**segment, "segment_index": segment["id"]} for segment in timeline]
+    if plan_is_flat(as_index(result.get("scenes") or []), flat_rows):
+        retried = _call_orchestrator_json(system_prompt, "\n".join(lines) + _ASK_FOR_AN_EDIT, _EDIT_DOCUMENT_PLAN_SCHEMA,
+                                          stage="storyboard", project_id=project_id,
+                                          step="Kế hoạch dựng EditDocument (hỏi lại vì không có nhịp)")
+        if not plan_is_flat(as_index(retried.get("scenes") or []), flat_rows):
+            result = retried
+    answers: dict[int, dict[str, Any]] = {}
+    for entry in result.get("scenes") or []:
+        try:
+            segment_id = int(entry.get("segment_id")) if isinstance(entry, dict) else None
+        except (TypeError, ValueError):
+            segment_id = None
+        if segment_id in planned_rows and segment_id not in answers:
+            answers[segment_id] = entry
+    text_check = _overlay_text_check(project_id, project)
+    measured: list[dict[str, Any]] | None = None
+    edits: dict[str, dict[str, Any]] = {}
+    problems: dict[str, str] = {}
+    warnings: list[dict[str, Any]] = []
+    for key in wanted:
+        segment_id = int(scenes_by_key[key]["segment_id"])
+        segment, entry = planned_rows[segment_id], answers.get(segment_id)
+        if entry is None:
+            problems[key] = "AI không trả kế hoạch cho cảnh này"
+            continue
+        if (workflow_key == "reup" or str(segment.get("asset_type") or "") == "source_clip") \
+                and str(entry.get("visual_strategy") or "").strip() not in _VISUAL_STRATEGIES:
+            entry = {**_fallback_scene_transform(segment, workflow_key, motion_policy), **entry}
+        kind = str(entry.get("kind") or "image")
+        if motion_policy == "gif_only" and kind == "video":
+            kind = "gif"
+        try:
+            transform = _normalise_visual_transform_fields(entry, segment)
+            beats = _scene_plan_to_edit_beats(segment, {"direction": transform.get("direction") or {}})
+        except ValueError as exc:
+            problems[key] = f"Kế hoạch cảnh không hợp lệ: {exc}"
+            continue
+        overlays, rejected = edit_planner.overlays_through(transform.get("overlays") or [], text_check)
+        if rejected:
+            warnings.append({"scene_key": key, "segment_id": segment_id, "overlays_rejected": rejected})
+        transform["overlays"] = overlays
+        from .sound_effects import resolve_sound_assets
+        try:
+            sound_cues = resolve_sound_assets(database, project_id, transform.get("sound_cues") or [],
+                                              float(segment["duration_seconds"]),
+                                              ensure_project_layout(PRODUCTION_ARTIFACT_DIR, project_id)["audio"] / "sfx")
+        except ValueError as exc:
+            sound_cues = []
+            warnings.append({"scene_key": key, "segment_id": segment_id, "sound_cues_dropped": str(exc)[:300]})
+        uses_source = str(transform.get("visual_strategy") or "") in {"source_clip_short", "source_freeze_frame"}
+        if (workflow_key == "reup" or uses_source) and measured is None:
+            measured = _measured_source_marks(project)
+        cleanups = ((measured or []) if (workflow_key == "reup" or uses_source) else []) or [
+            item for item in (entry.get("cleanups") or []) if isinstance(item, dict)]
+        edits[key] = edit_planner.scene_edit(
+            kind=kind, fps=int(entry.get("fps") or 0) if kind in {"gif", "video"} else 0,
+            reason=str(entry.get("reason") or ""), transform=transform,
+            transition=str(entry.get("transition") or "fade"), effect=str(entry.get("effect") or "zoom_in"),
+            note=str(entry.get("note") or ""), trim_head=float(entry.get("trim_head_seconds") or 0),
+            trim_tail=float(entry.get("trim_tail_seconds") or 0), cleanups=cleanups, sound_cues=sound_cues, beats=beats)
+    return edits, problems, warnings
+
+
+def _edit_document_planned(project_id: int, script_id: int) -> bool:
+    """Whether the script's EditDocument, current for its latest storyboard, leaves no scene with a row to plan (T5)."""
+    row = database.get_latest_project_storyboard(project_id, script_id=script_id)
+    if not row:
+        return False
+    try:
+        found = edit_store.current(database, project_id, script_id, row)
+        return found["state"] == edit_store.CURRENT and not edit_planner.select(found["document"])[0]
+    except (edit_store.EditStoreError, edit_planner.PlannerError):
+        return False
+
+
+def _measured_source_marks(project: dict[str, Any]) -> list[dict[str, Any]]:
+    """The source's own marks (logo, burned-in subtitles) measured on its picture, as the legacy Edit Plan measures them."""
+    video = database.get_video(str(project.get("youtube_video_id") or "")) or {}
+    media = Path(str(video.get("local_media_path") or ""))
+    if not media.is_file():
+        return []
+    try:
+        return detect_burned_in_marks(media, ffmpeg_binary=FFMPEG_BINARY)
+    except (MarkDetectionError, OSError, ValueError):
+        return []
+
+
+def _overlay_text_check(project_id: int, project: dict[str, Any]):
+    """The script's own text checks (script_engine.text_errors), for an overlay's words (decision 2)."""
+    plan_row = _current_project_plan(project_id)
+    video_id = _project_source_video_id(project)
+    analysis = database.get_video_analysis(video_id, analysis_type="reference") if video_id else None
+    try:
+        plan_row = script_engine.ready_plan(plan_row)
+    except script_engine.ScriptError:
+        return lambda lines: ["Kế hoạch chưa sẵn sàng: không kiểm được chữ trên màn hình"]
+    context = script_engine._inputs(database, plan_row, analysis or {}, video_id or "")
+
+    def check(lines: list[dict[str, Any]]) -> list[str]:
+        return script_engine.text_errors(lines, plan=context["plan"], insight=context["insight"], analysis=analysis or {},
+                                         allowed_numbers=context["allowed"], label="chữ trên màn hình")
+    return check
 
 
 @app.post("/api/projects/{project_id}/edit-plan")

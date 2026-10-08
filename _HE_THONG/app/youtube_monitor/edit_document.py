@@ -414,26 +414,51 @@ def plan_scene(document: dict[str, Any], storyboard: dict[str, Any], scene_key: 
     previous one - so going back to an earlier edit is a new version, never a
     copy of one already in the history.
     """
+    planned, problems = plan_scenes(document, storyboard, {scene_key: value})
+    if problems:
+        raise EditDocumentError(problems[scene_key])
+    return planned
+
+
+def plan_scenes(document: dict[str, Any], storyboard: dict[str, Any],
+                edits: dict[str, dict[str, Any] | None]) -> tuple[dict[str, Any], dict[str, str]]:
+    """(the document with every scene of `edits` that can take its edit made for it, why each other one could not).
+
+    Bước 5.3 · T5: a planner's edits for several scenes become one version,
+    based on `document`. Each scene is made exactly as plan_scene() makes one
+    (scene_key → edit, None keeps the edit as it plays now); a scene that
+    cannot take its edit is left as it was and named, the others still made.
+    When none can, `document` itself comes back, unchanged.
+    """
     if storyboard.get("document_hash") != document["provenance"]["storyboard_hash"]:
         raise EditDocumentError("EditDocument không thuộc storyboard này")
-    position = next((n for n, item in enumerate(document["scenes"]) if item["scene_key"] == scene_key), None)
-    if position is None:
-        raise EditDocumentError(f"Không có cảnh {scene_key} trong EditDocument")
-    current = next(scene for scene in scenes(storyboard) if scene["scene_key"] == scene_key)
-    item = document["scenes"][position]
-    if value is None:
-        if (item.get("timing") or {}).get("state") == TIMING_STALE:
-            raise EditDocumentError("Thời gian lớp dựng không theo được giọng mới: cần lập lại lớp dựng cho cảnh này")
-        value = effective_edit(item)
-    value = normalize_edit(value)
-    problems = timing_errors(value, float(item["voice"]["duration_seconds"]))
-    if problems:
-        raise EditDocumentError(f"Lớp dựng không vừa cảnh: {problems[0]}")
-    basis = _basis(current, item["voice"], document["provenance"]["storyboard_hash"], value)
+    positions = {item["scene_key"]: n for n, item in enumerate(document["scenes"])}
+    current = {scene["scene_key"]: scene for scene in scenes(storyboard)}
     updated = _copy(document)
+    problems: dict[str, str] = {}
+    for scene_key, value in edits.items():
+        position = positions.get(scene_key)
+        if position is None or scene_key not in current:
+            problems[scene_key] = f"Không có cảnh {scene_key} trong EditDocument"
+            continue
+        item = document["scenes"][position]
+        if value is None:
+            if (item.get("timing") or {}).get("state") == TIMING_STALE:
+                problems[scene_key] = "Thời gian lớp dựng không theo được giọng mới: cần lập lại lớp dựng cho cảnh này"
+                continue
+            value = effective_edit(item)
+        value = normalize_edit(value)
+        errors = timing_errors(value, float(item["voice"]["duration_seconds"]))
+        if errors:
+            problems[scene_key] = f"Lớp dựng không vừa cảnh: {errors[0]}"
+            continue
+        basis = _basis(current[scene_key], item["voice"], document["provenance"]["storyboard_hash"], value)
+        updated["scenes"][position] = _scene(current[scene_key], value, basis, item["voice"], item["lineage"],
+                                             item.get("segment_id"), False)
+    if len(problems) == len(edits):
+        return document, problems
     updated["based_on"] = document.get("document_hash")
-    updated["scenes"][position] = _scene(current, value, basis, item["voice"], item["lineage"], item.get("segment_id"), False)
-    return _finish(updated)
+    return _finish(updated), problems
 
 
 # ---------------------------------------------------------------------------

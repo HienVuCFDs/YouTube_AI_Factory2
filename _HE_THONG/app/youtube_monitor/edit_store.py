@@ -331,6 +331,28 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
             **stored}
 
 
+def plan_scenes(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any],
+                edits: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """Bước 5.3 · T5: several scenes' edits made for them on the current document, kept as ONE next version.
+
+    {"created": bool, "problems": {scene_key: why}, "document", "document_hash", ...}. Scenes that cannot take
+    their edit are named and left as they were; when none can, nothing is kept (`created` False).
+    """
+    found = current(database, project_id, script_id, storyboard_row)
+    if found["state"] != CURRENT:
+        raise EditStoreError("Chưa có EditDocument của storyboard hiện hành: hãy đồng bộ trước khi lập lớp dựng")
+    try:
+        document, problems = edit_document.plan_scenes(found["document"], found["storyboard"], edits)
+    except edit_document.EditDocumentError as exc:
+        raise EditStoreError(str(exc), status_code=422) from exc
+    if document is found["document"]:
+        return {"state": CURRENT, "created": False, "problems": problems, "document": document,
+                "document_hash": found["document_hash"], "artifact_id": found["artifact_id"]}
+    stored = save(database, project_id, script_id, document, storyboard_row=storyboard_row,
+                  expected_parent=found["document_hash"])
+    return {"state": CURRENT, "problems": problems, "document": document, **stored}
+
+
 def plan_scene(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], scene_key: str,
                value: dict[str, Any] | None = None) -> dict[str, Any]:
     """One scene's edit made for it (edit_document.plan_scene) on the current document, kept as the next version."""
