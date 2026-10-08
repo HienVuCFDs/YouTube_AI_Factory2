@@ -1,10 +1,10 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 hoàn thành, T3 hoàn thành)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 hoàn thành)
 
 Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
 
 > **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
-> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành, đã review và commit** (mục 9c), việc tiếp theo (mục 11).
+> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), việc tiếp theo (mục 11).
 
 ---
 
@@ -26,8 +26,9 @@ Quy trình từ trước tới nay:
 - **T2 (lưu trữ EditDocument) đã hoàn thành** (mục 9b). Người dùng đã chốt:
   - storage là `project_director_artifacts`, `kind="edit_document"`;
   - bootstrap theo cách (b): lớp dựng cũ thành orphan `legacy`.
-- **T3 (Apply EditDocument → timeline) hoàn thành**: đã qua final review, đã commit và push lên `claude/dreamy-gates-4qehd3` (mục 9c). Người dùng đã chốt H1–H6, B1–B4. **Chưa có caller** (H4): T3 chưa được nối vào luồng sản xuất.
-- Việc kế tiếp: T4 (mục 11).
+- **T3 (Apply EditDocument → timeline) hoàn thành** (mục 9c). Người dùng đã chốt H1–H6, B1–B4.
+- **T4 (tích hợp) hoàn thành** (mục 9d): `_sync_storyboard` → `_apply_edit_document` → `edit_store.sync()` → `edit_apply.apply_scenes()` là đường ghi EditDocument → timeline trong luồng sản xuất; reconcile không chép, không `_retime` phần EditDocument sở hữu. Chỉ chạy cho project **đã có** EditDocument; T5/T6 mới tạo edit đầu tiên.
+- Việc kế tiếp: T5 (mục 11).
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -64,7 +65,7 @@ Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -90,13 +91,14 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  mới  _HE_THONG/app/youtube_monitor/storyboard_engine.py   (5.1, T0.5)
  mới  _HE_THONG/app/youtube_monitor/storyboard_reconcile.py (5.2, T0.5, T1)
  mới  _HE_THONG/app/youtube_monitor/edit_document.py      (T1)
- mới  _HE_THONG/app/youtube_monitor/edit_store.py         (T2; chưa có caller/route – đúng phạm vi)
+ mới  _HE_THONG/app/youtube_monitor/edit_store.py         (T2; caller từ T4: main._apply_edit_document)
  mới  _HE_THONG/app/tests/test_storyboard_engine.py       (34 test)
  mới  _HE_THONG/app/tests/test_storyboard_gate.py         (47 test)
  mới  _HE_THONG/app/tests/test_storyboard_lineage.py      (28 test)
  mới  _HE_THONG/app/tests/test_edit_document.py           (25 test)
  (T2, commit ec62257) _HE_THONG/app/tests/test_edit_store.py (20 test)
- (T3, commit T3)      _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
+ (T3, commit 1225aef) _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
+ (T4, commit T4)      _HE_THONG/app/tests/test_edit_integration.py (18 test); sửa main.py, database.py, edit_store.py, edit_document.py; test_edit_apply.py / test_edit_store.py (cô lập test, mục 9d)
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
@@ -190,7 +192,7 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
 **Thứ tự task:**
 
 ```text
-T0 ✅ → T0.5 ✅ → T1 ✅ (chờ duyệt) → T2 Lưu trữ ✅ → T3 Apply ✅ → T4 Nối reconcile (F1)
+T0 ✅ → T0.5 ✅ → T1 ✅ (chờ duyệt) → T2 Lưu trữ ✅ → T3 Apply ✅ → T4 Nối reconcile ✅ (F1)
 → T5 Planner theo storyboard → T6 Adapter sửa tay / AI từng cảnh → T7 Gate → T8 F5/F6/F8 → T9 Nghiệm thu
 ```
 
@@ -262,6 +264,7 @@ Sửa 3 dòng cùng lúc: 30,8% → 4,5%. Xoá dòng / chèn dòng: → 0%. Mọ
 | Hình / layers / beats / retime / stale | `apply_storyboard_reconcile` chép theo cơ chế + `Database._retime` (lớp tạm T0.5) | EditDocument (T1) → `apply_scenes` (T3); reconcile thôi chép cột edit (T4) |
 
 - **Ràng buộc T3/T4:** không được có giai đoạn mà cả reconcile (chép cột edit + `_retime`) **và** `apply_scenes` cùng ghi cột edit. T4 phải gỡ hai thứ đó trong cùng thay đổi nối `apply_scenes` vào sau reconcile.
+  - **Đã thực hiện ở T4 (mục 9d), theo ownership chứ không gỡ toàn bộ:** reconcile thôi chép và thôi `_retime` các cột/beats mà EditDocument đã áp (`edit_apply`). Với hàng chưa từng được áp (legacy) reconcile vẫn chép và retime như cũ - đó là lớp legacy, không phải edit của EditDocument. Không có hàng nào mà cả hai cùng ghi cột edit đã sở hữu.
 
 ---
 
@@ -338,7 +341,7 @@ Sửa 3 dòng cùng lúc: 30,8% → 4,5%. Xoá dòng / chèn dòng: → 0%. Mọ
 Thêm: `[X, Y, X]` với chèn / xoá / dời không tráo edit; validator bắt 8 kiểu sai; cùng đầu vào cho ra cùng document, giống đến từng byte.
 
 **Điều cần biết cho các bước sau (không phải lỗi):**
-- Phép retime đang có ở hai nơi: `edit_document.retimed` (bản chuẩn) và `Database._retime` (lớp tạm T0.5, gỡ ở T4).
+- Phép retime đang có ở hai nơi: `edit_document.retimed` (bản chuẩn) và `Database._retime` (lớp tạm T0.5). Từ T4, `Database._retime` chỉ còn chạy trên nội dung legacy (hàng chưa được EditDocument áp); edit đã áp chỉ được retime qua `effective_edit`.
 - Orphan được giữ lại qua mọi lần build; cách dọn bớt là việc của T2/T6.
 - Cảnh trùng y hệt không quyết định được: lineage chọn theo quy tắc cố định, không đánh dấu "ambiguous" (edit vẫn khớp từng chữ).
 - `origin` (ai/manual) và `applied.layer_hash` trong thiết kế chưa có trong T1. Đúng phạm vi: T3/T6 mới cần.
@@ -378,7 +381,7 @@ Code T2 ban đầu nằm trong `30ca9e1`. Commit T2 bổ sung:
 - `sync` (`bootstrap` · `follow` · `carried_over` · `unchanged`);
 - `plan_scene`.
 
-Chưa có caller, route hay MCP nào gọi `edit_store`. Đây là đúng phạm vi T2.
+Lúc T2 chưa có caller nào gọi `edit_store` (đúng phạm vi T2). Từ T4, `main._apply_edit_document` gọi `sync()` (mục 9d).
 
 ### Test (`tests/test_edit_store.py`, 20 test)
 
@@ -421,12 +424,12 @@ Chưa có caller, route hay MCP nào gọi `edit_store`. Đây là đúng phạm
    - Không tra theo `candidate`: đó là `scene_key` của storyboard lúc bootstrap, không được nối lại khi storyboard đổi.
 2. **T3/T7 — layer ghi sau bootstrap thì EditDocument không thấy.** Bốn đường ghi của Edit Plan cũ (mục 5) vẫn ghi thẳng xuống timeline. Từ bản thứ hai, `build()` không đọc lại timeline (T1 cố ý cấm `legacy` khi đã có `previous`). T3 phải so hàng timeline với thứ document đang sở hữu trước khi ghi. T7 phải chặn các đường ghi đó.
 3. **T6 — orphan không có cơ chế dọn.** Bootstrap sinh nhiều orphan, vì hàng do storyboard sinh ra thường đã có `visual_prompt` (liên quan F8). Cờ `unverified` ở cấp cảnh chỉ có ở bản bootstrap; sau đó chỉ còn trong danh sách orphan.
-4. **T3/T6 — `sync()` tự ghi khi được gọi** nhưng chưa có caller. Ai gọi và gọi lúc nào phải được định nghĩa ở T3/T6.
+4. **T3/T6 — `sync()` tự ghi khi được gọi.** Từ T4 caller là `_apply_edit_document`, sau mỗi `_sync_storyboard` của project đã có EditDocument (mục 9d); T6 sẽ thêm caller cho sửa tay / AI.
 5. **Chống race chỉ trong SQLite.** `BEGIN IMMEDIATE` chặn được nhiều tiến trình cùng DB. Phần sửa `_held` (trường hợp `fits` đổi mà audio không đổi) chưa có test riêng.
 
 ---
 
-## 9c. T3 — Apply EditDocument → timeline (HOÀN THÀNH 08/10: đã sửa B1–B4, qua final review, đã commit — chưa có caller)
+## 9c. T3 — Apply EditDocument → timeline (HOÀN THÀNH 08/10: đã sửa B1–B4, qua final review, đã commit; caller nối ở T4, mục 9d)
 
 ### Quyết định người dùng đã chốt (audit T3, H1–H6)
 
@@ -455,7 +458,7 @@ Lần review trước commit đã chạy probe và chứng minh 3 lỗi thật, 
 | File | Nội dung |
 |---|---|
 | `youtube_monitor/database.py` (+232 dòng, chỉ thêm) | `EDIT_APPLY_KIND`, `EDIT_OWNED_COLUMNS`, `EDIT_BEAT_COLUMNS`, `StoredEditApplyError`, `_schema_problem` (kiểm theo schema thật). `save_director_artifact` / `get_director_artifact` từ chối `kind="edit_apply"`. Thêm `list_edit_applies` và `apply_edit_document_rows` (mô tả bên dưới) |
-| `youtube_monitor/edit_apply.py` (mới) | `state_hash`, `row_writes` (H2/H5), `plan` (H3, legacy theo `segment_id`), `apply_scenes` (bắt buộc document `CURRENT` và theo kịp timeline/giọng hiện tại). Không module nào import nó (H4) |
+| `youtube_monitor/edit_apply.py` (mới) | `state_hash`, `row_writes` (H2/H5), `plan` (H3, legacy theo `segment_id`), `apply_scenes` (bắt buộc document `CURRENT` và theo kịp timeline/giọng hiện tại). Lúc T3 không module nào import nó (H4); từ T4 `main._apply_edit_document` gọi `apply_scenes` |
 | `tests/test_edit_apply.py` (mới) | 46 test: 10 nhóm ban đầu + B1 (6) + B2 (7) + B3 (6) + B4 (1) |
 
 **Transaction** (`Database.apply_edit_document_rows`): `BEGIN IMMEDIATE`, sau đó với từng hàng:
@@ -545,11 +548,11 @@ Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(
 
 ### Giới hạn đã biết, chuyển sang task sau
 
-1. **T4:**
+1. **T4 (đã xử lý ở mục 9d):**
    - Hàng mang sang kịch bản mới (reconcile chép hình) luôn là `conflict` (`expected_from: default`), vì chưa có lượt áp nào và chưa có orphan nào cho `segment_id` mới. Cố ý an toàn.
    - Tương tự, reconcile tại chỗ `_retime` layer → hàng lệch `state_hash` → `conflict`.
    - T4 phải nối `apply_scenes` vào sau reconcile, đồng thời gỡ việc chép cột edit và `_retime`.
-2. **T4/T6:** chưa có caller. `apply_scenes` chỉ được test gọi.
+2. **T4/T6:** ~~chưa có caller~~ — T4 đã nối caller (mục 9d). T6 vẫn phải nối sửa tay / AI từng cảnh vào EditDocument.
 3. **H5:** T3 không gọi `resync_timeline_segment_states`, nên cột `status` có thể chưa phản ánh hình mới cho tới lần resync kế tiếp (reconcile, job…). Caller ở T4/T6 cần quyết định có gọi hay không.
 4. **T6:**
    - Khi EditDocument sở hữu hình (H2), mọi cột visual không có trong edit (kể cả `visual_prompt`, `source_start_seconds`) trở về default.
@@ -559,11 +562,119 @@ Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(
    - `state_hash` đọc theo `edit_store.timeline_edit`: `asset_type` chỉ được tính khi hàng có `visual_path`. Đổi riêng `asset_type` trên hàng không có hình thì không bị phát hiện.
    - Bốn đường Edit Plan cũ vẫn ghi được timeline. T3 chỉ **phát hiện** (conflict), không chặn.
    - Job cấp cảnh (không có `edit_beat_id`) ở trạng thái `error`/`cancelled` vẫn retry được và ghi đè `visual_path` của cảnh. Đây là hành vi cũ, không do T3 gây ra; T3 chỉ chặn job **chưa xong** (`scene_job_running`), và lần áp sau sẽ phát hiện thành conflict.
-7. **T4 (caller) / T7 (gate):**
+7. **T4 (caller) / T7 (gate)** — T4 đã xử lý phần caller, xem mục 9d; khoảng hở còn lại ghi ở đó:
    - Kiểm `CURRENT` và "theo kịp" (`_fresh`) chạy **trước** transaction; cột giọng không nằm trong `state_hash`, nên một reconcile chen vào giữa không bị phát hiện.
    - `storyboard_row` do caller truyền không được kiểm là storyboard mới nhất (giống T2 `sync()`).
-   - Chưa có caller nên chưa xảy ra được; caller ở T4 phải giữ hai điều kiện này.
+   - T4 đã thêm caller: điều kiện storyboard hiện hành được caller kiểm; khoảng hở thời điểm của `_fresh` còn lại, ghi ở mục 9d.
 6. **T6:** dọn orphan.
+
+---
+
+## 9d. T4 — Tích hợp EditDocument vào luồng sản xuất (HOÀN THÀNH 08/10)
+
+T3 không đổi (H1–H6, B1–B4 giữ nguyên). T4 làm đúng checklist 11a.
+
+### Audit (code thực tế)
+
+- **Mọi cửa vào** cảnh của dự án luồng Kế hoạch đều đi qua `main._sync_storyboard`: `/shots/generate`, `/timeline/generate` (`_storyboard_timeline`), `run_step("shots")`, `run_step("timeline")` (kể cả nhánh agent gửi `segments`), `/scripts/import`. MCP và UI gọi các route này. Không có worker nào gọi reconcile.
+- Reconcile (`Database.apply_storyboard_reconcile`, một transaction riêng) **chép mọi cột không thuộc danh tính/giọng** sang hàng mới khi mang sang kịch bản mới, chép beats, và `_retime` / `_retime_beats` overlays, sound cues, beats khi một hàng mất giọng (tại chỗ hoặc mang sang).
+- `edit_store.sync()` (T2) và `apply_edit_document_rows()` (T3) mỗi hàm một transaction riêng; trước T4 không có caller.
+- Đường ghi edit khác trong **cùng luồng**: nhánh agent của `_step_timeline` ghi `visual_prompt` / `asset_type` ngay sau reconcile. Các đường Edit Plan cũ (mục 5) là luồng khác (T7).
+- **Lệch với mục 8 / 11a:** mục 8 nói "gỡ" việc reconcile chép cột edit và `_retime`. Gỡ toàn bộ sẽ làm mất hình legacy khi mang sang kịch bản mới và làm render dừng vì overlay legacy vượt độ dài cảnh (lý do T0.5 thêm `_retime`). T4 gỡ **theo ownership** (dưới đây), đúng với yêu cầu T4: reconcile không chép hay `_retime` cột thuộc EditDocument, dữ liệu legacy giữ ở lớp legacy.
+
+### Quyết định kiến trúc
+
+1. **Transaction: A — các transaction riêng, chạy tuần tự** `reconcile → edit_store.sync() → apply_scenes()`. **Không atomic.**
+   - Thay đổi chen giữa được phát hiện thế nào:
+     - `apply_scenes` kiểm lại `CURRENT` và `_fresh` (segment + giọng) ngay khi bắt đầu, rồi trong transaction của nó kiểm expected-state từng hàng;
+     - mọi thay đổi cột sở hữu hoặc beats của một hàng (bất kể ai ghi) → `conflict`, không ghi.
+   - Khoảng hở còn lại:
+     - (a) giọng đổi giữa lúc `_fresh` kiểm và lúc `BEGIN IMMEDIATE` (cột giọng không nằm trong `state_hash`) → edit được ghi theo độ dài giọng cũ;
+     - (b) một hàng **mà reconcile vừa ghi nội dung legacy** bị đường khác ghi chen giữa reconcile và `sync()` → nội dung đó được ghi nhận là legacy.
+   - Reconcile đã commit thì không rollback theo `sync()` / `apply`. Lỗi hệ thống trong apply rollback **riêng lượt apply** rồi ném lên (route trả 500).
+   - Phương án B (dùng chung một connection) cần đổi chữ ký 3 hàm ở 3 task đã duyệt; không chọn.
+2. **Ownership:** một hàng do EditDocument sở hữu ⇔ có bản ghi `edit_apply` cho hàng đó (lượt mới nhất).
+   - Cột sở hữu = `columns_written`; beats sở hữu ⇔ `beats_written` khác `null`.
+   - Bản ghi cũ không có các khoá này → coi là sở hữu toàn bộ.
+   - Hàm: `Database._edit_owned` / `edit_owned_rows`.
+3. **Một đường ghi:** EditDocument → `apply_scenes()` → timeline là đường duy nhất ghi edit **đã sở hữu**. Reconcile chỉ ghi phần legacy. Agent `segments` chỉ ghi hàng chưa sở hữu.
+
+### Thay đổi
+
+| File | Nội dung |
+|---|---|
+| `main.py` | `_apply_edit_document(project_id, script, *, refresh)` = caller sản xuất duy nhất. Gọi ở cuối `_sync_storyboard` (cả nhánh không reconcile lẫn nhánh có reconcile; không chạy khi reconcile trả `stale`). `_storyboard_timeline` trả thêm `edit_document`. Nhánh agent của `_step_timeline`: reconcile với `apply_edits=False`, bỏ qua hàng đã sở hữu (`edit_owned_rows_kept`), rồi mới apply |
+| `database.py` | `_edit_owned` / `edit_owned_rows`. `apply_storyboard_reconcile`: tại chỗ, hàng sở hữu **không** `_retime` (cả layer lẫn beats); mang sang, **không chép** cột sở hữu và beats sở hữu, chỉ retime phần legacy. Bản ghi reconcile có thêm `touched_segments` (hàng reconcile vừa ghi nội dung legacy) và `edit_owned` từng cảnh |
+| `edit_store.py` | `sync(..., refresh=)`: với hàng trong `refresh`, ghi nhận nội dung hiện có thành orphan `legacy` của chính hàng đó (để apply biết, không phải conflict). Có `refresh` thì luôn lưu phiên bản mới |
+| `edit_document.py` | `build(..., refreshed=)`: thêm orphan `legacy` cho các hàng đó, **không** đụng edit, basis, lineage của cảnh; được phép khi đã có document trước (khác `legacy`). Không đổi luật nào của T1 |
+
+**`_apply_edit_document`** — chỉ chạy khi project đã có EditDocument (`no_document` nếu chưa; project cũ giữ nguyên, không tạo document). Thứ tự:
+1. Storyboard phải là bản `current` của Storyboard Gate, của đúng script này, và là storyboard mới nhất của script → nếu không: `not_current`, không ghi.
+2. `edit_store.sync(refresh)`.
+3. `apply_scenes()`.
+4. Có hàng được áp → `resync_timeline_segment_states`.
+
+Trạng thái trả về:
+- `applied` / `unchanged` / `nothing_to_apply`: không có cảnh nào cần người xử lý.
+- `partial` (có cảnh ghi được) / `blocked` (không cảnh nào ghi được): khi có conflict hoặc skip cần xử lý (`invalid_edit`, `beat_has_jobs`, `scene_job_running`, `unknown_asset`, `missing_row`). **Không bao giờ báo thành công.**
+- `not_current` / `error` (`EditStoreError`, document hỏng) / `no_document`.
+- Kèm `counts` và danh sách từng cảnh.
+
+### Test
+
+- **`tests/test_edit_integration.py` (mới, 18 test):**
+  - caller của `timeline/generate`, `shots/generate`, `run_step`;
+  - project không có document thì giữ nguyên;
+  - idempotent (không phiên bản hay bản ghi mới);
+  - storyboard không `current` / script cũ → `not_current`;
+  - document hỏng → `error`;
+  - cảnh sở hữu bị đổi lời → không retime, không ghi, skip `stale`;
+  - cảnh legacy đổi lời → retime như cũ **và** được ghi nhận, sau đó lập và áp được;
+  - mang sang kịch bản mới: hình sở hữu do apply ghi, hình legacy được chép, không conflict; cột và beats sở hữu không bị chép;
+  - `partial` / `blocked`; `invalid_edit` → `partial`;
+  - lỗi hệ thống → rollback lượt apply và ném lên;
+  - agent không ghi hàng sở hữu;
+  - một luồng ghi hàng sở hữu đúng một lần, không có writer legacy.
+- **Đổi test cũ (cô lập, không nới guard):**
+  - `test_edit_store.py::…carries_the_edit_over…` và `test_edit_apply.py::…carried_over_row_is_never_wiped…`: tắt caller T4 đúng tại bước revision, để tiếp tục kiểm thư viện T2/T3 khi đứng riêng (giả định "chưa có caller"). Hành vi tích hợp được test ở file mới.
+  - `test_edit_apply.py::_ApplyCase`: chặn worker tạo cảnh nền (nó quét job `queued` mỗi 2 giây) nhặt job do test tạo. Đã tái hiện bằng probe 3 giây trễ: worker chạy job `dry_run` lỗi làm đổi beat, test nhận conflict thay vì `beat_has_jobs`. Đây là lỗi cô lập của test T3 bộc lộ khi máy tải nặng; guard T3 không đổi.
+- **Mutation: 13/13 đột biến T4 bị bắt:**
+  - reconcile chép cột sở hữu;
+  - retime hàng sở hữu tại chỗ;
+  - chép beats sở hữu;
+  - không ghi nhận hàng mang sang;
+  - không ghi nhận hàng retime;
+  - `sync` bỏ `refresh`;
+  - engine bỏ `refreshed`;
+  - caller chạy cả khi không có document (54 test đỏ);
+  - caller bỏ gate;
+  - agent ghi hàng sở hữu;
+  - `partial` báo thành công;
+  - không đếm conflict;
+  - không gọi caller sau reconcile.
+- **Kết quả (08/10, Linux, DB tạm):**
+  - T4: 18/18;
+  - Bước 5 (T1–T4 + storyboard): **218/218**;
+  - full suite **2310 đạt · 11 đỏ · 13 bỏ qua**, 11 đỏ giống hệt trước T3/T4 (2 cũ + 9 môi trường) → **không regression**.
+  - Một lần chạy full suite song song với smoke test có thêm 1 đỏ (race worker nói trên); đã sửa và chạy lại sạch.
+- **Smoke test app thật** (uvicorn cổng 8787, DB tạm `scratchpad/smoke/smoke.db` — `/api/health` xác nhận; seed bằng model giả, không gọi API):
+  - `POST /api/projects/1/timeline/generate` lần 1 → `edit_document.status = applied` (1 áp, 9 `needs_plan`), hàng 1 nhận hình và overlay của EditDocument, 9 hàng khác giữ hình legacy;
+  - lần 2 → `unchanged`, không bản ghi mới;
+  - đã tắt app, không còn tiến trình uvicorn, cổng 8787 trống.
+  - Không chạy trên DB thật (không có trong môi trường cloud).
+
+### Rủi ro còn lại
+
+1. **Không atomic** (chiến lược A): khoảng hở (a), (b) ở trên.
+2. **Hàng sở hữu có cảnh stale sau khi đổi lời:**
+   - không retime, nên overlay cũ có thể vượt độ dài mới và render dừng với lỗi rõ ràng, cho tới khi cảnh được lập lại (T6) hoặc gate chặn render (T7);
+   - beats legacy trên hàng sở hữu cũng không được retime;
+   - mang sang kịch bản mới: hình sở hữu của cảnh stale **không** được chép, apply cũng bỏ qua cảnh stale, nên hàng mới chưa có hình cho tới khi lập lại.
+3. **Ghi nhận legacy (`refresh`)** chỉ áp cho hàng reconcile hay agent vừa ghi. Mọi đường khác ghi vào hàng đã biết (Edit Plan cũ, job, sửa tay) vẫn là conflict (T7 chặn).
+4. **Caller chỉ chạy qua `_sync_storyboard`:** job giọng (`production_worker`) đổi giọng mà không gọi sync/apply, nên document chưa theo kịp cho tới lần sync kế tiếp; apply sẽ từ chối (`_fresh`) nếu bị gọi lúc đó.
+5. **Bản ghi `edit_apply` hỏng** làm reconcile (đọc ownership) dừng với lỗi: chặt, không đọc thành "không sở hữu".
+6. **Chưa có gì tạo edit trong sản xuất:** `plan_scene` chưa có caller (T5 planner, T6 sửa tay / AI), nên ở dữ liệu thật, caller T4 hiện chỉ là no-op (`no_document`) hoặc chỉ áp `needs_plan`.
+7. Chưa chạy trên DB thật; số liệu Windows chưa đo lại.
 
 ---
 
@@ -582,13 +693,13 @@ Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(
 1. Người dùng cùng GPT **duyệt T1** (mục 9).
 2. ~~Chốt T2~~: **xong 08/10** (mục 9b). Nên chạy lại full suite trên Windows để xác nhận.
 3. ~~T3 — Apply~~: **xong 08/10** (mục 9c), đã commit và push. Nên chạy lại full suite trên Windows.
-4. **T4 — Nối reconcile:** gọi `edit_apply.apply_scenes` sau reconcile; trong **cùng thay đổi** gỡ việc reconcile chép cột edit và `Database._retime` / `_retime_beats`; xử lý hàng mang sang (mục 9c, giới hạn 1). **Bắt buộc theo checklist 11a.**
+4. ~~T4 — Nối reconcile~~: **xong 08/10** (mục 9d), theo checklist 11a.
 5. Sau đó lần lượt T5 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
 6. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 ### 11a. T4 — Integration checklist bắt buộc (đã thống nhất 08/10)
 
-Đây là **contract cho T4**, chưa triển khai. Nó không thay đổi contract T3 (H1–H6, B1–B4, mục 9c): T3 là thư viện apply độc lập và chưa có caller. Test T3 xanh **không** có nghĩa Bước 5 đã sẵn sàng cho sản xuất; T4 là nơi kiểm chứng caller thật.
+**Trạng thái: đã thực hiện ở T4, xem mục 9d** (cách giải quyết từng điểm và khoảng hở còn lại). Đây là **contract cho T4**. Nó không thay đổi contract T3 (H1–H6, B1–B4, mục 9c): T3 là thư viện apply độc lập và chưa có caller. Test T3 xanh **không** có nghĩa Bước 5 đã sẵn sàng cho sản xuất; T4 là nơi kiểm chứng caller thật.
 
 1. **CURRENT / freshness**
    - Kiểm tra `CURRENT` (`edit_store.current`) và `_fresh` (document theo kịp `segment_id` + giọng hiện tại) **đúng thời điểm**, ngay trước khi apply.
@@ -633,7 +744,7 @@ Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(
 
 ## 12. DB thật
 
-- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10 qua toàn bộ T0 → T1. Chưa đo lại sau khi có code T2. Code T2 chưa có caller nên không thể đã ghi DB, nhưng nên đo lại ở đầu phiên kế tiếp trên máy người dùng.
+- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10 qua toàn bộ T0 → T1. Chưa đo lại sau khi có code T2. Code T2–T4 chưa từng chạy trên DB thật (smoke test T4 dùng DB tạm), nhưng nên đo lại ở đầu phiên kế tiếp trên máy người dùng.
 - Ngày 06/10 lúc 13:33:44 có một tiến trình ngoài lượt làm việc (khả năng cao là app được bật bằng `.bat`, hoặc một agent khác) chạy migration 5.1. Kết quả: thêm bảng `project_storyboards` (0 dòng) cùng index; không gì khác đổi.
 - Người dùng đã chốt: **không điều tra thêm, không rollback, không sửa DB.**
 

@@ -321,7 +321,7 @@ def build(storyboard: dict[str, Any], *, voices: dict[str, dict[str, Any]] | Non
           previous: dict[str, Any] | None = None, previous_storyboard: dict[str, Any] | None = None,
           segments: dict[str, int] | None = None, links: dict[str, int] | None = None,
           legacy: dict[str, dict[str, Any]] | None = None, storyboard_id: int | None = None,
-          voice_fingerprint: str = "") -> dict[str, Any]:
+          voice_fingerprint: str = "", refreshed: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """The EditDocument of a storyboard: each scene's edit carried over from the previous document by lineage, and judged.
 
     voices     scene_key → the scene's voice now (voice_entry()); a scene
@@ -335,6 +335,12 @@ def build(storyboard: dict[str, Any], *, voices: dict[str, dict[str, Any]] | Non
     legacy     scene_key → {"segment_id", "edit"}: what the timeline already
                has, from before any EditDocument. No basis says what it was
                made for, so it is held for review, never adopted unseen.
+    refreshed  scene_key → {"segment_id", "edit"}: what a reconcile has just
+               written to a row that no EditDocument wrote (Bước 5.3 · T4) -
+               the legacy content it carried to a new row, or retimed on its
+               own. Kept as a legacy orphan of that row, so an apply knows what
+               the row holds; the scene's own edit, basis and lineage are not
+               touched. Allowed with a previous document, unlike `legacy`.
     """
     if not isinstance(storyboard, dict) or storyboard.get("status") != VALID or not storyboard.get("document_hash"):
         raise EditDocumentError("Storyboard chưa hợp lệ: chưa thể lập EditDocument")
@@ -386,6 +392,11 @@ def build(storyboard: dict[str, Any], *, voices: dict[str, dict[str, Any]] | Non
     for item in before.values():
         if item["scene_key"] not in claimed and item.get("basis"):
             orphans.append(_orphan(item, REMOVED, storyboard_hash=from_hash))
+    for scene in current:
+        held = (refreshed or {}).get(scene["scene_key"])
+        if held and not _is_empty(normalize_edit(held.get("edit"))):
+            orphans.append(_orphan({"scene_key": None, "segment_id": held.get("segment_id"), "edit": held.get("edit")},
+                                   LEGACY, storyboard_hash=None, candidate=scene["scene_key"]))
     document = {"kind": KIND, "engine_version": ENGINE_VERSION,
                 "provenance": _provenance(storyboard, now, storyboard_id=storyboard_id, voice_fingerprint=voice_fingerprint),
                 "based_on": (previous or {}).get("document_hash"), "scenes": out, "orphans": orphans}

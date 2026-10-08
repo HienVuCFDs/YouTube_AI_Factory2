@@ -343,7 +343,9 @@ class FollowTests(_StoreCase):
         lines[at] = lines[at].replace(" ", " mỗi ", 1).rsplit(" ", 1)[0] + "."
         main.run_project_step(project_id, "script", {"revision": {"base_script_id": old["id"],
                                                                   "fields": {"main_content": "\n".join(lines)}, "source": "test"}})
-        self.assertEqual(self.client.post(f"/api/projects/{project_id}/shots/generate", json={}).json()["status"], "saved")
+        # The library alone (T2): the production caller (T4) would already have synced the new script here.
+        with mock.patch.object(main, "_apply_edit_document", return_value={"status": "deferred"}):
+            self.assertEqual(self.client.post(f"/api/projects/{project_id}/shots/generate", json={}).json()["status"], "saved")
         new_id = int(self.database.get_latest_project_script(project_id)["id"])
         self.assertNotEqual(new_id, old_id)
         done = self._sync(project_id, new_id)

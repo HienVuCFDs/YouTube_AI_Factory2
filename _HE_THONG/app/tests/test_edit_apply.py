@@ -32,8 +32,16 @@ _NOT_OWNED = ("voice_text", "subtitle_text", "speaker", "audio_path", "subtitle_
 class _ApplyCase(_StoreCase):
     def setUp(self) -> None:
         super().setUp()
+        self._hold_scene_worker()
         self.project_id, self.script_id = self._project()
         self.bootstrap = self._sync(self.project_id, self.script_id)
+
+    def _hold_scene_worker(self) -> None:
+        """The app's scene worker runs for as long as the class's TestClient: idle, it takes queued jobs from the
+        database every 2 s. A job a test made to hold a beat must stay as the test left it, not be run (and fail)."""
+        idle = mock.patch.object(self.database, "list_queued_scene_generation_job_ids", return_value=[])
+        idle.start()
+        self.addCleanup(idle.stop)
 
     # --- helpers ---------------------------------------------------------------------
 
@@ -148,7 +156,10 @@ class NothingToApplyTests(_ApplyCase):
         lines[at] = lines[at].replace(" ", " mỗi ", 1).rsplit(" ", 1)[0] + "."
         main.run_project_step(self.project_id, "script", {"revision": {"base_script_id": old["id"],
                                                                        "fields": {"main_content": "\n".join(lines)}, "source": "t"}})
-        self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={})
+        # The library alone (T3): rows no EditDocument knows of. With the production caller (T4) the reconcile's
+        # carried rows are known and applied - tests/test_edit_integration.py.
+        with mock.patch.object(main, "_apply_edit_document", return_value={"status": "deferred"}):
+            self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={})
         self.script_id = int(self.database.get_latest_project_script(self.project_id)["id"])
         self.assertEqual(self._sync(self.project_id, self.script_id)["mode"], "carried_over")
         before = self._timeline_edit(self.project_id, self.script_id)
@@ -456,6 +467,7 @@ class _LegacyBeatCase(_ApplyCase):
 
     def setUp(self) -> None:
         _StoreCase.setUp(self)
+        self._hold_scene_worker()
         self.project_id, self.script_id = self._project()
         first = self._timeline(self.project_id, self.script_id)[0]
         self.database.replace_timeline_edit_beats(int(first["id"]), [

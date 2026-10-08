@@ -35,12 +35,13 @@ from . import settings
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
-from .database import Database
+from .database import Database, StoredEditDocumentError
 from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available, render_timeline_with_ffmpeg
 from .ffmpeg_renderer import video_frame_size
 from . import gemini_tts, operations, tts_catalog, usage_limits, workflows
+from . import edit_apply, edit_store
 from . import languages
 from .fidelity_guard import unsourced_details
 from .graphic_overlays import normalize_graphic_overlays
@@ -3165,7 +3166,7 @@ def _previous_storyboard(project_id: int, script_id: int) -> dict[str, Any] | No
 
 def _sync_storyboard(
     project_id: int, project: dict[str, Any], script: dict[str, Any], *, force: bool,
-    groups: list[list[str]] | None = None, with_timeline: bool = False,
+    groups: list[list[str]] | None = None, with_timeline: bool = False, apply_edits: bool = True,
 ) -> dict[str, Any]:
     """Bước 5.1-5.2: cut a planned project's current script into its StoryboardDocument and bring what downstream reads in line.
 
@@ -3182,6 +3183,12 @@ def _sync_storyboard(
     applied only with `force`; without it the answer is "stale" with what it
     would do. `force` never skips a check. A new script (a revision, a new
     plan) is carried over from the previous storyboard's rows, which stay.
+
+    Bước 5.3 · T4: once the storyboard is saved, the EditDocument follows it
+    and is applied to the timeline (`edit_document` in the answer, see
+    _apply_edit_document) - unless `apply_edits` is False, for a caller that
+    still writes to the rows and applies after it (`edit_refresh` names the
+    rows this reconcile wrote legacy content to).
     """
     plan_row = _current_project_plan(project_id)
     script_id = int(script["id"])
@@ -3213,7 +3220,9 @@ def _sync_storyboard(
             raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
         return {"status": "saved", "script_id": script_id, "stale": False, "shots": shots,
                 "storyboard": {"id": saved["id"], **storyboard_engine.summary(storyboard)},
-                "reconcile": {"counts": {storyboard_reconcile.UNCHANGED: len(shots)}, "applied": False}}
+                "reconcile": {"counts": {storyboard_reconcile.UNCHANGED: len(shots)}, "applied": False},
+                "edit_refresh": [],
+                "edit_document": _apply_edit_document(project_id, script) if apply_edits else _EDIT_APPLY_DEFERRED}
 
     if shots or timeline:
         source_script_id, source_shots, source_timeline = script_id, shots, timeline
@@ -3252,12 +3261,80 @@ def _sync_storyboard(
     if not saved:
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     database.resync_timeline_segment_states(project_id)
+    touched = [int(item) for item in record.get("touched_segments") or []]
+    edits = _apply_edit_document(project_id, script, refresh=set(touched)) if apply_edits else _EDIT_APPLY_DEFERRED
     shots = database.list_project_shots(project_id, script_id=script_id)
     _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
     return {"status": "saved", "script_id": script_id, "stale": False, "shots": shots,
             "storyboard": {"id": saved["id"], **storyboard_engine.summary(storyboard)},
             "reconcile": {**report, "scenes": record.get("scenes", report["scenes"]), "mode": record["mode"],
-                          "anchoring": storyboard.get("anchoring"), "applied": True}}
+                          "anchoring": storyboard.get("anchoring"), "applied": True},
+            "edit_refresh": touched, "edit_document": edits}
+
+
+# What an apply leaves to the caller to resolve, scene by scene; the rest of a skip is the plan's own state.
+_EDIT_APPLY_ACTIONABLE = frozenset({edit_apply.INVALID_EDIT, "beat_has_jobs", "scene_job_running", "unknown_asset",
+                                    "missing_row"})
+_EDIT_APPLY_DEFERRED = {"status": "deferred"}
+
+
+def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: set[int] | None = None) -> dict[str, Any]:
+    """Bước 5.3 · T4: the one production call of EditDocument → apply_scenes() → timeline. Never raises for a state or data fault.
+
+    Runs only for a project that already keeps an EditDocument (T5/T6 make
+    the first one): a project without one has no edit to apply, and its
+    timeline stays the legacy layer it is.
+
+    Three transactions in a row, never one: the reconcile (already
+    committed by the caller), edit_store.sync() (the EditDocument follows
+    the storyboard; `refresh` rows are what that reconcile wrote legacy
+    content to), and apply_scenes() - which checks again, at its start, that
+    the document is the current storyboard's and fresh, and in its own
+    transaction that each row still holds what the document last knew
+    (conflict otherwise). The storyboard must be the Storyboard Gate's
+    current one, of this very script.
+
+    Returns {"status", "counts", "applied", "unchanged", "skipped", "conflicts", ...}:
+    status "applied" | "unchanged" | "nothing_to_apply" | "partial" | "blocked" | "not_current" | "error" | "no_document".
+    "partial" and "blocked" are never success: some scenes were not written.
+    """
+    script_id = int(script["id"])
+    try:
+        if not database.list_edit_documents(project_id):
+            return {"status": "no_document"}
+    except StoredEditDocumentError as exc:  # a broken stored document is reported, never read as "none"
+        return {"status": "error", "detail": str(exc)}
+    gate, row = _storyboard_gate(project_id)
+    if gate.get("state") != storyboard_engine.CURRENT or not row or int(row["script_id"]) != script_id \
+            or int(row["id"]) != int((database.get_latest_project_storyboard(project_id, script_id=script_id) or {}).get("id") or 0):
+        return {"status": "not_current", "detail": "Storyboard của kịch bản này không phải bản hiện hành: chưa áp EditDocument",
+                "gate": gate.get("state")}
+    try:
+        synced = edit_store.sync(database, project_id, script_id, row, refresh=refresh)
+        done = edit_apply.apply_scenes(database, project_id, script_id, row)
+    except edit_store.EditStoreError as exc:
+        return {"status": "error", "detail": str(exc)}
+    if done["applied"]:
+        database.resync_timeline_segment_states(project_id)
+    skipped: dict[str, int] = {}
+    for item in done["skipped"]:
+        skipped[item["reason"]] = skipped.get(item["reason"], 0) + 1
+    blocked = len(done["conflicts"]) + sum(count for reason, count in skipped.items() if reason in _EDIT_APPLY_ACTIONABLE)
+    written = len(done["applied"]) + len(done["unchanged"])
+    if blocked:
+        status = "partial" if written else "blocked"
+    elif done["applied"]:
+        status = "applied"
+    elif done["unchanged"]:
+        status = "unchanged"
+    else:
+        status = "nothing_to_apply"
+    return {"status": status, "document_hash": done["document_hash"], "document_mode": synced["mode"],
+            "artifact_id": done["artifact_id"],
+            "counts": {"applied": len(done["applied"]), "unchanged": len(done["unchanged"]),
+                       "conflicts": len(done["conflicts"]), "skipped": skipped},
+            "applied": done["applied"], "unchanged": done["unchanged"], "skipped": done["skipped"],
+            "conflicts": done["conflicts"]}
 
 
 def _storyboard_owns_shots(project_id: int, script: dict[str, Any] | None) -> bool:
@@ -3297,7 +3374,8 @@ def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, 
             if storyboard_engine.refusal_for(status, need="shots") or not stored \
                     or not storyboard_engine.segments_match(supplied, stored):
                 raise HTTPException(status_code=409, detail=storyboard_engine.SEGMENTS_LOCKED)
-            synced = _sync_storyboard(project_id, project, current, force=bool(options.get("force", False)), with_timeline=True)
+            synced = _sync_storyboard(project_id, project, current, force=bool(options.get("force", False)), with_timeline=True,
+                                      apply_edits=False)
             if synced["stale"]:
                 # Bringing the timeline in line would lose a voice or rows and was not forced:
                 # nothing is written - not even the agent's picture fields - and it says what it would do.
@@ -3308,13 +3386,20 @@ def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, 
                     or not storyboard_engine.segments_match(supplied, now):
                 raise HTTPException(status_code=409, detail=storyboard_engine.SEGMENTS_LOCKED)
             # Row for row the storyboard's scenes now, so the agent's segment n is the timeline's segment n.
+            # A row an EditDocument has applied to is its own (Bước 5.3 · T4): the agent's fields go elsewhere only.
+            owned = database.edit_owned_rows(project_id)
+            refresh, kept = set(synced.get("edit_refresh") or []), []
             for segment, item in zip(timeline, supplied):
                 fields = {key: str(item[key]) for key in ("visual_prompt", "asset_type")
                           if isinstance(item, dict) and item.get(key)}
-                if fields:
+                if fields and int(segment["id"]) in owned:
+                    kept.append(int(segment["id"]))
+                elif fields:
                     database.update_project_timeline_segment(int(segment["id"]), **fields)
+                    refresh.add(int(segment["id"]))
             return {"status": "saved", "script_id": int(current["id"]),
-                    "timeline": database.list_project_timeline(project_id, script_id=int(current["id"]))}
+                    "timeline": database.list_project_timeline(project_id, script_id=int(current["id"])),
+                    "edit_owned_rows_kept": kept, "edit_document": _apply_edit_document(project_id, current, refresh=refresh)}
         script = database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để dựng timeline")
@@ -4564,6 +4649,7 @@ def _storyboard_timeline(
         "shot_count": len(result["shots"]),
         "total_duration_seconds": sum(int(item["duration_seconds"]) for item in timeline),
         "timeline": timeline, "storyboard": result.get("storyboard"), "reconcile": result.get("reconcile"),
+        "edit_document": result.get("edit_document"),
     }
 
 

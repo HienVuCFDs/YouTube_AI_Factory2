@@ -284,7 +284,8 @@ def _held(document: dict[str, Any]) -> list[tuple[Any, ...]]:
             for item in document["scenes"]]
 
 
-def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any]) -> dict[str, Any]:
+def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], *,
+         refresh: set[int] | frozenset[int] | None = None) -> dict[str, Any]:
     """The script's EditDocument for this storyboard, built from what came before and kept - nothing applied.
 
     * the script's latest document (any storyboard) is what it follows, by
@@ -293,6 +294,11 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
     * else, a new script follows the newest document of another script;
     * else (the first one) layers already on the timeline are kept as legacy
       orphans, their scene as candidate - never ready.
+    `refresh` (Bước 5.3 · T4): timeline rows a reconcile has just written
+    legacy content to (carried to a new row, or retimed) - what they now hold
+    is kept as a legacy orphan of that row, so a later apply expects it. Only
+    those rows: anything else written to a row the document already knows is
+    still a conflict.
     Returns {"state": "current", "created", "document", "document_hash", "artifact_id", "parent_hash", "mode"}.
     """
     board = _storyboard(storyboard_row, project_id=project_id, script_id=script_id)
@@ -307,11 +313,14 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
     else:
         options["legacy"] = now["legacy"]
         mode = "bootstrap"
+    refreshed = {key: held for key, held in now["legacy"].items() if int(held["segment_id"]) in (refresh or ())}
+    if refreshed and source is not None:
+        options["refreshed"] = refreshed
     try:
         document = edit_document.build(board, **options)
     except edit_document.EditDocumentError as exc:
         raise EditStoreError(str(exc)) from exc
-    if own is not None and own["document"]["provenance"] == document["provenance"] \
+    if own is not None and not options.get("refreshed") and own["document"]["provenance"] == document["provenance"] \
             and _held(own["document"]) == _held(document):
         # Nothing the engine reads has moved since the latest version: it is still the current one.
         return {"state": CURRENT, "created": False, "mode": "unchanged", **own}

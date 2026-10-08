@@ -2728,6 +2728,31 @@ class Database:
             found.append({"id": int(row["id"]), "created_at": row["created_at"], "payload": payload})
         return found
 
+    @classmethod
+    def _edit_owned(cls, connection: sqlite3.Connection, project_id: int) -> dict[int, dict[str, Any]]:
+        """Bước 5.3 · T4: the timeline rows an EditDocument owns, by the latest apply that wrote or kept each.
+
+        {segment_id: {"columns": owned columns, "beats": whether its beats are owned}}. A row with an apply
+        record holds state the EditDocument expects to find unchanged (state_hash), so nothing else may
+        rewrite it. An older record without `columns_written` owns every owned column and the beats.
+        """
+        owned: dict[int, dict[str, Any]] = {}
+        for entry in cls._edit_apply_entries(connection, project_id):
+            for item in entry["payload"]["rows"]:
+                if int(item["segment_id"]) in owned:
+                    continue
+                columns = item.get("columns_written")
+                owned[int(item["segment_id"])] = {
+                    "columns": frozenset(columns) if isinstance(columns, list) else EDIT_OWNED_COLUMNS,
+                    "beats": item.get("beats_written") is not None if "beats_written" in item else True,
+                }
+        return owned
+
+    def edit_owned_rows(self, project_id: int) -> dict[int, dict[str, Any]]:
+        """The timeline rows an EditDocument owns (see _edit_owned). Raises StoredEditApplyError on a broken record."""
+        with self._connect() as connection:
+            return self._edit_owned(connection, project_id)
+
     def list_edit_applies(self, project_id: int, script_id: int | None = None) -> list[dict[str, Any]]:
         """Apply records, newest first: {"id", "created_at", "payload"}. Raises StoredEditApplyError on a broken row."""
         with self._connect() as connection:
@@ -2951,10 +2976,22 @@ class Database:
         rows had on the same terms; the old script's rows are not touched.
         Removed rows (in place) are copied into the reconcile record - with
         their edit beats and scene jobs - before they leave. No file is deleted.
+
+        Bước 5.3 · T4: what an EditDocument has applied to a row (edit_apply)
+        is the EditDocument's, never the reconcile's. Such a row is not
+        retimed in place - its edit follows the voice through the
+        EditDocument's effective_edit and the next apply, and a stale one is
+        left for the apply to refuse. Carried to a new row, its owned columns
+        and owned beats are not copied: the next apply writes them from the
+        EditDocument. Everything else (legacy content) is carried and retimed
+        as before. `touched_segments` names the rows whose legacy content this
+        reconcile wrote, for the EditDocument to know what they now hold.
         """
         now = utc_now()
         in_place = source_script_id is not None and int(source_script_id) == int(script_id)
+        touched: list[int] = []
         with self._connect() as connection:
+            owned = self._edit_owned(connection, project_id)
             segment_columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_timeline_segments)")]
             beat_columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_timeline_edit_beats)")
                             if row["name"] not in {"id", "timeline_segment_id"}]
@@ -3032,7 +3069,13 @@ class Database:
                         values.update(subtitle_text=shot["narration"], audio_path="", subtitle_path="", voice_review_score=0,
                                       voice_review_note="", source_voice_text="", duration_seconds=int(shot["duration_seconds"]),
                                       status="planned")
-                        placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
+                        if int(source_segment["id"]) in owned:
+                            # The EditDocument's edit follows the new voice itself (effective_edit), or is refused as stale.
+                            placed[-1]["edit_owned"] = True
+                        else:
+                            placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
+                            if placed[-1]["retimed"]:
+                                touched.append(int(source_segment["id"]))
                     connection.execute(
                         f"UPDATE project_timeline_segments SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
                         [*values.values(), int(source_segment["id"])],
@@ -3047,20 +3090,29 @@ class Database:
                     "duration_seconds": int(shot["duration_seconds"]), "start_seconds": 0, "end_seconds": int(shot["duration_seconds"]),
                     "audio_path": "", "visual_path": "", "status": "planned", "created_at": now, "updated_at": now,
                 }
+                own = owned.get(int(source_segment["id"])) if source_segment else None
                 if source_segment:
                     for column in segment_columns:
-                        if column not in self._SEGMENT_IDENTITY and (keep or column not in self._SEGMENT_VOICE):
+                        if column not in self._SEGMENT_IDENTITY and (keep or column not in self._SEGMENT_VOICE) \
+                                and not (own and column in own["columns"]):
                             values[column] = source_segment[column]
                     if keep:
                         values["subtitle_text"] = source_segment["subtitle_text"]
                     else:
-                        placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
+                        # Owned layers are not carried, so only the legacy ones are scaled (into a scratch copy when owned).
+                        placed[-1]["retimed"] = self._retime(
+                            {key: value for key, value in source_segment.items()
+                             if not (own and key in own["columns"])}, int(shot["duration_seconds"]), values)
+                    if own:
+                        placed[-1]["edit_owned"] = True
                 cursor = connection.execute(
                     f"INSERT INTO project_timeline_segments ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
                     list(values.values()),
                 )
                 placed[-1]["segment_id"] = int(cursor.lastrowid)
-                if source_segment and beat_columns:
+                if source_segment:
+                    touched.append(int(cursor.lastrowid))
+                if source_segment and beat_columns and not (own and own["beats"]):
                     connection.execute(
                         f"INSERT INTO project_timeline_edit_beats (timeline_segment_id, {', '.join(beat_columns)}) "
                         f"SELECT ?, {', '.join(beat_columns)} FROM project_timeline_edit_beats WHERE timeline_segment_id = ?",
@@ -3072,10 +3124,10 @@ class Database:
             connection.execute("UPDATE production_projects SET updated_at = ? WHERE id = ?", (now, project_id))
             record = {**report, "script_id": script_id, "source_script_id": source_script_id,
                       "mode": "in_place" if in_place else ("carried_over" if source_script_id is not None else "new"),
-                      "archived": archived}
+                      "archived": archived, "touched_segments": touched}
             if isinstance(report.get("scenes"), list):
                 record["scenes"] = [{**scene, "new_shot_id": landed["shot_id"], "new_segment_id": landed["segment_id"],
-                                     "retimed": landed.get("retimed")}
+                                     "retimed": landed.get("retimed"), "edit_owned": bool(landed.get("edit_owned"))}
                                     for scene, landed in zip(report["scenes"], placed)]
             connection.execute(
                 "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
