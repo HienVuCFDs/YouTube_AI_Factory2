@@ -399,6 +399,9 @@ def plan_scene(document: dict[str, Any], storyboard: dict[str, Any], scene_key: 
     `value` is the new edit; None keeps the scene's edit as it plays now
     (effective_edit) - someone looked at it and it still fits. An edit whose
     times cannot follow the voice is not kept that way: it is made again.
+    The result is based on `document` (`based_on`), as a build is on its
+    previous one - so going back to an earlier edit is a new version, never a
+    copy of one already in the history.
     """
     if storyboard.get("document_hash") != document["provenance"]["storyboard_hash"]:
         raise EditDocumentError("EditDocument không thuộc storyboard này")
@@ -417,6 +420,7 @@ def plan_scene(document: dict[str, Any], storyboard: dict[str, Any], scene_key: 
         raise EditDocumentError(f"Lớp dựng không vừa cảnh: {problems[0]}")
     basis = _basis(current, item["voice"], document["provenance"]["storyboard_hash"], value)
     updated = _copy(document)
+    updated["based_on"] = document.get("document_hash")
     updated["scenes"][position] = _scene(current, value, basis, item["voice"], item["lineage"], item.get("segment_id"), False)
     return _finish(updated)
 

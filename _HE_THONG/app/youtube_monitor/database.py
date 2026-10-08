@@ -5204,6 +5204,9 @@ class Database:
         return result
 
     def save_director_artifact(self, project_id: int, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if kind == EDIT_DOCUMENT_KIND:
+            # Only save_edit_document keeps an EditDocument: it checks the version it follows.
+            raise ValueError("EditDocument chỉ được lưu qua save_edit_document")
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
@@ -5216,6 +5219,9 @@ class Database:
         return {"id": artifact_id, "kind": kind, "payload": payload}
 
     def get_director_artifact(self, project_id: int, kind: str) -> dict[str, Any] | None:
+        if kind == EDIT_DOCUMENT_KIND:
+            # Read only through list_edit_documents / edit_store, which refuse a broken one instead of handing it back.
+            raise ValueError("EditDocument chỉ được đọc qua list_edit_documents")
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM project_director_artifacts WHERE project_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",

@@ -276,6 +276,14 @@ def _carried(database: Any, project_id: int, script_id: int) -> dict[str, Any] |
     return None
 
 
+def _held(document: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """Per scene, the row it is on, the voice it was judged with and what that made of it - not how it was linked
+    this time (a rebuild on the same storyboard links each scene to itself; inheritance() reads no more than that
+    the match was verified)."""
+    return [(item.get("scene_key"), item.get("segment_id"), item.get("voice"), item.get("statuses"), item.get("timing"))
+            for item in document["scenes"]]
+
+
 def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any]) -> dict[str, Any]:
     """The script's EditDocument for this storyboard, built from what came before and kept - nothing applied.
 
@@ -304,8 +312,7 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
     except edit_document.EditDocumentError as exc:
         raise EditStoreError(str(exc)) from exc
     if own is not None and own["document"]["provenance"] == document["provenance"] \
-            and [item.get("segment_id") for item in own["document"]["scenes"]] \
-            == [item.get("segment_id") for item in document["scenes"]]:
+            and _held(own["document"]) == _held(document):
         # Nothing the engine reads has moved since the latest version: it is still the current one.
         return {"state": CURRENT, "created": False, "mode": "unchanged", **own}
     stored = save(database, project_id, script_id, document, storyboard_row=storyboard_row,
