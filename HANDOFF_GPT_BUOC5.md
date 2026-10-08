@@ -582,9 +582,44 @@ Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(
 1. Người dùng cùng GPT **duyệt T1** (mục 9).
 2. ~~Chốt T2~~: **xong 08/10** (mục 9b). Nên chạy lại full suite trên Windows để xác nhận.
 3. ~~T3 — Apply~~: **xong 08/10** (mục 9c), đã commit và push. Nên chạy lại full suite trên Windows.
-4. **T4 — Nối reconcile:** gọi `edit_apply.apply_scenes` sau reconcile; trong **cùng thay đổi** gỡ việc reconcile chép cột edit và `Database._retime` / `_retime_beats`; xử lý hàng mang sang (mục 9c, giới hạn 1).
+4. **T4 — Nối reconcile:** gọi `edit_apply.apply_scenes` sau reconcile; trong **cùng thay đổi** gỡ việc reconcile chép cột edit và `Database._retime` / `_retime_beats`; xử lý hàng mang sang (mục 9c, giới hạn 1). **Bắt buộc theo checklist 11a.**
 5. Sau đó lần lượt T5 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
 6. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
+
+### 11a. T4 — Integration checklist bắt buộc (đã thống nhất 08/10)
+
+Đây là **contract cho T4**, chưa triển khai. Nó không thay đổi contract T3 (H1–H6, B1–B4, mục 9c): T3 là thư viện apply độc lập và chưa có caller. Test T3 xanh **không** có nghĩa Bước 5 đã sẵn sàng cho sản xuất; T4 là nơi kiểm chứng caller thật.
+
+1. **CURRENT / freshness**
+   - Kiểm tra `CURRENT` (`edit_store.current`) và `_fresh` (document theo kịp `segment_id` + giọng hiện tại) **đúng thời điểm**, ngay trước khi apply.
+   - Không để caller áp dụng EditDocument dựa trên snapshot đã stale.
+   - Hiện tại hai kiểm tra này chạy **trước** transaction của `apply_edit_document_rows()`, và cột giọng không nằm trong `state_hash`. T4 phải tính tới khoảng hở này.
+2. **Storyboard hiện hành**
+   - Xác minh `storyboard_row` truyền vào thực sự là storyboard hiện hành của script (bản mới nhất, Storyboard Gate `current`) trước khi apply.
+   - Không chỉ dựa vào việc row tồn tại hay `current()` trả `CURRENT` so với row do caller tự chọn.
+3. **Segment identity / reconcile**
+   - Khi reconcile hoặc revision kịch bản làm đổi `segment_id` (hàng mang sang có id mới; hàng bị xoá), phải xử lý theo expected-state / conflict của T3.
+   - **Không dùng `candidate`** để nối lại visual hay edit; orphan chỉ được nhận diện theo `segment_id`.
+   - T4 phải gỡ việc reconcile (`apply_storyboard_reconcile`) **chép các cột edit** sang hàng mới, vì đây là nguyên nhân hàng mang sang luôn thành conflict ở T3.
+   - Việc gỡ này phải nằm **trong cùng thay đổi tích hợp T4**: không được nối caller mới vào trên một reconcile vẫn phá provenance của EditDocument (ràng buộc T3/T4 ở mục 8).
+4. **`_retime` / timing**
+   - Không để `_retime` / `_retime_beats` âm thầm sửa dữ liệu edit thuộc EditDocument.
+   - T4 phải gỡ hoặc điều chỉnh đường `_retime` đang ghi đè edit, trong cùng thay đổi tích hợp.
+   - Timing thực tế phải đi qua `effective_edit()` / giọng hiện tại theo contract T3.
+   - Hàng bị `_retime` làm lệch phải trở thành **conflict**, không bị ghi đè im lặng.
+5. **Partial success**
+   - Caller phải hiểu đúng kết quả `apply_scenes()`:
+     - `conflicts` và `skipped` (`needs_plan`, `stale`, `invalid_edit`, `beat_has_jobs`, `scene_job_running`, `unknown_asset`, `missing_row`, `no_row`) là bỏ qua **theo từng cảnh**;
+     - lỗi hệ thống là exception, đã rollback **toàn bộ** lượt apply.
+   - Không được biến kết quả một phần thành "thành công".
+   - Nếu T4 chạm tới UI, status hay log, chúng phải hiện đúng số cảnh `applied` / `unchanged` / `skipped` / `conflicts`.
+6. **Transaction boundary**
+   - Hiện `apply_edit_document_rows()` **tự mở connection** và `BEGIN IMMEDIATE`.
+   - `apply_storyboard_reconcile()` và `edit_store.sync()` (T2) cũng mỗi hàm một transaction riêng.
+   - T4 phải quyết định rõ một trong hai:
+     - **a.** Giữ các transaction riêng, chạy tuần tự `reconcile → sync() → apply_scenes()`, dựa vào expected-state để phát hiện thay đổi chen vào giữa; hoặc
+     - **b.** Refactor chữ ký / API để cả chuỗi dùng chung một connection / transaction.
+   - Không được tạo cảm giác atomic giữa reconcile / sync / apply nếu thực tế vẫn là nhiều transaction độc lập.
 
 **Known limitations còn lại:**
 - Job tạo ảnh/video chưa qua Storyboard Gate (để 5.4).
