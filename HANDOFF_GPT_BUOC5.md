@@ -1,10 +1,10 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 hoàn thành)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 hoàn thành, T3 hoàn thành)
 
 Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
 
 > **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
-> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), việc tiếp theo (mục 11).
+> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành, đã review và commit** (mục 9c), việc tiếp theo (mục 11).
 
 ---
 
@@ -26,7 +26,8 @@ Quy trình từ trước tới nay:
 - **T2 (lưu trữ EditDocument) đã hoàn thành** (mục 9b). Người dùng đã chốt:
   - storage là `project_director_artifacts`, `kind="edit_document"`;
   - bootstrap theo cách (b): lớp dựng cũ thành orphan `legacy`.
-- Việc kế tiếp: duyệt T1/T2, rồi T3 Apply (mục 11).
+- **T3 (Apply EditDocument → timeline) hoàn thành**: đã qua final review, đã commit và push lên `claude/dreamy-gates-4qehd3` (mục 9c). Người dùng đã chốt H1–H6, B1–B4. **Chưa có caller** (H4): T3 chưa được nối vào luồng sản xuất.
+- Việc kế tiếp: T4 (mục 11).
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -63,7 +64,7 @@ Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -94,6 +95,8 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  mới  _HE_THONG/app/tests/test_storyboard_gate.py         (47 test)
  mới  _HE_THONG/app/tests/test_storyboard_lineage.py      (28 test)
  mới  _HE_THONG/app/tests/test_edit_document.py           (25 test)
+ (T2, commit ec62257) _HE_THONG/app/tests/test_edit_store.py (20 test)
+ (T3, commit T3)      _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
@@ -187,7 +190,7 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
 **Thứ tự task:**
 
 ```text
-T0 ✅ → T0.5 ✅ → T1 ✅ (chờ duyệt) → T2 Lưu trữ ✅ → T3 Apply → T4 Nối reconcile (F1)
+T0 ✅ → T0.5 ✅ → T1 ✅ (chờ duyệt) → T2 Lưu trữ ✅ → T3 Apply ✅ → T4 Nối reconcile (F1)
 → T5 Planner theo storyboard → T6 Adapter sửa tay / AI từng cảnh → T7 Gate → T8 F5/F6/F8 → T9 Nghiệm thu
 ```
 
@@ -423,6 +426,147 @@ Chưa có caller, route hay MCP nào gọi `edit_store`. Đây là đúng phạm
 
 ---
 
+## 9c. T3 — Apply EditDocument → timeline (HOÀN THÀNH 08/10: đã sửa B1–B4, qua final review, đã commit — chưa có caller)
+
+### Quyết định người dùng đã chốt (audit T3, H1–H6)
+
+| # | Quyết định |
+|---|---|
+| H1 | Trạng thái đã áp lưu ở `project_director_artifacts`, `kind="edit_apply"`. Mỗi lượt áp có ghi một dòng, không migration |
+| H2 | Cảnh có basis và edit có `visual.visual_path` thì EditDocument **sở hữu** visual của hàng và ghi toàn bộ cột visual. Edit không có `visual_path` thì **giữ nguyên** visual hiện tại, kể cả visual legacy. Không xoá file nào |
+| H3 | `needs_plan` → không ghi; `visual_review` → được ghi; `stale_content` / `stale_overlays` / `stale_timing` → không ghi |
+| H4 | T3 **không** thêm caller hay route. Chỉ có hàm thư viện, storage và test. T4/T6 sẽ nối caller |
+| H5 | Cột thuộc EditDocument: `edit_store._VISUAL_COLUMNS` + `asset_type`, `overlays`, `sound_cues`, `edit_direction`, cùng bảng edit beats. Không đụng audio, subtitle, duration, voice, status, `project_shots.visual_prompt` |
+| H6 | Cảnh conflict thì bỏ qua và trả `conflict`; các cảnh hợp lệ vẫn được áp. Có transaction rõ ràng: conflict không phải exception; lỗi hệ thống thật thì rollback cả lượt |
+
+### Sửa sau review cuối (B1–B4, người dùng đã duyệt hướng sửa)
+
+Lần review trước commit đã chạy probe và chứng minh 3 lỗi thật, cộng 1 thiếu sót so với H1. Đã sửa cả bốn:
+
+| # | Lỗi (probe chứng minh) | Sửa |
+|---|---|---|
+| B1 | Edit không nêu beats làm **xoá beats legacy** của hàng (P2: beats `[]` sau khi áp) | Edit không có beats → `beats=None` → **không đụng** beats của hàng (không DELETE). Edit có beats → thay, vẫn qua expected-state như mọi cột khác |
+| B2 | Xoá beat làm `scene_generation_jobs.edit_beat_id` thành NULL (`ON DELETE SET NULL`). Job `cancelled` được retry khi xong ghi đè **hình của cả cảnh** (P4) | Trước khi thay beats: nếu **bất kỳ** job nào trỏ `edit_beat_id` vào beat của hàng (mọi trạng thái, vì `error`/`cancelled`/`completed`-review-fail đều retry được) → `skipped: beat_has_jobs`, giữ nguyên hình và beats. Không sửa route retry |
+| B3 | `None` cho cột `NOT NULL` → `IntegrityError` → **rollback cả cảnh hợp lệ** (P5); `asset_id="abc"` → `ValueError` trong transaction | DB kiểm từng giá trị theo **schema thật** (`PRAGMA table_info`: kiểu khai báo + `NOT NULL`, số hữu hạn) **trước** khi ghi → `skipped: invalid_edit`, không dùng `IntegrityError` làm control flow. Engine có `InvalidEditError` riêng (JSON sai loại, overlay không phải object, beat sai schema), chỉ catch đúng loại này. Lỗi hệ thống / lập trình vẫn rollback cả lượt |
+| B4 | Bản ghi thiếu "columns written" | Mỗi hàng có thêm `columns_written` (danh sách cột đã ghi) và `beats_written` (số beat, hoặc `null` nếu không đụng beats). Format cũ giữ nguyên, chỉ thêm khoá |
+
+### Thay đổi (commit T3 trên `claude/dreamy-gates-4qehd3`)
+
+| File | Nội dung |
+|---|---|
+| `youtube_monitor/database.py` (+232 dòng, chỉ thêm) | `EDIT_APPLY_KIND`, `EDIT_OWNED_COLUMNS`, `EDIT_BEAT_COLUMNS`, `StoredEditApplyError`, `_schema_problem` (kiểm theo schema thật). `save_director_artifact` / `get_director_artifact` từ chối `kind="edit_apply"`. Thêm `list_edit_applies` và `apply_edit_document_rows` (mô tả bên dưới) |
+| `youtube_monitor/edit_apply.py` (mới) | `state_hash`, `row_writes` (H2/H5), `plan` (H3, legacy theo `segment_id`), `apply_scenes` (bắt buộc document `CURRENT` và theo kịp timeline/giọng hiện tại). Không module nào import nó (H4) |
+| `tests/test_edit_apply.py` (mới) | 46 test: 10 nhóm ban đầu + B1 (6) + B2 (7) + B3 (6) + B4 (1) |
+
+**Transaction** (`Database.apply_edit_document_rows`): `BEGIN IMMEDIATE`, sau đó với từng hàng:
+1. Hàng không thuộc project/script → `skipped: missing_row`.
+2. Giá trị không hợp với schema thật của bảng (kiểu, `NOT NULL`) → `skipped: invalid_edit`, không ghi hàng đó.
+3. Đọc hàng và beats, tính `state_hash`.
+4. **Expected-state** đọc trong transaction, theo thứ tự:
+   1. `state_hash` mà lượt áp gần nhất để lại cho hàng đó;
+   2. hash của orphan `legacy` có **cùng `segment_id`** (không bao giờ dùng `candidate`);
+   3. edit rỗng (chưa từng ghi).
+5. Hàng khác expected → `conflict` (`timeline_changed`, kèm `expected_from`), không ghi hàng đó.
+6. Lượt áp trước đã ghi đúng edit này và hàng vẫn như nó để lại → `unchanged`, không ghi.
+7. Edit có beats và có job (mọi trạng thái) trỏ vào beat hiện có của hàng → `skipped: beat_has_jobs`.
+8. Còn scene job chưa xong trên hàng → `skipped: scene_job_running` (job xong sẽ ghi đè hình).
+9. Beat trỏ tới asset không thuộc project → `skipped: unknown_asset`.
+10. Còn lại: UPDATE các cột sở hữu; thay beats **chỉ khi edit nêu beats**; đọc lại để lấy `state_hash` mới.
+
+Hàng đã ghi và bản ghi `edit_apply` (`rows`: `segment_id`, `scene_key`, `layer_hash`, `state_hash`, `visual_owned`, `columns_written`, `beats_written`) được **commit cùng nhau**. Conflict và `invalid_edit` chỉ bỏ qua hàng đó; lỗi hệ thống rollback cả lượt. Không có hàng nào ghi thì không tạo bản ghi. Mọi exception (lỗi hệ thống, cột ngoài `EDIT_OWNED_COLUMNS`) → rollback cả lượt.
+
+**`apply_scenes()`** trả `{document_hash, artifact_id, applied, unchanged, skipped, conflicts}`. Nó từ chối (`EditStoreError`, không ghi gì) khi:
+- document không `CURRENT`;
+- shots / timeline lệch storyboard;
+- `segment_id` hoặc giọng của cảnh khác với lúc document được dựng (phải `sync()` trước);
+- `scene_keys` có cảnh không tồn tại (422).
+
+Hàm ghi `effective_edit()` (đã retime theo giọng), `layer_hash = edit_hash(effective_edit)`.
+
+### Test (`tests/test_edit_apply.py`, 46 test)
+
+| Nhóm | Kiểm |
+|---|---|
+| 1. Áp cảnh ready (3) | Ghi đúng cột, beats, bản ghi `edit_apply`; ghi edit đã retime; cột không sở hữu giữ nguyên; tập cột khớp T2 |
+| 2. Không có gì để áp (2) | Bootstrap: mọi cảnh `needs_plan`, timeline và file nguyên vẹn. Carried over: hình được reconcile chép sang → `conflict` (`expected_from: default`), không xoá hay ghi đè |
+| 3. Sở hữu hình (3) | Edit không có hình → giữ hình legacy, chỉ ghi look và layer. Edit có hình → thay hình; file legacy và orphan vẫn còn. Orphan nối theo `segment_id`, tráo `candidate` không ảnh hưởng |
+| 4. Conflict (3) | Hàng bị sửa tay sau lần áp → conflict, các cảnh khác vẫn áp. Job ảnh hoàn thành, hoặc layer cũ ghi đè hàng legacy → conflict. Hàng legacy chưa bị đụng → áp được |
+| 5. Trạng thái (2) | `plan()` chỉ nhận `ready` / `visual_review`. Tích hợp: cảnh đổi lời (`stale_content` + `visual_review`) giữ nguyên |
+| 6. Điều kiện (5) | Document lệch timeline/giọng → từ chối. Không `CURRENT` → từ chối. Cảnh lạ → 422. Hàng của script khác → `missing_row`. Cột ngoài danh sách → exception, không ghi |
+| 7. Transaction (1) | Lỗi hệ thống sau khi đã ghi 2 hàng → rollback cả hai, không có bản ghi |
+| 8. Idempotent (2) | Áp lại cùng document → `unchanged`, không ghi, không đổi `updated_at`, không tạo bản ghi. Edit mới → ghi |
+| 9. Beats và job (3) | Beat được job gắn asset → conflict. Job đang chạy → skip. Asset của project khác → skip |
+| 10. Tách biệt (2) | Không đụng `project_edit_plans`; hàm director artifact chung không với tới `edit_apply`. Bản ghi `edit_apply` hỏng → từ chối, không bỏ qua |
+| B1. Beats legacy (6) | Edit không có beats → beats legacy còn nguyên (cùng id). Hình và beats legacy cùng còn. Edit có beats → thay đúng. Áp lại → `unchanged`, beats không bị thay lại. Beats bị ghi ngoài → conflict, không bị xoá. Edit không beats sau một lượt có beats → giữ beats |
+| B2. Job giữ beat (7) | Job `running` / `queued` / `error` / `cancelled` / `completed` trỏ vào beat → `beat_has_jobs`, hình và beats giữ nguyên, `edit_beat_id` còn nguyên. Retry job sau T3 → job ghi vào beat của nó, **không** ghi đè hình cảnh. Beat không có job → thay được |
+| B3. Edit không hợp lệ (6) | Cảnh hợp lệ + cảnh `edit_transition=None` → cảnh hợp lệ commit, cảnh kia `invalid_edit`. `asset_id="abc"` → `invalid_edit`. Cảnh cuối lỗi → các cảnh trước vẫn commit. DB nêu lỗi trước khi ghi, không qua `IntegrityError`. Engine nêu edit sai hình dạng. Lỗi phát hiện ở engine → `invalid_edit` qua `apply_scenes` |
+| B4. Bản ghi (1) | Mỗi hàng có `columns_written`, `beats_written`, đúng với cái đã ghi |
+
+### Kết quả (08/10, Linux, venv tạm, DB tạm) — sau khi sửa B1–B4
+
+- **Test T3:** **46/46 đạt** (26 ban đầu + 20 cho B1–B4).
+- **Mutation test: 23/23 đột biến bị bắt.**
+  - 15 đột biến ban đầu:
+    - bỏ kiểm expected-state;
+    - bỏ expected legacy;
+    - bỏ `needs_plan`;
+    - bỏ kiểm stale;
+    - luôn sở hữu hình;
+    - bỏ `unchanged`;
+    - bỏ kiểm job đang chạy;
+    - bỏ kiểm "theo kịp";
+    - bỏ guard `kind`;
+    - commit từng hàng;
+    - bỏ kiểm cột sở hữu;
+    - bỏ kiểm asset;
+    - bỏ bắt buộc `CURRENT`;
+    - bỏ kiểm hàng lạ;
+    - nối orphan theo `candidate`.
+  - 8 đột biến mới:
+    - edit không beats vẫn thay beats;
+    - luôn DELETE beats;
+    - bỏ `beat_has_jobs`;
+    - `beat_has_jobs` chỉ tính job còn sống;
+    - bỏ kiểm schema;
+    - không catch `InvalidEditError`;
+    - bỏ kiểm loại JSON;
+    - bỏ `columns_written`.
+  - 2 đột biến mới (không catch `InvalidEditError`, bỏ kiểm loại JSON) ban đầu **sống sót**. Đã thêm 1 test tích hợp và 1 ca chuỗi JSON sai loại; sau đó cả hai bị bắt.
+- Đột biến "commit từng hàng" (lần code đầu) ban đầu không bị bắt vì test transaction lỗi (mock gọi đệ quy). Đã sửa test; hàng đầu được chứng minh là đã ghi rồi bị rollback.
+- **Probe chạy lại sau khi sửa** (DB tạm):
+  - **P2:** beat legacy + edit không beats → hình giữ, beats giữ nguyên (cùng id).
+  - **P4:** job `cancelled` trỏ beat → `beat_has_jobs`, `edit_beat_id` còn nguyên. Retry → job ghi vào beat, hình cảnh vẫn là hình T3 đã áp.
+  - **P5:** cảnh hợp lệ commit, cảnh `edit_transition=None` → `invalid_edit`, có bản ghi.
+- **Nhóm Bước 5 + T2 + T3:** **200/200 đạt** (134 + 20 + 46).
+- **Full suite (Linux):** **2292 đạt · 11 đỏ · 13 bỏ qua**.
+  - Trước T3 là 2246 đạt; +46 = test T3.
+  - 11 đỏ **giống hệt** danh sách trước T3: 2 đỏ cũ (`test_burned_in_marks`, `test_shorts`) + 9 do môi trường Linux/cloud. **Không có regression.**
+- Chưa chạy app, chưa mở DB thật, chưa migration, không gọi API thật. **Chưa real-run T3.**
+
+### Giới hạn đã biết, chuyển sang task sau
+
+1. **T4:**
+   - Hàng mang sang kịch bản mới (reconcile chép hình) luôn là `conflict` (`expected_from: default`), vì chưa có lượt áp nào và chưa có orphan nào cho `segment_id` mới. Cố ý an toàn.
+   - Tương tự, reconcile tại chỗ `_retime` layer → hàng lệch `state_hash` → `conflict`.
+   - T4 phải nối `apply_scenes` vào sau reconcile, đồng thời gỡ việc chép cột edit và `_retime`.
+2. **T4/T6:** chưa có caller. `apply_scenes` chỉ được test gọi.
+3. **H5:** T3 không gọi `resync_timeline_segment_states`, nên cột `status` có thể chưa phản ánh hình mới cho tới lần resync kế tiếp (reconcile, job…). Caller ở T4/T6 cần quyết định có gọi hay không.
+4. **T6:**
+   - Khi EditDocument sở hữu hình (H2), mọi cột visual không có trong edit (kể cả `visual_prompt`, `source_start_seconds`) trở về default.
+   - Edit không nêu beats thì không bao giờ xoá được beats của hàng (cố ý, B1). Muốn bỏ beats cần một thao tác rõ ràng ở T6.
+   - Khi thay beats, id beat đổi. Beat có job trỏ vào thì không bao giờ bị thay (B2), nên một hàng có beat từng được gửi job sẽ luôn `beat_has_jobs` cho tới khi T6 có cách xử lý (ví dụ cập nhật beat tại chỗ).
+5. **T7:**
+   - `state_hash` đọc theo `edit_store.timeline_edit`: `asset_type` chỉ được tính khi hàng có `visual_path`. Đổi riêng `asset_type` trên hàng không có hình thì không bị phát hiện.
+   - Bốn đường Edit Plan cũ vẫn ghi được timeline. T3 chỉ **phát hiện** (conflict), không chặn.
+   - Job cấp cảnh (không có `edit_beat_id`) ở trạng thái `error`/`cancelled` vẫn retry được và ghi đè `visual_path` của cảnh. Đây là hành vi cũ, không do T3 gây ra; T3 chỉ chặn job **chưa xong** (`scene_job_running`), và lần áp sau sẽ phát hiện thành conflict.
+7. **T4 (caller) / T7 (gate):**
+   - Kiểm `CURRENT` và "theo kịp" (`_fresh`) chạy **trước** transaction; cột giọng không nằm trong `state_hash`, nên một reconcile chen vào giữa không bị phát hiện.
+   - `storyboard_row` do caller truyền không được kiểm là storyboard mới nhất (giống T2 `sync()`).
+   - Chưa có caller nên chưa xảy ra được; caller ở T4 phải giữ hai điều kiện này.
+6. **T6:** dọn orphan.
+
+---
+
 ## 10. Yêu cầu bắt buộc cho T2 (đã nêu ở checkpoint)
 
 - Trạng thái "stale" ở T0.5 **không bền**: nó chỉ nằm trong bản ghi reconcile của từng lần, và `get_director_artifact` chỉ đọc bản mới nhất.
@@ -437,9 +581,10 @@ Chưa có caller, route hay MCP nào gọi `edit_store`. Đây là đúng phạm
 
 1. Người dùng cùng GPT **duyệt T1** (mục 9).
 2. ~~Chốt T2~~: **xong 08/10** (mục 9b). Nên chạy lại full suite trên Windows để xác nhận.
-3. **T3 — Apply:** `apply_scenes()` là đường ghi duy nhất từ EditDocument xuống timeline. Phải tôn trọng rủi ro 1–2 ở mục 9b: không ghi đè visual của orphan `legacy`.
-4. Sau đó lần lượt T4 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
-5. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
+3. ~~T3 — Apply~~: **xong 08/10** (mục 9c), đã commit và push. Nên chạy lại full suite trên Windows.
+4. **T4 — Nối reconcile:** gọi `edit_apply.apply_scenes` sau reconcile; trong **cùng thay đổi** gỡ việc reconcile chép cột edit và `Database._retime` / `_retime_beats`; xử lý hàng mang sang (mục 9c, giới hạn 1).
+5. Sau đó lần lượt T5 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
+6. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 **Known limitations còn lại:**
 - Job tạo ảnh/video chưa qua Storyboard Gate (để 5.4).

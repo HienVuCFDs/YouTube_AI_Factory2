@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import uuid
@@ -19,6 +20,47 @@ def utc_now() -> str:
 # Bước 5.3 · T2: EditDocuments are kept as director artifacts of this kind - never in
 # project_edit_plans, which belongs to the legacy Edit Plan and its routes.
 EDIT_DOCUMENT_KIND = "edit_document"
+# Bước 5.3 · T3: what an apply wrote to the timeline, row by row - one artifact per apply that wrote something.
+EDIT_APPLY_KIND = "edit_apply"
+# The timeline columns an EditDocument owns (with the edit beats): its visual, its look, its layers.
+# Voice, subtitles, length, status and the shot's prompt are never written by an apply.
+EDIT_OWNED_COLUMNS = frozenset({
+    "visual_path", "visual_prompt", "visual_kind", "visual_fps", "visual_kind_reason", "visual_strategy",
+    "visual_provider", "source_dependency", "risk_level", "content_dna", "transform_actions", "required_assets",
+    "edit_transition", "edit_effect", "edit_note", "edit_trim_head", "edit_trim_tail", "edit_cleanups",
+    "source_start_seconds", "source_cue_reason", "asset_type", "overlays", "sound_cues", "edit_direction",
+})
+# The edit beat columns an apply writes; beat_index is given by the order, the rest by the table.
+EDIT_BEAT_COLUMNS = ("asset_id", "visual_path", "source_kind", "start_seconds", "duration_seconds", "effect",
+                      "transition", "prompt", "status")
+# A scene job that has not finished may still write its picture into the row or one of its beats.
+_SCENE_JOB_DONE = ("completed", "error", "cancelled")
+# What a value of a column of each declared type has to be, before it is written.
+_COLUMN_TYPES: dict[str, tuple[type, ...]] = {"TEXT": (str,), "INTEGER": (int,), "REAL": (int, float)}
+
+
+def _schema_problem(values: dict[str, Any], schema: dict[str, tuple[str, bool]]) -> str:
+    """Why values cannot be written to columns of this declared schema ({name: (type, notnull)}) - "" when they can.
+
+    Read against the table's own declaration (PRAGMA table_info), so a value
+    the database would refuse - None in a NOT NULL column, text in a number
+    column, a number that is not finite - is named before any write, never
+    found by an IntegrityError half way through an apply.
+    """
+    for column, value in values.items():
+        if column not in schema:
+            return f"{column}: không phải cột của bảng"
+        declared, notnull = schema[column]
+        if value is None:
+            if notnull:
+                return f"{column}: không được để trống"
+            continue
+        allowed = _COLUMN_TYPES.get(declared.upper(), ())
+        if isinstance(value, bool) or (allowed and not isinstance(value, allowed)):
+            return f"{column}: phải là {declared}"
+        if isinstance(value, float) and not math.isfinite(value):
+            return f"{column}: không phải số hữu hạn"
+    return ""
 
 
 class StoredEditDocumentError(ValueError):
@@ -27,6 +69,10 @@ class StoredEditDocumentError(ValueError):
 
 class EditDocumentConflict(RuntimeError):
     """A save that does not follow the latest stored EditDocument of the script it is for."""
+
+
+class StoredEditApplyError(ValueError):
+    """A stored edit_apply artifact that cannot be read as one (broken JSON, missing fields)."""
 
 
 class Database:
@@ -2654,6 +2700,187 @@ class Database:
             artifact_id = int(cursor.lastrowid)
         return {"id": artifact_id, "created_at": now, "payload": json.loads(text), "created": True}
 
+    # ------------------------------------------------------------------
+    # Bước 5.3 · T3 · applying an EditDocument to the timeline (project_director_artifacts, kind "edit_apply")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _edit_apply_entries(connection: sqlite3.Connection, project_id: int) -> list[dict[str, Any]]:
+        """The project's apply records, newest first. A row that cannot be read is refused, never skipped:
+        skipping it would make an older state look like the one the timeline was last given."""
+        rows = connection.execute(
+            "SELECT id, payload_json, created_at FROM project_director_artifacts "
+            "WHERE project_id = ? AND kind = ? ORDER BY id DESC",
+            (int(project_id), EDIT_APPLY_KIND),
+        ).fetchall()
+        found: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError) as exc:
+                raise StoredEditApplyError(f"Bản ghi áp #{row['id']} không đọc được (JSON hỏng)") from exc
+            written = payload.get("rows") if isinstance(payload, dict) else None
+            if not isinstance(written, list) or any(
+                    not isinstance(item, dict) or not isinstance(item.get("segment_id"), int)
+                    or not isinstance(item.get("state_hash"), str) or not isinstance(item.get("layer_hash"), str)
+                    for item in written):
+                raise StoredEditApplyError(f"Bản ghi áp #{row['id']} thiếu segment_id, state_hash hoặc layer_hash")
+            found.append({"id": int(row["id"]), "created_at": row["created_at"], "payload": payload})
+        return found
+
+    def list_edit_applies(self, project_id: int, script_id: int | None = None) -> list[dict[str, Any]]:
+        """Apply records, newest first: {"id", "created_at", "payload"}. Raises StoredEditApplyError on a broken row."""
+        with self._connect() as connection:
+            entries = self._edit_apply_entries(connection, project_id)
+        return [entry for entry in entries if script_id is None or entry["payload"].get("script_id") == int(script_id)]
+
+    def apply_edit_document_rows(
+        self, project_id: int, script_id: int, rows: list[dict[str, Any]], *,
+        state_hash: Callable[[dict[str, Any], list[dict[str, Any]]], str], record: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Write the planned rows of an EditDocument to the timeline, each only if it is still as expected - one transaction.
+
+        Each row: {"segment_id", "scene_key", "layer_hash", "legacy_hash", "default_hash",
+        "updates": {owned column: value}, "beats": [beat, ...] | None, "visual_owned"}.
+        `beats` None: the edit names no beats, so the row's beats are not
+        touched - whoever made them. A list replaces them.
+
+        What a row is expected to hold is read inside the transaction, in this
+        order: the state the latest apply left it in; else the legacy layers
+        the EditDocument holds as an orphan of that row; else nothing ever
+        written. A row that holds anything else - written since by another
+        path - is a conflict: it is not written and the others still are. A
+        row the latest apply already gave this very edit, still as it left
+        it, is unchanged. A row with a scene job still running is skipped: the
+        job would write its picture over the edit when it finishes. Beats any
+        scene job points at (edit_beat_id, whatever its status - a failed or
+        cancelled one can be retried) are never deleted: the row is skipped,
+        since deleting them would set the job's beat to NULL and a retried job
+        would then write its picture over the whole scene. Values the table
+        would refuse (its own declared types and NOT NULL) skip the row as an
+        invalid edit - like a conflict, the other rows are still written.
+
+        The rows written and the record of what each now holds (`state_hash`,
+        read back) are committed together; any error rolls back the whole
+        apply. Only the owned columns and the row's edit beats are written.
+        """
+        written: list[dict[str, Any]] = []
+        unchanged: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        artifact_id: int | None = None
+        now = utc_now()
+        with self._connect() as connection:
+            # The write lock before the first read: no other writer between what is checked and what is written.
+            connection.execute("BEGIN IMMEDIATE")
+            latest: dict[int, dict[str, Any]] = {}
+            for entry in self._edit_apply_entries(connection, project_id):
+                for item in entry["payload"]["rows"]:
+                    latest.setdefault(int(item["segment_id"]), {**item, "artifact_id": entry["id"]})
+
+            schemas = {table: {item["name"]: (str(item["type"] or ""), bool(item["notnull"]))
+                               for item in connection.execute(f"PRAGMA table_info({table})")}
+                       for table in ("project_timeline_segments", "project_timeline_edit_beats")}
+
+            def read(segment_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                found = connection.execute("SELECT * FROM project_timeline_segments WHERE id = ?", (segment_id,)).fetchone()
+                beats = [dict(beat) for beat in connection.execute(
+                    "SELECT * FROM project_timeline_edit_beats WHERE timeline_segment_id = ? ORDER BY beat_index, id",
+                    (segment_id,))]
+                return dict(found), beats
+
+            for row in rows:
+                segment_id, key = int(row["segment_id"]), row.get("scene_key")
+                bad = set(row["updates"]) - EDIT_OWNED_COLUMNS
+                if bad:
+                    raise ValueError(f"Cột không thuộc EditDocument: {sorted(bad)}")
+                found = connection.execute(
+                    "SELECT id FROM project_timeline_segments WHERE id = ? AND project_id = ? AND script_id = ?",
+                    (segment_id, int(project_id), int(script_id))).fetchone()
+                if not found:
+                    skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "missing_row"})
+                    continue
+                new_beats = row.get("beats")
+                problem = _schema_problem(row["updates"], schemas["project_timeline_segments"]) or next(
+                    (f"beat {number}: {issue}" for number, beat in enumerate(new_beats or [], start=1)
+                     if (issue := _schema_problem({column: beat[column] for column in EDIT_BEAT_COLUMNS if column in beat},
+                                                  schemas["project_timeline_edit_beats"]))), "")
+                if problem:
+                    skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "invalid_edit", "detail": problem})
+                    continue
+                segment, beats = read(segment_id)
+                current = state_hash(segment, beats)
+                applied = latest.get(segment_id)
+                if applied is not None:
+                    expected, source = applied["state_hash"], "applied"
+                elif row.get("legacy_hash"):
+                    expected, source = row["legacy_hash"], "legacy"
+                else:
+                    expected, source = row["default_hash"], "default"
+                if current != expected:
+                    conflicts.append({"segment_id": segment_id, "scene_key": key, "reason": "timeline_changed",
+                                      "expected_from": source})
+                    continue
+                if applied is not None and applied["layer_hash"] == row["layer_hash"]:
+                    unchanged.append({"segment_id": segment_id, "scene_key": key, "layer_hash": row["layer_hash"],
+                                      "state_hash": current, "visual_owned": bool(applied.get("visual_owned")),
+                                      "columns_written": list(applied.get("columns_written") or []),
+                                      "beats_written": applied.get("beats_written")})
+                    continue
+                if new_beats is not None and beats and connection.execute(
+                        f"SELECT COUNT(*) FROM scene_generation_jobs WHERE edit_beat_id IN ({', '.join('?' for _ in beats)})",
+                        [int(beat["id"]) for beat in beats]).fetchone()[0]:
+                    skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "beat_has_jobs"})
+                    continue
+                running = connection.execute(
+                    f"SELECT COUNT(*) FROM scene_generation_jobs WHERE timeline_segment_id = ? "
+                    f"AND status NOT IN ({', '.join('?' for _ in _SCENE_JOB_DONE)})",
+                    (segment_id, *_SCENE_JOB_DONE)).fetchone()[0]
+                if running:
+                    skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "scene_job_running"})
+                    continue
+                asset_ids = {int(beat["asset_id"]) for beat in new_beats or [] if beat.get("asset_id") is not None}
+                if asset_ids:
+                    known = {int(item[0]) for item in connection.execute(
+                        f"SELECT id FROM project_assets WHERE project_id = ? AND id IN ({', '.join('?' for _ in asset_ids)})",
+                        (int(project_id), *asset_ids))}
+                    if asset_ids - known:
+                        skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "unknown_asset"})
+                        continue
+                if row["updates"]:
+                    connection.execute(
+                        f"UPDATE project_timeline_segments SET {', '.join(f'{column} = ?' for column in row['updates'])}, "
+                        f"updated_at = ? WHERE id = ?",
+                        [*row["updates"].values(), now, segment_id],
+                    )
+                if new_beats is not None:
+                    connection.execute("DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (segment_id,))
+                    for index, beat in enumerate(new_beats, start=1):
+                        columns = [column for column in EDIT_BEAT_COLUMNS if column in beat]
+                        connection.execute(
+                            f"INSERT INTO project_timeline_edit_beats (timeline_segment_id, beat_index, "
+                            f"{''.join(f'{column}, ' for column in columns)}created_at, updated_at) "
+                            f"VALUES (?, ?, {''.join('?, ' for _ in columns)}?, ?)",
+                            (segment_id, index, *(beat[column] for column in columns), now, now),
+                        )
+                segment, beats = read(segment_id)
+                written.append({"segment_id": segment_id, "scene_key": key, "layer_hash": row["layer_hash"],
+                                "state_hash": state_hash(segment, beats), "visual_owned": bool(row.get("visual_owned")),
+                                "columns_written": sorted(row["updates"]),
+                                "beats_written": len(new_beats) if new_beats is not None else None})
+            if written:
+                payload = {**record, "schema": 1, "script_id": int(script_id), "rows": written + unchanged,
+                           "written": [item["segment_id"] for item in written], "conflicts": conflicts, "skipped": skipped}
+                cursor = connection.execute(
+                    "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                    (int(project_id), EDIT_APPLY_KIND,
+                     json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")), now),
+                )
+                artifact_id = int(cursor.lastrowid)
+        return {"written": written, "unchanged": unchanged, "conflicts": conflicts, "skipped": skipped,
+                "artifact_id": artifact_id}
+
+
     # What a timeline row is (its place and its words) - never copied from an
     # older row - and what belongs to the voice spoken from those words.
     _SEGMENT_IDENTITY = frozenset({"id", "project_id", "script_id", "shot_id", "segment_index", "section", "voice_text",
@@ -5207,6 +5434,9 @@ class Database:
         if kind == EDIT_DOCUMENT_KIND:
             # Only save_edit_document keeps an EditDocument: it checks the version it follows.
             raise ValueError("EditDocument chỉ được lưu qua save_edit_document")
+        if kind == EDIT_APPLY_KIND:
+            # Only apply_edit_document_rows records an apply, in the transaction that wrote it.
+            raise ValueError("Bản ghi áp EditDocument chỉ được lưu qua apply_edit_document_rows")
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO project_director_artifacts (project_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
@@ -5222,6 +5452,8 @@ class Database:
         if kind == EDIT_DOCUMENT_KIND:
             # Read only through list_edit_documents / edit_store, which refuse a broken one instead of handing it back.
             raise ValueError("EditDocument chỉ được đọc qua list_edit_documents")
+        if kind == EDIT_APPLY_KIND:
+            raise ValueError("Bản ghi áp EditDocument chỉ được đọc qua list_edit_applies")
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM project_director_artifacts WHERE project_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
