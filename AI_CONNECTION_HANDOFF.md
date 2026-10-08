@@ -4,6 +4,13 @@ Cập nhật: **2026-10-04**, mốc **Bước 3 · Kịch bản COMPLETE (gồm 
 
 **File này tự đủ để một AI khác (ChatGPT) nắm dự án.** Claude Code dùng thêm `PROJECT_STATUS.md` (cùng nội dung, gọn hơn).
 
+> **Ghi chú 2026-10-08:** file này đúng tới **Bước 4** (04/10). Từ đó đến nay:
+> - Bước 3 + 4 đã commit (`98c51d2`).
+> - Bước 5 (Storyboard & Edit: 5.1, 5.2, 5.3 T0 → T1, code T2) nằm trong `30ca9e1`.
+> - Repo đã có remote GitHub `HienVuCFDs/YouTube_AI_Factory2`.
+>
+> **Trạng thái hiện tại và việc tiếp theo: đọc `HANDOFF_GPT_BUOC5.md` trước.** Mục 14 của file đó là bản đồ tài liệu.
+
 Lịch sử cập nhật:
 - 29/09: Bước 1 (mục 1–9).
 - 03/10: thêm mục 0 và mục 10–16 — Nguồn tham khảo, Bước 2 Kế hoạch, Bước 3 Kịch bản (Script Engine, production gate ở API và worker, provenance của Short), trạng thái git/test/DB, quy tắc làm việc, việc đang chờ.

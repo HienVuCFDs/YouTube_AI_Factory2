@@ -1,6 +1,10 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5, tới hết T1)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 đã có code nhưng chưa có test)
 
-Cập nhật: 2026-10-07 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
+Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
+
+> **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
+> Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
+> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), code T2 đã có (mục 9b), việc tiếp theo (mục 11).
 
 ---
 
@@ -18,8 +22,9 @@ Quy trình từ trước tới nay:
 3. Người dùng dán báo cáo cho GPT; GPT review, chỉ ra rủi ro, soạn prompt tiếp theo.
 
 **Việc ngay bây giờ:**
-- **T1 (EditDocument Engine thuần) đã xong, đang chờ duyệt.**
-- Sau khi duyệt, việc kế tiếp là **T2 — lưu trữ EditDocument** (mục 11).
+- **T1 (EditDocument Engine thuần) đã xong, đang chờ duyệt** (mục 9).
+- **T2 (lưu trữ EditDocument) đã có code** trong `edit_store.py` và `database.py`. Code này **chưa có test, chưa có báo cáo, chưa được duyệt**. Nó cũng **lệch thiết kế đã duyệt** ở chỗ lưu: dùng `project_director_artifacts` thay vì `project_edit_plans` (mục 9b).
+- Việc kế tiếp: duyệt T1, rồi chốt T2: chấp nhận chỗ lưu mới hay không, viết test, báo cáo (mục 11).
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -45,14 +50,18 @@ Quy trình từ trước tới nay:
 
 - App local: FastAPI + SQLite + HTML/JS thuần, cổng 8787.
 - Code ở `_HE_THONG/app/youtube_monitor/`, test ở `_HE_THONG/app/tests/`.
-- DB thật: `_HE_THONG/data/youtube_monitor.db`. Hash hiện tại **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10.
-- Git: nhánh `master`, commit gần nhất `98c51d2 feat: complete script engine and Gemini TTS` (Bước 3 + 4). Repo **không có remote**.
+- DB thật: `_HE_THONG/data/youtube_monitor.db` (gitignore, chỉ có trên máy người dùng). Hash ghi nhận gần nhất **`6ece65e24917facb3b46b3ab320796c4`** (07/10), không đổi từ 06/10. Ngày 08/10 chưa đo lại: phiên Claude trên cloud không có DB.
+- Git (08/10):
+  - Repo **đã có remote** GitHub `HienVuCFDs/YouTube_AI_Factory2`, nhánh chính `main`.
+  - Lịch sử: `08c5ed0` (Bước 2) → `98c51d2 feat: complete script engine and Gemini TTS` (Bước 3 + 4) → **`30ca9e1 Initial commit`** (08/10 01:19).
+  - `30ca9e1` gom **toàn bộ** thay đổi trước đó còn nằm ngoài git: Bước 5.1, 5.2, T0, T0.5, T1, code T2, file này. Nó gom luôn các file `_tmp_*` ở thư mục gốc, kể cả `_tmp_work_brief_review/pymupdf_deps/` (thư viện pymupdf vendored).
+  - Nhánh làm việc của Claude trên cloud: `claude/dreamy-gates-4qehd3`.
 
 Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 🔧 có code, chưa test) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -63,28 +72,32 @@ ProjectPlan → ScriptDocument → StoryboardDocument ─(lineage)→ EditDocume
 
 ---
 
-## 2. Thay đổi chưa commit (toàn bộ Bước 5.1 + 5.2 + 5.3 T0/T0.5/T1)
+## 2. Bước 5 nằm ở đâu trong git
+
+Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong commit **`30ca9e1 Initial commit`**, ngay sau `98c51d2`. Danh sách file code/test của Bước 5:
 
 ```text
- M _HE_THONG/app/tests/test_production_gate.py
- M _HE_THONG/app/tests/test_script_paths.py
- M _HE_THONG/app/youtube_monitor/database.py
- M _HE_THONG/app/youtube_monitor/main.py
- M _HE_THONG/app/youtube_monitor/production_worker.py
- M _HE_THONG/app/youtube_monitor/shot_planner.py        (chỉ docstring)
- M _HE_THONG/app/youtube_monitor/voice_library.py
-?? _HE_THONG/app/youtube_monitor/storyboard_engine.py
-?? _HE_THONG/app/youtube_monitor/storyboard_reconcile.py
-?? _HE_THONG/app/youtube_monitor/edit_document.py      (T1)
-?? _HE_THONG/app/tests/test_storyboard_engine.py       (34 test)
-?? _HE_THONG/app/tests/test_storyboard_gate.py         (47 test)
-?? _HE_THONG/app/tests/test_storyboard_lineage.py      (28 test)
-?? _HE_THONG/app/tests/test_edit_document.py           (25 test)
-?? HANDOFF_GPT_BUOC5.md                                 (file này)
+ sửa  _HE_THONG/app/tests/test_production_gate.py
+ sửa  _HE_THONG/app/tests/test_script_paths.py
+ sửa  _HE_THONG/app/youtube_monitor/database.py          (+ storyboard, reconcile, EditDocument T2)
+ sửa  _HE_THONG/app/youtube_monitor/main.py
+ sửa  _HE_THONG/app/youtube_monitor/production_worker.py
+ sửa  _HE_THONG/app/youtube_monitor/shot_planner.py      (chỉ docstring)
+ sửa  _HE_THONG/app/youtube_monitor/voice_library.py
+ mới  _HE_THONG/app/youtube_monitor/storyboard_engine.py   (5.1, T0.5)
+ mới  _HE_THONG/app/youtube_monitor/storyboard_reconcile.py (5.2, T0.5, T1)
+ mới  _HE_THONG/app/youtube_monitor/edit_document.py      (T1)
+ mới  _HE_THONG/app/youtube_monitor/edit_store.py         (T2 – chưa có test, chưa nối vào đâu)
+ mới  _HE_THONG/app/tests/test_storyboard_engine.py       (34 test)
+ mới  _HE_THONG/app/tests/test_storyboard_gate.py         (47 test)
+ mới  _HE_THONG/app/tests/test_storyboard_lineage.py      (28 test)
+ mới  _HE_THONG/app/tests/test_edit_document.py           (25 test)
+ mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
-- Các file `_tmp_*` ở thư mục gốc **không** thuộc commit nào; cố ý để ngoài.
-- **Kết quả test mới nhất (sau T1):** 2239 đạt · 2 đỏ cũ · 9 bỏ qua · 230 subtest đạt.
+- Các file `_tmp_*` ở thư mục gốc là của người dùng, nhưng **đã lọt vào `30ca9e1`**: `_tmp_inspect_project56.py`, `_tmp_schema.py`, `_tmp_project56_*.json`, `_tmp_review_project56/` (ảnh contact sheet), `_tmp_work_brief_review/` (PDF/PNG của WORK BRIEF + thư viện `pymupdf_deps/`). Có gỡ khỏi git hay không là quyết định của người dùng. Claude không tự xoá.
+- **Kết quả test mới nhất (sau T1, 07/10, trên máy người dùng):** 2239 đạt · 2 đỏ cũ · 9 bỏ qua · 230 subtest đạt. Code T2 có sau lần chạy đó, và chưa có test nào gọi tới nó.
+- Phiên Claude trên cloud (08/10) **không chạy được test**: môi trường chưa cài `fastapi` / `pytest`. Số liệu test ở đây vẫn là số đo trên máy người dùng.
 
 ---
 
@@ -154,6 +167,7 @@ ProjectPlan → ScriptDocument → StoryboardDocument ─(lineage)→ EditDocume
 ## 6. Bước 5.3 — thiết kế EditDocument (đã duyệt) và thứ tự task
 
 - **Lưu** trong `project_edit_plans.plan_json` với `"kind": "edit_document"`, `"engine_version": "edit-phase1"`. Không cần migration.
+  - ⚠️ **Code T2 hiện tại không làm theo dòng này.** Nó lưu vào `project_director_artifacts` (kind `edit_document`), mỗi phiên bản một dòng. Vẫn không migration. Chi tiết và lý do ở mục 9b; cần người dùng/GPT chốt.
 - **Nối cảnh cũ–mới chỉ qua `lineage()`.**
 - **Một đường ghi duy nhất:** `apply_scenes()` (T3). Sửa tay, AI từng cảnh, AI toàn bộ đều ghi vào EditDocument trước.
 - **Gate (T7):**
@@ -326,6 +340,61 @@ Thêm: `[X, Y, X]` với chèn / xoá / dời không tráo edit; validator bắt
 
 ---
 
+## 9b. T2 — Lưu trữ EditDocument (CÓ CODE, CHƯA TEST, CHƯA BÁO CÁO, CHƯA DUYỆT)
+
+Code T2 đã nằm trong `30ca9e1`. Phần dưới đây là **kết quả đọc code ngày 08/10**, chưa phải báo cáo nghiệm thu: chưa có test nào cho T2 và chưa ai chạy nó.
+
+**File:**
+- `youtube_monitor/edit_store.py` (mới, khoảng 330 dòng). **Chưa được import ở đâu**: `main.py`, route và MCP đều chưa gọi.
+- `youtube_monitor/database.py`:
+  - hằng `EDIT_DOCUMENT_KIND = "edit_document"`;
+  - lỗi `StoredEditDocumentError`, `EditDocumentConflict`;
+  - `list_edit_documents`, `get_latest_edit_document`, `save_edit_document`;
+  - `get_project_storyboard_by_hash`.
+- **Không có** `tests/test_edit_store.py` hay test nào gọi các hàm trên.
+
+**Chỗ lưu: lệch thiết kế đã duyệt (mục 6).**
+- Lưu ở `project_director_artifacts` với `kind = "edit_document"`, mỗi phiên bản một dòng, chỉ thêm, không sửa dòng cũ.
+- `payload_json = {schema: 1, script_id, storyboard_id, storyboard_hash, document_hash, parent_hash, carried_from, document}`.
+- Lý do ghi trong code: `project_edit_plans` thuộc Edit Plan cũ và các route của nó; tách ra để hai hệ không đọc dữ liệu của nhau.
+- Không cần migration, vì bảng đã có sẵn.
+- **Cần chốt:** chấp nhận chỗ lưu này (rồi sửa mục 6), hay bắt quay về `project_edit_plans`.
+
+**Phiên bản** (`Database.save_edit_document`):
+- Ghi trong một transaction `BEGIN IMMEDIATE`.
+- `expected_parent` phải đúng là `document_hash` của bản mới nhất; sai thì `EditDocumentConflict` và không ghi gì.
+- Cùng hash với bản mới nhất: trả lại dòng cũ (`created: false`).
+- Trùng hash với một bản cũ hơn trong lịch sử: từ chối.
+- `parent_hash` là bản lưu trước đó. Nó khác `based_on` của document (cái engine dựng từ đó).
+- Một dòng hỏng (JSON lỗi, thiếu `script_id` / `document_hash`) làm **cả danh sách** bị từ chối, không bỏ qua. Lý do: bỏ qua có thể trả về một bản cũ hơn như thể nó là bản mới nhất.
+
+**Đọc chặt** (`edit_store.load` / `history` / `_verified`):
+- Kiểm `schema`, rồi `document_hash` khớp nội dung, rồi đúng `script_id`, rồi `storyboard_hash` khớp giữa payload và provenance.
+- Storyboard tìm theo hash phải còn nguyên vẹn và `VALID`.
+- Cuối cùng là `edit_document.validate(document, storyboard)`.
+- Hỏng ở bất kỳ chỗ nào thì `EditStoreError` kèm lý do, không bao giờ coi là rỗng hay tự sửa.
+- `current()` trả `current` / `outdated` (bản mới nhất lập cho storyboard khác, không trả document) / `missing`.
+
+**Dựng và lưu** (`edit_store.sync`):
+- `snapshot()` đọc shots, timeline, giọng (`read_voice_record`, `audio_signature`, `voice_fingerprint`) và edit beats.
+  - Từ chối nếu shots chưa khớp storyboard, hoặc timeline có nhưng chưa khớp storyboard.
+- Ba chế độ:
+  - `follow`: có bản của chính kịch bản này; dựng tiếp theo lineage.
+  - `carried_over`: kịch bản mới, lấy bản mới nhất của **kịch bản khác** cùng dự án làm `previous`; ghi `carried_from`.
+  - `bootstrap`: lần đầu; lớp dựng đang có trên timeline thành orphan `legacy`, đúng **cách 2 ở mục 10**.
+- Không có gì đổi (cùng provenance, cùng danh sách `segment_id`): trả bản đang có (`mode: unchanged`), không thêm phiên bản.
+- `plan_scene()`: bọc `edit_document.plan_scene` trên bản `current`, rồi lưu thành phiên bản kế tiếp.
+- **Không ghi gì xuống timeline** (T3), không đổi reconcile (T4), không gate (T7).
+
+**Điểm cần review khi duyệt T2:**
+1. Chỗ lưu lệch mục 6 (nói ở trên).
+2. `carried_over` dựng lineage xuyên kịch bản. Cần xác nhận cách này khớp với reconcile "mang sang kịch bản mới" của 5.2.
+3. Orphan vẫn được giữ qua mọi lần build. Chưa có cơ chế dọn (theo thiết kế là việc của T2/T6).
+4. `sync()` tự **ghi** khi được gọi. Ai được gọi nó và gọi lúc nào chưa được định nghĩa, vì chưa có route hay caller.
+5. Cần test trên DB tạm cho: phiên bản và xung đột, dòng hỏng, `outdated`, ba chế độ `sync`, bootstrap không bao giờ `ready`.
+
+---
+
 ## 10. Yêu cầu bắt buộc cho T2 (đã nêu ở checkpoint)
 
 - Trạng thái "stale" ở T0.5 **không bền**: nó chỉ nằm trong bản ghi reconcile của từng lần, và `get_director_artifact` chỉ đọc bản mới nhất.
@@ -339,14 +408,14 @@ Thêm: `[X, Y, X]` với chèn / xoá / dời không tráo edit; validator bắt
 ## 11. Việc tiếp theo
 
 1. Người dùng cùng GPT **duyệt T1** (mục 9).
-2. Soạn prompt **T2 — Lưu trữ EditDocument**. Gợi ý phạm vi:
-   - ghi / đọc EditDocument trong `project_edit_plans.plan_json` (`kind: edit_document`), không migration;
-   - quy tắc phiên bản (`based_on` / `document_hash`);
-   - đọc lại phải qua `validate()`;
-   - bootstrap theo mục 10;
-   - chưa apply xuống timeline (T3), chưa đổi reconcile (T4), chưa gate (T7);
-   - test chỉ trên DB tạm.
+2. **Chốt T2** (mục 9b). Code đã có, nên prompt T2 giờ là *hoàn thiện và nghiệm thu*, không phải viết mới. Gợi ý phạm vi:
+   - quyết định chỗ lưu: `project_director_artifacts` như code hiện tại, hay `project_edit_plans` như thiết kế ở mục 6;
+   - viết `tests/test_edit_store.py` (DB tạm) cho 5 điểm ở mục 9b;
+   - chạy nhóm test Bước 5 và full suite trên máy người dùng;
+   - báo cáo theo format chuẩn (mục 0), chờ duyệt;
+   - vẫn chưa apply xuống timeline (T3), chưa đổi reconcile (T4), chưa gate (T7), chưa thêm route hay UI.
 3. Sau đó lần lượt T3 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
+4. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 **Known limitations còn lại:**
 - Job tạo ảnh/video chưa qua Storyboard Gate (để 5.4).
@@ -360,7 +429,7 @@ Thêm: `[X, Y, X]` với chèn / xoá / dời không tráo edit; validator bắt
 
 ## 12. DB thật
 
-- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10 qua toàn bộ T0 → T1.
+- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10 qua toàn bộ T0 → T1. Chưa đo lại sau khi có code T2. Code T2 chưa có caller nên không thể đã ghi DB, nhưng nên đo lại ở đầu phiên kế tiếp trên máy người dùng.
 - Ngày 06/10 lúc 13:33:44 có một tiến trình ngoài lượt làm việc (khả năng cao là app được bật bằng `.bat`, hoặc một agent khác) chạy migration 5.1. Kết quả: thêm bảng `project_storyboards` (0 dòng) cùng index; không gì khác đổi.
 - Người dùng đã chốt: **không điều tra thêm, không rollback, không sửa DB.**
 
@@ -377,8 +446,20 @@ Thêm: `[X, Y, X]` với chèn / xoá / dời không tráo edit; validator bắt
 
 ---
 
-## 14. Tài liệu khác trong repo
+## 14. Bản đồ tài liệu (đọc theo thứ tự này)
 
-- `PROJECT_STATUS.md`: trạng thái dự án, cập nhật tới Bước 4. **Chưa ghi Bước 5**; nội dung Bước 5 nằm trong file này.
-- `AI_CONNECTION_HANDOFF.md`: lịch sử kết nối AI và các bước trước.
-- `AGENTS.md`: quy tắc vận hành (không tự chạy app nền).
+| # | File | Vai trò | Còn đúng tới |
+|---|---|---|---|
+| 1 | `HANDOFF_GPT_BUOC5.md` (file này) | **Trạng thái hiện tại**, Bước 5, quy tắc làm việc | 08/10 |
+| 2 | `PROJECT_STATUS.md` | Trạng thái Bước 1–4, gate, an toàn dữ liệu, giới hạn đã biết | 04/10; mục đầu có tóm tắt Bước 5 trỏ về đây |
+| 3 | `AI_CONNECTION_HANDOFF.md` | Kiến trúc AI (orchestrator vs worker), MCP, quota, Bước 1–4 chi tiết | 04/10 |
+| 4 | `AGENTS.md` | Luật vận hành: không tự chạy app nền | luôn đúng |
+| 5 | `AUDIT_HE_THONG.md` | Số liệu đo thật và các lỗi đã sửa (giai đoạn 25–29/09) | **lịch sử**, 29/09 |
+| 6 | `KE_HOACH_HOP_NHAT_LUONG.md` | Lý do có "một luồng, `run_step`", nhật ký 25–29/09 | **lịch sử**; nguyên tắc vẫn đúng |
+| 7 | `ASTRA_REFACTOR_IMPLEMENTATION_PLAN.md` | Kế hoạch refactor Astra/Orchestrator (tiếng Anh) | **lịch sử**, 20–22/09; đã được các file trên thay thế |
+| 8 | `_HE_THONG/tai_lieu/STORYBOARD_EDITOR_CLEANUP_PLAN.md` | Ý tưởng storyboard/UI cũ | **lịch sử**, 12–19/09; thiết kế Bước 5 hiện hành nằm ở file này |
+| 9 | `_HE_THONG/tai_lieu/KE_HOACH_DU_AN.md` | Kế hoạch gốc và nhật ký tháng 8 | **lịch sử** |
+| — | `HUONG_DAN_SU_DUNG.md` | Hướng dẫn dùng app cho người dùng | — |
+| — | `WORK BRIEF.docx` | Brief của người dùng (bản PDF/PNG ở `_tmp_work_brief_review/`) | — |
+
+Khi tài liệu mâu thuẫn nhau: **code + test là nguồn sự thật**, sau đó tới file có ngày mới hơn.

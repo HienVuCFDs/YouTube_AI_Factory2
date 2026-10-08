@@ -1,5 +1,7 @@
 # Ke hoach nang cap Storyboard va don UI tong
 
+> **TÀI LIỆU LỊCH SỬ** (ghi chú 2026-10-08). Ý tưởng storyboard/UI 12–19/09. Thiết kế Bước 5 đang làm (StoryboardDocument → EditDocument) nằm trong `HANDOFF_GPT_BUOC5.md`. Trạng thái hiện tại xem `HANDOFF_GPT_BUOC5.md` (mục 14: bản đồ tài liệu) và `PROJECT_STATUS.md`.
+
 Ngay lap: 2026-09-12; cap nhat quyet dinh: 2026-09-18
 
 Pham vi da chot:

@@ -1,6 +1,8 @@
 # PROJECT STATUS — YouTube AI Factory
 
-Cập nhật: **2026-10-04**, sau khi hoàn tất Bước 3 · Kịch bản (Phase 1 → 2.2 và UI) và Bước 4 · Giọng đọc (đã nghiệm thu bằng API thật). Bản đầu viết ngày 03/10. Tác giả: Claude Code, theo yêu cầu người dùng.
+Cập nhật: **2026-10-08** (bổ sung trạng thái Bước 5 và git). Nội dung Bước 3–4 viết ngày 04/10. Bản đầu viết ngày 03/10. Tác giả: Claude Code, theo yêu cầu người dùng.
+
+> **Bước 5 (Storyboard & Edit) đang làm. Chi tiết đầy đủ ở `HANDOFF_GPT_BUOC5.md`**, file vào đầu tiên cho GPT và Claude ở chat mới. File này giữ phần Bước 1–4, gate, an toàn dữ liệu và giới hạn đã biết.
 
 File này là **trạng thái hiện tại**. Chi tiết kết nối AI và lịch sử các bước trước xem `AI_CONNECTION_HANDOFF.md`. Luật làm việc trong workspace: `AGENTS.md`.
 
@@ -13,17 +15,19 @@ File này là **trạng thái hiện tại**. Chi tiết kết nối AI và lị
 | Bước 1 — Phân tích | **COMPLETE** (đã commit) | `run_step("analyze")`, Nguồn tham khảo, Product Reader |
 | Bước 2 — Kế hoạch | **COMPLETE** (đã commit) | Research → Insight → Plan → Feasibility, UI Bước 2 |
 | Bước 3 — Kịch bản | **COMPLETE** (chưa commit) | Script Engine, production gate, worker gate, Short provenance, UI Bước 3 (mục 3) |
-| Bước 4 — Giọng đọc | **COMPLETE / REAL-VERIFIED** (chưa commit) | Edge TTS, Google Gemini 3.8 Flash TTS, Google Gemini 3.8 Flash-Lite TTS, Gemini voice catalog, `voice_style`, preview, UI, ProductionWorker, real API verification (mục 3b) |
+| Bước 4 — Giọng đọc | **COMPLETE / REAL-VERIFIED** (đã commit `98c51d2`) | Edge TTS, Google Gemini 3.8 Flash TTS, Google Gemini 3.8 Flash-Lite TTS, Gemini voice catalog, `voice_style`, preview, UI, ProductionWorker, real API verification (mục 3b) |
+| Bước 5 — Storyboard & Edit | **ĐANG LÀM** (code trong `30ca9e1`) | 5.1 Storyboard Engine ✅ · 5.2 Storyboard Gate + Reconcile ✅ · 5.3 EditDocument: T0 ✅, T0.5 ✅, T1 ✅ chờ duyệt, T2 có code nhưng chưa test và chưa duyệt. Xem `HANDOFF_GPT_BUOC5.md` |
+| Bước 6, 7 | chưa làm lại theo kiến trúc mới | renderer và publisher cũ vẫn chạy; xem giới hạn ở mục 6 |
 
-- **Test:** 2105 pass, 2 known old failures (`test_burned_in_marks`, `test_shorts`), 9 skipped (mục 4).
-- **Git:** Bước 3 + Bước 4 chưa commit tại thời điểm bắt đầu commit. Commit gần nhất là `08c5ed0`.
+- **Test:** sau T1 (07/10, máy người dùng) 2239 đạt, 2 đỏ cũ (`test_burned_in_marks`, `test_shorts`), 9 bỏ qua. Số 2105 ở mục 4 là của 04/10.
+- **Git (08/10):** repo đã có remote GitHub `HienVuCFDs/YouTube_AI_Factory2` (nhánh `main`). Lịch sử: `08c5ed0` → `98c51d2` (Bước 3 + 4) → `30ca9e1 Initial commit` (toàn bộ Bước 5 tới T2, kèm các file `_tmp_*`).
 
 ---
 
 ## 0. Việc đầu tiên trong phiên mới
 
-1. `git status` và `git diff --stat`. Nếu chưa có commit mới sau `08c5ed0` thì **Bước 3 + Bước 4 vẫn nằm trong working tree, CHƯA COMMIT** (mục 3, 3b).
-2. Đọc file này, rồi `AI_CONNECTION_HANDOFF.md` (mục 0, 10–16, gồm 13b cho Bước 4).
+1. `git status` và `git log --oneline -5`. Bước 3 + 4 đã commit (`98c51d2`); Bước 5 nằm trong `30ca9e1`.
+2. Đọc `HANDOFF_GPT_BUOC5.md` trước (trạng thái hiện tại và bản đồ tài liệu), rồi file này, rồi `AI_CONNECTION_HANDOFF.md` (mục 0, 10–16, gồm 13b cho Bước 4).
 3. Không reset, revert, clean, commit hay push khi người dùng chưa bảo.
 4. Không tự khởi động app (AGENTS.md). Không mở DB thật bằng `Database()` (mục 7). Không gọi Google Gemini API thật khi người dùng chưa cho phép (lời gọi có phát sinh chi phí).
 5. Chạy test: từ `_HE_THONG/app`, dùng `python -B -m pytest -q -p no:cacheprovider tests` (toàn bộ khoảng 6 phút).
@@ -48,7 +52,7 @@ videos.source_kind
   → production gate → giọng đọc (Bước 4) / storyboard / timeline / render / publish / Short
 ```
 
-## 2. Các mốc đã commit (nhánh `master`, chưa có remote)
+## 2. Các mốc đã commit
 
 | Commit | Nội dung |
 |---|---|
@@ -58,10 +62,12 @@ videos.source_kind
 | `09b5525`, `6ccb716`, `886eb9d` | Nguồn tham khảo: ô "Thêm nguồn" chung, cột `videos.source_kind`, Channel Intelligence |
 | `54148db` | Bước 2 backend: Research → Insight → Plan → Feasibility, kèm hardening |
 | `08c5ed0` | UI Bước 2; Bước 3 chỉ mở khi plan `completed` |
+| `98c51d2` | Bước 3 Script Engine + Bước 4 Gemini TTS |
+| `30ca9e1` | "Initial commit" (08/10): Bước 5.1, 5.2, T0, T0.5, T1, code T2, `HANDOFF_GPT_BUOC5.md`, kèm các file `_tmp_*` của người dùng |
 
-`git remote -v` trống: repo **chưa có remote**, nên "chưa push" nghĩa là chưa có nơi để push.
+Repo đã có remote `origin` = GitHub `HienVuCFDs/YouTube_AI_Factory2`, nhánh chính `main`. Trước 08/10 repo chưa có remote; nhánh cục bộ cũ tên `master`.
 
-## 3. Bước 3 · Kịch bản — COMPLETE (Phase 1 → 2.2 + UI, CHƯA COMMIT)
+## 3. Bước 3 · Kịch bản — COMPLETE (Phase 1 → 2.2 + UI, đã commit `98c51d2`)
 
 ### 3.1 Phase 1: Script Engine (`youtube_monitor/script_engine.py`, mới)
 
@@ -154,7 +160,7 @@ videos.source_kind
 - Làn Short đọc `provenance` và `blocked_reason` từ `GET /short-script`. Short làm từ kịch bản cũ thì các nút phía sau bị khóa, kèm lý do của server.
 - Writer cũ vẫn còn ở trang Thư viện (AI Writer từng video hoặc hàng loạt) và ở phần đề xuất metadata xuất bản (mục 6); Bước 3 không đọc nó.
 
-## 3b. Bước 4 · Giọng đọc — COMPLETE / REAL-VERIFIED (CHƯA COMMIT)
+## 3b. Bước 4 · Giọng đọc — COMPLETE / REAL-VERIFIED (đã commit `98c51d2`)
 
 **Engine** (`youtube_monitor/tts_catalog.py`, mới): mỗi provider key ứng với một vendor, một model và loại file.
 
@@ -309,10 +315,12 @@ Script Engine và các gate **chưa chạy với model viết kịch bản thậ
 
 ## 9. Việc tiếp theo (chờ người dùng quyết)
 
-- [ ] Review và commit Bước 3 + Bước 4 (người dùng ra lệnh commit riêng, với message của họ).
+- [x] Commit Bước 3 + Bước 4 (`98c51d2`).
+- [ ] Bước 5.3: duyệt T1, chốt và nghiệm thu T2 (xem `HANDOFF_GPT_BUOC5.md` mục 9b, 11).
 - [x] Audit A (provenance của `final.mp4`) và B (worker sidecar) — xong 03/10, kết quả ở mục 6.
 - [ ] Quyết định migration cho phase "final.mp4 provenance + publish artifact gate" (MIGRATION_REQUIRED, mục 6, ý 1).
 - [ ] Xác nhận ranh giới "luồng Kế hoạch" (mục 3.2).
 - [x] UI Bước 3 — xong (mục 3.5).
 - [x] Bước 4 · Giọng đọc với Gemini TTS — xong, REAL-VERIFIED (mục 3b).
-- [ ] Sau đó: Bước 5 Storyboard dựng từ section của ScriptDocument; chạy thật Script Engine trên dự án 78 với model thật.
+- [x] Bước 5.1 Storyboard dựng từ section của ScriptDocument (xong, xem `HANDOFF_GPT_BUOC5.md`).
+- [ ] Chạy thật Script Engine trên dự án 78 với model thật.

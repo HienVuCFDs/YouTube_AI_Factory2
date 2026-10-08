@@ -1,5 +1,7 @@
 # Audit hệ thống — những gì đã đo, những gì mới là phỏng đoán
 
+> **TÀI LIỆU LỊCH SỬ** (ghi chú 2026-10-08). Số liệu đo và lỗi đã sửa của giai đoạn 25–29/09; vẫn đúng như một bản ghi, nhưng số test và trạng thái kết nối đã cũ. Trạng thái hiện tại xem `HANDOFF_GPT_BUOC5.md` (mục 14: bản đồ tài liệu) và `PROJECT_STATUS.md`.
+
 Ghi lại **kết quả đo thật**, tách khỏi những gì chỉ mới viết code chứ chưa chứng minh.
 Mỗi mục ghi rõ: đo bằng cách nào, số liệu ra sao, và chỗ nào còn là giả thuyết.
 

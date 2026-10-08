@@ -1,5 +1,7 @@
 # ASTRA_REFACTOR_IMPLEMENTATION_PLAN
 
+> **TÀI LIỆU LỊCH SỬ** (ghi chú 2026-10-08). Kế hoạch 20–22/09. Đã được thay bằng kế hoạch hợp nhất luồng, Bước 1–4 và thiết kế Bước 5 (EditDocument). Trạng thái hiện tại xem `HANDOFF_GPT_BUOC5.md` (mục 14: bản đồ tài liệu) và `PROJECT_STATUS.md`.
+
 ## Reality check & correction plan — 2026-09-22
 
 ### Why this update exists

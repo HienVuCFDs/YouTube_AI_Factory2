@@ -1,5 +1,7 @@
 # Kế hoạch hợp nhất luồng làm video
 
+> **TÀI LIỆU LỊCH SỬ** (ghi chú 2026-10-08). Nguyên tắc "một luồng, mọi cửa vào đều gọi `run_project_step`" vẫn là kiến trúc hiện hành. Nhật ký và danh sách nợ dừng ở 29/09. Trạng thái hiện tại xem `HANDOFF_GPT_BUOC5.md` (mục 14: bản đồ tài liệu) và `PROJECT_STATUS.md`.
+
 Ngày lập: 2026-09-25
 
 ## 1. Vấn đề

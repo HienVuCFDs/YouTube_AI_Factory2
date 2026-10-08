@@ -1,5 +1,7 @@
 # Kế hoạch dự án YouTube AI Factory
 
+> **TÀI LIỆU LỊCH SỬ** (ghi chú 2026-10-08). Kế hoạch gốc và nhật ký triển khai tháng 8–9. Trạng thái hiện tại xem `HANDOFF_GPT_BUOC5.md` (mục 14: bản đồ tài liệu) và `PROJECT_STATUS.md`.
+
 ## 1. Mục tiêu
 
 Xây dựng hệ thống AI hỗ trợ quy trình sản xuất video YouTube theo dạng module. Hệ thống có thể theo dõi nhiều kênh, lưu metadata, phân tích nội dung, tạo transcript, hỗ trợ viết kịch bản, dựng video, tạo thumbnail và chuẩn bị xuất bản.
