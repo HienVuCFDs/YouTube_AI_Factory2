@@ -35,13 +35,13 @@ from . import settings
 from .antigravity_bridge import antigravity_cli_status
 from .claude_code_bridge import claude_code_cli_status
 from .codex_bridge import CodexBridgeError, call_codex_vision_json, codex_cli_status, launch_codex_login
-from .database import Database, StoredEditDocumentError
+from .database import Database, StoredEditApplyError, StoredEditDocumentError
 from .event_bus import EventBus
 from .director import DirectorError, director_to_markdown, director_to_script, director_to_shots, generate_director_draft
 from .ffmpeg_renderer import ffmpeg_available, media_duration_seconds, nvenc_available, render_timeline_with_ffmpeg
 from .ffmpeg_renderer import video_frame_size
 from . import gemini_tts, operations, tts_catalog, usage_limits, workflows
-from . import edit_apply, edit_planner, edit_store
+from . import edit_apply, edit_document, edit_planner, edit_store
 from . import languages
 from .fidelity_guard import unsourced_details
 from .graphic_overlays import normalize_graphic_overlays
@@ -8037,6 +8037,64 @@ def _edit_document_planned(project_id: int, script_id: int) -> bool:
         return found["state"] == edit_store.CURRENT and not edit_planner.select(found["document"])[0]
     except (edit_store.EditStoreError, edit_planner.PlannerError):
         return False
+
+
+_EDIT_SCENE_PLANNED = frozenset({edit_document.READY, edit_document.VISUAL_REVIEW})
+
+
+@app.get("/api/projects/{project_id}/edit-document")
+def get_project_edit_document(project_id: int) -> dict[str, Any]:
+    """Bước 5.3 · T5 (UI): where the project's EditDocument stands, scene by scene. Read-only.
+
+    mode: the Storyboard Gate's (plan | reup | legacy); only "plan" has an
+    EditDocument, the others answer state "not_applicable". state: current |
+    outdated (made for another storyboard: the next plan or sync follows it) |
+    missing | error. For a current document, each scene: its status (ready,
+    visual_review, needs_plan, stale_*), its timeline row, and `applied`:
+    "applied" (the row holds this very edit, by the latest apply record),
+    "not_applied" (never applied), "older" (the row holds an earlier edit),
+    None for a scene with no edit to apply. Nothing is synced, planned or
+    applied here - edit_store.current and the apply records are only read.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    gate, _ = _storyboard_gate(project_id)
+    answer: dict[str, Any] = {"project_id": project_id, "mode": gate.get("mode"), "gate": gate.get("state")}
+    if gate.get("mode") != storyboard_engine.PLAN_MODE:
+        return {**answer, "state": edit_planner.NOT_APPLICABLE, "scenes": []}
+    script = script_engine.current_script(database, project_id, _current_project_plan(project_id))
+    if not script:
+        return {**answer, "state": edit_store.MISSING, "scenes": []}
+    script_id = int(script["id"])
+    row = database.get_latest_project_storyboard(project_id, script_id=script_id)
+    answer.update(script_id=script_id, storyboard_id=int(row["id"]) if row else None)
+    try:
+        found = edit_store.current(database, project_id, script_id, row)
+        if found["state"] != edit_store.CURRENT:
+            return {**answer, "state": found["state"], "document_hash": found.get("document_hash"), "scenes": []}
+        on_rows: dict[int, str] = {}
+        for entry in database.list_edit_applies(project_id, script_id):  # newest first
+            for item in entry["payload"]["rows"]:
+                on_rows.setdefault(int(item["segment_id"]), item["layer_hash"])
+    except (edit_store.EditStoreError, StoredEditApplyError) as exc:
+        return {**answer, "state": "error", "detail": str(exc), "scenes": []}
+    scenes: list[dict[str, Any]] = []
+    for item in found["document"]["scenes"]:
+        segment_id = item.get("segment_id")
+        applied = None
+        if item.get("status") in _EDIT_SCENE_PLANNED and segment_id is not None:
+            held = on_rows.get(int(segment_id))
+            mine = edit_document.edit_hash(edit_document.effective_edit(item))
+            applied = "not_applied" if held is None else ("applied" if held == mine else "older")
+        scenes.append({"scene_key": item["scene_key"], "segment_id": segment_id, "status": item.get("status"),
+                       "statuses": list(item.get("statuses") or []),
+                       "timing": (item.get("timing") or {}).get("state"), "applied": applied})
+    counts = {"scenes": len(scenes), "planned": sum(1 for item in scenes if item["status"] in _EDIT_SCENE_PLANNED),
+              "needs_plan": sum(1 for item in scenes if item["status"] == edit_document.NEEDS_PLAN),
+              "applied": sum(1 for item in scenes if item["applied"] == "applied")}
+    counts["stale"] = counts["scenes"] - counts["planned"] - counts["needs_plan"]
+    return {**answer, "state": edit_store.CURRENT, "document_hash": found["document_hash"], "counts": counts,
+            "scenes": scenes}
 
 
 def _measured_source_marks(project: dict[str, Any]) -> list[dict[str, Any]]:

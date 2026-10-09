@@ -1,10 +1,10 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành, UI Bước 5 nối T5)
 
 Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
 
 > **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
-> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), **T5 hoàn thành: Planner theo storyboard** (mục 9e), việc tiếp theo (mục 11).
+> Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), **T5 hoàn thành: Planner theo storyboard** (mục 9e), **UI Bước 5 nối vào T5/EditDocument** (mục 9f), việc tiếp theo (mục 11).
 
 ---
 
@@ -29,7 +29,8 @@ Quy trình từ trước tới nay:
 - **T3 (Apply EditDocument → timeline) hoàn thành** (mục 9c). Người dùng đã chốt H1–H6, B1–B4.
 - **T4 (tích hợp) hoàn thành** (mục 9d): `_sync_storyboard` → `_apply_edit_document` → `edit_store.sync()` → `edit_apply.apply_scenes()` là đường ghi EditDocument → timeline trong luồng sản xuất; reconcile không chép, không `_retime` phần EditDocument sở hữu. Chỉ chạy cho project **đã có** EditDocument.
 - **T5 (Planner theo storyboard) hoàn thành** (mục 9e): `run_step("edit_plan")` của project luồng Kế hoạch lập edit cho các cảnh của storyboard hiện hành vào EditDocument (khớp theo `segment_id`), chỉ khi đầu vào current; áp ngay chỉ khi `confirmed_apply`.
-- Việc kế tiếp: T6 (mục 11). **Chưa bắt đầu T6.**
+- **UI Bước 5 nối vào T5** (mục 9f, 09/10): nút lập/áp kế hoạch dựng của project luồng Kế hoạch gọi `POST …/steps/edit_plan` (áp chỉ khi người dùng xác nhận → `confirmed_apply`), thẻ cảnh đọc `GET …/edit-document` (route mới, chỉ đọc), mọi trạng thái hiển thị đúng lời máy chủ; nút dựng lại storyboard gửi `force` trong body.
+- Việc kế tiếp: GPT/người dùng quyết phương án T4 tự áp (mục 9f, "Hành vi áp"), rồi T6 (mục 11). **Chưa bắt đầu T6/T7.**
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -100,7 +101,8 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  (T2, commit ec62257) _HE_THONG/app/tests/test_edit_store.py (20 test)
  (T3, commit 1225aef) _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
  (T4, commit 4555921) _HE_THONG/app/tests/test_edit_integration.py (18 test); sửa main.py, database.py, edit_store.py, edit_document.py; test_edit_apply.py / test_edit_store.py (cô lập test, mục 9d)
- (T5, commit T5)      mới _HE_THONG/app/youtube_monitor/edit_planner.py, _HE_THONG/app/tests/test_edit_planner.py (30 test); sửa main.py, edit_store.py, edit_document.py (mục 9e)
+ (T5, commit f4c07d6) mới _HE_THONG/app/youtube_monitor/edit_planner.py, _HE_THONG/app/tests/test_edit_planner.py (30 test); sửa main.py, edit_store.py, edit_document.py (mục 9e)
+ (UI T5, commit riêng) sửa main.py (GET /edit-document), static/project-detail.js; mới tests/step5_edit_document_ui.test.cjs (27 test), tests/test_step5_edit_ui.py (12 test) (mục 9f)
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
@@ -751,6 +753,57 @@ Phủ 15 yêu cầu: storyboard current → document; idempotent; storyboard sta
 
 ---
 
+## 9f. UI Bước 5 nối vào T5 / EditDocument (HOÀN THÀNH 09/10)
+
+Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Plan cũ `POST /api/projects/{id}/edit-plan` (và `edit-beats/plan` từng cảnh) thay vì T5; (2) thẻ cảnh chỉ đọc `edit_beats` nên cảnh đã lập/đã áp vẫn hiện "Kế hoạch dựng: chưa lập"; (3) "Dựng lại storyboard từ kịch bản" gửi `?force=true` trên URL trong khi route đọc `force` trong body. Đã sửa cả 3. Không đổi guard T3, ownership/freshness T4, không thêm đường ghi timeline.
+
+### Thay đổi
+
+| File | Nội dung |
+|---|---|
+| `main.py` | Route mới **`GET /api/projects/{id}/edit-document`** — chỉ đọc (`_storyboard_gate`, `edit_store.current`, bản ghi `edit_apply`; không `sync`, không lưu, không apply). 404 nếu không có dự án. Trả `mode` (plan/reup/legacy), `gate`, `state` (`current`/`outdated`/`missing`/`not_applicable`/`error`), `counts`, và từng cảnh `{scene_key, segment_id, status, statuses, timing, applied}`; `applied` = `applied` (bản ghi apply mới nhất của hàng có đúng `layer_hash` của edit hiện tại) / `older` (hàng giữ edit cũ hơn) / `not_applied` / `null` (cảnh chưa lập hoặc cũ). Bản ghi apply hỏng → `state: error` kèm lý do, không đọc thành "chưa áp". Import thêm `edit_document`, `StoredEditApplyError` |
+| `static/project-detail.js` | Khối mới `// ---- Bước 5 · EditDocument ----`: đọc `/edit-document` sau mỗi lần vẽ storyboard (lượt đọc mới nhất thắng, đúng project); `studioEditFlow()` = `plan`/`legacy`/không rõ. Project luồng Kế hoạch: "1. Lập kế hoạch dựng" và "Lập kế hoạch" → `POST …/steps/edit_plan {options:{}}`; "2. Áp dụng kế hoạch dựng" và "Duyệt và áp dụng" → hỏi xác nhận rồi `{options:{confirmed_apply:true}}`; nút từng cảnh → `{scene_keys:[key], replan:true}`. Không đọc được trạng thái → không lập gì (kể cả kiểu cũ). Project ngoài luồng Kế hoạch giữ nguyên Edit Plan cũ / edit-beats. Thẻ cảnh hiện trạng thái EditDocument (đã lập · đã áp / chưa áp / timeline còn bản cũ; chưa lập; cũ: lời/chữ/thời lượng; cần xem lại hình; document thuộc storyboard trước; chưa có EditDocument). Ô trạng thái: số cảnh đã lập/đã áp/chưa lập/cũ, cảnh báo gate không current, và câu nói rõ T4 sẽ tự áp ở lần dựng lại storyboard/timeline kế tiếp. `rebuildStoryboardFromScript` gửi `{force: true}` trong body |
+
+### Hiển thị kết quả (không coi HTTP 200 là thành công)
+
+- Lập: `planned` → thành công (+ "Chưa áp vào timeline…" + cảnh báo T4 tự áp); `unchanged` → trung tính; `partial` (nêu cảnh chưa lập và lý do), `blocked`, `not_current`, `needs_rebuild`, `error` (lời của model/máy chủ), `not_applicable`, trạng thái lạ hoặc rỗng → lỗi.
+- Áp (`result.applied` của T4): `applied`/`unchanged`/`nothing_to_apply` → được; `partial`/`blocked` (số xung đột, số bỏ qua), `not_current`, `no_document`, `error`, thiếu kết quả áp khi đã yêu cầu áp, trạng thái lạ → lỗi.
+- Request lỗi (409/422/500) → lỗi bằng chính thông điệp máy chủ. Bấm lần hai khi đang chạy → không gửi thêm.
+
+### Hành vi áp (đo thật, không đổi)
+
+- Lập không xác nhận: không áp (0 `edit_apply`, cột edit trên timeline không đổi).
+- **T4 tự áp các cảnh đã lập ở lần đồng bộ storyboard kế tiếp.** Caller của `_apply_edit_document` (audit 09/10): `_sync_storyboard` (gọi từ `POST /shots/generate`, `POST /timeline/generate` qua `_storyboard_timeline`, `run_step("shots")`, `run_step("timeline")`, `POST /api/scripts/import`); nhánh agent của `_step_timeline`; T5 `_plan_edit_document` khi `confirmed_apply`. Trên UI các nút gây đồng bộ: "Tạo lại storyboard"/"Dựng lại storyboard từ kịch bản", "Chia cảnh & tạo giọng đọc" (Bước 4), tạo storyboard ở thư viện. UI nói rõ điều này; **semantics không đổi**.
+- Lưu ý khi đổi: hàng đã sở hữu **chỉ được retime nhờ T4 áp lại** (reconcile không retime hàng sở hữu, mục 9d) — tắt hẳn tự áp sẽ làm overlay/beat của hàng sở hữu lệch độ dài giọng mới.
+- **Phương án đề xuất (chưa làm, cần GPT/người dùng chọn):**
+  - **A. Lần áp đầu cần xác nhận, áp lại tự động:** T4 khi đồng bộ chỉ áp cảnh mà hàng đã có bản ghi `edit_apply` (đã sở hữu); cảnh chưa từng áp chờ `confirmed_apply`. Đơn giản, giữ retime. Hở: cảnh đã sở hữu được *lập lại* (`older`) vẫn tự áp.
+  - **B. Đồng ý theo phiên bản:** lưu một artifact `edit_apply_consent` (document_hash + layer_hash từng cảnh người dùng đã duyệt); T4 chỉ áp cảnh có layer đã duyệt, hoặc khác layer đã duyệt chỉ do retime (`effective_edit` từ cùng basis). Chặt nhất, cần thêm 1 kind artifact và test T4.
+  - **C. Giữ như hiện tại** (đã nói rõ trên UI).
+
+### Test
+
+- `tests/step5_edit_document_ui.test.cjs` (mới, **27** test, chạy khối JS thật trong `vm` với máy chủ giả lập): một POST tới `steps/edit_plan`, không `confirmed_apply` khi lập; hai nút áp gửi `confirmed_apply` chỉ sau xác nhận; từ chối xác nhận → không gửi gì; nút từng cảnh `scene_keys`+`replan`; không bao giờ gọi `/edit-plan` hay `/edit-beats` với project luồng Kế hoạch; không đọc được trạng thái → không lập gì; project legacy giữ edit-beats; 9 trạng thái lập + 6 trạng thái áp hiển thị đúng; lỗi request; bấm hai lần; thẻ cảnh theo EditDocument (overlay không làm cảnh "đã lập", thiếu beats không làm cảnh "chưa lập"); document của project khác không vẽ lên project này; nút dựng lại gửi `{force:true}` trong body, không query.
+- `tests/test_step5_edit_ui.py` (mới, **12** test + chạy file `.cjs`): `GET /edit-document` 404 / missing (không bootstrap) / planned→not_applied→applied / `older` sau lập lại / `needs_plan` → `applied: null` / cảnh đổi lời không còn "đã lập" / legacy `not_applicable` / bản ghi apply hỏng → `error`; đọc không ghi gì; lập không xác nhận không đổi timeline, `timeline/generate` kế tiếp T4 áp đúng từng hàng theo `segment_id`; `force` trong body tới `_sync_storyboard`/`_storyboard_timeline`, trong query thì không; hình dạng kết quả step mà UI đọc.
+- **Mutation 18/18 bị bắt** (13 JS: luôn `confirmed_apply`, lập về Edit Plan cũ ×2, `partial`/trạng thái lạ thành công, `force` về query, thẻ cảnh về legacy, bỏ nhãn đã áp, không rõ flow → legacy, bỏ kiểm project, áp không hỏi, áp `partial` thành công, bỏ `replan`; 5 Python: luôn `applied`, đọc mà `sync`, nuốt bản ghi hỏng, legacy có document, cảnh chưa lập có `applied`).
+- **Kết quả (09/10, Linux, DB tạm):** UI mới 27/27 + 12/12; test UI cũ (`test_workflow_ui`, `test_ui_modules`, `test_step1..3_ui`, …) 129/129 và mọi `.cjs` xanh; Bước 5 **260/260**; full suite **2352 đạt · 11 đỏ · 13 bỏ qua**, 11 đỏ giống hệt baseline (2 cũ + 9 môi trường) → không regression.
+- **Smoke app thật + Chromium** (uvicorn 8787, DB tạm `scratchpad/smoke_ui2/data/smoke.db` — `/api/health` xác nhận; seed bằng model giả):
+  - A (đã lập, chưa áp): 10 thẻ "đã lập · chưa áp vào timeline", ô trạng thái "10/10 đã lập · 0 đã áp" + cảnh báo T4; bấm "2. Áp dụng" → `POST …/steps/edit_plan {"options":{"confirmed_apply":true}}` → "Đã áp 10 cảnh vào timeline", thẻ đổi "đã áp vào timeline"; bấm "1. Lập kế hoạch dựng" và "Lập kế hoạch" → `{"options":{}}` → "Không có cảnh nào cần lập" (trung tính); "Dựng lại storyboard" → `shots/generate {"force":true}`, `timeline/generate {"force":true}`.
+  - B (kịch bản sửa tại chỗ): "chưa có EditDocument" + cảnh báo gate `stale`; bấm lập → lỗi `not_current` đúng lời máy chủ.
+  - C (chưa lập, **không có model**): lỗi `error` với lời máy chủ (không AI nào chạy được), thẻ vẫn "chưa lập".
+  - Không request nào tới `/edit-plan` hay `/edit-beats`.
+  - **Sự cố trong smoke (đã xử lý):** lần chạy C đầu tiên, app tự tìm thấy `claude` CLI có sẵn trong container cloud (`settings._detect_claude_code_cli` → `shutil.which("claude")`) và gọi nó làm model thật (`claude -p … --dangerously-skip-permissions`). Đã kill tiến trình đó sau ~20 giây và tắt app; chạy lại C với `PATH` không có CLI model. **Bài học: smoke trên máy có Claude Code/Codex CLI phải bỏ chúng khỏi `PATH` của app (hoặc đặt cấu hình provider) nếu không muốn gọi model thật.**
+  - Đã tắt app, không còn uvicorn/chromium/`claude -p`, cổng 8787 trống. Không chạy trên PC Windows (phiên cloud không truy cập được máy người dùng), không dùng DB thật.
+
+### Rủi ro còn lại
+
+1. T4 tự áp ở lần đồng bộ kế tiếp (trên) — chờ chọn A/B/C.
+2. Thẻ cảnh của project luồng Kế hoạch vẫn có trình sửa nhịp dựng cũ ("Lưu kế hoạch cảnh", "Áp dụng cảnh này" → `PUT/POST /api/timeline/{id}/edit-beats…`) và sửa chữ động/SFX (`PATCH /api/timeline/{id}/plan`): ghi thẳng timeline ngoài EditDocument → T4 báo xung đột ở hàng đã sở hữu (UI hiện `partial`/`blocked`). Nối các thao tác sửa tay vào EditDocument là **T6**; chặn đường ghi cũ là **T7**. Route `/edit-plan` cũ vẫn mở cho MCP/agent (không qua UI).
+3. "2. Áp dụng kế hoạch dựng" với `confirmed_apply` cũng **lập luôn** các cảnh chưa lập/cũ rồi áp (đúng semantics T5); hộp xác nhận nói rõ.
+4. Nút "Chia cảnh & tạo giọng đọc" (Bước 4) vẫn tự `force` khi máy chủ báo storyboard `stale` — hành vi có từ trước, có chủ đích, không đổi.
+5. Chưa chạy trên Windows/DB thật; ảnh/sóng âm trong smoke lỗi vì file giả của seed (không phải lỗi app).
+
+---
+
 ## 10. Yêu cầu bắt buộc cho T2 (đã nêu ở checkpoint)
 
 - Trạng thái "stale" ở T0.5 **không bền**: nó chỉ nằm trong bản ghi reconcile của từng lần, và `get_director_artifact` chỉ đọc bản mới nhất.
@@ -768,8 +821,9 @@ Phủ 15 yêu cầu: storyboard current → document; idempotent; storyboard sta
 3. ~~T3 — Apply~~: **xong 08/10** (mục 9c), đã commit và push. Nên chạy lại full suite trên Windows.
 4. ~~T4 — Nối reconcile~~: **xong 08/10** (mục 9d), theo checklist 11a.
 5. ~~T5 — Planner theo storyboard~~: **xong 08/10** (mục 9e). Cần GPT review rủi ro 1 của 9e (T4 tự áp edit đã lập ở lần sync kế tiếp).
-6. Sau đó lần lượt T6 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
-7. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
+6. ~~UI Bước 5 nối T5~~: **xong 09/10** (mục 9f). Chờ quyết phương án "chỉ áp sau xác nhận" (9f).
+7. Sau đó lần lượt T6 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
+8. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 ### 11a. T4 — Integration checklist bắt buộc (đã thống nhất 08/10)
 
@@ -826,7 +880,7 @@ Phủ 15 yêu cầu: storyboard current → document; idempotent; storyboard sta
 
 ## 13. Ghi chú kỹ thuật cho Claude ở chat mới
 
-- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút. Nhóm test Bước 5 (248 test, ~75 giây): `tests/test_edit_planner.py tests/test_edit_integration.py tests/test_edit_apply.py tests/test_edit_store.py tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py`.
+- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút. Nhóm test Bước 5 (260 test, ~75 giây): `tests/test_step5_edit_ui.py tests/test_edit_planner.py tests/test_edit_integration.py tests/test_edit_apply.py tests/test_edit_store.py tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py`.
 - **Không sửa file khi full suite đang chạy.** Test `test_a_freshly_imported_process_is_not_stale` kiểm thời điểm sửa file nguồn. Muốn sửa thì dừng suite trước, sửa xong chạy lại.
 - **File trong repo dùng xuống dòng LF.** Sửa bằng script Python thì dùng `read_bytes`/`write_bytes` hoặc `newline="\n"`; `Path.write_text` trên Windows đổi cả file sang CRLF. Sửa xong thì kiểm `count(b"\r\n") == 0`.
 - **Không mở DB thật bằng `Database()` hay `import main`** (`initialize()` sẽ migrate). Chỉ đọc bằng `sqlite3` với `mode=ro`, hoặc dùng bản sao.

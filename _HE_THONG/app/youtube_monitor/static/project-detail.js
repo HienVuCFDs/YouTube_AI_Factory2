@@ -1175,8 +1175,9 @@
     if (!confirm('Dựng lại storyboard từ kịch bản?\n\nCác cảnh đang đọc transcript của video gốc sẽ bị thay bằng lời kịch bản. Giọng đã tạo cho lời kịch bản sẽ được gắn lại tự động.')) return;
     setMessage('Đang dựng lại storyboard từ kịch bản...', '');
     try {
-      await api(`/api/projects/${projectId}/shots/generate?force=true`, {method: 'POST'});
-      await api(`/api/projects/${projectId}/timeline/generate?force=true`, {method: 'POST'});
+      // `force` is read from the JSON body (GenerateShotsRequest / GenerateTimelineRequest), never the query.
+      await api(`/api/projects/${projectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: true})});
+      await api(`/api/projects/${projectId}/timeline/generate`, {method: 'POST', body: JSON.stringify({force: true})});
       const restored = await api(`/api/projects/${projectId}/timeline/reattach-voice`, {
         method: 'POST', body: JSON.stringify({video_variant: 'long'}),
       });
@@ -1191,6 +1192,204 @@
         'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }
+
+  // ---- Bước 5 · EditDocument ----
+  // A planned project's edit is its EditDocument (Bước 5.3 · T5): planned by
+  // one POST to …/steps/edit_plan, applied only when the user confirms it
+  // (confirmed_apply), and read back from GET …/edit-document. What the page
+  // shows is what the server said: an HTTP 200 alone is never "done". A
+  // project outside the plan workflow keeps the legacy Edit Plan below.
+  const EDIT_DOC_SCENE_LABELS = {
+    ready: 'đã lập',
+    visual_review: 'đã lập · cần xem lại hình',
+    needs_plan: 'chưa lập',
+    stale_content: 'cũ: lời cảnh đã đổi, cần lập lại',
+    stale_overlays: 'cũ: lớp chữ không còn hợp, cần lập lại',
+    stale_timing: 'cũ: thời lượng đổi, cần lập lại',
+  };
+  const EDIT_DOC_APPLIED_LABELS = {
+    applied: 'đã áp vào timeline',
+    not_applied: 'chưa áp vào timeline',
+    older: 'timeline còn bản cũ, chưa áp bản mới',
+  };
+  const EDIT_DOC_AUTO_APPLY_NOTE = 'Lưu ý: lần dựng lại storyboard/timeline kế tiếp cũng sẽ tự áp các cảnh đã lập.';
+  let studioEditDocumentTicket = 0;
+  let studioEditPlanRunning = false;
+
+  // Read the EditDocument's state for the open project; the newest read wins.
+  async function refreshStudioEditDocument() {
+    const projectId = Number(state.studioProjectId || 0);
+    if (!projectId) { state.studioEditDocument = null; return null; }
+    const ticket = ++studioEditDocumentTicket;
+    let answer;
+    try {
+      answer = await api(`/api/projects/${projectId}/edit-document`);
+    } catch (error) {
+      answer = {project_id: projectId, state: 'error', detail: error.message, scenes: []};
+    }
+    if (ticket !== studioEditDocumentTicket || Number(state.studioProjectId || 0) !== projectId) return state.studioEditDocument;
+    state.studioEditDocument = answer;
+    renderStudioEditDocument();
+    return answer;
+  }
+
+  // 'plan' (EditDocument) | 'legacy' (legacy Edit Plan) | null (not known: nothing is planned).
+  function studioEditFlow(doc = state.studioEditDocument) {
+    if (!doc || Number(doc.project_id) !== Number(state.studioProjectId || 0) || !doc.mode) return null;
+    return doc.mode === 'plan' ? 'plan' : 'legacy';
+  }
+
+  async function studioEditFlowNow() {
+    await refreshStudioEditDocument();
+    return studioEditFlow();
+  }
+
+  function studioEditFlowUnknown() {
+    const detail = state.studioEditDocument?.detail;
+    return setMessage(`Không đọc được trạng thái kế hoạch dựng${detail ? `: ${detail}` : ''}. Chưa lập gì; hãy thử lại.`, 'error');
+  }
+
+  function studioEditDocumentScene(segment, doc = state.studioEditDocument) {
+    return (doc?.scenes || []).find((item) => item.segment_id != null && Number(item.segment_id) === Number(segment?.id)) || null;
+  }
+
+  function editDocumentSceneLine(segment, doc = state.studioEditDocument) {
+    const id = Number(segment?.id || 0);
+    const line = (text, extra = '', muted = true) => `<div class="storyboard-edit-summary${muted ? ' muted' : ''}"${extra}><b>Kế hoạch dựng:</b> ${text}</div>`;
+    if (doc?.state === 'missing') return line('chưa lập (chưa có EditDocument). Bấm “1. Lập kế hoạch dựng”.', ' data-edit-doc-status="missing"');
+    if (doc?.state === 'outdated') return line('EditDocument thuộc storyboard trước. Bấm “1. Lập kế hoạch dựng” để cập nhật theo storyboard hiện tại.', ' data-edit-doc-status="outdated"');
+    if (doc?.state !== 'current') return line(`không đọc được EditDocument${doc?.detail ? `: ${esc(doc.detail)}` : ''}.`, ' data-edit-doc-status="error"');
+    const scene = studioEditDocumentScene(segment, doc);
+    if (!scene) return line('cảnh này không có trong EditDocument hiện tại.', ' data-edit-doc-status="absent"');
+    const planned = scene.status === 'ready' || scene.status === 'visual_review';
+    const text = esc(EDIT_DOC_SCENE_LABELS[scene.status] || scene.status || 'không rõ')
+      + (scene.applied ? ` · ${esc(EDIT_DOC_APPLIED_LABELS[scene.applied] || scene.applied)}` : '');
+    const button = `<button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${id})">${planned ? 'Lập lại cảnh này' : 'Lập kế hoạch cảnh này'}</button>`;
+    return line(`${text}. ${button}`, ` data-edit-doc-status="${esc(scene.status || '')}" data-edit-doc-applied="${esc(scene.applied || '')}"`, !planned);
+  }
+
+  // One scene's edit cell: the EditDocument's word for a planned project, the legacy edit beats otherwise.
+  function storyboardEditCell(segment) {
+    if (studioEditFlow() !== 'plan') return legacyStoryboardEditSummary(segment);
+    const beats = editBeatsForSegment(segment);
+    return editDocumentSceneLine(segment) + (beats.length ? legacyStoryboardEditSummary(segment, 'Nhịp dựng trên timeline') : '');
+  }
+
+  function editDocumentHeadline(doc = state.studioEditDocument) {
+    if (!doc) return '';
+    const gate = doc.gate && doc.gate !== 'current'
+      ? ` Storyboard chưa ở trạng thái hiện hành (${esc(doc.gate)}): lập kế hoạch sẽ bị từ chối cho tới khi dựng lại storyboard.` : '';
+    if (doc.state === 'missing') return `<b>Chưa lập kế hoạch dựng.</b> Chưa có EditDocument cho storyboard này.${gate}`;
+    if (doc.state === 'outdated') return `<b>Kế hoạch dựng thuộc storyboard trước.</b> Lập kế hoạch dựng để cập nhật.${gate}`;
+    if (doc.state !== 'current') return `<b>Không đọc được kế hoạch dựng.</b> ${esc(doc.detail || '')}`;
+    const counts = doc.counts || {};
+    const waiting = Number(counts.planned || 0) - Number(counts.applied || 0);
+    return `<b>EditDocument:</b> ${Number(counts.planned || 0)}/${Number(counts.scenes || 0)} cảnh đã lập · ${Number(counts.applied || 0)} đã áp`
+      + ` · ${Number(counts.needs_plan || 0)} chưa lập · ${Number(counts.stale || 0)} cũ.`
+      + (waiting > 0 ? ` ${waiting} cảnh đã lập chưa áp: bấm “2. Áp dụng kế hoạch dựng”. ${EDIT_DOC_AUTO_APPLY_NOTE}` : '') + gate;
+  }
+
+  function renderStudioEditDocument() {
+    if (typeof document !== 'undefined' && document.querySelectorAll) {
+      document.querySelectorAll('#studioStoryboardResult [data-edit-doc-segment]').forEach((cell) => {
+        const segment = (state.timeline || []).find((item) => Number(item.id) === Number(cell.dataset.editDocSegment));
+        if (segment) cell.innerHTML = storyboardEditCell(segment);
+      });
+    }
+    const box = $('studioEditPlanState');
+    if (box && studioEditFlow() === 'plan') box.innerHTML = editDocumentHeadline();
+  }
+
+  // What a planning run came to, in the server's terms: {ok, type, text}. Only "planned" and "unchanged" are fine.
+  function editPlanOutcome(result) {
+    const planned = Array.isArray(result?.planned) ? result.planned.length : 0;
+    const wanted = Array.isArray(result?.wanted) ? result.wanted.length : 0;
+    const named = Object.entries(result?.problems || {}).slice(0, 3).map(([key, why]) => `${key}: ${why}`).join('; ');
+    switch (result?.status) {
+      case 'planned': return {ok: true, type: 'success', text: `Đã lập kế hoạch dựng cho ${planned} cảnh.`};
+      case 'unchanged': return {ok: true, type: '', text: 'Không có cảnh nào cần lập: các cảnh đều đã có kế hoạch dựng hiện hành.'};
+      case 'partial': return {ok: false, type: 'error', text: `Chỉ lập được ${planned}/${wanted} cảnh. Chưa lập: ${named || 'không rõ lý do'}.`};
+      case 'blocked': return {ok: false, type: 'error', text: `Không lập được cảnh nào${named ? `: ${named}` : ''}.`};
+      case 'not_current': return {ok: false, type: 'error', text: `Chưa lập kế hoạch dựng: ${result.detail || 'storyboard hoặc kịch bản không phải bản hiện hành'}. Hãy dựng lại storyboard trước.`};
+      case 'needs_rebuild': return {ok: false, type: 'error', text: `Chưa lập kế hoạch dựng: ${result.detail || 'có giọng đọc làm với cấu hình cũ'}.`};
+      case 'error': return {ok: false, type: 'error', text: `Lập kế hoạch dựng lỗi: ${result.planner_error || result.detail || 'không rõ lỗi'}.`};
+      case 'not_applicable': return {ok: false, type: 'error', text: 'Dự án này không thuộc luồng Kế hoạch: không có EditDocument để lập.'};
+      default: return {ok: false, type: 'error', text: `Máy chủ trả trạng thái không rõ (${result?.status ?? 'trống'}): không coi là đã lập.`};
+    }
+  }
+
+  // What applying came to (T4 _apply_edit_document), or null when nothing was asked to be applied.
+  function editApplyOutcome(applied) {
+    if (!applied) return null;
+    const counts = applied.counts || {};
+    const skipped = Object.values(counts.skipped || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    const left = `${Number(counts.conflicts || 0)} cảnh xung đột (hàng đã bị sửa ngoài EditDocument), ${skipped} cảnh bỏ qua`;
+    switch (applied.status) {
+      case 'applied': return {ok: true, type: 'success', text: `Đã áp ${Number(counts.applied || 0)} cảnh vào timeline.`};
+      case 'unchanged': return {ok: true, type: '', text: 'Timeline đã có đúng các cảnh đã lập: không cần áp lại.'};
+      case 'nothing_to_apply': return {ok: true, type: '', text: 'Không có cảnh đã lập nào để áp.'};
+      case 'partial': return {ok: false, type: 'error', text: `Chỉ áp được ${Number(counts.applied || 0)} cảnh; ${left}.`};
+      case 'blocked': return {ok: false, type: 'error', text: `Không áp được cảnh nào: ${left}.`};
+      case 'not_current': return {ok: false, type: 'error', text: `Chưa áp: ${applied.detail || 'storyboard của kịch bản này không phải bản hiện hành'}.`};
+      case 'no_document': return {ok: false, type: 'error', text: 'Chưa áp: dự án chưa có EditDocument.'};
+      case 'error': return {ok: false, type: 'error', text: `Áp kế hoạch dựng lỗi: ${applied.detail || 'không rõ lỗi'}.`};
+      default: return {ok: false, type: 'error', text: `Máy chủ trả trạng thái áp không rõ (${applied.status ?? 'trống'}): không coi là đã áp.`};
+    }
+  }
+
+  // One POST to the step. `apply` asks for confirmed_apply - only ever from a click the user confirmed.
+  async function runStudioEditDocumentPlan(options = {}, {apply = false} = {}) {
+    const projectId = Number(state.studioProjectId || 0);
+    if (!projectId) return setMessage('Chưa có project.', 'error');
+    if (studioEditPlanRunning) return null;
+    studioEditPlanRunning = true;
+    const box = $('studioEditPlanState');
+    if (box) box.innerHTML = apply ? '<b>Đang lập và áp kế hoạch dựng…</b>' : '<b>AI đang lập kế hoạch dựng…</b>';
+    try {
+      const body = {options: {...options}};
+      if (apply) body.options.confirmed_apply = true;
+      const response = await api(`/api/projects/${projectId}/steps/edit_plan`, {method: 'POST', body: JSON.stringify(body)});
+      const result = response?.result || {};
+      const plan = editPlanOutcome(result);
+      const applied = editApplyOutcome(result.applied);
+      let text = plan.text;
+      if (applied) text += ` ${applied.text}`;
+      else if (apply && plan.ok) text += ' Chưa áp: máy chủ không báo kết quả áp.';
+      else if (!apply && result.status === 'planned') text += ` Chưa áp vào timeline: bấm “2. Áp dụng kế hoạch dựng” để áp. ${EDIT_DOC_AUTO_APPLY_NOTE}`;
+      const ok = plan.ok && (apply ? Boolean(applied?.ok) : true);
+      const type = ok ? ((applied || plan).type || plan.type) : 'error';
+      await refreshStudioStoryboard();
+      setMessage(text, type);
+      if (box) box.innerHTML = `${editDocumentHeadline()}<div class="${ok ? 'secondary-text' : 'warning-text'}" style="margin-top:4px">${esc(text)}</div>`;
+      return result;
+    } catch (error) {
+      if (box) box.innerHTML = `<b>Không lập được kế hoạch dựng.</b> ${esc(error.message)}`;
+      setMessage(`Không lập được kế hoạch dựng: ${error.message}`, 'error');
+      return null;
+    } finally {
+      studioEditPlanRunning = false;
+    }
+  }
+
+  async function planStudioEditDocument(options = {}) {
+    const what = options.scene_keys ? 'cảnh này' : 'các cảnh chưa có kế hoạch dựng hoặc đã cũ';
+    if (!confirm(`AI sẽ lập kế hoạch dựng cho ${what} (EditDocument).\nChưa áp vào timeline cho tới khi bạn bấm “2. Áp dụng kế hoạch dựng”.\n\nTiếp tục?`)) return null;
+    return runStudioEditDocumentPlan(options);
+  }
+
+  async function applyStudioEditDocument() {
+    if (!confirm('Áp kế hoạch dựng vào timeline?\n\nCác cảnh đã lập trong EditDocument được ghi vào timeline; hình hiện có của cảnh được giữ. Cảnh chưa lập hoặc đã cũ sẽ được AI lập trước rồi áp luôn. Cảnh đã bị sửa ngoài EditDocument sẽ báo xung đột, không bị ghi đè.\n\nTiếp tục?')) return null;
+    return runStudioEditDocumentPlan({}, {apply: true});
+  }
+
+  // A scene's own button: that scene alone, planned again even when its edit still holds.
+  async function planStudioEditDocumentScene(segmentId) {
+    const doc = state.studioEditDocument;
+    const scene = doc?.state === 'current' ? studioEditDocumentScene({id: segmentId}, doc) : null;
+    if (!scene) return setMessage('Cảnh này chưa có trong EditDocument hiện tại. Bấm “1. Lập kế hoạch dựng” trước.', 'error');
+    return planStudioEditDocument({scene_keys: [scene.scene_key], replan: true});
+  }
+  // ---- hết Bước 5 · EditDocument ----
 
   function storyboardSceneFacts(shot, segment) {
     const hasVisual = Boolean(segment && String(segment.visual_path || '').trim());
@@ -1239,6 +1438,11 @@
 
   function storyboardEditSummary(segment) {
     if (!segment) return '';
+    return `<div class="storyboard-edit-cell" data-edit-doc-segment="${Number(segment.id || 0)}">${storyboardEditCell(segment)}</div>`;
+  }
+
+  function legacyStoryboardEditSummary(segment, heading = 'Kế hoạch dựng') {
+    if (!segment) return '';
     const beats = editBeatsForSegment(segment);
     const transition = segment.edit_transition || 'fade';
     const effect = segment.edit_effect || 'static';
@@ -1270,7 +1474,7 @@
         <input class="beat-prompt" value="${esc(beat.prompt || '')}" placeholder="Prompt ảnh phụ nếu chọn Ảnh AI">
         <em>${esc(labels[beat.status] || beat.status || 'sẵn sàng')}</em>
       </div>`).join('');
-    return `<div class="storyboard-edit-summary" data-edit-segment="${segment.id}"><b>Kế hoạch dựng:</b> ${beats.length} nhịp · ${inserts} frame/ảnh phụ · ${esc(statusText)} · hiệu ứng ${esc(effect)} · chuyển ${esc(transition)}<div class="secondary-text">${esc(detail)}</div><details><summary>Sửa kế hoạch cảnh</summary><div class="storyboard-edit-beats">${rows}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập lại kế hoạch cảnh</button><button class="btn small ghost" type="button" onclick="saveStudioSceneEditPlan(${segment.id})">Lưu kế hoạch cảnh</button><button class="btn small primary" type="button" onclick="applyStudioSceneEdit(${segment.id})">Áp dụng cảnh này</button></div></details></div>`;
+    return `<div class="storyboard-edit-summary" data-edit-segment="${segment.id}"><b>${esc(heading)}:</b> ${beats.length} nhịp · ${inserts} frame/ảnh phụ · ${esc(statusText)} · hiệu ứng ${esc(effect)} · chuyển ${esc(transition)}<div class="secondary-text">${esc(detail)}</div><details><summary>Sửa kế hoạch cảnh</summary><div class="storyboard-edit-beats">${rows}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập lại kế hoạch cảnh</button><button class="btn small ghost" type="button" onclick="saveStudioSceneEditPlan(${segment.id})">Lưu kế hoạch cảnh</button><button class="btn small primary" type="button" onclick="applyStudioSceneEdit(${segment.id})">Áp dụng cảnh này</button></div></details></div>`;
   }
 
   async function studioEditBeatGenerationSettings(resolveProvider = true, forcedProvider = '') {
@@ -1329,6 +1533,11 @@
 
   async function planStudioSceneEdit(segmentId, options = {}) {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    if (options.flow !== 'legacy') {
+      const flow = await studioEditFlowNow();
+      if (flow === 'plan') return planStudioEditDocumentScene(segmentId);
+      if (!flow) return studioEditFlowUnknown();
+    }
     const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
     if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
     const button = options.button || null;
@@ -1386,6 +1595,9 @@
   }
 
   async function planAllStudioSceneEdits() {
+    const flow = await studioEditFlowNow();
+    if (flow === 'plan') return planStudioEditDocument();
+    if (!flow) return studioEditFlowUnknown();
     const segments = (state.timeline || []).filter((segment) => Number(segment.id));
     if (!segments.length) return setMessage('Storyboard chưa có cảnh để lập kế hoạch dựng. Hãy tạo timeline/storyboard trước.', 'error');
     if (!confirm(`AI sẽ lập kế hoạch dựng cho ${segments.length} cảnh. Sau bước này bạn có thể mở từng thẻ cảnh để sửa nhịp hình, hiệu ứng, chuyển cảnh và prompt ảnh phụ trước khi áp dụng.\n\nTiếp tục?`)) return;
@@ -1402,7 +1614,7 @@
         setStudioProgress(percent, `AI đang lập kế hoạch cảnh ${labelIndex} · ${index}/${segments.length} đã xong...`);
         if (stateBox) stateBox.innerHTML = `<b>Đang lập kế hoạch:</b> cảnh ${esc(labelIndex)} · ${index}/${segments.length} đã xong.`;
         try {
-          await planStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true});
+          await planStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true, flow: 'legacy'});
           planned += 1;
         } catch (error) {
           failed.push(`cảnh ${labelIndex}: ${error.message}`);
@@ -1423,6 +1635,9 @@
   }
 
   async function applyAllStudioSceneEdits() {
+    const flow = await studioEditFlowNow();
+    if (flow === 'plan') return applyStudioEditDocument();
+    if (!flow) return studioEditFlowUnknown();
     const segments = (state.timeline || []).filter((segment) => Number(segment.id));
     if (!segments.length) return setMessage('Storyboard chưa có cảnh để áp dụng kế hoạch dựng.', 'error');
     const missingPlan = segments.filter((segment) => !editBeatsForSegment(segment).length);
@@ -1507,6 +1722,9 @@
 
   async function planStudioGraphics() {
     if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
+    const flow = await studioEditFlowNow();
+    if (flow === 'plan') return planStudioEditDocument();
+    if (!flow) return studioEditFlowUnknown();
     const target = $('studioGraphicPlanState');
     if (target) target.textContent = 'AI đang lập kế hoạch dựng và chữ động...';
     try {
@@ -1525,6 +1743,9 @@
 
   async function applyStudioGraphics() {
     if (!state.studioProjectId) return setMessage('Hãy tạo storyboard trước.', 'error');
+    const flow = await studioEditFlowNow();
+    if (flow === 'plan') return applyStudioEditDocument();
+    if (!flow) return studioEditFlowUnknown();
     const base = `/api/projects/${state.studioProjectId}/edit-plan`;
     try {
       const current = await api(base);
@@ -1628,6 +1849,7 @@
     // uses another container and must not replace the long timeline.
     if (containerId === 'studioStoryboardResult') {
       state.timeline = Array.isArray(timeline) ? timeline : [];
+      state.studioEditDocumentLoad = refreshStudioEditDocument();
     }
     if (!shots.length) {
       result.innerHTML = '<div class="studio-empty">Chưa có cảnh. Hãy tạo storyboard hoặc mở chỉnh sửa chi tiết để thêm cảnh.</div>';
@@ -1692,6 +1914,7 @@
     state.timeline = bundle.latest_timeline || [];
     state.projectAssets = bundle.project_assets || [];
     renderStudioStoryboard(state.shots, state.timeline);
+    await state.studioEditDocumentLoad;
     return bundle;
   }
 
