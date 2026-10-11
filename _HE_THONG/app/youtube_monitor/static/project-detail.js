@@ -1256,8 +1256,8 @@
   function editDocumentSceneLine(segment, doc = state.studioEditDocument) {
     const id = Number(segment?.id || 0);
     const line = (text, extra = '', muted = true) => `<div class="storyboard-edit-summary${muted ? ' muted' : ''}"${extra}><b>Kế hoạch dựng:</b> ${text}</div>`;
-    if (doc?.state === 'missing') return line('chưa lập (chưa có EditDocument). Bấm “1. Lập kế hoạch dựng”.', ' data-edit-doc-status="missing"');
-    if (doc?.state === 'outdated') return line('EditDocument thuộc storyboard trước. Bấm “1. Lập kế hoạch dựng” để cập nhật theo storyboard hiện tại.', ' data-edit-doc-status="outdated"');
+    if (doc?.state === 'missing') return line('chưa lập (chưa có EditDocument). Bấm “Lập kế hoạch dựng”.', ' data-edit-doc-status="missing"');
+    if (doc?.state === 'outdated') return line('EditDocument thuộc storyboard trước. Bấm “Lập kế hoạch dựng” để cập nhật theo storyboard hiện tại.', ' data-edit-doc-status="outdated"');
     if (doc?.state !== 'current') return line(`không đọc được EditDocument${doc?.detail ? `: ${esc(doc.detail)}` : ''}.`, ' data-edit-doc-status="error"');
     const scene = studioEditDocumentScene(segment, doc);
     if (!scene) return line('cảnh này không có trong EditDocument hiện tại.', ' data-edit-doc-status="absent"');
@@ -1286,7 +1286,20 @@
     const waiting = Number(counts.planned || 0) - Number(counts.applied || 0);
     return `<b>EditDocument:</b> ${Number(counts.planned || 0)}/${Number(counts.scenes || 0)} cảnh đã lập · ${Number(counts.applied || 0)} đã áp`
       + ` · ${Number(counts.needs_plan || 0)} chưa lập · ${Number(counts.stale || 0)} cũ.`
-      + (waiting > 0 ? ` ${waiting} cảnh đã lập chưa áp: bấm “2. Áp dụng kế hoạch dựng”. ${EDIT_DOC_AUTO_APPLY_NOTE}` : '') + gate;
+      + (waiting > 0 ? ` ${waiting} cảnh đã lập chưa áp: bấm “Áp dụng vào timeline…”. ${EDIT_DOC_AUTO_APPLY_NOTE}` : '')
+      + editDocumentFreshNote(doc) + gate;
+  }
+
+  // Bước 05 · F3: the server answers the scenes as the timeline is now (its next sync), and says when that is not
+  // yet the stored EditDocument (fresh false) or when it could not work it out (fresh null).
+  function editDocumentFreshNote(doc = state.studioEditDocument) {
+    if (doc?.fresh === false) {
+      return '<div class="secondary-text" data-edit-doc-fresh="false" style="margin-top:4px">Thời lượng hoặc giọng đọc của cảnh đã đổi sau lần lưu kế hoạch gần nhất: trạng thái ở đây đã tính theo timeline hiện tại. Lần lập hoặc áp kế tiếp sẽ cập nhật EditDocument trước.</div>';
+    }
+    if (doc?.fresh === null) {
+      return `<div class="warning-text" data-edit-doc-fresh="unknown" style="margin-top:4px">Chưa kiểm được kế hoạch dựng có theo kịp timeline hiện tại không${doc.fresh_detail ? `: ${esc(doc.fresh_detail)}` : ''}. Trạng thái ở đây là của lần lưu gần nhất.</div>`;
+    }
+    return '';
   }
 
   function renderStudioEditDocument() {
@@ -1298,6 +1311,86 @@
     }
     const box = $('studioEditPlanState');
     if (box && studioEditFlow() === 'plan') box.innerHTML = editDocumentHeadline();
+    const legacyCard = $('studioGraphicPlanCard');
+    if (legacyCard && studioEditFlow()) legacyCard.hidden = studioEditFlow() === 'plan';
+    syncStudioScenePlanState();
+  }
+
+  // A scene's plan state for its row, the filter and the strip - only what GET …/edit-document says.
+  const STUDIO_SCENE_PLAN = {
+    needs_plan: ['Chưa lập', 'idle'],
+    planned: ['Đã lập · chưa áp', 'info'],
+    applied: ['Đã áp vào timeline', 'ok'],
+    older: ['Đã lập · timeline còn bản cũ', 'info'],
+    stale: ['Cũ · cần lập lại', 'warn'],
+    review: ['Cần xem lại hình', 'warn'],
+    outdated: ['Kế hoạch thuộc storyboard trước', 'warn'],
+    absent: ['Không có trong EditDocument', 'idle'],
+    unknown: ['Chưa đọc được kế hoạch', 'bad'],
+  };
+  const STUDIO_SCENE_PLAN_FILTERS = ['needs_plan', 'planned', 'applied', 'older', 'stale', 'review', 'outdated'];
+
+  function studioScenePlanState(segment, doc = state.studioEditDocument) {
+    if (studioEditFlow(doc) !== 'plan') return {key: '', label: '', tone: ''};
+    let key;
+    if (doc.state === 'missing') key = 'needs_plan';
+    else if (doc.state === 'outdated') key = 'outdated';
+    else if (doc.state !== 'current') key = 'unknown';
+    else {
+      const scene = studioEditDocumentScene(segment, doc);
+      if (!scene) key = 'absent';
+      else if (scene.status === 'needs_plan') key = 'needs_plan';
+      else if (scene.status === 'visual_review') key = 'review';
+      else if (String(scene.status || '').startsWith('stale_')) key = 'stale';
+      else if (scene.applied === 'applied') key = 'applied';
+      else if (scene.applied === 'older') key = 'older';
+      else key = 'planned';
+    }
+    const [label, tone] = STUDIO_SCENE_PLAN[key];
+    return {key, label, tone};
+  }
+
+  function studioScenePlanChip(plan) {
+    return plan.key ? `<span class="sb-chip sb-chip-${plan.tone}">${esc(plan.label)}</span>` : '';
+  }
+
+  function syncStudioScenePlanState() {
+    if (typeof document === 'undefined' || !document.querySelectorAll) return;
+    const counts = {};
+    document.querySelectorAll('#studioStoryboardResult [data-scene-row]').forEach((row) => {
+      const segment = (state.timeline || []).find((item) => Number(item.id) === Number(row.dataset.segmentId));
+      const plan = studioScenePlanState(segment);
+      row.dataset.planState = plan.key;
+      counts[plan.key] = (counts[plan.key] || 0) + 1;
+      const chip = row.querySelector('[data-edit-doc-chip]');
+      if (chip) chip.innerHTML = studioScenePlanChip(plan);
+      const block = document.querySelector(`#studioStoryboardResult [data-strip-shot="${row.dataset.shotId}"]`);
+      if (block) block.dataset.planState = plan.key;
+    });
+    const plan = studioEditFlow() === 'plan';
+    const filterBox = $('studioScenePlanFilterBox');
+    if (filterBox) filterBox.hidden = !plan;
+    const select = $('studioSceneFilterPlan');
+    if (select) {
+      const view = state.storyboardView || {};
+      if (!plan) view.plan = 'all';
+      const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+      select.innerHTML = `<option value="all">Tất cả (${total})</option>` + STUDIO_SCENE_PLAN_FILTERS
+        .filter((key) => counts[key] || view.plan === key)
+        .map((key) => `<option value="${key}"${view.plan === key ? ' selected' : ''}>${esc(STUDIO_SCENE_PLAN[key][0])} (${counts[key] || 0})</option>`).join('');
+      select.value = view.plan || 'all';
+    }
+    if (typeof applyStudioStoryboardFilters === 'function') applyStudioStoryboardFilters();
+  }
+
+  // The head's two actions are disabled while one runs, so a second click never starts a second run.
+  function setStudioEditBusy(busy) {
+    for (const id of ['studioBuildEditPlanButton', 'studioApplyEditPlanToScenesButton']) {
+      const button = $(id);
+      if (!button) continue;
+      button.disabled = busy;
+      if (typeof button.setAttribute === 'function') button.setAttribute('aria-busy', String(busy));
+    }
   }
 
   // What a planning run came to, in the server's terms: {ok, type, text}. Only "planned" and "unchanged" are fine.
@@ -1343,6 +1436,7 @@
     if (!projectId) return setMessage('Chưa có project.', 'error');
     if (studioEditPlanRunning) return null;
     studioEditPlanRunning = true;
+    setStudioEditBusy(true);
     const box = $('studioEditPlanState');
     if (box) box.innerHTML = apply ? '<b>Đang lập và áp kế hoạch dựng…</b>' : '<b>AI đang lập kế hoạch dựng…</b>';
     try {
@@ -1355,7 +1449,7 @@
       let text = plan.text;
       if (applied) text += ` ${applied.text}`;
       else if (apply && plan.ok) text += ' Chưa áp: máy chủ không báo kết quả áp.';
-      else if (!apply && result.status === 'planned') text += ` Chưa áp vào timeline: bấm “2. Áp dụng kế hoạch dựng” để áp. ${EDIT_DOC_AUTO_APPLY_NOTE}`;
+      else if (!apply && result.status === 'planned') text += ` Chưa áp vào timeline: bấm “Áp dụng vào timeline…” để áp. ${EDIT_DOC_AUTO_APPLY_NOTE}`;
       const ok = plan.ok && (apply ? Boolean(applied?.ok) : true);
       const type = ok ? ((applied || plan).type || plan.type) : 'error';
       await refreshStudioStoryboard();
@@ -1368,12 +1462,13 @@
       return null;
     } finally {
       studioEditPlanRunning = false;
+      setStudioEditBusy(false);
     }
   }
 
   async function planStudioEditDocument(options = {}) {
     const what = options.scene_keys ? 'cảnh này' : 'các cảnh chưa có kế hoạch dựng hoặc đã cũ';
-    if (!confirm(`AI sẽ lập kế hoạch dựng cho ${what} (EditDocument).\nChưa áp vào timeline cho tới khi bạn bấm “2. Áp dụng kế hoạch dựng”.\n\nTiếp tục?`)) return null;
+    if (!confirm(`AI sẽ lập kế hoạch dựng cho ${what} (EditDocument).\nChưa áp vào timeline cho tới khi bạn bấm “Áp dụng vào timeline…”.\n\nTiếp tục?`)) return null;
     return runStudioEditDocumentPlan(options);
   }
 
@@ -1386,7 +1481,7 @@
   async function planStudioEditDocumentScene(segmentId) {
     const doc = state.studioEditDocument;
     const scene = doc?.state === 'current' ? studioEditDocumentScene({id: segmentId}, doc) : null;
-    if (!scene) return setMessage('Cảnh này chưa có trong EditDocument hiện tại. Bấm “1. Lập kế hoạch dựng” trước.', 'error');
+    if (!scene) return setMessage('Cảnh này chưa có trong EditDocument hiện tại. Bấm “Lập kế hoạch dựng” trước.', 'error');
     return planStudioEditDocument({scene_keys: [scene.scene_key], replan: true});
   }
   // ---- hết Bước 5 · EditDocument ----
@@ -1412,18 +1507,76 @@
     return storyboardSceneFacts(shot, segment).state;
   }
 
+  // ---- Storyboard · bố cục A: danh sách cảnh + chi tiết ----
+  // One compact row per scene, and the whole scene (media, voice, edit plan,
+  // layers, AI tools) only for the selected one. Search, filters, sort, the
+  // selected scene and the strip's open state live in state.storyboardView, so
+  // the redraw after any action shows the same view.
+  const STORYBOARD_PROD_FILTERS = [
+    ['all', 'Tất cả'], ['ready', 'Sẵn sàng'], ['missing_visual', 'Thiếu hình'], ['missing_audio', 'Thiếu tiếng'],
+    ['missing_both', 'Thiếu hình + tiếng'], ['draft', 'Visual nháp'], ['fallback', 'Dự phòng'],
+  ];
+  const STORYBOARD_SORTS = [['order', 'Thứ tự cảnh'], ['attention', 'Cần xử lý trước'], ['duration', 'Thời lượng dài nhất']];
+  const STORYBOARD_ATTENTION = {missing_both: 0, missing_visual: 1, missing_audio: 2, draft: 3, fallback: 4, ready: 5};
+  const STORYBOARD_PLAN_ATTENTION = {unknown: 0, stale: 1, review: 1, outdated: 1, needs_plan: 2, absent: 2, older: 3, planned: 3, applied: 4, '': 5};
+
+  function studioStoryboardView() {
+    if (!state.storyboardView) state.storyboardView = {query: '', prod: 'all', plan: 'all', sort: 'order', selected: null, stripOpen: true};
+    return state.storyboardView;
+  }
+
   function filterStudioStoryboard(filter = 'all') {
-    document.querySelectorAll('#studioStoryboardResult .storyboard-card[data-scene-state]').forEach((card) => {
-      const matches = filter === 'all'
-        || (filter === 'missing_visual' && card.dataset.missingVisual === '1')
-        || (filter === 'missing_audio' && card.dataset.missingAudio === '1')
-        || (filter === 'ready' && card.dataset.ready === '1');
+    studioStoryboardView().prod = filter;
+    applyStudioStoryboardFilters();
+  }
+
+  function storyboardRowMatches(card, view) {
+    const prod = view.prod || 'all';
+    const prodOk = prod === 'all'
+      || (prod === 'missing_visual' && card.dataset.missingVisual === '1')
+      || (prod === 'missing_audio' && card.dataset.missingAudio === '1')
+      || (prod === 'ready' && card.dataset.ready === '1')
+      || (prod === 'missing_both' && card.dataset.missingVisual === '1' && card.dataset.missingAudio === '1')
+      || ((prod === 'draft' || prod === 'fallback') && card.dataset.sceneState === prod);
+    const planOk = (view.plan || 'all') === 'all' || card.dataset.planState === view.plan;
+    const query = String(view.query || '').trim().toLowerCase();
+    if (!query) return prodOk && planOk;
+    const number = query.replace(/^(cảnh|canh|#)\s*/, '');
+    const queryOk = /^\d+$/.test(number) ? card.dataset.sceneNumber === number : String(card.dataset.search || '').includes(query);
+    return prodOk && planOk && queryOk;
+  }
+
+  function applyStudioStoryboardFilters() {
+    const view = studioStoryboardView();
+    const hiddenShots = new Set();
+    let shown = 0;
+    let total = 0;
+    document.querySelectorAll('#studioStoryboardResult [data-scene-row]').forEach((card) => {
+      const matches = storyboardRowMatches(card, view);
       card.hidden = !matches;
+      total += 1;
+      if (matches) shown += 1; else hiddenShots.add(card.dataset.shotId);
     });
-    document.querySelectorAll('#studioStoryboardResult [data-storyboard-filter]').forEach((button) => {
-      button.classList.toggle('primary', button.dataset.storyboardFilter === filter);
-      button.classList.toggle('ghost', button.dataset.storyboardFilter !== filter);
+    document.querySelectorAll('#studioStoryboardResult [data-strip-shot]').forEach((block) => {
+      block.classList.toggle('is-dim', hiddenShots.has(block.dataset.stripShot));
     });
+    const line = $('studioSceneResultLine');
+    if (line) line.textContent = shown === total ? `${total} cảnh` : `Hiển thị ${shown}/${total} cảnh`;
+    const empty = $('studioSceneEmpty');
+    if (empty) empty.hidden = shown > 0 || total === 0;
+  }
+
+  // Search and filters only show or hide rows; a new sort redraws the list.
+  function setStudioStoryboardView(patch = {}) {
+    const view = studioStoryboardView();
+    Object.assign(view, patch);
+    if ('sort' in patch) return renderStudioStoryboard(state.shots || [], state.timeline || []);
+    applyStudioStoryboardFilters();
+  }
+
+  function clearStudioStoryboardFilters() {
+    Object.assign(studioStoryboardView(), {query: '', prod: 'all', plan: 'all'});
+    renderStudioStoryboard(state.shots || [], state.timeline || []);
   }
 
   function editBeatsForSegment(segment) {
@@ -1624,7 +1777,7 @@
       setStudioProgress(100, failed.length ? `Đã lập ${planned}/${segments.length} kế hoạch, còn lỗi.` : `Đã lập ${planned}/${segments.length} kế hoạch.`);
       const summary = failed.length
         ? `Đã lập ${planned}/${segments.length} kế hoạch. Lỗi: ${failed.slice(0, 3).join('; ')}`
-        : `Đã lập kế hoạch dựng cho ${planned} cảnh. Hãy xem/sửa từng cảnh rồi bấm “Áp dụng kế hoạch dựng”.`;
+        : `Đã lập kế hoạch dựng cho ${planned} cảnh. Hãy xem/sửa từng cảnh rồi bấm “Áp dụng vào timeline…”.`;
       if (stateBox) stateBox.innerHTML = failed.length
         ? `<b>Cần kiểm tra:</b> ${esc(summary)}`
         : `<b>Đã lập kế hoạch.</b> ${esc(summary)}`;
@@ -1865,45 +2018,517 @@
       if (facts.fallback) summary.fallback += 1;
       if (facts.draft) summary.draft += 1;
     });
-    const summaryBar = containerId === 'studioStoryboardResult' ? `<div class="storyboard-status-bar">
-      <b>${shots.length} cảnh</b><span class="status-ready">${summary.ready} sẵn sàng</span>
-      <span>${summary.missing_visual} thiếu hình</span><span>${summary.missing_audio} thiếu tiếng</span>
-      ${summary.fallback ? `<span>${summary.fallback} dự phòng</span>` : ''}
-      <div class="storyboard-filter-row"><button class="btn small primary" data-storyboard-filter="all" onclick="filterStudioStoryboard('all')">Tất cả</button><button class="btn small ghost" data-storyboard-filter="missing_visual" onclick="filterStudioStoryboard('missing_visual')">Thiếu hình</button><button class="btn small ghost" data-storyboard-filter="missing_audio" onclick="filterStudioStoryboard('missing_audio')">Thiếu tiếng</button><button class="btn small ghost" data-storyboard-filter="ready" onclick="filterStudioStoryboard('ready')">Sẵn sàng</button></div>
-    </div>` : '';
-    result.innerHTML = narrationSourceNotice() + summaryBar + `<div class="storyboard-grid">${shots.map((shot, index) => {
+    if (containerId === 'studioStoryboardResult') return renderStudioSceneBoard(result, shots, timeline, summary);
+    // The Short lane keeps one full card per scene.
+    result.innerHTML = `<div class="storyboard-grid">${shots.map((shot, index) => {
       const segment = storyboardSegmentForShot(shot, timeline);
       const sceneFacts = storyboardSceneFacts(shot, segment);
       const sceneState = sceneFacts.state;
-      // Voiceover is rendered from timeline.voice_text.  A shot is its visual
-      // plan and can be older after a per-scene translation, so displaying
-      // shot.narration here made an English audio look as if it were Vietnamese.
-      const spokenText = String(segment?.voice_text || shot.narration || '').trim();
-      const preview = segment?.visual_path
-        ? (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(segment.visual_path) ? `<img src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" alt="Cảnh ${shot.shot_index || index + 1}">` : `<video src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" controls muted preload="metadata"></video>`)
-        : `<div class="storyboard-prompt">Chưa có video/ảnh thật. Hãy tạo cảnh AI hoặc gắn asset trước khi render.</div>`;
-      // The shape of the audio shows a dead scene or a line cut short at a
-      // glance; pressing play on every scene in turn is how those get missed.
-      const audioPreview = segment?.audio_path
-        ? `<div class="storyboard-audio"><b>Nghe lời đọc</b>`
-          + `<img class="storyboard-wave" alt="Dạng sóng giọng đọc" loading="lazy"`
-          + ` src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/waveform"`
-          + ` onerror="this.remove()" />`
-          + `<audio controls preload="metadata" src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/audio-preview"></audio></div>`
-        : `<div class="secondary-text" style="margin-top:8px">Chưa có giọng đọc cho cảnh này.</div>`;
-      const voiceControls = segment
-        ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="attachStudioGeneratedVoiceForScene(${segment.id})">Chọn voice đã tạo</button><button class="btn small ghost" type="button" onclick="uploadStudioVoiceForScene(${segment.id})">${segment.audio_path ? 'Thay bằng file voice' : 'Nạp file giọng vào cảnh'}</button><span class="secondary-text">Audio được gắn trực tiếp vào cảnh này.</span></div>`
-        : '';
-      const shotVisualPath = String(segment?.visual_path || '');
-      const wantsVisual = String(shot.status || '') === 'needs_visual';
-      const optionalMediaTools = `<details style="margin-top:9px"><summary class="secondary-text">Thay ảnh/video bằng AI (tùy chọn)</summary><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;flex-wrap:wrap"><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(shotVisualPath) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button></div></details>`;
+      const parts = storyboardSceneParts(shot, segment, index);
       return `
-      <div class="storyboard-card" data-segment-id="${segment?.id || ''}" data-scene-state="${sceneState}" data-missing-visual="${sceneFacts.missingVisual ? '1' : '0'}" data-missing-audio="${sceneFacts.missingAudio ? '1' : '0'}" data-ready="${sceneFacts.ready ? '1' : '0'}"${wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
+      <div class="storyboard-card" data-segment-id="${segment?.id || ''}" data-scene-state="${sceneState}" data-missing-visual="${sceneFacts.missingVisual ? '1' : '0'}" data-missing-audio="${sceneFacts.missingAudio ? '1' : '0'}" data-ready="${sceneFacts.ready ? '1' : '0'}"${parts.wantsVisual ? ' style="outline:1px solid var(--danger,#e5484d)"' : ''}>
         <div class="storyboard-card-head"><span class="storyboard-card-title">Cảnh ${shot.shot_index || index + 1} · ${Number(shot.duration_seconds || 0).toFixed(1)} giây</span><span class="storyboard-state storyboard-state-${sceneState}">${sceneFacts.label}</span></div>
-        <div class="storyboard-media">${preview}</div>
-        <div class="storyboard-body"><div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(spokenText || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${voiceControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div>${storyboardEditSummary(segment)}${storyboardGraphicSummary(segment)}${storyboardSoundCueSummary(segment)}<div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng</button></div>${optionalMediaTools}</div>
+        <div class="storyboard-media">${parts.preview}</div>
+        <div class="storyboard-body">${parts.body}</div>
       </div>`;
     }).join('')}</div>`;
+  }
+
+  const STORYBOARD_IMAGE = /\.(jpg|jpeg|png|webp|bmp|gif)$/i;
+
+  function storyboardTimecode(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    const minutes = Math.floor(value / 60);
+    return `${minutes}:${(value - minutes * 60).toFixed(1).padStart(4, '0')}`;
+  }
+
+  // What one scene shows in full: in the detail panel, and on each Short card.
+  function storyboardSceneParts(shot, segment, index) {
+    // Voiceover is rendered from timeline.voice_text.  A shot is its visual
+    // plan and can be older after a per-scene translation, so displaying
+    // shot.narration here made an English audio look as if it were Vietnamese.
+    const spokenText = String(segment?.voice_text || shot.narration || '').trim();
+    const preview = segment?.visual_path
+      ? (STORYBOARD_IMAGE.test(segment.visual_path) ? `<img src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" alt="Cảnh ${shot.shot_index || index + 1}" loading="lazy">` : `<video src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" controls muted preload="metadata"></video>`)
+      : `<div class="storyboard-prompt">Chưa có video/ảnh thật. Hãy tạo cảnh AI hoặc gắn asset trước khi render.</div>`;
+    // The shape of the audio shows a dead scene or a line cut short at a
+    // glance; pressing play on every scene in turn is how those get missed.
+    const audioPreview = segment?.audio_path
+      ? `<div class="storyboard-audio"><b>Nghe lời đọc</b>`
+        + `<img class="storyboard-wave" alt="Dạng sóng giọng đọc" loading="lazy"`
+        + ` src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/waveform"`
+        + ` onerror="this.remove()" />`
+        + `<audio controls preload="metadata" src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/audio-preview"></audio></div>`
+      : `<div class="secondary-text" style="margin-top:8px">Chưa có giọng đọc cho cảnh này.</div>`;
+    const voiceControls = segment
+      ? `<div class="queue-controls" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="attachStudioGeneratedVoiceForScene(${segment.id})">Chọn voice đã tạo</button><button class="btn small ghost" type="button" onclick="uploadStudioVoiceForScene(${segment.id})">${segment.audio_path ? 'Thay bằng file voice' : 'Nạp file giọng vào cảnh'}</button><span class="secondary-text">Audio được gắn trực tiếp vào cảnh này.</span></div>`
+      : '';
+    const shotVisualPath = String(segment?.visual_path || '');
+    const wantsVisual = String(shot.status || '') === 'needs_visual';
+    const optionalMediaTools = `<details style="margin-top:9px"><summary class="secondary-text">Thay ảnh/video bằng AI (tùy chọn)</summary><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;flex-wrap:wrap"><select id="studioShotSceneRatio-${shot.id}" aria-label="Định dạng kích thước"><option value="1280:720">Ngang 16:9</option><option value="720:1280">Dọc 9:16</option><option value="1024:1024">Vuông 1:1</option></select><select id="studioShotImageProvider-${shot.id}" aria-label="Engine tạo ảnh AI">${IMAGE_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotImage(${shot.id})">Tạo ảnh AI</button><select id="studioShotVideoProvider-${shot.id}" aria-label="Engine tạo video AI">${VIDEO_PROVIDER_OPTIONS}</select><button class="btn small primary" type="button" onclick="generateStudioShotVideo(${shot.id})">${STORYBOARD_IMAGE.test(shotVisualPath) ? 'Tạo video AI từ ảnh' : 'Cần tạo ảnh trước'}</button></div></details>`;
+    const body = `<div class="storyboard-narration"><b>Lời AI sẽ đọc</b>${esc(spokenText || 'Chưa có lời dẫn cho cảnh này.')}</div>${audioPreview}${voiceControls}<div class="storyboard-prompt">${wantsVisual ? '⊕ <b>Cảnh này thiếu hình minh hoạ.</b> ' : ''}${esc(shot.visual_prompt || 'Chưa có visual prompt')}</div>${storyboardEditSummary(segment)}${storyboardGraphicSummary(segment)}${storyboardSoundCueSummary(segment)}<div class="storyboard-summary"><span>${esc(shot.asset_type || 'generated')}</span></div><div class="queue-controls" style="justify-content:flex-start;margin-top:9px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="editStudioScene(${shot.id}, ${segment?.id || 0})">Sửa cảnh</button><button class="btn small ghost" type="button" onclick="regenerateStudioShotVoice(${shot.id})">Tạo lại giọng</button></div>${optionalMediaTools}`;
+    return {preview, body, wantsVisual, spokenText};
+  }
+
+  // The long lane: toolbar, the collapsible strip, then rows beside the selected scene.
+  function renderStudioSceneBoard(result, shots, timeline, summary) {
+    // The form lives inside `result`, which is about to be replaced: keep what was
+    // typed now, while the old form can still be read (renderStudioSceneDetail
+    // below draws the new one from it). Every redraw of the long board - a scene
+    // job finishing, a new sort, clearing the filters, a refresh - comes through here.
+    keepStudioSceneDraft(state.storyboardEdit);
+    const view = studioStoryboardView();
+    const focused = document.activeElement && result.contains(document.activeElement) ? document.activeElement : null;
+    const focusId = focused?.id || '';
+    const focusShot = focused?.dataset?.shotId || '';
+    const caret = focused && typeof focused.selectionStart === 'number' ? focused.selectionStart : null;
+    const scrollY = window.scrollY;
+    const list = $('studioSceneList');
+    const listScroll = list ? list.scrollTop : 0;
+    const project = state.studioProject || (state.projects || []).find((item) => Number(item.id) === Number(state.studioProjectId)) || {};
+    const title = $('studioStoryboardTitle');
+    if (title) title.textContent = project.title || project.source_title || 'Storyboard';
+
+    let elapsed = 0;
+    const items = shots.map((shot, index) => {
+      const segment = storyboardSegmentForShot(shot, timeline);
+      const item = {shot, segment, index, start: elapsed, facts: storyboardSceneFacts(shot, segment), plan: studioScenePlanState(segment)};
+      elapsed += Number(shot.duration_seconds || 0);
+      return item;
+    });
+    if (!items.some((item) => Number(item.shot.id) === Number(view.selected))) {
+      view.selected = Number(items[0].shot.id);
+      if (state.storyboardEdit && !items.some((item) => Number(item.shot.id) === Number(state.storyboardEdit.shotId))) state.storyboardEdit = null;
+    }
+    const ordered = items.slice();
+    if (view.sort === 'duration') ordered.sort((a, b) => Number(b.shot.duration_seconds || 0) - Number(a.shot.duration_seconds || 0) || a.index - b.index);
+    if (view.sort === 'attention') {
+      ordered.sort((a, b) => (STORYBOARD_ATTENTION[a.facts.state] ?? 9) - (STORYBOARD_ATTENTION[b.facts.state] ?? 9)
+        || (STORYBOARD_PLAN_ATTENTION[a.plan.key] ?? 9) - (STORYBOARD_PLAN_ATTENTION[b.plan.key] ?? 9) || a.index - b.index);
+    }
+    const prodCounts = {all: items.length, ready: summary.ready, missing_visual: summary.missing_visual, missing_audio: summary.missing_audio,
+      missing_both: items.filter((item) => item.facts.state === 'missing_both').length, draft: summary.draft, fallback: summary.fallback};
+    const planFlow = studioEditFlow() === 'plan';
+    const toolbar = `<div class="sb-toolbar" role="search">
+      <label class="sb-field sb-search"><span>Tìm cảnh</span><input id="studioSceneSearch" type="search" value="${esc(view.query)}" placeholder="Số cảnh, lời đọc hoặc mô tả hình…" autocomplete="off" oninput="setStudioStoryboardView({query: this.value})"></label>
+      <label class="sb-field"><span>Sản xuất</span><select id="studioSceneFilterProd" onchange="setStudioStoryboardView({prod: this.value})">${STORYBOARD_PROD_FILTERS
+        .filter(([key]) => key === 'all' || prodCounts[key] || view.prod === key)
+        .map(([key, label]) => `<option value="${key}"${view.prod === key ? ' selected' : ''}>${esc(label)} (${prodCounts[key] || 0})</option>`).join('')}</select></label>
+      <label class="sb-field" id="studioScenePlanFilterBox"${planFlow ? '' : ' hidden'}><span>Kế hoạch dựng</span><select id="studioSceneFilterPlan" onchange="setStudioStoryboardView({plan: this.value})"><option value="all">Tất cả</option></select></label>
+      <label class="sb-field"><span>Sắp xếp</span><select id="studioSceneSort" onchange="setStudioStoryboardView({sort: this.value})">${STORYBOARD_SORTS
+        .map(([key, label]) => `<option value="${key}"${view.sort === key ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+    </div>
+    <p class="sb-summary"><span id="studioSceneResultLine" aria-live="polite">${items.length} cảnh</span><span class="sb-ok">${summary.ready} sẵn sàng</span><span>${summary.missing_visual} thiếu hình</span><span>${summary.missing_audio} thiếu tiếng</span>${summary.draft ? `<span>${summary.draft} visual nháp</span>` : ''}${summary.fallback ? `<span>${summary.fallback} dự phòng</span>` : ''}</p>`;
+    const strip = `<details class="sb-strip" id="studioSceneStrip"${view.stripOpen ? ' open' : ''} ontoggle="studioStoryboardView().stripOpen = this.open">
+      <summary><span>Timeline thu gọn</span><span class="sb-mono">${storyboardTimecode(elapsed)} · ${items.length} cảnh</span></summary>
+      <div class="sb-strip-track" role="list">${items.map((item) => storyboardStripBlock(item, view)).join('')}</div>
+    </details>`;
+    result.innerHTML = narrationSourceNotice() + toolbar + strip + `<div class="sb-layout">
+      <div class="sb-list" id="studioSceneList" role="list" aria-label="Danh sách cảnh">${ordered.map((item) => storyboardSceneRow(item, view)).join('')}
+        <div class="sb-empty" id="studioSceneEmpty" hidden><b>Không có cảnh nào khớp.</b> <button class="btn small" type="button" onclick="clearStudioStoryboardFilters()">Xoá bộ lọc</button></div>
+      </div>
+      <aside class="sb-detail" id="studioSceneDetail" aria-label="Chi tiết cảnh" tabindex="-1"></aside>
+    </div>`;
+    renderStudioSceneDetail();
+    syncStudioScenePlanState();
+    const newList = $('studioSceneList');
+    if (newList) newList.scrollTop = listScroll;
+    if (Math.abs(window.scrollY - scrollY) > 1) window.scrollTo(0, scrollY);
+    const again = focusId ? $(focusId) : (focusShot ? result.querySelector(`[data-scene-row][data-shot-id="${focusShot}"]`) : null);
+    if (again) {
+      again.focus({preventScroll: true});
+      if (caret !== null && typeof again.setSelectionRange === 'function') again.setSelectionRange(caret, caret);
+    }
+  }
+
+  function storyboardSceneRow(item, view) {
+    const {shot, segment, index, start} = item;
+    const sceneFacts = item.facts;
+    const number = shot.shot_index || index + 1;
+    const selected = Number(shot.id) === Number(view.selected);
+    const spoken = String(segment?.voice_text || shot.narration || '').trim();
+    const duration = Number(shot.duration_seconds || 0);
+    const thumb = segment?.visual_path && STORYBOARD_IMAGE.test(segment.visual_path)
+      ? `<img src="/api/projects/${state.studioProjectId}/timeline/${segment.id}/visual-preview" alt="" loading="lazy">`
+      : `<span class="sb-thumb-empty">${segment?.visual_path ? 'Video' : 'Chưa có hình'}</span>`;
+    const search = `${spoken} ${shot.visual_prompt || ''}`.toLowerCase();
+    return `<button type="button" role="listitem" class="sb-row${selected ? ' is-selected' : ''}" data-scene-row data-shot-id="${shot.id}" data-segment-id="${segment?.id || ''}" data-scene-number="${number}" data-scene-state="${sceneFacts.state}" data-missing-visual="${sceneFacts.missingVisual ? '1' : '0'}" data-missing-audio="${sceneFacts.missingAudio ? '1' : '0'}" data-ready="${sceneFacts.ready ? '1' : '0'}" data-plan-state="${esc(item.plan.key)}" data-search="${esc(search)}" aria-pressed="${selected}" onclick="selectStudioScene(${shot.id})" onkeydown="studioSceneRowKey(event)">
+      <span class="sb-thumb">${thumb}</span>
+      <span class="sb-row-main"><span class="sb-row-head"><b>Cảnh ${number}</b><span class="sb-mono">${storyboardTimecode(start)}–${storyboardTimecode(start + duration)} · ${duration.toFixed(1)}s</span></span>
+        <span class="sb-say">${esc(spoken || 'Chưa có lời dẫn cho cảnh này.')}</span>
+        <span class="sb-see">${esc(shot.visual_prompt || 'Chưa có visual prompt')}</span></span>
+      <span class="sb-row-side"><span class="storyboard-state storyboard-state-${sceneFacts.state}">${sceneFacts.label}</span><span class="sb-plan" data-edit-doc-chip>${studioScenePlanChip(item.plan)}</span></span>
+    </button>`;
+  }
+
+  function storyboardStripBlock(item, view) {
+    const {shot, index} = item;
+    const number = shot.shot_index || index + 1;
+    const duration = Number(shot.duration_seconds || 0);
+    const selected = Number(shot.id) === Number(view.selected);
+    const label = `Cảnh ${number} · ${duration.toFixed(1)} giây · ${item.facts.label}${item.plan.label ? ` · ${item.plan.label}` : ''}`;
+    return `<button type="button" role="listitem" class="sb-strip-block sb-strip-${item.facts.state}${selected ? ' is-selected' : ''}" style="flex:${Math.max(duration, 0.5)}" data-strip-shot="${shot.id}" data-plan-state="${esc(item.plan.key)}" title="${esc(label)}" aria-label="${esc(label)}" onclick="selectStudioScene(${shot.id})">${number}</button>`;
+  }
+
+  function studioSelectedScene() {
+    const view = studioStoryboardView();
+    const shots = state.shots || [];
+    const index = shots.findIndex((shot) => Number(shot.id) === Number(view.selected));
+    if (index < 0) return null;
+    return {shot: shots[index], segment: storyboardSegmentForShot(shots[index], state.timeline || []), index};
+  }
+
+  function renderStudioSceneDetail() {
+    const box = $('studioSceneDetail');
+    if (!box) return;
+    const edit = state.storyboardEdit;
+    // A redraw while the form is open keeps what was typed.
+    keepStudioSceneDraft(edit);
+    const scene = studioSelectedScene();
+    if (!scene) { box.innerHTML = '<div class="studio-empty">Chọn một cảnh ở danh sách để xem chi tiết.</div>'; return; }
+    const {shot, segment, index} = scene;
+    const number = shot.shot_index || index + 1;
+    const sceneFacts = storyboardSceneFacts(shot, segment);
+    const shots = state.shots || [];
+    const start = shots.slice(0, index).reduce((sum, item) => sum + Number(item.duration_seconds || 0), 0);
+    const duration = Number(shot.duration_seconds || 0);
+    const editing = edit && Number(edit.shotId) === Number(shot.id);
+    const parts = editing ? null : storyboardSceneParts(shot, segment, index);
+    box.innerHTML = `<div class="sb-detail-head">
+        <div><p class="sb-eyebrow">Chi tiết cảnh</p><h3>Cảnh ${number}</h3><p class="sb-mono">${storyboardTimecode(start)}–${storyboardTimecode(start + duration)} · ${duration.toFixed(1)} giây</p></div>
+        <div class="sb-detail-nav"><button class="btn small ghost" type="button" aria-label="Cảnh trước" onclick="stepStudioScene(-1)"${index > 0 ? '' : ' disabled'}>‹</button><button class="btn small ghost" type="button" aria-label="Cảnh sau" onclick="stepStudioScene(1)"${index < shots.length - 1 ? '' : ' disabled'}>›</button></div>
+      </div>
+      <div class="sb-detail-states"><span class="storyboard-state storyboard-state-${sceneFacts.state}">${sceneFacts.label}</span>${studioScenePlanChip(studioScenePlanState(segment))}</div>
+      ${editing ? storyboardSceneEditForm(shot, segment, edit) : `<div class="storyboard-media sb-detail-media">${parts.preview}</div><div class="storyboard-body">${parts.body}</div>`}`;
+  }
+
+  function selectStudioScene(shotId, {focusRow = false} = {}) {
+    const view = studioStoryboardView();
+    const edit = state.storyboardEdit;
+    if (edit && Number(edit.shotId) !== Number(shotId)) {
+      if (edit.saving) return setMessage('Đang lưu cảnh, chờ lưu xong rồi chuyển cảnh.', '');
+      if (edit.dirty && !confirm(`Cảnh đang sửa có thay đổi chưa lưu.\n\nBỏ các thay đổi đó để chuyển cảnh?`)) return;
+      state.storyboardEdit = null;
+    }
+    view.selected = Number(shotId);
+    document.querySelectorAll('#studioStoryboardResult [data-scene-row]').forEach((row) => {
+      const on = Number(row.dataset.shotId) === view.selected;
+      row.classList.toggle('is-selected', on);
+      row.setAttribute('aria-pressed', String(on));
+      if (on && focusRow) row.focus();
+    });
+    document.querySelectorAll('#studioStoryboardResult [data-strip-shot]').forEach((block) => {
+      block.classList.toggle('is-selected', Number(block.dataset.stripShot) === view.selected);
+    });
+    renderStudioSceneDetail();
+    if (!focusRow && window.matchMedia && window.matchMedia('(max-width: 1100px)').matches) {
+      $('studioSceneDetail')?.scrollIntoView({block: 'start', behavior: 'smooth'});
+    }
+  }
+
+  function stepStudioScene(delta) {
+    const rows = [...document.querySelectorAll('#studioStoryboardResult [data-scene-row]')].filter((row) => !row.hidden);
+    const at = rows.findIndex((row) => Number(row.dataset.shotId) === Number(studioStoryboardView().selected));
+    const next = rows[at + delta];
+    if (next) selectStudioScene(Number(next.dataset.shotId));
+  }
+
+  function studioSceneRowKey(event) {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const rows = [...document.querySelectorAll('#studioStoryboardResult [data-scene-row]')].filter((row) => !row.hidden);
+    const at = rows.indexOf(event.currentTarget);
+    const next = event.key === 'Home' ? rows[0] : event.key === 'End' ? rows[rows.length - 1]
+      : rows[at + (event.key === 'ArrowDown' ? 1 : -1)];
+    event.preventDefault();
+    if (next) selectStudioScene(Number(next.dataset.shotId), {focusRow: true});
+  }
+
+  // ---- Sửa cảnh trong panel chi tiết ----
+  // Only what the user changed is sent: a field left out of the PATCH is left as
+  // it is (Database.update_project_timeline_segment writes only the columns it is
+  // given). The recorded voice is dropped (audio_path: '') only when the words it
+  // reads change - and only after the user agrees. Editing the picture or the
+  // length keeps the voice. Words are compared the way the routes compare them
+  // (whitespace collapsed), so retyping the same line is not a change.
+  //
+  // In the plan workflow a scene's words are the script's (Bước 3): the field is
+  // read-only there and the form never sends narration, voice_text or audio_path.
+  //
+  // A save is two requests (the shot, then its timeline row) and the server has no
+  // way to make them one, so a save may land half-way, or its outcome may be
+  // unknown (a 5xx, a lost connection). Nothing is assumed about such a request:
+  // every save first reads the scene back from the server and, per field, sends
+  // only what is not there yet. A field that is neither what the form found when
+  // it opened nor what it wants to write was changed elsewhere and is never
+  // written over; the save stops instead. This check runs in the page, before the
+  // write - it narrows the window, it cannot close it (the routes take no version).
+  const studioSceneWords = (text) => String(text || '').split(/\s+/).filter(Boolean).join(' ');
+
+  const STUDIO_SCENE_FIELDS = {
+    shot: ['narration', 'visual_prompt', 'duration_seconds'],
+    segment: ['voice_text', 'subtitle_text', 'audio_path', 'visual_prompt', 'duration_seconds'],
+  };
+
+  const STUDIO_SCENE_FIELD_LABELS = {
+    narration: 'lời đọc', voice_text: 'lời đọc', subtitle_text: 'phụ đề', audio_path: 'giọng đọc',
+    visual_prompt: 'mô tả hình', duration_seconds: 'thời lượng',
+  };
+
+  const STUDIO_SCENE_PART_LABELS = {shot: 'cảnh (storyboard)', segment: 'timeline'};
+
+  // The routes store text stripped and lengths as whole numbers; compare the same way.
+  function studioSceneValue(field, value) {
+    if (field === 'duration_seconds') return value === null || value === undefined || value === '' ? '' : String(Number(value));
+    return String(value ?? '').trim();
+  }
+
+  function studioSceneRowValues(kind, row) {
+    const values = {};
+    STUDIO_SCENE_FIELDS[kind].forEach((field) => { values[field] = row ? row[field] : undefined; });
+    return values;
+  }
+
+  // For each field the save wants to write: already on the server (skip), still as
+  // the form found it (send), or changed by someone else since (stop).
+  function studioScenePending(body, fresh, base) {
+    const send = {};
+    const elsewhere = [];
+    Object.keys(body).forEach((field) => {
+      const now = studioSceneValue(field, fresh[field]);
+      if (now === studioSceneValue(field, body[field])) return;
+      if (now === studioSceneValue(field, base[field])) send[field] = body[field];
+      else elsewhere.push(field);
+    });
+    // New words always go with an empty voice path, even when the path already reads
+    // empty: a voice made between this read and the write must not stay on new words.
+    if ('voice_text' in send && 'audio_path' in body) send.audio_path = body.audio_path;
+    return {send, elsewhere};
+  }
+
+  // A 4xx is the route refusing before it writes (narration lock, validation, not
+  // found). Anything else - a 5xx, no answer at all - may or may not have written.
+  function studioSceneOutcome(error) {
+    const status = Number(error?.status || 0);
+    return status >= 400 && status < 500 ? 'refused' : 'unknown';
+  }
+
+  function studioSceneNarrationLocked(edit) {
+    return Boolean(edit?.narrationLocked) || studioEditFlow() === 'plan';
+  }
+
+  function keepStudioSceneDraft(edit) {
+    if (!edit || !$('studioSceneEditForm')) return;
+    edit.draft = {narration: $('studioSceneEditNarration')?.value ?? '', visual: $('studioSceneEditVisual')?.value ?? '', duration: $('studioSceneEditDuration')?.value ?? ''};
+  }
+
+  function studioSceneEditChanges(edit) {
+    const original = edit.original || {};
+    const locked = studioSceneNarrationLocked(edit);
+    const narration = locked ? String(original.narration || '') : ($('studioSceneEditNarration')?.value ?? String(original.narration || ''));
+    const visual = $('studioSceneEditVisual')?.value ?? String(original.visual || '');
+    const durationText = String($('studioSceneEditDuration')?.value ?? original.duration ?? '').trim();
+    return {
+      narration, visual, durationText,
+      narrationChanged: !locked && studioSceneWords(narration) !== studioSceneWords(original.narration),
+      visualChanged: visual.trim() !== String(original.visual || '').trim(),
+      durationChanged: Number(durationText) !== Number(original.duration),
+    };
+  }
+
+  function storyboardSceneEditForm(shot, segment, edit) {
+    const draft = edit.draft || {};
+    const original = edit.original || {};
+    const locked = studioSceneNarrationLocked(edit);
+    const narration = locked ? String(original.narration || '') : (draft.narration ?? String(original.narration || ''));
+    const visual = draft.visual ?? String(original.visual || '');
+    const duration = draft.duration ?? String(original.duration ?? '');
+    const wordsChanged = !locked && studioSceneWords(narration) !== studioSceneWords(original.narration);
+    const narrationField = locked
+      ? `<label class="sb-field"><span>Lời AI sẽ đọc</span><textarea id="studioSceneEditNarration" rows="4" readonly aria-readonly="true" aria-describedby="studioSceneNarrationLocked">${esc(narration)}</textarea><small class="sb-field-note" id="studioSceneNarrationLocked">Lời lấy nguyên văn từ kịch bản. Muốn đổi lời, sửa kịch bản ở Bước 3 rồi chia cảnh lại.</small></label>`
+      : `<label class="sb-field"><span>Lời AI sẽ đọc</span><textarea id="studioSceneEditNarration" rows="4">${esc(narration)}</textarea></label>`;
+    const retry = edit.retry
+      ? `<div class="sb-callout sb-callout-warn" id="studioSceneSaveState" role="status"><b>Lần lưu trước chưa xong.</b> Khi lưu lại, ứng dụng đọc cảnh trên máy chủ trước: phần đã có thì không gửi lại, phần đã bị đổi ở nơi khác thì không ghi đè.</div>`
+      : '';
+    const label = edit.saving ? 'Đang lưu…' : (edit.retry ? 'Lưu phần còn lại' : 'Lưu cảnh');
+    return `<form class="sb-form" id="studioSceneEditForm" novalidate onsubmit="event.preventDefault(); saveStudioSceneEdit()" oninput="markStudioSceneEditDirty()">
+      ${retry}
+      ${edit.hasVoice ? `<div class="sb-callout" role="note">Sửa mô tả hình hoặc thời lượng giữ nguyên giọng đọc của cảnh.</div>
+      ${locked ? '' : `<div class="sb-callout sb-callout-warn" id="studioSceneVoiceWarning" role="alert"${wordsChanged ? '' : ' hidden'}><b>Lời đọc đã đổi: lưu sẽ bỏ giọng đọc hiện tại của cảnh này.</b> Sau khi lưu, tạo lại giọng ở bước 04. Ứng dụng hỏi xác nhận trước khi lưu.</div>`}` : ''}
+      ${narrationField}
+      <label class="sb-field"><span>Mô tả hình ảnh</span><textarea id="studioSceneEditVisual" rows="3">${esc(visual)}</textarea></label>
+      <label class="sb-field sb-field-narrow"><span>Thời lượng (giây, số nguyên)</span><input id="studioSceneEditDuration" type="number" min="1" max="3600" step="1" inputmode="numeric" value="${esc(duration)}"></label>
+      <div class="sb-form-actions"><button class="btn ghost" type="button" onclick="cancelStudioSceneEdit()"${edit.saving ? ' disabled' : ''}>Huỷ</button><button class="btn primary" type="submit"${edit.saving ? ' disabled aria-busy="true"' : ''}>${label}</button></div>
+    </form>`;
+  }
+
+  function markStudioSceneEditDirty() {
+    const edit = state.storyboardEdit;
+    if (!edit) return;
+    edit.dirty = true;
+    const warning = $('studioSceneVoiceWarning');
+    if (warning) warning.hidden = !studioSceneEditChanges(edit).narrationChanged;
+  }
+
+  function cancelStudioSceneEdit() {
+    const edit = state.storyboardEdit;
+    if (!edit || edit.saving) return;
+    state.storyboardEdit = null;
+    renderStudioSceneDetail();
+    setMessage(edit.mayHaveWritten
+      ? 'Đã đóng form. Lần lưu trước có thể đã ghi một phần thay đổi; cảnh đang hiện theo dữ liệu đọc được gần nhất từ máy chủ.'
+      : 'Đã huỷ chỉnh sửa. Cảnh giữ nguyên như trước.', '');
+  }
+
+  // What each part ended as, in words: saved, already there, refused, unknown, not sent.
+  function studioSceneSaveReport(parts, result) {
+    return parts.map((kind) => {
+      const outcome = result[kind];
+      const text = outcome === 'saved' || outcome === 'in_place' ? 'đã lưu'
+        : outcome === 'refused' ? `chưa lưu (máy chủ từ chối: ${result.error?.message || 'lỗi'})`
+        : outcome === 'unknown' ? `không xác định được đã lưu hay chưa (${result.error?.message || 'mất kết nối'})`
+        : 'chưa gửi';
+      return `${STUDIO_SCENE_PART_LABELS[kind]}: ${text}`;
+    }).join('; ');
+  }
+
+  // Put rows the server sent back into the page when the full reload failed.
+  function studioSceneMergeRows(rows) {
+    if (rows.shot) state.shots = (state.shots || []).map((item) => (Number(item.id) === Number(rows.shot.id) ? {...item, ...rows.shot} : item));
+    if (rows.segment) state.timeline = (state.timeline || []).map((item) => (Number(item.id) === Number(rows.segment.id) ? {...item, ...rows.segment} : item));
+  }
+
+  function stopStudioSceneSave(edit, text) {
+    edit.saving = false;
+    if (state.storyboardEdit === edit) renderStudioSceneDetail();
+    return setMessage(text, 'error');
+  }
+
+  async function saveStudioSceneEdit() {
+    const edit = state.storyboardEdit;
+    if (!edit || edit.saving) return;
+    const shot = findStudioShot(edit.shotId);
+    if (!shot) return setMessage('Không tìm thấy cảnh cần sửa.', 'error');
+    const number = shot.shot_index || '';
+    const change = studioSceneEditChanges(edit);
+    const duration = Number(change.durationText);
+    // Both routes take whole seconds (UpdateShotRequest / UpdateTimelineRequest: int, 1-3600).
+    if (change.durationChanged && (!Number.isInteger(duration) || duration < 1 || duration > 3600)) {
+      return setMessage('Thời lượng cần là số giây nguyên từ 1 đến 3600.', 'error');
+    }
+    if (!change.narrationChanged && !change.visualChanged && !change.durationChanged) {
+      state.storyboardEdit = null;
+      renderStudioSceneDetail();
+      return setMessage(edit.mayHaveWritten
+        ? 'Không còn thay đổi nào so với lúc mở form; form đã đóng. Lần lưu trước có thể đã ghi một phần; cảnh đang hiện theo dữ liệu đọc được gần nhất từ máy chủ.'
+        : 'Không có thay đổi nào để lưu. Cảnh giữ nguyên.', '');
+    }
+    if (change.narrationChanged && edit.hasVoice
+        && !confirm(`Lưu cảnh ${number}?\n\nLời đọc đã đổi nên giọng đọc hiện tại của cảnh này sẽ bị bỏ; bạn cần tạo lại giọng ở bước 04.`)) return;
+    const bodies = {shot: {}, segment: {}};
+    if (change.narrationChanged) {
+      bodies.shot.narration = change.narration;
+      Object.assign(bodies.segment, {voice_text: change.narration, subtitle_text: change.narration, audio_path: ''});
+    }
+    if (change.visualChanged) { bodies.shot.visual_prompt = change.visual; bodies.segment.visual_prompt = change.visual; }
+    if (change.durationChanged) { bodies.shot.duration_seconds = duration; bodies.segment.duration_seconds = duration; }
+    const parts = edit.segmentId ? ['shot', 'segment'] : ['shot'];
+    const projectId = state.studioProjectId;
+    edit.saving = true;
+    renderStudioSceneDetail();
+
+    // 1. Read the scene as the server has it now. Without that, nothing is sent.
+    let fresh;
+    try {
+      fresh = await api(`/api/projects/${projectId}`);
+    } catch (error) {
+      return stopStudioSceneSave(edit, `Chưa đọc được dữ liệu mới nhất của cảnh ${number} (${error.message}) nên chưa gửi gì. Nội dung đang nhập được giữ nguyên; thử lưu lại sau.`);
+    }
+    const rows = {
+      shot: (fresh?.latest_shots || []).find((item) => Number(item.id) === Number(shot.id)) || null,
+      segment: edit.segmentId ? (fresh?.latest_timeline || []).find((item) => Number(item.id) === Number(edit.segmentId)) || null : null,
+    };
+    if (!rows.shot || (edit.segmentId && !rows.segment)) {
+      return stopStudioSceneSave(edit, `Cảnh ${number} không còn trong storyboard hiện tại trên máy chủ nên chưa gửi gì. Huỷ form rồi mở lại storyboard để sửa trên dữ liệu mới.`);
+    }
+    const pending = {};
+    parts.forEach((kind) => { pending[kind] = studioScenePending(bodies[kind], studioSceneRowValues(kind, rows[kind]), edit.base[kind]); });
+    const elsewhere = [...new Set(parts.flatMap((kind) => pending[kind].elsewhere.map((field) => STUDIO_SCENE_FIELD_LABELS[field] || field)))];
+    if (elsewhere.length) {
+      keepStudioSceneDraft(edit);
+      edit.saving = false;
+      state.shots = fresh.latest_shots || [];
+      renderStudioStoryboard(state.shots, fresh.latest_timeline || []);
+      if (state.storyboardEdit === edit) renderStudioSceneDetail();
+      return setMessage(`Không lưu cảnh ${number}: ${elsewhere.join(', ')} đã bị thay đổi ở nơi khác kể từ khi mở form, nên không ghi đè. Chưa gửi gì. Nội dung đang nhập được giữ nguyên; huỷ form rồi mở lại cảnh để sửa trên dữ liệu mới.`, 'error');
+    }
+
+    // 2. Send, in order, only what is not on the server yet; stop at the first failure.
+    const wroteBefore = Boolean(edit.mayHaveWritten);
+    const result = {};
+    const savedRows = {};
+    for (const kind of parts) {
+      const body = pending[kind].send;
+      if (!Object.keys(body).length) { result[kind] = 'in_place'; continue; }
+      try {
+        const answer = await api(kind === 'shot' ? `/api/shots/${shot.id}` : `/api/timeline/${edit.segmentId}`, {method: 'PATCH', body: JSON.stringify(body)});
+        result[kind] = 'saved';
+        const row = kind === 'shot' ? answer?.shot : answer?.segment;
+        if (row) savedRows[kind] = row;
+        // What this form wrote is the new starting point for that field, so a later
+        // save of the same form is not mistaken for someone else's change.
+        Object.keys(body).forEach((field) => { edit.base[kind][field] = row && field in row ? row[field] : body[field]; });
+      } catch (error) {
+        result[kind] = studioSceneOutcome(error);
+        result.error = error;
+        result.failed = kind;
+        break;
+      }
+    }
+    // Fields already on the server are the starting point too.
+    parts.forEach((kind) => Object.keys(bodies[kind]).forEach((field) => {
+      if (!(field in pending[kind].send)) edit.base[kind][field] = rows[kind][field];
+    }));
+    const done = !result.failed;
+    const savedSomething = parts.some((kind) => result[kind] === 'saved');
+    edit.mayHaveWritten = wroteBefore || savedSomething || result[result.failed] === 'unknown';
+    if (done) {
+      if (state.storyboardEdit === edit) state.storyboardEdit = null;
+    } else {
+      keepStudioSceneDraft(edit);
+      edit.saving = false;
+      edit.retry = edit.mayHaveWritten;
+    }
+
+    // 3. Show what the server holds now, whatever happened above.
+    let reloadError = null;
+    try {
+      const bundle = await api(`/api/projects/${projectId}`);
+      state.shots = bundle.latest_shots || [];
+      renderStudioStoryboard(state.shots, bundle.latest_timeline || []);
+    } catch (error) {
+      reloadError = error;
+      studioSceneMergeRows(savedRows);
+      renderStudioStoryboard(state.shots || [], state.timeline || []);
+    }
+    if (state.storyboardEdit === edit) renderStudioSceneDetail();
+    const reloadNote = reloadError
+      ? ` Chưa tải lại được dữ liệu (${reloadError.message}); danh sách có thể còn nội dung cũ, hãy mở lại dự án để xem bản mới nhất.`
+      : '';
+
+    if (done) {
+      const nothingSent = parts.every((kind) => result[kind] === 'in_place');
+      const text = nothingSent
+        ? `Thay đổi của cảnh ${number} đã có sẵn trên máy chủ; không gửi lại gì.`
+        : change.narrationChanged
+          ? 'Đã lưu cảnh này. Lời đọc đã đổi nên giọng cũ của cảnh được bỏ; quay lại bước 4 để tạo giọng mới.'
+          : 'Đã lưu cảnh này. Giọng đọc của cảnh được giữ nguyên.';
+      // Saved but not reloaded is not an error, and not a plain success either.
+      return setMessage(`${text}${reloadNote}`, reloadError ? '' : 'success');
+    }
+    if (!edit.mayHaveWritten) {
+      return setMessage(`Không lưu được cảnh ${number}: ${result.error.message}. Máy chủ từ chối trước khi ghi nên cảnh chưa đổi. Nội dung đang nhập được giữ nguyên.${reloadNote}`, 'error');
+    }
+    return setMessage(`Lưu cảnh ${number} chưa xong. ${studioSceneSaveReport(parts, result)}. Nội dung đang nhập được giữ nguyên; bấm "Lưu phần còn lại" để đọc lại cảnh trên máy chủ rồi chỉ gửi phần chưa có.${reloadNote}`, 'error');
   }
 
   async function refreshStudioStoryboard() {
@@ -2368,7 +2993,30 @@
     } catch (error) { setMessage(`Không dịch được: ${error.message}`, 'error'); }
   }
 
+  // On the long storyboard a scene is edited in its detail panel; elsewhere (the
+  // Short lane's cards) the earlier dialogs remain.
   async function editStudioScene(shotId, segmentId) {
+    const onBoard = $('studioSceneDetail') && (state.shots || []).some((item) => Number(item.id) === Number(shotId));
+    if (!onBoard) return editStudioScenePrompt(shotId, segmentId);
+    selectStudioScene(shotId);
+    if (Number(studioStoryboardView().selected) !== Number(shotId)) return;
+    const shot = findStudioShot(shotId);
+    const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
+    // What the form starts from, so a redraw from the server never moves what "changed" means.
+    state.storyboardEdit = {
+      shotId: Number(shotId), segmentId: Number(segmentId) || 0, dirty: false, saving: false,
+      hasVoice: Boolean(String(segment?.audio_path || '').trim()),
+      narrationLocked: studioEditFlow() === 'plan',
+      original: {narration: segment?.voice_text || shot?.narration || '', visual: shot?.visual_prompt || '', duration: shot?.duration_seconds ?? 8},
+      // The rows as the form found them: a save never writes over a field that has
+      // moved on from these since (studioScenePending).
+      base: {shot: studioSceneRowValues('shot', shot), segment: studioSceneRowValues('segment', segment)},
+    };
+    renderStudioSceneDetail();
+    $(state.storyboardEdit.narrationLocked ? 'studioSceneEditVisual' : 'studioSceneEditNarration')?.focus();
+  }
+
+  async function editStudioScenePrompt(shotId, segmentId) {
     const shot = findStudioShot(shotId);
     if (!shot) return setMessage('Không tìm thấy cảnh cần sửa.', 'error');
     const timelineSegment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));

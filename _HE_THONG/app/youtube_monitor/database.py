@@ -2762,6 +2762,7 @@ class Database:
     def apply_edit_document_rows(
         self, project_id: int, script_id: int, rows: list[dict[str, Any]], *,
         state_hash: Callable[[dict[str, Any], list[dict[str, Any]]], str], record: dict[str, Any],
+        rule: Any = None,
     ) -> dict[str, Any]:
         """Write the planned rows of an EditDocument to the timeline, each only if it is still as expected - one transaction.
 
@@ -2788,6 +2789,13 @@ class Database:
         The rows written and the record of what each now holds (`state_hash`,
         read back) are committed together; any error rolls back the whole
         apply. Only the owned columns and the row's edit beats are written.
+
+        P2-4 · F1: with a `rule` (edit_apply.ScopedCheck), what a row is
+        expected to hold is compared only over the columns this apply writes
+        - rule.verdict(), read inside this transaction - and each record row
+        also keeps `state_edit`, what the EditDocument now knows the row holds
+        (rule.settle()). A conflict names its `columns`. Without a rule the
+        whole row is compared, as before.
         """
         written: list[dict[str, Any]] = []
         unchanged: list[dict[str, Any]] = []
@@ -2836,21 +2844,31 @@ class Database:
                 segment, beats = read(segment_id)
                 current = state_hash(segment, beats)
                 applied = latest.get(segment_id)
-                if applied is not None:
-                    expected, source = applied["state_hash"], "applied"
-                elif row.get("legacy_hash"):
-                    expected, source = row["legacy_hash"], "legacy"
+                known: dict[str, Any] | None = None
+                if rule is not None:
+                    verdict = rule.verdict(row, segment, beats, applied)
+                    if verdict["conflict"]:
+                        conflicts.append({"segment_id": segment_id, "scene_key": key, "reason": "timeline_changed",
+                                          "expected_from": verdict["source"], "columns": verdict["columns"]})
+                        continue
+                    known = verdict["base"]
                 else:
-                    expected, source = row["default_hash"], "default"
-                if current != expected:
-                    conflicts.append({"segment_id": segment_id, "scene_key": key, "reason": "timeline_changed",
-                                      "expected_from": source})
-                    continue
+                    if applied is not None:
+                        expected, source = applied["state_hash"], "applied"
+                    elif row.get("legacy_hash"):
+                        expected, source = row["legacy_hash"], "legacy"
+                    else:
+                        expected, source = row["default_hash"], "default"
+                    if current != expected:
+                        conflicts.append({"segment_id": segment_id, "scene_key": key, "reason": "timeline_changed",
+                                          "expected_from": source})
+                        continue
                 if applied is not None and applied["layer_hash"] == row["layer_hash"]:
                     unchanged.append({"segment_id": segment_id, "scene_key": key, "layer_hash": row["layer_hash"],
                                       "state_hash": current, "visual_owned": bool(applied.get("visual_owned")),
                                       "columns_written": list(applied.get("columns_written") or []),
-                                      "beats_written": applied.get("beats_written")})
+                                      "beats_written": applied.get("beats_written"),
+                                      **({"state_edit": known} if known is not None else {})})
                     continue
                 if new_beats is not None and beats and connection.execute(
                         f"SELECT COUNT(*) FROM scene_generation_jobs WHERE edit_beat_id IN ({', '.join('?' for _ in beats)})",
@@ -2866,10 +2884,11 @@ class Database:
                     continue
                 asset_ids = {int(beat["asset_id"]) for beat in new_beats or [] if beat.get("asset_id") is not None}
                 if asset_ids:
-                    known = {int(item[0]) for item in connection.execute(
+                    # Not `known`: that is what the EditDocument knows the row holds (rule.settle below).
+                    found_assets = {int(item[0]) for item in connection.execute(
                         f"SELECT id FROM project_assets WHERE project_id = ? AND id IN ({', '.join('?' for _ in asset_ids)})",
                         (int(project_id), *asset_ids))}
-                    if asset_ids - known:
+                    if asset_ids - found_assets:
                         skipped.append({"segment_id": segment_id, "scene_key": key, "reason": "unknown_asset"})
                         continue
                 if row["updates"]:
@@ -2892,7 +2911,8 @@ class Database:
                 written.append({"segment_id": segment_id, "scene_key": key, "layer_hash": row["layer_hash"],
                                 "state_hash": state_hash(segment, beats), "visual_owned": bool(row.get("visual_owned")),
                                 "columns_written": sorted(row["updates"]),
-                                "beats_written": len(new_beats) if new_beats is not None else None})
+                                "beats_written": len(new_beats) if new_beats is not None else None,
+                                **({"state_edit": rule.settle(known, segment, beats, row)} if known is not None else {})})
             if written:
                 payload = {**record, "schema": 1, "script_id": int(script_id), "rows": written + unchanged,
                            "written": [item["segment_id"] for item in written], "conflicts": conflicts, "skipped": skipped}
@@ -2958,6 +2978,7 @@ class Database:
     def apply_storyboard_reconcile(
         self, project_id: int, script_id: int, entries: list[dict[str, Any]], removed: list[dict[str, Any]], *,
         source_script_id: int | None, with_timeline: bool, report: dict[str, Any],
+        held: set[int] | frozenset[int] = frozenset(),
     ) -> dict[str, Any]:
         """Bring project_shots and the timeline of one script in line with its storyboard, in one transaction.
 
@@ -2986,10 +3007,35 @@ class Database:
         EditDocument. Everything else (legacy content) is carried and retimed
         as before. `touched_segments` names the rows whose legacy content this
         reconcile wrote, for the EditDocument to know what they now hold.
+
+        P2-4 · F2: `held` names source rows that already held, before this
+        reconcile, something the EditDocument never knew (edit_apply.unknown_rows
+        - a hand edit, most often). Their content is still carried and retimed
+        as above, but the rows it lands on are never named in
+        `touched_segments`: the EditDocument must not take a hand edit as the
+        legacy it expects, or the next apply would write the plan over it with
+        no conflict. They are named in `held_segments` instead, and in
+        `held_from` with the row each came from and the parts this reconcile
+        did not carry there (`not_carried`: the columns, and "beats", an
+        EditDocument owns on the source row) - so the EditDocument can take
+        every other part as known, and keep only the hand-edited ones it was
+        given as they were (edit_apply.held_edits).
         """
         now = utc_now()
         in_place = source_script_id is not None and int(source_script_id) == int(script_id)
         touched: list[int] = []
+        held_landed: list[int] = []
+        held_from: list[dict[str, Any]] = []
+        held = frozenset(int(item) for item in held)
+
+        def landed(segment_id: int, source_id: int, own: dict[str, Any] | None) -> None:
+            if source_id not in held:
+                touched.append(segment_id)
+                return
+            held_landed.append(segment_id)
+            # "beats" is edit_apply.BEATS: the row's edit beats as one part.
+            held_from.append({"segment_id": segment_id, "source_segment_id": source_id,
+                              "not_carried": sorted(own["columns"]) + (["beats"] if own["beats"] else []) if own else []})
         with self._connect() as connection:
             owned = self._edit_owned(connection, project_id)
             segment_columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_timeline_segments)")]
@@ -3075,7 +3121,7 @@ class Database:
                         else:
                             placed[-1]["retimed"] = self._retime(source_segment, int(shot["duration_seconds"]), values)
                             if placed[-1]["retimed"]:
-                                touched.append(int(source_segment["id"]))
+                                landed(int(source_segment["id"]), int(source_segment["id"]), None)
                     connection.execute(
                         f"UPDATE project_timeline_segments SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
                         [*values.values(), int(source_segment["id"])],
@@ -3111,7 +3157,7 @@ class Database:
                 )
                 placed[-1]["segment_id"] = int(cursor.lastrowid)
                 if source_segment:
-                    touched.append(int(cursor.lastrowid))
+                    landed(int(cursor.lastrowid), int(source_segment["id"]), own)
                 if source_segment and beat_columns and not (own and own["beats"]):
                     connection.execute(
                         f"INSERT INTO project_timeline_edit_beats (timeline_segment_id, {', '.join(beat_columns)}) "
@@ -3124,7 +3170,8 @@ class Database:
             connection.execute("UPDATE production_projects SET updated_at = ? WHERE id = ?", (now, project_id))
             record = {**report, "script_id": script_id, "source_script_id": source_script_id,
                       "mode": "in_place" if in_place else ("carried_over" if source_script_id is not None else "new"),
-                      "archived": archived, "touched_segments": touched}
+                      "archived": archived, "touched_segments": touched, "held_segments": held_landed,
+                      "held_from": held_from}
             if isinstance(report.get("scenes"), list):
                 record["scenes"] = [{**scene, "new_shot_id": landed["shot_id"], "new_segment_id": landed["segment_id"],
                                      "retimed": landed.get("retimed"), "edit_owned": bool(landed.get("edit_owned"))}

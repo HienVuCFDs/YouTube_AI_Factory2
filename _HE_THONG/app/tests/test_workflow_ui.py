@@ -77,8 +77,10 @@ def test_storyboard_splits_edit_planning_from_apply(page: str) -> None:
     assert 'id="studioBuildEditPlanButton"' in page
     assert 'id="studioApplyEditPlanToScenesButton"' in page
     assert "AI dựng từng cảnh" in page
-    assert "1. Lập kế hoạch dựng" in page
-    assert "2. Áp dụng kế hoạch dựng" in page
+    # Approved 09/10 (storyboard layout A): two names that say what each action does.
+    assert ">Lập kế hoạch dựng</button>" in page
+    assert ">Áp dụng vào timeline…</button>" in page
+    assert "1. Lập kế hoạch dựng" not in page and "2. Áp dụng kế hoạch dựng" not in page
     assert '<option value="phantom_canvas_image">Gemini Web · Phantom Canvas (đề xuất)</option>' in page
     assert "$('studioEditPlanProviderSelect')?.value || 'phantom_canvas_image'" in page
     assert "function planAllStudioSceneEdits()" in page

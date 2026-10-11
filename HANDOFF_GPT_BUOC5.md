@@ -1,10 +1,12 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành, UI Bước 5 nối T5)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành, UI Bước 5 nối T5, Storyboard UI bố cục A, P2-4 F1/F2/F3 + sửa F1×F2 — đã review, đã test, chưa commit)
 
-Cập nhật: 2026-10-08 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo)
+Cập nhật: 2026-10-11 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo trên PC Windows)
 
 > **Đây là file vào đầu tiên** cho GPT và cho Claude ở chat mới. Nó mô tả trạng thái **hiện tại** của dự án.
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
 > Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), **T5 hoàn thành: Planner theo storyboard** (mục 9e), **UI Bước 5 nối vào T5/EditDocument** (mục 9f), việc tiếp theo (mục 11).
+> **Bản 11/10 bổ sung:** trạng thái git trên PC (mục 1–2), **Storyboard UI bố cục A + form "Sửa cảnh" an toàn** (mục 9g), **P2-4 — sửa tay trước EditDocument: F1 so theo cột, F2 không nhận sửa tay làm legacy, F3 đọc theo timeline hiện tại** (mục 9h), **kết quả test lần đầu trên Windows** (mục 9i), DB thật đo lại (mục 12). Toàn bộ thay đổi 9g–9h **chưa commit, chưa push**.
+> **Cập nhật cuối 11/10 (đọc mục 9j trước):** đã review 9g–9h hai vòng. Lỗi Medium F1×F2 (xung đột giả) **đã sửa và đã kiểm chứng** bằng test cùng mutation test. Toàn bộ suite: **2397 đạt · 2 đỏ (lỗi nền) · 9 bỏ qua** (mục 9i). Đang chờ người dùng quyết commit (mục 11).
 
 ---
 
@@ -30,7 +32,14 @@ Quy trình từ trước tới nay:
 - **T4 (tích hợp) hoàn thành** (mục 9d): `_sync_storyboard` → `_apply_edit_document` → `edit_store.sync()` → `edit_apply.apply_scenes()` là đường ghi EditDocument → timeline trong luồng sản xuất; reconcile không chép, không `_retime` phần EditDocument sở hữu. Chỉ chạy cho project **đã có** EditDocument.
 - **T5 (Planner theo storyboard) hoàn thành** (mục 9e): `run_step("edit_plan")` của project luồng Kế hoạch lập edit cho các cảnh của storyboard hiện hành vào EditDocument (khớp theo `segment_id`), chỉ khi đầu vào current; áp ngay chỉ khi `confirmed_apply`.
 - **UI Bước 5 nối vào T5** (mục 9f, 09/10): nút lập/áp kế hoạch dựng của project luồng Kế hoạch gọi `POST …/steps/edit_plan` (áp chỉ khi người dùng xác nhận → `confirmed_apply`), thẻ cảnh đọc `GET …/edit-document` (route mới, chỉ đọc), mọi trạng thái hiển thị đúng lời máy chủ; nút dựng lại storyboard gửi `force` trong body.
-- Việc kế tiếp: GPT/người dùng quyết phương án T4 tự áp (mục 9f, "Hành vi áp"), rồi T6 (mục 11). **Chưa bắt đầu T6/T7.**
+- **Storyboard UI bố cục A** (mục 9g, 09–10/10): đầu Bước 5 gọn (một nút primary "Lập kế hoạch dựng", "Áp dụng vào timeline…" luôn hỏi), bộ lọc/tìm cảnh, form "Sửa cảnh" chống lưu dở và chống ghi đè. Ở luồng Kế hoạch, lời đọc chỉ đọc.
+- **P2-4 · F1/F2/F3** (mục 9h, 10–11/10): sửa tay (PATCH timeline, `/plan`, `/edit-beats`) không còn bị kế hoạch ghi đè im lặng, và không còn làm kẹt cảnh vô lý. F1 = apply chỉ so các cột nó ghi; F2 = hàng giữ sửa tay không bao giờ được nhận làm mốc legacy mới; F3 = `GET /edit-document` trả đúng điều lần sync kế tiếp sẽ lưu, không ghi gì.
+- **Review + sửa sau review** (mục 9j, 11/10):
+  - Review vòng 1 tìm ra 1 lỗi Medium (F2 đo cả hàng nên sinh xung đột giả, ngược mục tiêu F1) và 1 lỗi Low (UNVERIFIED).
+  - Đã sửa lỗi Medium: hàng bị giữ được ghi nhận theo từng phần (`unknown_parts` → `held_from` → `held_edits` → `sync(kept=)`).
+  - Review vòng 2 PASS cả A–D. Có 3 điểm Low: L1 (chú thích) đã sửa; L2, L3 người dùng chốt giữ làm giới hạn đã biết.
+  - Đã chạy test: PASS, không regression.
+- **Việc kế tiếp:** người dùng ra lệnh commit (riêng); quyết phương án T4 tự áp (mục 9f, "Hành vi áp"); task riêng cho lỗi Low nhánh agent (mục 9j); rồi T6 (mục 11). **Chưa bắt đầu T6/T7.**
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -56,7 +65,8 @@ Quy trình từ trước tới nay:
 
 - App local: FastAPI + SQLite + HTML/JS thuần, cổng 8787.
 - Code ở `_HE_THONG/app/youtube_monitor/`, test ở `_HE_THONG/app/tests/`.
-- DB thật: `_HE_THONG/data/youtube_monitor.db` (gitignore, chỉ có trên máy người dùng). Hash ghi nhận gần nhất **`6ece65e24917facb3b46b3ab320796c4`** (07/10), không đổi từ 06/10. Ngày 08/10 chưa đo lại: phiên Claude trên cloud không có DB.
+- DB thật: `_HE_THONG/data/youtube_monitor.db` (gitignore, chỉ có trên máy người dùng). Hash **`6ece65e24917facb3b46b3ab320796c4`**, đo lại trên PC ngày **11/10**: không đổi từ 06/10.
+- **Git trên PC (11/10):** `F:\YouTube_AI_Factory`, branch `claude/dreamy-gates-4qehd3`, HEAD **`99f4709`** (chore: read-only DB check + launcher DB tạm), trùng với branch trên GitHub. Lịch sử Bước 5 sau `30ca9e1`: `ec62257` (T2) → `1225aef` (T3) → `badba1e` (docs checklist T4) → `4555921` (T4) → `f4c07d6` (T5) → `c944c90` (UI nối T5) → `99f4709`. Thay đổi 9g–9h nằm ở working tree, **chưa commit** (danh sách ở mục 2).
 - Git (08/10):
   - Repo **đã có remote** GitHub `HienVuCFDs/YouTube_AI_Factory2`, nhánh chính `main`.
   - Lịch sử: `08c5ed0` (Bước 2) → `98c51d2 feat: complete script engine and Gemini TTS` (Bước 3 + 4) → **`30ca9e1 Initial commit`** (08/10 01:19).
@@ -67,7 +77,7 @@ Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅ · T5 ✅) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅ · T5 ✅ · UI ✅ · Storyboard UI A 🟡 · P2-4 F1/F2/F3 🟡 — 🟡 = xong, chưa commit) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -102,9 +112,31 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  (T3, commit 1225aef) _HE_THONG/app/youtube_monitor/edit_apply.py, _HE_THONG/app/tests/test_edit_apply.py (46 test), database.py (+232 dòng)
  (T4, commit 4555921) _HE_THONG/app/tests/test_edit_integration.py (18 test); sửa main.py, database.py, edit_store.py, edit_document.py; test_edit_apply.py / test_edit_store.py (cô lập test, mục 9d)
  (T5, commit f4c07d6) mới _HE_THONG/app/youtube_monitor/edit_planner.py, _HE_THONG/app/tests/test_edit_planner.py (30 test); sửa main.py, edit_store.py, edit_document.py (mục 9e)
- (UI T5, commit riêng) sửa main.py (GET /edit-document), static/project-detail.js; mới tests/step5_edit_document_ui.test.cjs (27 test), tests/test_step5_edit_ui.py (12 test) (mục 9f)
+ (UI T5, commit c944c90) sửa main.py (GET /edit-document), static/project-detail.js; mới tests/step5_edit_document_ui.test.cjs (27 test), tests/test_step5_edit_ui.py (12 test) (mục 9f)
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
+
+**Chưa commit (working tree PC, cuối 11/10) — 12 file code/test sửa + HANDOFF_GPT_BUOC5.md + 3 file mới:**
+
+```text
+ sửa  _HE_THONG/app/youtube_monitor/main.py               (~+75) F2 + sửa F1×F2 ở _sync_storyboard/_held_parts/_apply_edit_document/_step_timeline; F3 ở GET /edit-document
+ sửa  _HE_THONG/app/youtube_monitor/database.py           (~+79) F1 apply_edit_document_rows(rule=); F2 apply_storyboard_reconcile(held=) + held_from
+ sửa  _HE_THONG/app/youtube_monitor/edit_apply.py         (~+238) F1 ScopedCheck, state_edit, known_writes; F2 unknown_rows/unknown_parts/held_edits, ROW_PARTS
+ sửa  _HE_THONG/app/youtube_monitor/edit_store.py         (~+60) F3 _next() tách khỏi sync(), preview(); sync(kept=)
+ sửa  _HE_THONG/app/youtube_monitor/static/project-detail.js (+742) bố cục A, bộ lọc, form Sửa cảnh, hiển thị F3 (mục 9g)
+ sửa  _HE_THONG/app/youtube_monitor/static/app.css        (+121) CSS #studioStep5 / sb-
+ sửa  _HE_THONG/app/youtube_monitor/templates/index.html  (+25)  đầu Bước 5, nhãn nút mới, ?v=20261010-storyboard3
+ sửa  _HE_THONG/app/tests/step5_edit_document_ui.test.cjs (+26)  F3 (fresh false / null)
+ sửa  _HE_THONG/app/tests/test_edit_apply.py              (+23)  F1 (asset check vs state_edit, bản ghi)
+ sửa  _HE_THONG/app/tests/test_edit_integration.py        (+61)  F2 (lời đổi + lớp sửa tay → retime nhưng không nhận làm legacy)
+ sửa  _HE_THONG/app/tests/test_step5_edit_ui.py           (+131) chạy 2 file .cjs, SceneSaveContractTests
+ sửa  _HE_THONG/app/tests/test_workflow_ui.py             (+6)   ghim nhãn nút mới
+ mới  _HE_THONG/app/tests/step5_storyboard_layout.test.cjs       42 test Node (bố cục, lọc, form Sửa cảnh)
+ mới  _HE_THONG/app/tests/test_edit_manual_conflicts.py          19 test P2-4 (mục 9h; 7a/7b từ mục 9j)
+ mới  HANDOFF_CHAT_MOI_BUOC5.md                                  bàn giao gói đồng bộ cloud → PC (09/10)
+```
+
+Ghi chú: trên PC `core.autocrlf=true`, nên một số file ở working tree là CRLF, số khác là LF (mỗi file đồng nhất, không lẫn). Git chuẩn hoá về LF khi commit, nên đây không phải lỗi.
 
 - Các file `_tmp_*` ở thư mục gốc là của người dùng, nhưng **đã lọt vào `30ca9e1`**: `_tmp_inspect_project56.py`, `_tmp_schema.py`, `_tmp_project56_*.json`, `_tmp_review_project56/` (ảnh contact sheet), `_tmp_work_brief_review/` (PDF/PNG của WORK BRIEF + thư viện `pymupdf_deps/`). Có gỡ khỏi git hay không là quyết định của người dùng. Claude không tự xoá.
 - **Kết quả test mới nhất (sau T1, 07/10, trên máy người dùng):** 2239 đạt · 2 đỏ cũ · 9 bỏ qua · 230 subtest đạt. Kết quả T2 (Linux, 08/10) ở mục 9b.
@@ -779,6 +811,7 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
   - **A. Lần áp đầu cần xác nhận, áp lại tự động:** T4 khi đồng bộ chỉ áp cảnh mà hàng đã có bản ghi `edit_apply` (đã sở hữu); cảnh chưa từng áp chờ `confirmed_apply`. Đơn giản, giữ retime. Hở: cảnh đã sở hữu được *lập lại* (`older`) vẫn tự áp.
   - **B. Đồng ý theo phiên bản:** lưu một artifact `edit_apply_consent` (document_hash + layer_hash từng cảnh người dùng đã duyệt); T4 chỉ áp cảnh có layer đã duyệt, hoặc khác layer đã duyệt chỉ do retime (`effective_edit` từ cùng basis). Chặt nhất, cần thêm 1 kind artifact và test T4.
   - **C. Giữ như hiện tại** (đã nói rõ trên UI).
+  - *(11/10: vẫn chưa chọn.)*
 
 ### Test
 
@@ -801,6 +834,218 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 3. "2. Áp dụng kế hoạch dựng" với `confirmed_apply` cũng **lập luôn** các cảnh chưa lập/cũ rồi áp (đúng semantics T5); hộp xác nhận nói rõ.
 4. Nút "Chia cảnh & tạo giọng đọc" (Bước 4) vẫn tự `force` khi máy chủ báo storyboard `stale` — hành vi có từ trước, có chủ đích, không đổi.
 5. Chưa chạy trên Windows/DB thật; ảnh/sóng âm trong smoke lỗi vì file giả của seed (không phải lỗi app).
+6. *(11/10)* Rủi ro 2 (sửa tay ghi thẳng timeline → conflict) được giảm phần lớn ở P2-4 (mục 9h): sửa tay ở cột kế hoạch không ghi thì không còn conflict; sửa tay ở cột kế hoạch ghi thì vẫn là conflict nhưng không bao giờ bị ghi đè. Nối sửa tay vào EditDocument vẫn là T6.
+
+---
+
+## 9g. Storyboard UI bố cục A + form "Sửa cảnh" (09–10/10, CHƯA COMMIT)
+
+Làm trên cloud (09/10), đồng bộ sang PC bằng gói `buoc5_sync` (chi tiết đồng bộ và hash từng file: `HANDOFF_CHAT_MOI_BUOC5.md`), rồi sửa tiếp trên PC. Chỉ đổi UI. Không đổi API, schema, guard T3/T4. Luồng legacy giữ nguyên.
+
+### Bố cục (index.html, app.css, project-detail.js)
+
+- **Đầu Bước 5** (`.sb-head`): tiêu đề, một nút primary **"Lập kế hoạch dựng"** (chưa ghi timeline), một nút thường **"Áp dụng vào timeline…"** (luôn hỏi xác nhận), và ô trạng thái `#studioEditPlanState`. Chi tiết kỹ thuật để trong tooltip.
+- Công cụ ít dùng (tạo ảnh/video AI, cắt clip, che logo, chọn model ảnh phụ, Edit Plan đồ hoạ cũ) gom vào `<details class="sb-tools">`. Edit Plan đồ hoạ cũ đổi nhãn rõ: "Kế hoạch đồ hoạ tổng thể (Edit Plan cũ)".
+- **Bảng cảnh** (`renderStudioSceneBoard`): mỗi cảnh một hàng gồm timecode, lời, hình, trạng thái giọng/hình và chip kế hoạch (`studioScenePlanChip`); thêm dải thời gian (`storyboardStripBlock`), chọn cảnh, và di chuyển bằng phím (`stepStudioScene`).
+- **Lọc/tìm** (`setStudioStoryboardView`, `applyStudioStoryboardFilters`, `clearStudioStoryboardFilters`): thiếu hình / thiếu giọng / cả hai / nháp / fallback; theo trạng thái kế hoạch (so đúng trạng thái hàng giữ); tìm theo số cảnh hoặc chữ trong lời/hình. Mỗi trạng thái EditDocument giữ tên riêng: stale, review, older, applied, planned, not planned.
+- Đã kiểm trên cloud bằng Chromium headless với route giả (không server, không DB): không tràn ngang ở 1440/1280/1024/768/390px. **Chưa thử trên Windows/Edge ở tỉ lệ 125–150%.**
+
+### Form "Sửa cảnh" (`storyboardSceneEditForm`, `saveStudioSceneEdit`)
+
+Dựa trên hợp đồng API có sẵn, không đổi gì: trường không gửi thì giữ nguyên; `audio_path: ''` là cách duy nhất để bỏ giọng; `duration_seconds` là số nguyên 1–3600. Hai request tuần tự: `PATCH /api/shots/{id}` rồi `PATCH /api/timeline/{segmentId}`.
+
+- **Luồng Kế hoạch:** ô lời đọc **chỉ đọc**, ghi rõ chỗ sửa lời là Bước 3, không có cảnh báo giọng. Khi lưu, form không bao giờ gửi lời và không bao giờ bỏ giọng, dù trường đang chứa gì. Chỉ đổi lời thì coi như không đổi gì. Ngoài luồng Kế hoạch, và khi chưa rõ luồng, lời vẫn sửa được như cũ.
+- **Giữ giọng:** chỉ đổi hình hoặc độ dài thì không hỏi, không gửi `audio_path`, không gửi lời. Gõ lại cùng lời, chỉ khác khoảng trắng, không tính là đổi lời. Đổi lời thì cảnh báo ngay, hỏi trước khi lưu, rồi bỏ giọng đúng theo hợp đồng (lời mới luôn đi kèm `audio_path: ''`).
+- **Chống ghi đè:** trước mỗi lần lưu, form đọc lại cảnh từ máy chủ; không đọc được thì không gửi gì. Trường nào đã bị sửa ở nơi khác kể từ lúc mở form thì không ghi đè: dừng lưu và hiện các hàng mới hơn. Có giọng mới tạo trong lúc đang sửa thì đổi lời không làm mất giọng đó: dừng lưu. Trường đã đúng như muốn trên máy chủ thì không gửi lại.
+- **Lưu dở:** shot đã lưu mà timeline bị từ chối → báo rõ phần nào đã lưu, hiện các hàng máy chủ trả về, giữ form, và lần thử lại chỉ gửi timeline. Mất phản hồi hoặc lỗi 5xx → trạng thái **"unknown"**: không gửi lại mù. Lần thử lại đọc máy chủ: thấy đã ghi thì không gửi gì, chưa ghi thì chỉ gửi phần đó. Shot bị mất phản hồi → dừng trước bước timeline, và không gọi là "chưa lưu". Đóng form sau lưu dở thì không bao giờ báo "cảnh không đổi".
+- **Nháp:** điều đang gõ được giữ khi trang vẽ lại (job cảnh xong, đổi sắp xếp, xoá lọc), và khi lưu thì gửi đúng điều đã gõ. Chuyển cảnh khi còn thay đổi chưa lưu → hỏi trước. Huỷ → quay về cảnh như cũ, không gửi gì.
+- Không còn trên storyboard dài → dùng hộp thoại cũ. Cảnh đã bị xoá trên máy chủ → không lưu.
+
+### Rủi ro còn lại (9g)
+
+1. Hai request không atomic: lưu dở vẫn xảy ra được, nhưng nay được báo đúng và thử lại an toàn.
+2. Form "Sửa cảnh" và trình sửa nhịp dựng cũ vẫn ghi thẳng timeline, ngoài EditDocument (T6/T7). Từ P2-4 (9h), việc này không còn bị kế hoạch ghi đè.
+3. Chưa chạy app thật trên PC, chưa thử Edge/DPI cao.
+
+---
+
+## 9h. P2-4 — Sửa tay trước EditDocument: F1 · F2 · F3 (10–11/10, CHƯA COMMIT)
+
+**Vấn đề (giai đoạn 1 = chốt hành vi bằng test, `tests/test_edit_manual_conflicts.py`):** sửa tay một cảnh (PATCH `/api/timeline/{id}`, `/plan`, `/edit-beats`) ghi thẳng timeline. Trước P2-4 có hai lỗi ngược chiều nhau:
+- **(a) Kẹt vô lý:** apply so **cả hàng** với điều EditDocument biết lần cuối. Chỉ sửa `visual_prompt` (cột kế hoạch không bao giờ ghi) cũng làm cảnh thành `conflict` vĩnh viễn.
+- **(b) Ghi đè im lặng:** khi reconcile (kịch bản mới, đổi lời) hoặc timeline của agent chạm vào hàng đang giữ sửa tay, `refresh` (T4) nhận nội dung đó làm mốc `legacy` mới. Lần apply sau "thấy đúng như mong đợi" nên ghi kế hoạch đè lên sửa tay, **không có conflict**.
+
+### F1 — Apply chỉ so các cột nó ghi (`edit_apply.ScopedCheck`, `database.apply_edit_document_rows(rule=)`)
+
+- `verdict()` (đọc trong transaction của apply): conflict ⇔ một cột **mà lần apply này ghi** (cột trong `updates`, cộng `beats` khi edit nêu beats) khác điều EditDocument biết lần cuối (`base`). Cột không ghi (`visual_prompt`, beats khi kế hoạch không nêu beats…) được phép giữ sửa tay, apply để nguyên.
+- `base` lấy theo thứ tự: `state_edit` của bản ghi apply mới nhất → (bản ghi trước F1) dựng lại từng cột từ edit đã ghi (`known_writes`: `layer_hash` → trạng thái edit đó ghi), **chỉ khi** `state_hash` của bản ghi chứng minh được; nếu không thì so **cả hàng** như trước F1 (`columns: ["*"]`) → orphan `legacy` cùng `segment_id` → edit rỗng.
+- Mỗi hàng trong bản ghi `edit_apply` có thêm **`state_edit`** = `base` với **chỉ các cột vừa ghi** được thay (`settle()`). Sửa tay ở cột không ghi **không bao giờ** được ghi vào `state_edit`: về sau, một edit có ghi cột đó vẫn thấy sửa tay và dừng.
+- Conflict có thêm `columns` (các cột lệch). Format cũ giữ nguyên, chỉ thêm khoá. Gọi không có `rule` thì hành vi như cũ (so cả hàng).
+- Sửa tên biến: biến tập asset trong apply đổi thành `found_assets`, để không trùng với `known` (điều document biết). Có test riêng (`test_a_beat_naming_an_asset_of_this_project_is_applied_and_recorded_as_known`).
+
+### F2 — Hàng giữ sửa tay không bao giờ thành mốc legacy mới (`edit_apply.unknown_rows`)
+
+- `unknown_rows(database, project_id, script_id, segments)`, chỉ đọc: trả các hàng đang giữ điều EditDocument **chưa từng biết**. So với cùng mốc mà apply dùng: `state_edit`/`state_hash` của apply mới nhất → orphan legacy cùng `segment_id` → edit rỗng.
+  - Script chưa có EditDocument → không hàng nào (luồng legacy giữ nguyên).
+  - Không đọc được điều document biết → **mọi hàng** đều bị coi là unknown (an toàn).
+- `main._sync_storyboard`: tính `held` **trước** reconcile và truyền vào `apply_storyboard_reconcile(held=)`. Nội dung của các hàng này vẫn được mang sang và retime như cũ, nhưng hàng đích ghi vào **`held_segments`**, không vào `touched_segments` (nên không vào `refresh`).
+- `main._step_timeline` (nhánh agent): agent vẫn ghi `visual_prompt`/`asset_type` vào hàng chưa sở hữu, nhưng hàng trong `held` không được thêm vào `refresh`.
+- Kết quả: sửa tay trên hàng chưa áp luôn được giữ nguyên và báo conflict, dù đi qua đường nào: không reconcile, kịch bản mới (kể cả lần T4 tự áp khi tạo lại storyboard), đổi lời cảnh, hay timeline của agent.
+
+### F3 — `GET /edit-document` đọc theo timeline hiện tại (`edit_store.preview`)
+
+- Vấn đề: document đã lưu ghi lại timeline và giọng **lúc lưu**. Sau khi đổi độ dài hoặc giọng một cảnh, route vẫn trả `current` với timing/trạng thái/`applied` cũ, trong khi lần sync kế tiếp sẽ retime hoặc đánh dấu cảnh.
+- `edit_store._next()` tách phần "dựng document kế tiếp" ra khỏi `sync()` (hành vi `sync()` không đổi). `preview()` dùng `_next()` để dựng, **không lưu**: `{fresh, document, document_hash}`.
+- Route trả thêm: `fresh` (`true`: bản lưu vẫn đúng; `false`: các cảnh được trả **theo bản sync sẽ lưu**, `document_hash` là hash bản đó, `stored_document_hash` là bản đang lưu; `null` + `fresh_detail`: không tính được, trả bản đang lưu kèm lý do). Route vẫn chỉ đọc.
+- UI (`editDocumentFreshNote`): `fresh: false` → nói rõ "máy chủ tính theo timeline hiện tại"; `fresh: null` → nêu lý do; `fresh: true` → không thêm gì.
+
+### Test P2-4
+
+- `tests/test_edit_manual_conflicts.py` (**mới, 17 test**, DB tạm, model giả `test_edit_planner.Director`):
+  - 1, 2, 2b — `visual_prompt` sửa tay trước/sau khi áp: giữ nguyên, cảnh vẫn áp/lập lại được; bản ghi nhớ mô tả cũ, không nhận mô tả tay;
+  - 3 — kế hoạch AI không nêu `visual_prompt`/`visual_path`, apply không ghi hai cột đó và không ghi `project_shots`;
+  - 3b/3c — lớp kế hoạch ghi bị sửa tay → conflict, giữ nguyên; beats tay mà kế hoạch không ghi → không conflict;
+  - 4a–4d — lớp sửa tay trên hàng chưa áp: conflict và giữ nguyên khi không reconcile / kịch bản mới / đổi lời / timeline agent;
+  - 5, 5b, 5c — F3: sau khi đổi độ dài, đọc trả `retimed`, cảnh `older`, `fresh: false`, không ghi DB; độ dài không theo được → `stale_timing`; không tính được → bản lưu + lý do;
+  - 6, 6a–6c — reflow (đổi độ dài làm đổi start/end mọi hàng) không gây conflict giả; bản ghi trước F1: đọc lại được từng cột thì gỡ kẹt, không đọc được thì so cả hàng.
+- `test_edit_integration.py`: test cũ "cảnh legacy đổi lời được retime **và nhận làm legacy**" đổi thành hai ca: lớp document **chưa từng biết** → retime nhưng không nhận (`test_a_reworded_scene_with_layers_the_document_never_knew_…`, `test_layers_the_document_never_knew_are_a_conflict_after_a_reword_…`); lớp legacy **đã có từ khi document bắt đầu** (orphan bootstrap) → vẫn retime và nhận như cũ (`KnownLegacyReconcileTests`).
+- `test_edit_apply.py`: thêm ca asset (F1) và kiểm `state_edit` trong bản ghi.
+- `step5_edit_document_ui.test.cjs`: thêm 2 test F3 (`fresh: false`, `fresh: null`).
+- **Mutation test:** đã làm cho phần sửa F1×F2 (2 đột biến đều bị bắt, mục 9j). Chưa có mutation test riêng cho `ScopedCheck` (F1) và `preview` (F3).
+
+### Rủi ro còn lại (9h)
+
+1. `unknown_rows` đọc **ngoài** transaction của reconcile (chiến lược A của T4: không atomic). Một sửa tay chen vào giữa lúc đọc `held` và lúc reconcile thì không được đánh dấu là held; lần apply sau vẫn dựa vào expected-state (F1) để phát hiện nếu cột đó bị ghi.
+2. `known_writes` chỉ dựng lại được bản ghi trước F1 khi edit đã ghi còn trong lịch sử EditDocument của script. Không thì so cả hàng (an toàn nhưng có thể vẫn kẹt).
+3. `preview()` dựng lại document ở mỗi lần `GET /edit-document`, nên tốn công hơn trước (đọc file giọng). Chưa đo trên project lớn.
+4. Sửa tay ở cột kế hoạch ghi vẫn làm cảnh kẹt `conflict`. Cách gỡ (nhận sửa tay vào EditDocument, hoặc nút "ghi đè") là T6.
+
+### Sửa sau review (11/10/2026, lỗi Medium F1 × F2) — ĐÃ KIỂM CHỨNG
+
+**Lỗi:** F2 đo "chưa biết" theo cả hàng. Chỉ cần sửa tay một cột kế hoạch không ghi (ví dụ `visual_prompt`), cả hàng bị giữ lại; sau reconcile, lớp dựng legacy được chép/retime không được ghi nhận, nên lần áp sau báo xung đột giả.
+
+**Sửa:** ghi nhận hàng bị giữ theo từng phần (`unknown_parts` → `held_from` → `held_edits` → `sync(kept=)`). Phần sửa tay giữ mốc cũ; phần còn lại là đã biết. Chi tiết thiết kế, sơ đồ dữ liệu và bất biến: mục 9j.
+
+**Kết quả kiểm chứng (11/10/2026, Windows, DB tạm của `conftest.py`, `--basetemp` riêng):**
+
+| Nhóm | Kết quả |
+|---|---|
+| `test_edit_manual_conflicts.py` | **19 passed** |
+| `test_edit_integration.py` | **20 passed** |
+| Nhóm Bước 5 mở rộng (14 file) | **363 passed**, 6 subtests |
+| Node Bước 5 (`step5_*.test.cjs`) | **71/71** |
+| Toàn bộ suite | **2397 passed · 2 failed · 9 skipped**, 236 subtests |
+
+- **Hai test đỏ là lỗi nền.** Cả hai cũng đỏ trên bản sạch `99f4709`, cùng assertion:
+  - `test_burned_in_marks.py::AutoCoverRespectsWhatIsAlreadyDecided::test_an_unmarked_reup_gets_its_source_measured`: `AssertionError: 0 != 1`
+  - `test_shorts.py::RendererFitTests::test_the_renderer_can_fill_a_frame_as_well_as_pad_it`: `AssertionError: 'sound_cues' != 'fit'`
+- **Mutation mô phỏng hành vi trước bản sửa** (`_held_parts` trả `{}`): 4b, 7a, 7b thất bại, tái hiện đúng xung đột giả.
+- **Mutation phá F2** (phần sửa tay bị coi là đã biết): bị **5 test** bắt (4b, 4c, 7a và 2 test F2 trong `test_edit_integration.py`).
+- **Review vòng hai: PASS A–D.** L1 (chú thích nhánh agent trong `main.py`) đã sửa. L2 (khoảng hở giữa hai lần đọc) và L3 (`kept` không được lưu khi sync dừng sớm) giữ nguyên theo quyết định đã duyệt (mục 9j).
+
+---
+
+## 9i. Kết quả test trên Windows (11/10, lần đầu chạy trên PC)
+
+> **Bảng dưới là lần chạy 1, trên bản trước khi sửa F1×F2.** Lần chạy 2, sau khi sửa: **toàn bộ suite 2397 đạt · 2 đỏ (vẫn 2 lỗi nền, cùng assertion) · 9 bỏ qua** + 236 subtests, 9 phút 11 giây, có `--basetemp` nên in đủ tóm tắt. Chi tiết lần 2 ở mục 9j.
+
+Môi trường: Windows 11, Python 3.13.3 hệ thống (không venv), pytest 9.1.1, FastAPI 0.123.5, Node 24.15. DB tạm của `conftest.py`. Biến `YOUTUBE_DB_PATH`/`YOUTUBE_DATA_DIR` không đặt trong shell. Không chạy app, không gọi AI thật.
+
+| Nhóm | Kết quả |
+|---|---|
+| Node `step5_edit_document_ui.test.cjs` | **29/29** |
+| Node `step5_storyboard_layout.test.cjs` | **42/42** |
+| `test_edit_manual_conflicts.py` | **17 passed** |
+| `test_step5_edit_ui.py` | **22 passed** + 6 subtests |
+| `test_edit_apply.py` | **47 passed** |
+| `test_edit_integration.py` | **20 passed** |
+| `test_workflow_ui.py` | **33 passed** |
+| Nhóm Bước 5 (9 file ở mục 13 + `test_edit_manual_conflicts`) | **290 passed**, 6 subtests, 0 đỏ — 147 giây (Linux khoảng 75 giây) |
+| Toàn bộ `tests` (2406 test thu thập) | **2395 đạt · 2 đỏ · 9 bỏ qua** — 2 đỏ đều là lỗi nền → **không regression** |
+
+**Hai test đỏ: lỗi nền, có bằng chứng.** Đây đúng là 2 "đỏ cũ" đã biết (mục 0). Chạy lại từng test trên working tree và trên bản sạch `99f4709` (giải nén bằng `git archive` vào thư mục tạm của phiên, không đụng working tree): cả hai bản đều đỏ, cùng assertion.
+- `test_burned_in_marks.py::AutoCoverRespectsWhatIsAlreadyDecided::test_an_unmarked_reup_gets_its_source_measured`: `AssertionError: 0 != 1`.
+- `test_shorts.py::RendererFitTests::test_the_renderer_can_fill_a_frame_as_well_as_pad_it`: `AssertionError: 'sound_cues' != 'fit'`.
+
+**9 đỏ "môi trường Linux/cloud"** (`test_operations` ×4, `test_voxcpm_readiness` ×2, `test_motion_graphics`, `test_channel_accounts`, `test_publish_gate`) **đều đạt trên Windows** (đạt thật, không nằm trong số bị bỏ qua). Chúng chỉ đỏ trên Linux. 9 test bị bỏ qua là `test_reup_clip_sync` ×4 và `test_workflows::CuttingByDialogueAsksBeforeReplacingTheScriptTests` ×5, đều thuộc Reup "cắt theo lời thoại", không thuộc Bước 5.
+
+**Sự cố của pytest trên Windows (không phải lỗi code):** khi chạy toàn bộ suite với thư mục tạm mặc định, pytest chạy xong mọi test rồi mới sập ở bước dọn dẹp cuối phiên. Lỗi là `PermissionError: [WinError 5] Access is denied: '...\AppData\Local\Temp\pytest-of-ADMIN\pytest-current'`, ở `_pytest/pathlib.cleanup_dead_symlinks`. Vì sập nên không in phần tóm tắt, và exit code là 1. Số liệu trên lấy bằng cách khớp chuỗi tiến độ với `--collect-only` (2395 + 9 + 2 = 2406, khớp đúng), rồi xác nhận lại 2 test đỏ bằng cách chạy riêng. **Từ nay, trên PC luôn thêm `--basetemp=<thư mục tạm riêng>`** (ví dụ thư mục scratchpad của phiên) để tránh lỗi này.
+
+Kiểm cuối (11/10): md5 DB thật vẫn `6ece65e24917facb3b46b3ab320796c4`, không có `-wal`/`-shm`. Cổng 8787 trống. Không còn tiến trình uvicorn/pytest/youtube_monitor. Chưa commit, chưa push, chưa chạy app.
+
+---
+
+## 9j. Review 9g–9h và sửa lỗi F1 × F2 (11/10, ĐÃ TEST, CHƯA COMMIT)
+
+### Review vòng 1 (chỉ đọc)
+
+- Storyboard UI A: PASS về logic; UNVERIFIED về hiển thị trên Windows/Edge ở tỉ lệ 125–150%. F1: PASS. F3: PASS.
+- F2: PASS về mục tiêu bảo vệ, nhưng có **lỗi Medium**.
+  - `unknown_rows` so hash của **cả hàng**. Vì vậy chỉ cần sửa tay một cột kế hoạch không ghi (ví dụ "Mô tả hình" qua form "Sửa cảnh"), cả hàng đã bị giữ lại.
+  - Khi đó reconcile (kịch bản mới, hoặc đổi lời tại chỗ có retime) vẫn chép hoặc căn lại lớp dựng legacy, nhưng không ghi nhận phần đó vào EditDocument.
+  - Lần áp sau so `overlays`/`sound_cues`/`edit_direction` (ba cột này lần áp nào cũng ghi) với mốc cũ, nên báo xung đột giả. Cảnh bị kẹt cho tới T6. Không mất dữ liệu.
+- **Lỗi Low (UNVERIFIED), chưa sửa, để làm task riêng:**
+  - Vị trí: nhánh agent `main._step_timeline` gọi `unknown_rows` với kịch bản **hiện tại**.
+  - Điều kiện: kịch bản mới chưa có EditDocument riêng, vì lần sync đầu của nó trả `not_current`/`error`.
+  - Hậu quả: tập hàng chưa biết rỗng, và hàng agent ghi vào được `refresh` nguyên trạng, kể cả hàng mang sửa tay.
+
+### Sửa lỗi Medium: ghi nhận theo từng phần, không còn theo cả hàng
+
+```text
+_sync_storyboard
+ ├─ edit_apply.unknown_parts(source)       [đọc lần 1, trước reconcile]
+ │    {S: {"known": mốc document biết, "columns": các phần lệch}}
+ │    None = chỉ nói được cả hàng (bản ghi trước F1, hoặc không đọc được)
+ ├─ database.apply_storyboard_reconcile(held=set(parts))
+ │    held_from = [{segment_id (đích), source_segment_id, not_carried}]
+ │    not_carried = cột (+ "beats") EditDocument sở hữu trên hàng nguồn, không được chép sang
+ ├─ main._held_parts → {đích: {known, columns − not_carried}}   (None → bỏ qua, như trước)
+ └─ _apply_edit_document(refresh=touched, held)
+      ├─ edit_apply.held_edits             [đọc lần 2, ngay trước sync]
+      │    with_parts(hàng hiện tại, known, columns)
+      │    = phần chép/retime lấy từ hiện tại, phần sửa tay giữ mốc cũ
+      ├─ edit_store.sync(refresh = touched − kept, kept)   (kept thắng refresh)
+      │    → thành orphan legacy CUỐI của hàng
+      └─ apply_scenes: plan() lấy orphan cuối làm legacy_edit; ScopedCheck (F1, không đổi)
+```
+
+- `edit_apply.py`: thêm `ROW_PARTS`, `unknown_parts`, `held_edits`. `unknown_rows` giờ là `set(unknown_parts())`, cho đúng tập hàng như trước.
+- `database.py`: thêm hàm nội bộ `landed()` và trường `held_from` trong bản ghi reconcile.
+- `edit_store.py`: `sync(kept=)`, `_next(kept=)`.
+- `main.py`: `_held_parts`; `_apply_edit_document(held=)`; nhánh agent nhận qua `edit_held`. Khóa này chỉ có khi `apply_edits=False`, nên không lộ ra response HTTP.
+- Không đổi schema, API, `ScopedCheck` (F1), hay hành vi tự áp của T4.
+- Bất biến (đã review vòng 2):
+  - Hàng chỉ vào `touched` hoặc `held`, không bao giờ cả hai.
+  - Hàng đã có bản ghi áp dùng `state_edit`, không dùng orphan.
+  - Cột sở hữu không được chép sang hàng mới, nên sửa tay ở đó không thành mốc mới.
+  - Project chưa có EditDocument, legacy đã bootstrap, bản ghi trước F1: hành vi như cũ.
+
+### Review vòng 2: PASS cả A–D, có 3 điểm Low
+
+- **L1** (chú thích `main.py` ở nhánh agent không còn đúng hết): **đã sửa**, chỉ chú thích.
+- **L2** (khoảng hở giữa đọc lần 1 và đọc lần 2, nay áp cả cho hàng bị giữ): **người dùng chốt giữ làm giới hạn đã biết**. Cùng loại với khoảng hở (b) chiến lược A của T4. Không thêm cơ chế khóa.
+  - Ví dụ: job tạo ảnh chạy nền xong đúng lúc giữa reconcile và sync → cột hình của hàng bị giữ được coi là đã biết.
+- **L3** (`kept` không được lưu lại): **người dùng chốt giữ làm giới hạn đã biết**.
+  - Nếu `_apply_edit_document` dừng trước sync (`not_current`/`error`), thông tin hàng bị giữ mất theo. Lần sync sau quay về hành vi trước khi sửa: xung đột giả, nhưng an toàn.
+  - `refresh` của T4 cũng mất theo cùng cách.
+
+### Test sau khi sửa (lần chạy 2, Windows, `--basetemp` riêng)
+
+| Nhóm | Kết quả |
+|---|---|
+| `test_edit_manual_conflicts.py` | **19 passed** (17 + `HandPromptThenReconcileTests` 7a, 7b) |
+| `test_edit_integration.py` | **20 passed** |
+| Nhóm Bước 5 mở rộng (14 file: 9 file mục 13 + `test_edit_manual_conflicts`, `test_storyboard_voice_recovery`, `test_edit_plan_applied`, `test_edit_cleanups`, `test_workflow_ui`) | **363 passed** + 6 subtests |
+| Node `step5_*` | **71/71** |
+| **Toàn bộ suite** | **2397 passed · 2 failed · 9 skipped** + 236 subtests; 2 đỏ = `test_burned_in_marks`, `test_shorts`, lỗi nền đã chứng minh trên `99f4709`, cùng assertion |
+
+- **7a** (kịch bản mới, chỉ sửa tay mô tả hình, có lớp legacy): lần tự áp ra `applied`, không xung đột. Mô tả tay giữ nguyên; `edit_transition: cut` và overlay của kế hoạch đã ghi.
+- **7b** (đổi lời tại chỗ, có retime): lập lại cảnh rồi áp, không xung đột, mô tả tay giữ nguyên.
+- **4b**: kỳ vọng mới `expected_from = "legacy"` đúng với dữ liệu mẫu. Xung đột nằm đúng ở các phần sửa tay: `edit_direction`, `edit_effect`, `edit_note`, `edit_transition`, `overlays`, `sound_cues`.
+- **Mutation test** (plugin pytest đặt ngoài repo, không sửa code):
+  - Đột biến "trước khi sửa" (`_held_parts` trả `{}`): 4b, 7a, 7b đỏ, tái hiện đúng xung đột giả.
+  - Đột biến "phá F2" (coi phần sửa tay là đã biết): 5 test đỏ (4b, 4c, 7a và 2 test F2 trong `test_edit_integration`).
+- Kiểm cuối: md5 DB thật vẫn `6ece65e2…`; cổng 8787 trống; không còn tiến trình app/pytest. Chưa commit, chưa push, chưa chạy app.
 
 ---
 
@@ -822,8 +1067,14 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 4. ~~T4 — Nối reconcile~~: **xong 08/10** (mục 9d), theo checklist 11a.
 5. ~~T5 — Planner theo storyboard~~: **xong 08/10** (mục 9e). Cần GPT review rủi ro 1 của 9e (T4 tự áp edit đã lập ở lần sync kế tiếp).
 6. ~~UI Bước 5 nối T5~~: **xong 09/10** (mục 9f). Chờ quyết phương án "chỉ áp sau xác nhận" (9f).
-7. Sau đó lần lượt T6 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt.
-8. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
+7. **(11/10) Storyboard UI bố cục A (mục 9g) + P2-4 F1/F2/F3 (mục 9h) + sửa F1×F2 (mục 9j)**: ~~review~~ xong 2 vòng; ~~sửa Medium~~ xong; ~~test~~ xong (2397 đạt, 2 đỏ nền). **Còn lại, chờ người dùng quyết:**
+   - a. Lệnh commit riêng. File cần commit: 13 file đã sửa ở mục 2 và 2 test mới (`step5_storyboard_layout.test.cjs`, `test_edit_manual_conflicts.py`). Có đưa `HANDOFF_CHAT_MOI_BUOC5.md` vào git không?
+   - b. Có thử app thật trên PC bằng `CHAY_THU_NGHIEM_DB_TAM.bat` (DB tạm) và kiểm hiển thị Edge ở 125–150% trước khi commit không? Chưa làm.
+   - c. Task riêng cho lỗi Low nhánh agent (mục 9j). Chưa làm, vẫn UNVERIFIED.
+   - d. (Tùy chọn) mutation test riêng cho F1 `ScopedCheck` và F3 `preview`.
+   - e. L2, L3 (mục 9j) đã chốt là giới hạn đã biết, không làm thêm.
+8. Sau đó lần lượt T6 … T9 (mục 6). Mỗi task một báo cáo, chờ duyệt. T6 giờ phải tính thêm: sửa tay ở cột kế hoạch ghi vẫn kẹt `conflict` (rủi ro 4 mục 9h).
+9. Việc phụ chờ người dùng quyết: có gỡ các file `_tmp_*` (và `pymupdf_deps/`) khỏi git hay không (mục 2).
 
 ### 11a. T4 — Integration checklist bắt buộc (đã thống nhất 08/10)
 
@@ -872,7 +1123,7 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 
 ## 12. DB thật
 
-- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10 qua toàn bộ T0 → T1. Chưa đo lại sau khi có code T2. Code T2–T4 chưa từng chạy trên DB thật (smoke test T4 dùng DB tạm), nhưng nên đo lại ở đầu phiên kế tiếp trên máy người dùng.
+- Hash **`6ece65e24917facb3b46b3ab320796c4`**, không đổi từ 06/10. **Đo lại trên PC ngày 11/10 (`md5sum`, chỉ đọc): vẫn `6ece65e2…`**, file 6.742.016 byte, sửa lần cuối 06/10 13:33, không có `-wal`/`-shm`. Code T2–T5, UI và P2-4 chưa từng chạy trên DB thật (mọi smoke test dùng DB tạm).
 - Ngày 06/10 lúc 13:33:44 có một tiến trình ngoài lượt làm việc (khả năng cao là app được bật bằng `.bat`, hoặc một agent khác) chạy migration 5.1. Kết quả: thêm bảng `project_storyboards` (0 dòng) cùng index; không gì khác đổi.
 - Người dùng đã chốt: **không điều tra thêm, không rollback, không sửa DB.**
 
@@ -880,7 +1131,9 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 
 ## 13. Ghi chú kỹ thuật cho Claude ở chat mới
 
-- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút. Nhóm test Bước 5 (260 test, ~75 giây): `tests/test_step5_edit_ui.py tests/test_edit_planner.py tests/test_edit_integration.py tests/test_edit_apply.py tests/test_edit_store.py tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py`.
+- **Chạy test** (từ `_HE_THONG/app`): `python -m pytest -q -rf -p no:cacheprovider`, khoảng 6–7 phút trên Linux, khoảng 9–25 phút trên PC Windows (mục 9i, 9j). Nhóm test Bước 5 (~75 giây Linux, ~150 giây Windows): `tests/test_step5_edit_ui.py tests/test_edit_planner.py tests/test_edit_integration.py tests/test_edit_apply.py tests/test_edit_store.py tests/test_edit_document.py tests/test_storyboard_lineage.py tests/test_storyboard_gate.py tests/test_storyboard_engine.py tests/test_edit_manual_conflicts.py` (292 test sau khi sửa F1×F2). Test Node Bước 5: `node --test tests/step5_edit_document_ui.test.cjs tests/step5_storyboard_layout.test.cjs`. Lệnh này chỉ chạy JS trong `vm`, không server, không DB.
+- **Trên PC:** luôn thêm `--basetemp=<thư mục tạm riêng>` (mục 9i: không có thì pytest sập ở bước dọn `pytest-current` và mất phần tóm tắt). Dùng Python hệ thống (`C:\Program Files\Python313`), không có `.venv`. Nên đặt `PYTHONIOENCODING=utf-8`. Trước khi chạy test, kiểm shell **không** đặt `YOUTUBE_DB_PATH`/`YOUTUBE_DATA_DIR`, vì `conftest.py` dùng `setdefault`: biến có sẵn sẽ thắng DB tạm.
+- `running_build_is_stale` chỉ xét file `.py` trong `youtube_monitor/`, nên sửa file `.md` ở gốc repo khi suite đang chạy vẫn an toàn.
 - **Không sửa file khi full suite đang chạy.** Test `test_a_freshly_imported_process_is_not_stale` kiểm thời điểm sửa file nguồn. Muốn sửa thì dừng suite trước, sửa xong chạy lại.
 - **File trong repo dùng xuống dòng LF.** Sửa bằng script Python thì dùng `read_bytes`/`write_bytes` hoặc `newline="\n"`; `Path.write_text` trên Windows đổi cả file sang CRLF. Sửa xong thì kiểm `count(b"\r\n") == 0`.
 - **Không mở DB thật bằng `Database()` hay `import main`** (`initialize()` sẽ migrate). Chỉ đọc bằng `sqlite3` với `mode=ro`, hoặc dùng bản sao.
@@ -894,7 +1147,8 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 
 | # | File | Vai trò | Còn đúng tới |
 |---|---|---|---|
-| 1 | `HANDOFF_GPT_BUOC5.md` (file này) | **Trạng thái hiện tại**, Bước 5, quy tắc làm việc | 08/10 |
+| 1 | `HANDOFF_GPT_BUOC5.md` (file này) | **Trạng thái hiện tại**, Bước 5, quy tắc làm việc | **11/10** |
+| 1b | `HANDOFF_CHAT_MOI_BUOC5.md` (chưa track) | Gói đồng bộ Storyboard UI từ cloud sang PC (09/10): hash từng file, test trên cloud, rủi ro lưu cảnh | 09/10; nội dung đã gộp vào mục 9g |
 | 2 | `PROJECT_STATUS.md` | Trạng thái Bước 1–4, gate, an toàn dữ liệu, giới hạn đã biết | 04/10; mục đầu có tóm tắt Bước 5 trỏ về đây |
 | 3 | `AI_CONNECTION_HANDOFF.md` | Kiến trúc AI (orchestrator vs worker), MCP, quota, Bước 1–4 chi tiết | 04/10 |
 | 4 | `AGENTS.md` | Luật vận hành: không tự chạy app nền | luôn đúng |

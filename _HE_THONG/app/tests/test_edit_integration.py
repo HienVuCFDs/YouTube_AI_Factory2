@@ -10,8 +10,12 @@ What an EditDocument has applied to a row is its own: the reconcile neither
 carries it to a new row nor retimes it in place; the next apply writes it.
 Legacy content the reconcile does carry or retime is made known to the
 EditDocument (a legacy orphan of that row), so an apply expects it instead of
-refusing it. A project without an EditDocument is left as it was. Every test
-runs on the suite's temporary database.
+refusing it - unless the row held, before the reconcile, something the
+EditDocument never knew (a hand edit): that row is never made known as it
+holds (P2-4 · F2) - only its parts nobody edited by hand are - so the apply
+reports a conflict instead of writing over the hand edit. A project
+without an EditDocument is left as it was. Every test runs on the suite's
+temporary database.
 """
 
 from __future__ import annotations
@@ -53,6 +57,12 @@ class _FlowCase(_ApplyCase):
     def _plan_all(self, picture: bool = True) -> None:
         for n in range(len(self._doc()["scenes"])):
             self._plan(n, self._edit(n, picture=f"p{n}.png" if picture else None, beats=False))
+
+    def _last_reconcile(self) -> dict:
+        with self.database._connect() as connection:
+            row = connection.execute("SELECT payload_json FROM project_director_artifacts WHERE project_id = ? AND kind = ? "
+                                     "ORDER BY id DESC LIMIT 1", (self.project_id, "storyboard_reconcile")).fetchone()
+        return json.loads(row["payload_json"])
 
     def _orphan_hash(self, segment_id: int) -> str | None:
         """What the current EditDocument expects a row it never wrote to hold - the latest legacy orphan of that row."""
@@ -162,7 +172,7 @@ class ReconcileTests(_FlowCase):
         self.assertEqual(answer["edit_document"]["counts"]["skipped"].get(ea.STALE), 1)
         self.assertEqual(answer["edit_document"]["counts"]["conflicts"], 0)
 
-    def test_a_reworded_legacy_scene_is_retimed_as_before_and_made_known(self) -> None:
+    def test_a_reworded_scene_with_layers_the_document_never_knew_is_retimed_but_never_made_known(self) -> None:
         legacy_overlay = [{"kind": "text", "text": "old", "start_seconds": 0.0, "end_seconds": 1.0}]
         self._legacy_layers(legacy_overlay)   # the document follows, the layers are another path's - unknown to it
         self._reword_in_place()
@@ -170,14 +180,56 @@ class ReconcileTests(_FlowCase):
         retimed = [scene for scene in answer["reconcile"]["scenes"] if scene.get("retimed")]
         self.assertEqual(len(retimed), 1)
         segment_id = retimed[0]["new_segment_id"]
-        self.assertIn(segment_id, answer["edit_refresh"])
         row = self._row(segment_id)
         self.assertNotEqual(json.loads(row["overlays"]), legacy_overlay, "legacy layers still follow the new length")
+        # P2-4 · F2: what another path wrote since the document began (a hand edit) is never taken as known.
+        self.assertNotIn(segment_id, answer["edit_refresh"])
+        self.assertEqual(self._last_reconcile()["held_segments"], [segment_id])
+        self.assertNotEqual(self._orphan_hash(segment_id), ea.state_hash(row, self._beats(segment_id)),
+                            "the document still expects what it knew, not what the row now holds")
+
+    def test_layers_the_document_never_knew_are_a_conflict_after_a_reword_never_overwritten(self) -> None:
+        self._legacy_layers([{"kind": "text", "start_seconds": 0, "end_seconds": 1}])
+        self._reword_in_place()
+        answer = self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={"force": True}).json()
+        segment_id = next(scene["new_segment_id"] for scene in answer["reconcile"]["scenes"] if scene.get("retimed"))
+        n = next(n for n, scene in enumerate(self._doc()["scenes"]) if scene["segment_id"] == segment_id)
+        before = {key: self._row(segment_id)[key] for key in ("overlays", "edit_transition", "visual_path")}
+        self._plan(n, self._edit(n, beats=False, transition="cut"))
+        applied = self._timeline_generate()["edit_document"]
+        self.assertEqual([(item["segment_id"], item["expected_from"]) for item in applied["conflicts"]],
+                         [(segment_id, "legacy")])
+        self.assertEqual({key: self._row(segment_id)[key] for key in before}, before, "the row keeps what it holds")
+
+
+class KnownLegacyReconcileTests(_FlowCase):
+    """Legacy layers already on the rows when the EditDocument began (its first sync keeps them as orphans):
+    the document knows them, so a reconcile that retimes them makes the retimed layers known, as before."""
+
+    def setUp(self) -> None:
+        super(_ApplyCase, self).setUp()   # the app and its database, without _ApplyCase's first sync
+        self._hold_scene_worker()
+        self.project_id, self.script_id = self._project()
+        for row in self._timeline(self.project_id, self.script_id):
+            self.database.save_segment_edit_layers(int(row["id"]), overlays=[{"kind": "text", "text": "old",
+                                                                               "start_seconds": 0.0, "end_seconds": 1.0}])
+            self.database.update_project_timeline_segment(int(row["id"]), duration_seconds=int(row["duration_seconds"]) * 2)
+        self.bootstrap = self._sync(self.project_id, self.script_id)
+
+    def test_a_reworded_legacy_scene_is_retimed_as_before_and_made_known(self) -> None:
+        self._reword_in_place()
+        answer = self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={"force": True}).json()
+        retimed = [scene for scene in answer["reconcile"]["scenes"] if scene.get("retimed")]
+        self.assertEqual(len(retimed), 1)
+        segment_id = retimed[0]["new_segment_id"]
+        self.assertIn(segment_id, answer["edit_refresh"])
+        self.assertEqual(self._last_reconcile()["held_segments"], [])
+        row = self._row(segment_id)
+        self.assertNotEqual(json.loads(row["overlays"])[0]["end_seconds"], 1.0, "legacy layers still follow the new length")
         self.assertEqual(self._orphan_hash(segment_id), ea.state_hash(row, self._beats(segment_id)),
                          "and the document now knows what the row holds")
 
     def test_a_retimed_legacy_scene_can_then_be_planned_and_applied(self) -> None:
-        self._legacy_layers([{"kind": "text", "start_seconds": 0, "end_seconds": 1}])
         self._reword_in_place()
         answer = self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={"force": True}).json()
         segment_id = next(scene["new_segment_id"] for scene in answer["reconcile"]["scenes"] if scene.get("retimed"))

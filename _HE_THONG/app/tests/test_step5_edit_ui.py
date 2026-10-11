@@ -1,7 +1,7 @@
 """Bước 5 · Storyboard & Edit on screen: the page plans through T5 and shows the EditDocument as the server holds it.
 
-The page's side is run for real in tests/step5_edit_document_ui.test.cjs
-(one POST to …/steps/edit_plan, confirmed_apply only after the user
+The page's side is run for real in tests/step5_edit_document_ui.test.cjs and
+tests/step5_storyboard_layout.test.cjs (one POST to …/steps/edit_plan, confirmed_apply only after the user
 confirms, every status shown as the server said it, `force` in the body).
 This file runs that, and pins the server's side the page reads:
 
@@ -12,7 +12,14 @@ This file runs that, and pins the server's side the page reads:
   sends it), not the query string;
 * planning without confirmed_apply leaves the timeline as it was; T4 applies
   the planned scenes at the next sync of the storyboard (shots/timeline
-  generate) - the behaviour the page names to the user.
+  generate) - the behaviour the page names to the user;
+* what the scene form's save relies on: the routes answer with the row as they
+  stored it, refuse with a 4xx before they write, and the project read holds
+  both rows the form checks a save against;
+* a picture edit through the timeline route writes visual_prompt, a column the
+  EditDocument may own: since P2-4 · F1 it is neither a conflict nor written over
+  by an apply that does not write that column (VisualPromptOwnershipRiskTests).
+  Routing hand edits through the EditDocument itself is still T6/T7.
 """
 
 from __future__ import annotations
@@ -29,14 +36,15 @@ from tests.test_edit_planner import _PlannerCase
 from youtube_monitor import main
 from youtube_monitor.database import EDIT_APPLY_KIND, EDIT_DOCUMENT_KIND
 
-_NODE_TEST = Path(__file__).with_name("step5_edit_document_ui.test.cjs")
+_NODE_TESTS = ("step5_edit_document_ui.test.cjs", "step5_storyboard_layout.test.cjs")
 
 
-def test_the_page_runs_its_step5_contract_for_real() -> None:
+@pytest.mark.parametrize("script", _NODE_TESTS)
+def test_the_page_runs_its_step5_contract_for_real(script: str) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("node không có trên máy chạy test")
-    result = subprocess.run([node, "--test", str(_NODE_TEST)], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([node, "--test", str(Path(__file__).with_name(script))], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
 
 
@@ -163,3 +171,114 @@ class PageContractTests(_EditUiCase):
         self.assertTrue({"applied", "conflicts", "skipped"} <= set(applied["counts"]))
         self.assertIsInstance(applied["counts"]["skipped"], dict)
         json.dumps(applied)
+
+
+class SceneSaveContractTests(_EditUiCase):
+    """The routes the scene form saves through, as they are: a field left out is left alone.
+
+    The form relies on exactly this to keep a scene's voice when only its
+    picture or length is edited, and drops the voice only by sending
+    audio_path '' with changed words.
+    """
+
+    def _row(self) -> dict:
+        return self._timeline(self.project_id, self.script_id)[0]
+
+    def _shot(self, row: dict) -> dict:
+        return self.database.get_project_shot(int(row["shot_id"]))
+
+    def test_a_picture_or_length_edit_without_audio_path_keeps_the_voice(self) -> None:
+        row = self._row()
+        self.assertTrue(row["audio_path"])
+        for body in ({"visual_prompt": "Đồi cây phong lúc hoàng hôn"}, {"duration_seconds": int(row["duration_seconds"]) + 1}):
+            with self.subTest(body=body):
+                response = self.client.patch(f"/api/timeline/{row['id']}", json=body)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["segment"]["audio_path"], row["audio_path"], "the voice is untouched")
+        shot = self._shot(row)
+        response = self.client.patch(f"/api/shots/{shot['id']}", json={"visual_prompt": "Đồi cây phong lúc hoàng hôn"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self._row()["audio_path"], row["audio_path"])
+
+    def test_audio_path_empty_is_the_explicit_way_to_drop_the_voice(self) -> None:
+        row = self._row()
+        response = self.client.patch(f"/api/timeline/{row['id']}", json={"audio_path": ""})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["segment"]["audio_path"], "")
+
+    def test_the_words_of_a_planned_scene_are_refused_here_and_nothing_changes(self) -> None:
+        row = self._row()
+        shot = self._shot(row)
+        for url, body in ((f"/api/shots/{shot['id']}", {"narration": "Lời khác hẳn."}),
+                          (f"/api/timeline/{row['id']}", {"voice_text": "Lời khác hẳn.", "subtitle_text": "Lời khác hẳn.", "audio_path": ""})):
+            with self.subTest(url=url):
+                response = self.client.patch(url, json=body)
+                self.assertEqual(response.status_code, 409, response.text)
+        after = self._row()
+        self.assertEqual((after["voice_text"], after["audio_path"]), (row["voice_text"], row["audio_path"]))
+
+    def test_the_same_words_with_other_spacing_are_not_a_change(self) -> None:
+        row = self._row()
+        spaced = "  " + "  ".join(str(row["voice_text"]).split()) + " "
+        response = self.client.patch(f"/api/timeline/{row['id']}", json={"voice_text": spaced})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_lengths_are_whole_seconds(self) -> None:
+        row = self._row()
+        self.assertEqual(self.client.patch(f"/api/timeline/{row['id']}", json={"duration_seconds": 6.5}).status_code, 422)
+        self.assertEqual(self.client.patch(f"/api/shots/{row['shot_id']}", json={"duration_seconds": 6.5}).status_code, 422)
+        self.assertEqual(self._row()["audio_path"], row["audio_path"])
+
+    def test_each_route_answers_with_the_row_as_it_stored_it(self) -> None:
+        # The form takes these answers as the new starting point of the fields it wrote.
+        row = self._row()
+        shot = self._shot(row)
+        answer = self.client.patch(f"/api/shots/{shot['id']}", json={"visual_prompt": "  Hình đã gõ  "})
+        self.assertEqual(answer.status_code, 200, answer.text)
+        self.assertEqual(answer.json()["shot"]["visual_prompt"], "Hình đã gõ", "stored stripped, answered as stored")
+        answer = self.client.patch(f"/api/timeline/{row['id']}", json={"visual_prompt": "  Hình đã gõ  ", "duration_seconds": 7})
+        self.assertEqual(answer.status_code, 200, answer.text)
+        segment = answer.json()["segment"]
+        self.assertEqual((segment["visual_prompt"], segment["duration_seconds"]), ("Hình đã gõ", 7))
+        self.assertEqual(segment["audio_path"], row["audio_path"])
+
+    def test_the_project_read_the_form_checks_a_save_against_says_what_the_routes_answered(self) -> None:
+        # A save compares the project read with what the routes answered: they must say the same values,
+        # or the form's own write would read as someone else's change.
+        row = self._row()
+        shot = self._shot(row)
+        shot_answer = self.client.patch(f"/api/shots/{shot['id']}", json={"visual_prompt": "Hình đã gõ", "duration_seconds": 7}).json()["shot"]
+        segment_answer = self.client.patch(f"/api/timeline/{row['id']}", json={"visual_prompt": "Hình đã gõ", "duration_seconds": 7}).json()["segment"]
+        bundle = self.client.get(f"/api/projects/{self.project_id}").json()
+        shots = {int(item["id"]): item for item in bundle["latest_shots"]}
+        segments = {int(item["id"]): item for item in bundle["latest_timeline"]}
+        for field in ("narration", "visual_prompt", "duration_seconds"):
+            self.assertEqual(shots[int(shot["id"])][field], shot_answer[field], field)
+        for field in ("voice_text", "subtitle_text", "audio_path", "visual_prompt", "duration_seconds"):
+            self.assertEqual(segments[int(row["id"])][field], segment_answer[field], field)
+
+    def test_an_unknown_row_is_refused_with_a_4xx_and_nothing_is_written(self) -> None:
+        # The form reads a 4xx as "refused before writing"; anything else as "unknown".
+        row = self._row()
+        self.assertEqual(self.client.patch("/api/shots/987654", json={"visual_prompt": "x"}).status_code, 404)
+        self.assertEqual(self.client.patch("/api/timeline/987654", json={"visual_prompt": "x"}).status_code, 404)
+        self.assertEqual(self._row()["visual_prompt"], row["visual_prompt"])
+
+
+class VisualPromptOwnershipRiskTests(_EditUiCase):
+    """P2-4 · F1: visual_prompt is a column the EditDocument may own (edit_store._VISUAL_COLUMNS), but a plan that
+    names no picture never writes it - so the scene form's picture edit (PATCH /api/timeline/{id}) is neither a
+    conflict nor written over: an apply compares only the columns it writes (edit_apply.ScopedCheck).
+    """
+
+    def test_a_picture_edit_on_an_applied_row_is_kept_and_never_makes_the_next_apply_a_conflict(self) -> None:
+        self._plan_step(confirmed_apply=True)
+        row = self._timeline(self.project_id, self.script_id)[0]
+        scenes = {item["segment_id"]: item for item in self._read()["scenes"]}
+        self.assertEqual(scenes[row["id"]]["applied"], "applied")
+        response = self.client.patch(f"/api/timeline/{row['id']}", json={"visual_prompt": "Mô tả hình sửa tay"})
+        self.assertEqual(response.status_code, 200, response.text)
+        answer = self.client.post(f"/api/projects/{self.project_id}/timeline/generate", json={}).json()["edit_document"]
+        self.assertEqual((answer["status"], answer["conflicts"]), ("unchanged", []), "nothing to write, nothing in the way")
+        self.assertEqual(self._timeline(self.project_id, self.script_id)[0]["visual_prompt"], "Mô tả hình sửa tay",
+                         "the hand edit stays; the EditDocument does not write over it")

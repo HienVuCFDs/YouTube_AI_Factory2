@@ -3250,9 +3250,13 @@ def _sync_storyboard(
                for fields, entry in zip(new_shots, plan["entries"])]
     # Which old scene each new one is, storyboard against storyboard - what anything kept per scene follows.
     lineage = storyboard_reconcile.lineage(source_board, storyboard)
+    # P2-4 · F2: rows holding what their EditDocument never knew (a hand edit) - read before the reconcile changes
+    # them - are carried as they are but never made known to it as they are (edit_refresh): only their parts
+    # nobody edited by hand are (edit_held), so an apply never writes over a hand edit, nor stops at the rest.
+    parts = edit_apply.unknown_parts(database, project_id, source_script_id, source_timeline)
     record = database.apply_storyboard_reconcile(
         project_id, script_id, entries, plan["removed"] if in_place else [], source_script_id=source_script_id,
-        with_timeline=bool(timeline) or with_timeline or (not in_place and bool(source_timeline)),
+        with_timeline=bool(timeline) or with_timeline or (not in_place and bool(source_timeline)), held=set(parts),
         report={**report, "document_hash": storyboard["document_hash"], "anchoring": storyboard.get("anchoring"),
                 "lineage": {"scenes": [{key: item[key] for key in ("scene_key", "previous_scene_key", "previous_index", "match",
                                                                    "status", "changes", "inherit")}
@@ -3264,14 +3268,32 @@ def _sync_storyboard(
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án hoặc kịch bản")
     database.resync_timeline_segment_states(project_id)
     touched = [int(item) for item in record.get("touched_segments") or []]
-    edits = _apply_edit_document(project_id, script, refresh=set(touched)) if apply_edits else _EDIT_APPLY_DEFERRED
+    held = _held_parts(parts, record)
+    edits = _apply_edit_document(project_id, script, refresh=set(touched), held=held) if apply_edits else _EDIT_APPLY_DEFERRED
     shots = database.list_project_shots(project_id, script_id=script_id)
     _write_project_document(project_id, "shot-list.md", shots_to_markdown(project, script, shots))
     return {"status": "saved", "script_id": script_id, "stale": False, "shots": shots,
             "storyboard": {"id": saved["id"], **storyboard_engine.summary(storyboard)},
             "reconcile": {**report, "scenes": record.get("scenes", report["scenes"]), "mode": record["mode"],
                           "anchoring": storyboard.get("anchoring"), "applied": True},
-            "edit_refresh": touched, "edit_document": edits}
+            # A caller that applies after it (apply_edits False) passes the held rows on to _apply_edit_document.
+            "edit_refresh": touched, **({} if apply_edits else {"edit_held": held}), "edit_document": edits}
+
+
+def _held_parts(parts: dict[int, dict[str, Any] | None], record: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """P2-4 · F2: landed row → {"known", "columns"} for each row a reconcile held (`held_from`).
+
+    `known` is what the EditDocument knew of the row it came from (edit_apply.unknown_parts), `columns` the
+    hand-edited parts of that row the reconcile carried there - an owned part it did not carry is not one.
+    A row only known to differ as a whole (None) is left out: nothing of it is made known.
+    """
+    held: dict[int, dict[str, Any]] = {}
+    for item in record.get("held_from") or []:
+        source = parts.get(int(item["source_segment_id"]))
+        if source is not None:
+            held[int(item["segment_id"])] = {"known": source["known"],
+                                            "columns": frozenset(source["columns"]) - set(item.get("not_carried") or [])}
+    return held
 
 
 # What an apply leaves to the caller to resolve, scene by scene; the rest of a skip is the plan's own state.
@@ -3280,7 +3302,8 @@ _EDIT_APPLY_ACTIONABLE = frozenset({edit_apply.INVALID_EDIT, "beat_has_jobs", "s
 _EDIT_APPLY_DEFERRED = {"status": "deferred"}
 
 
-def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: set[int] | None = None) -> dict[str, Any]:
+def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: set[int] | None = None,
+                         held: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Bước 5.3 · T4: the one production call of EditDocument → apply_scenes() → timeline. Never raises for a state or data fault.
 
     Runs only for a project that already keeps an EditDocument (T5/T6 make
@@ -3295,6 +3318,11 @@ def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: se
     transaction that each row still holds what the document last knew
     (conflict otherwise). The storyboard must be the Storyboard Gate's
     current one, of this very script.
+
+    `held` (P2-4 · F2): rows the reconcile landed on that held a hand edit
+    (_held_parts). Each is made known part by part (edit_apply.held_edits,
+    read now - after any write that came between): what it holds, except
+    its hand-edited parts, kept as the document knew them. Never `refresh`ed.
 
     Returns {"status", "counts", "applied", "unchanged", "skipped", "conflicts", ...}:
     status "applied" | "unchanged" | "nothing_to_apply" | "partial" | "blocked" | "not_current" | "error" | "no_document".
@@ -3311,8 +3339,9 @@ def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: se
             or int(row["id"]) != int((database.get_latest_project_storyboard(project_id, script_id=script_id) or {}).get("id") or 0):
         return {"status": "not_current", "detail": "Storyboard của kịch bản này không phải bản hiện hành: chưa áp EditDocument",
                 "gate": gate.get("state")}
+    kept = edit_apply.held_edits(database, project_id, script_id, held or {})
     try:
-        synced = edit_store.sync(database, project_id, script_id, row, refresh=refresh)
+        synced = edit_store.sync(database, project_id, script_id, row, refresh=set(refresh or ()) - set(kept), kept=kept)
         done = edit_apply.apply_scenes(database, project_id, script_id, row)
     except edit_store.EditStoreError as exc:
         return {"status": "error", "detail": str(exc)}
@@ -3391,6 +3420,11 @@ def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, 
             # A row an EditDocument has applied to is its own (Bước 5.3 · T4): the agent's fields go elsewhere only.
             owned = database.edit_owned_rows(project_id)
             refresh, kept = set(synced.get("edit_refresh") or []), []
+            # P2-4 · F2: a row that already holds what the EditDocument never knew (a hand edit) still takes the
+            # agent's fields, but is never refreshed as it now holds: the apply reports the hand edit instead of
+            # writing over it. A row the reconcile held (edit_held) is made known part by part when the apply
+            # runs (held_edits reads it then): the agent's fields there are known unless that part was a hand edit.
+            held = edit_apply.unknown_rows(database, project_id, int(current["id"]), timeline)
             for segment, item in zip(timeline, supplied):
                 fields = {key: str(item[key]) for key in ("visual_prompt", "asset_type")
                           if isinstance(item, dict) and item.get(key)}
@@ -3398,10 +3432,14 @@ def _step_timeline(project_id: int, project: dict[str, Any], options: dict[str, 
                     kept.append(int(segment["id"]))
                 elif fields:
                     database.update_project_timeline_segment(int(segment["id"]), **fields)
-                    refresh.add(int(segment["id"]))
+                    if int(segment["id"]) not in held:
+                        refresh.add(int(segment["id"]))
+            # The rows the reconcile held are made known part by part (edit_held): their hand-edited parts never.
             return {"status": "saved", "script_id": int(current["id"]),
                     "timeline": database.list_project_timeline(project_id, script_id=int(current["id"])),
-                    "edit_owned_rows_kept": kept, "edit_document": _apply_edit_document(project_id, current, refresh=refresh)}
+                    "edit_owned_rows_kept": kept,
+                    "edit_document": _apply_edit_document(project_id, current, refresh=refresh,
+                                                          held=synced.get("edit_held") or {})}
         script = database.get_latest_project_script(project_id)
         if not script:
             raise HTTPException(status_code=400, detail="Chưa có kịch bản để dựng timeline")
@@ -8055,6 +8093,15 @@ def get_project_edit_document(project_id: int) -> dict[str, Any]:
     "not_applied" (never applied), "older" (the row holds an earlier edit),
     None for a scene with no edit to apply. Nothing is synced, planned or
     applied here - edit_store.current and the apply records are only read.
+
+    Bước 05 · F3: a stored document is the timeline and voices as they were
+    when it was kept. After a scene's length or voice changed (a PATCH of the
+    row, a new voice) the scenes are answered as the next sync would make them
+    (edit_store.preview - built, never kept): their timing, statuses and
+    `applied` are those of the timeline now. `fresh` False says so;
+    `document_hash` is then the hash the next sync will keep, and
+    `stored_document_hash` the one kept now. When that cannot be worked out
+    (`fresh` None, `fresh_detail` why) the stored document is answered as it is.
     """
     if not database.get_production_project(project_id):
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
@@ -8072,6 +8119,16 @@ def get_project_edit_document(project_id: int) -> dict[str, Any]:
         found = edit_store.current(database, project_id, script_id, row)
         if found["state"] != edit_store.CURRENT:
             return {**answer, "state": found["state"], "document_hash": found.get("document_hash"), "scenes": []}
+        document, document_hash = found["document"], found["document_hash"]
+        freshness: dict[str, Any] = {"fresh": True, "stored_document_hash": found["document_hash"]}
+        try:
+            seen = edit_store.preview(database, project_id, script_id, row)
+        except edit_store.EditStoreError as exc:
+            freshness.update(fresh=None, fresh_detail=str(exc))
+        else:
+            if not seen["fresh"]:
+                document, document_hash = seen["document"], seen["document_hash"]
+                freshness["fresh"] = False
         on_rows: dict[int, str] = {}
         for entry in database.list_edit_applies(project_id, script_id):  # newest first
             for item in entry["payload"]["rows"]:
@@ -8079,7 +8136,7 @@ def get_project_edit_document(project_id: int) -> dict[str, Any]:
     except (edit_store.EditStoreError, StoredEditApplyError) as exc:
         return {**answer, "state": "error", "detail": str(exc), "scenes": []}
     scenes: list[dict[str, Any]] = []
-    for item in found["document"]["scenes"]:
+    for item in document["scenes"]:
         segment_id = item.get("segment_id")
         applied = None
         if item.get("status") in _EDIT_SCENE_PLANNED and segment_id is not None:
@@ -8093,7 +8150,7 @@ def get_project_edit_document(project_id: int) -> dict[str, Any]:
               "needs_plan": sum(1 for item in scenes if item["status"] == edit_document.NEEDS_PLAN),
               "applied": sum(1 for item in scenes if item["applied"] == "applied")}
     counts["stale"] = counts["scenes"] - counts["planned"] - counts["needs_plan"]
-    return {**answer, "state": edit_store.CURRENT, "document_hash": found["document_hash"], "counts": counts,
+    return {**answer, "state": edit_store.CURRENT, "document_hash": document_hash, **freshness, "counts": counts,
             "scenes": scenes}
 
 

@@ -432,6 +432,23 @@ class BeatTests(_ApplyCase):
         self.assertEqual([item["reason"] for item in done["skipped"] if item["scene_key"] == self._scene(0)["scene_key"]],
                          ["unknown_asset"])
 
+    def test_a_beat_naming_an_asset_of_this_project_is_applied_and_recorded_as_known(self) -> None:
+        """P2-4 · F1: the asset check must not take the place of what the record keeps as known (state_edit)."""
+        asset = self.database.create_project_asset(self.project_id, "image", "own.png", str(self.tmp / "own.png"))
+        seconds = float(self._scene(0)["voice"]["duration_seconds"])
+        self._plan(0, ed.edit({"edit_transition": "fade"},
+                              beats=[{"asset_id": int(asset["id"]), "visual_path": "own.png", "start_seconds": 0.0,
+                                      "duration_seconds": seconds}]))
+        done = self._apply()
+        segment_id = self._scene(0)["segment_id"]
+        self.assertEqual([item["segment_id"] for item in done["applied"]], [segment_id])
+        self.assertEqual(self._beats(segment_id)[0]["asset_id"], int(asset["id"]))
+        record = next(item for item in done["applied"] if item["segment_id"] == segment_id)
+        self.assertIsInstance(record["state_edit"], dict)
+        self.assertEqual(ed.edit_hash(record["state_edit"]), ea.state_hash(self._row(segment_id), self._beats(segment_id)),
+                         "nothing else wrote to the row: what the document knows is what it holds")
+        self.assertEqual(self._apply()["conflicts"], [], "and the next apply finds the row as it left it")
+
 
 # ===========================================================================
 # 10. Apart from the legacy Edit Plan, and from the generic artifact calls
@@ -691,6 +708,10 @@ class RecordTests(_ApplyCase):
             self.assertEqual(item["columns_written"], sorted(planned["updates"]))
             self.assertEqual(item["beats_written"], None if planned["beats"] is None else len(planned["beats"]))
             self.assertEqual(set(item), {"segment_id", "scene_key", "layer_hash", "state_hash", "visual_owned",
-                                         "columns_written", "beats_written"})
+                                         "columns_written", "beats_written", "state_edit"})
+            # P2-4 · F1: what the document knows the row holds - here the row itself, no other path wrote to it.
+            segment_id = planned["segment_id"]
+            self.assertEqual(item["state_edit"], ea.state_edit(self._row(segment_id), self._beats(segment_id)))
+            self.assertEqual(ed.edit_hash(item["state_edit"]), item["state_hash"])
         self.assertIn("visual_path", record[self._scene(0)["segment_id"]]["columns_written"])
         self.assertNotIn("visual_path", record[self._scene(1)["segment_id"]]["columns_written"])

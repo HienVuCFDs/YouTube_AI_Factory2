@@ -287,6 +287,32 @@ test('stale, review, missing, outdated and unreadable documents each say so', as
   assert.match(broken.cell(31), /không đọc được EditDocument: Bản ghi áp #3 không đọc được/);
 });
 
+test('F3: a read the server worked out from the timeline now (fresh false) says so; the scenes are shown as it answered', async () => {
+  const ui = studio({doc: DOC({fresh: false, document_hash: 'h2', stored_document_hash: 'h1',
+    counts: {scenes: 3, planned: 2, applied: 0, needs_plan: 1, stale: 0},
+    scenes: [scene(31, 'ready', 'older'), scene(32, 'ready', 'not_applied'), scene(33, 'needs_plan')]})});
+  await ui.sandbox.refreshStudioStoryboard();
+  assert.match(ui.cell(31), /đã lập · timeline còn bản cũ, chưa áp bản mới/, 'the row whose length changed no longer reads "đã áp"');
+  const head = ui.elements.studioEditPlanState.innerHTML;
+  assert.match(head, /2\/3 cảnh đã lập · 0 đã áp/);
+  assert.match(head, /data-edit-doc-fresh="false"/);
+  assert.match(head, /Thời lượng hoặc giọng đọc của cảnh đã đổi sau lần lưu kế hoạch gần nhất/);
+  assert.equal(ui.posts().length, 0, 'reading the state sends nothing');
+});
+
+test('F3: a read that could not be checked against the timeline (fresh null) names why; a fresh read adds nothing', async () => {
+  const unknown = studio({doc: DOC({fresh: null, fresh_detail: 'Timeline chưa khớp <Storyboard>'})});
+  await unknown.sandbox.refreshStudioStoryboard();
+  const head = unknown.elements.studioEditPlanState.innerHTML;
+  assert.match(head, /data-edit-doc-fresh="unknown"/);
+  assert.match(head, /Chưa kiểm được kế hoạch dựng có theo kịp timeline hiện tại không: Timeline chưa khớp &lt;Storyboard&gt;/);
+  for (const doc of [DOC({fresh: true}), DOC()]) {
+    const ui = studio({doc});
+    await ui.sandbox.refreshStudioStoryboard();
+    assert.doesNotMatch(ui.elements.studioEditPlanState.innerHTML, /data-edit-doc-fresh/);
+  }
+});
+
 test('a legacy project keeps the legacy edit summary on its cards', async () => {
   const ui = studio({doc: LEGACY});
   await ui.sandbox.refreshStudioStoryboard();

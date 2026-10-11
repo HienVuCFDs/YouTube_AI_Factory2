@@ -285,7 +285,8 @@ def _held(document: dict[str, Any]) -> list[tuple[Any, ...]]:
 
 
 def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], *,
-         refresh: set[int] | frozenset[int] | None = None) -> dict[str, Any]:
+         refresh: set[int] | frozenset[int] | None = None,
+         kept: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     """The script's EditDocument for this storyboard, built from what came before and kept - nothing applied.
 
     * the script's latest document (any storyboard) is what it follows, by
@@ -299,7 +300,31 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
     is kept as a legacy orphan of that row, so a later apply expects it. Only
     those rows: anything else written to a row the document already knows is
     still a conflict.
+    `kept` (P2-4 · F2): segment_id → the edit to keep as the legacy orphan of
+    a row the reconcile landed on but that held a hand edit - never what the
+    row holds, but that with its hand-edited parts as the document knew them
+    (edit_apply.held_edits). Wins over `refresh` for the same row.
     Returns {"state": "current", "created", "document", "document_hash", "artifact_id", "parent_hash", "mode"}.
+    """
+    nxt = _next(database, project_id, script_id, storyboard_row, refresh=refresh, kept=kept)
+    own, source = nxt["own"], nxt["source"]
+    if nxt["unchanged"]:
+        # Nothing the engine reads has moved since the latest version: it is still the current one.
+        return {"state": CURRENT, "created": False, "mode": "unchanged", **own}
+    stored = save(database, project_id, script_id, nxt["document"], storyboard_row=storyboard_row,
+                  expected_parent=own["document_hash"] if own else None,
+                  carried_from=source["document_hash"] if source is not None and own is None else None)
+    return {"state": CURRENT, "mode": nxt["mode"], "document": nxt["document"], "storyboard": nxt["storyboard"],
+            "storyboard_row": storyboard_row, **stored}
+
+
+def _next(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], *,
+          refresh: set[int] | frozenset[int] | None = None,
+          kept: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """What sync() would keep, built and not kept: {"document", "unchanged", "own", "source", "mode", "storyboard"}.
+
+    Reads the database and the voice files only. `unchanged`: the script's latest stored document is still the one
+    sync() would hand back (same provenance, same rows, voices and verdicts, nothing refreshed).
     """
     board = _storyboard(storyboard_row, project_id=project_id, script_id=script_id)
     now = snapshot(database, project_id, script_id, board)
@@ -314,21 +339,36 @@ def sync(database: Any, project_id: int, script_id: int, storyboard_row: dict[st
         options["legacy"] = now["legacy"]
         mode = "bootstrap"
     refreshed = {key: held for key, held in now["legacy"].items() if int(held["segment_id"]) in (refresh or ())}
+    for key, segment_id in now["segments"].items():
+        if segment_id in (kept or {}):
+            refreshed[key] = {"segment_id": segment_id, "edit": kept[segment_id]}
     if refreshed and source is not None:
         options["refreshed"] = refreshed
     try:
         document = edit_document.build(board, **options)
     except edit_document.EditDocumentError as exc:
         raise EditStoreError(str(exc)) from exc
-    if own is not None and not options.get("refreshed") and own["document"]["provenance"] == document["provenance"] \
-            and _held(own["document"]) == _held(document):
-        # Nothing the engine reads has moved since the latest version: it is still the current one.
-        return {"state": CURRENT, "created": False, "mode": "unchanged", **own}
-    stored = save(database, project_id, script_id, document, storyboard_row=storyboard_row,
-                  expected_parent=own["document_hash"] if own else None,
-                  carried_from=source["document_hash"] if source is not None and own is None else None)
-    return {"state": CURRENT, "mode": mode, "document": document, "storyboard": board, "storyboard_row": storyboard_row,
-            **stored}
+    unchanged = own is not None and not options.get("refreshed") \
+        and own["document"]["provenance"] == document["provenance"] and _held(own["document"]) == _held(document)
+    return {"document": document, "unchanged": unchanged, "own": own, "source": source, "mode": mode, "storyboard": board}
+
+
+def preview(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any]) -> dict[str, Any]:
+    """Bước 05 · F3: the current document as the next sync() would make it - read only, nothing kept.
+
+    A stored EditDocument says what the timeline and the voices were when it was
+    kept. After a scene's length or voice changes (PATCH of a row, a new voice),
+    it still reads `current` for the storyboard, yet its timing, its statuses and
+    whether a row holds its edit are those of before: the next sync() retimes or
+    marks the scene. preview() answers what that sync would answer, without it:
+    {"fresh": bool, "document", "document_hash"} - `fresh` True when the stored
+    document is still the one sync() would hand back (then `document` is the stored
+    one). `document_hash` of a document not fresh is that of the one not yet kept.
+    """
+    nxt = _next(database, project_id, script_id, storyboard_row)
+    if nxt["unchanged"]:
+        return {"fresh": True, "document": nxt["own"]["document"], "document_hash": nxt["own"]["document_hash"]}
+    return {"fresh": False, "document": nxt["document"], "document_hash": nxt["document"]["document_hash"]}
 
 
 def plan_scenes(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any],
