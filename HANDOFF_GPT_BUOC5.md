@@ -1,4 +1,4 @@
-# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành, UI Bước 5 nối T5, Storyboard UI bố cục A, P2-4 F1/F2/F3 + sửa F1×F2 — đã review, đã test, chưa commit)
+# YOUTUBE AI FACTORY — BÀN GIAO SANG CHAT MỚI (Bước 5: T1 chờ duyệt, T2 · T3 · T4 · T5 hoàn thành, UI Bước 5 nối T5, Storyboard UI bố cục A, P2-4 F1/F2/F3 + sửa F1×F2 — đã review, đã test, đã commit `44e110a`, chưa push)
 
 Cập nhật: 2026-10-11 · Người lập: Claude (Claude Code, làm việc trực tiếp trong repo trên PC Windows)
 
@@ -6,7 +6,7 @@ Cập nhật: 2026-10-11 · Người lập: Claude (Claude Code, làm việc tr�
 > Thứ tự đọc khuyên dùng và bản đồ tài liệu nằm ở mục 14.
 > Bản 07/10 dừng ở T1. Bản 08/10 bổ sung: trạng thái git mới (mục 1–2), **T2 hoàn thành** (mục 9b), **T3 hoàn thành** (mục 9c), **T4 hoàn thành: EditDocument đã nối vào luồng sản xuất** (mục 9d), **T5 hoàn thành: Planner theo storyboard** (mục 9e), **UI Bước 5 nối vào T5/EditDocument** (mục 9f), việc tiếp theo (mục 11).
 > **Bản 11/10 bổ sung:** trạng thái git trên PC (mục 1–2), **Storyboard UI bố cục A + form "Sửa cảnh" an toàn** (mục 9g), **P2-4 — sửa tay trước EditDocument: F1 so theo cột, F2 không nhận sửa tay làm legacy, F3 đọc theo timeline hiện tại** (mục 9h), **kết quả test lần đầu trên Windows** (mục 9i), DB thật đo lại (mục 12). Toàn bộ thay đổi 9g–9h **chưa commit, chưa push**.
-> **Cập nhật cuối 11/10 (đọc mục 9j trước):** đã review 9g–9h hai vòng. Lỗi Medium F1×F2 (xung đột giả) **đã sửa và đã kiểm chứng** bằng test cùng mutation test. Toàn bộ suite: **2397 đạt · 2 đỏ (lỗi nền) · 9 bỏ qua** (mục 9i). Đang chờ người dùng quyết commit (mục 11).
+> **Cập nhật cuối 11/10 (đọc mục 9j trước):** đã review 9g–9h hai vòng. Lỗi Medium F1×F2 (xung đột giả) **đã sửa và đã kiểm chứng** bằng test cùng mutation test. Toàn bộ suite: **2397 đạt · 2 đỏ (lỗi nền) · 9 bỏ qua** (mục 9i). **12/10: đã commit trong `44e110a`, chưa push** (mục 1–2, 11).
 
 ---
 
@@ -39,7 +39,7 @@ Quy trình từ trước tới nay:
   - Đã sửa lỗi Medium: hàng bị giữ được ghi nhận theo từng phần (`unknown_parts` → `held_from` → `held_edits` → `sync(kept=)`).
   - Review vòng 2 PASS cả A–D. Có 3 điểm Low: L1 (chú thích) đã sửa; L2, L3 người dùng chốt giữ làm giới hạn đã biết.
   - Đã chạy test: PASS, không regression.
-- **Việc kế tiếp:** người dùng ra lệnh commit (riêng); quyết phương án T4 tự áp (mục 9f, "Hành vi áp"); task riêng cho lỗi Low nhánh agent (mục 9j); rồi T6 (mục 11). **Chưa bắt đầu T6/T7.**
+- **Việc kế tiếp:** ~~commit~~ xong (`44e110a`, 12/10); push cần lệnh riêng; quyết phương án T4 tự áp (mục 9f, "Hành vi áp"); task riêng cho lỗi Low nhánh agent (mục 9j); rồi T6 (mục 11). **Chưa bắt đầu T6/T7.**
 
 **Quy tắc bất biến (người dùng đã chốt):**
 - Làm theo từng phase/task nhỏ. Hết mỗi task thì **dừng, báo cáo**, chờ duyệt. Không tự mở rộng phạm vi; gặp vấn đề kiến trúc ngoài phạm vi thì báo **BLOCKED**.
@@ -66,7 +66,8 @@ Quy trình từ trước tới nay:
 - App local: FastAPI + SQLite + HTML/JS thuần, cổng 8787.
 - Code ở `_HE_THONG/app/youtube_monitor/`, test ở `_HE_THONG/app/tests/`.
 - DB thật: `_HE_THONG/data/youtube_monitor.db` (gitignore, chỉ có trên máy người dùng). Hash **`6ece65e24917facb3b46b3ab320796c4`**, đo lại trên PC ngày **11/10**: không đổi từ 06/10.
-- **Git trên PC (11/10):** `F:\YouTube_AI_Factory`, branch `claude/dreamy-gates-4qehd3`, HEAD **`99f4709`** (chore: read-only DB check + launcher DB tạm), trùng với branch trên GitHub. Lịch sử Bước 5 sau `30ca9e1`: `ec62257` (T2) → `1225aef` (T3) → `badba1e` (docs checklist T4) → `4555921` (T4) → `f4c07d6` (T5) → `c944c90` (UI nối T5) → `99f4709`. Thay đổi 9g–9h nằm ở working tree, **chưa commit** (danh sách ở mục 2).
+- **Git trên PC (11/10):** `F:\YouTube_AI_Factory`, branch `claude/dreamy-gates-4qehd3`, HEAD **`99f4709`** (chore: read-only DB check + launcher DB tạm), trùng với branch trên GitHub. Lịch sử Bước 5 sau `30ca9e1`: `ec62257` (T2) → `1225aef` (T3) → `badba1e` (docs checklist T4) → `4555921` (T4) → `f4c07d6` (T5) → `c944c90` (UI nối T5) → `99f4709`. Thay đổi 9g–9h lúc đó nằm ở working tree, chưa commit.
+- **Git trên PC (12/10, cập nhật):** HEAD **`44e110a`** (feat: step 5 storyboard layout A and hand-edit safety before the EditDocument (P2-4 F1/F2/F3)), commit duy nhất chứa toàn bộ 9g–9j. **Chưa push:** `origin/claude/dreamy-gates-4qehd3` vẫn ở `99f4709`, local đi trước 1 commit. Working tree lúc ghi dòng này: `HANDOFF_CHAT_MOI_BUOC5.md` vẫn chưa track (cố ý không commit); ngoài ra bản cập nhật `HANDOFF_GPT_BUOC5.md` này cũng là thay đổi chưa commit lúc đó (được commit riêng ngay sau, commit tài liệu kế tiếp `44e110a`).
 - Git (08/10):
   - Repo **đã có remote** GitHub `HienVuCFDs/YouTube_AI_Factory2`, nhánh chính `main`.
   - Lịch sử: `08c5ed0` (Bước 2) → `98c51d2 feat: complete script engine and Gemini TTS` (Bước 3 + 4) → **`30ca9e1 Initial commit`** (08/10 01:19).
@@ -77,7 +78,7 @@ Pipeline:
 
 ```text
 1 Phân tích ✅ → 2 Kế hoạch ✅ → 3 Kịch bản ✅ → 4 Giọng đọc ✅ (đã kiểm với API thật)
-→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅ · T5 ✅ · UI ✅ · Storyboard UI A 🟡 · P2-4 F1/F2/F3 🟡 — 🟡 = xong, chưa commit) → 6 Xưởng dựng → 7 Render & Xuất bản
+→ 5 Storyboard & Edit 🔧 (5.1 ✅ · 5.2 ✅ · 5.3: T0 ✅ T0.5 ✅ T1 ✅ chờ duyệt · T2 ✅ · T3 ✅ · T4 ✅ · T5 ✅ · UI ✅ · Storyboard UI A ✅ · P2-4 F1/F2/F3 ✅ — commit `44e110a`, chưa push) → 6 Xưởng dựng → 7 Render & Xuất bản
 ```
 
 Kiến trúc canonical (đích của Bước 5.3):
@@ -116,7 +117,7 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  mới  HANDOFF_GPT_BUOC5.md                                (file này)
 ```
 
-**Chưa commit (working tree PC, cuối 11/10) — 12 file code/test sửa + HANDOFF_GPT_BUOC5.md + 3 file mới:**
+**Commit `44e110a` (12/10, chưa push) — 15 file** (trước đó, cuối 11/10, là thay đổi chưa commit ở working tree). Số dòng là ước lượng lúc kiểm kê; commit thực tế: 15 file, +3144 / −126:
 
 ```text
  sửa  _HE_THONG/app/youtube_monitor/main.py               (~+75) F2 + sửa F1×F2 ở _sync_storyboard/_held_parts/_apply_edit_document/_step_timeline; F3 ở GET /edit-document
@@ -133,7 +134,9 @@ Mọi thay đổi của Bước 5 (5.1, 5.2, T0, T0.5, T1, code T2) nằm trong 
  sửa  _HE_THONG/app/tests/test_workflow_ui.py             (+6)   ghim nhãn nút mới
  mới  _HE_THONG/app/tests/step5_storyboard_layout.test.cjs       42 test Node (bố cục, lọc, form Sửa cảnh)
  mới  _HE_THONG/app/tests/test_edit_manual_conflicts.py          19 test P2-4 (mục 9h; 7a/7b từ mục 9j)
- mới  HANDOFF_CHAT_MOI_BUOC5.md                                  bàn giao gói đồng bộ cloud → PC (09/10)
+ sửa  HANDOFF_GPT_BUOC5.md                                       file này
+ ---  KHÔNG commit (chưa track, theo quyết định của người dùng):
+      HANDOFF_CHAT_MOI_BUOC5.md                                  bàn giao gói đồng bộ cloud → PC (09/10), chỉ có trên PC
 ```
 
 Ghi chú: trên PC `core.autocrlf=true`, nên một số file ở working tree là CRLF, số khác là LF (mỗi file đồng nhất, không lẫn). Git chuẩn hoá về LF khi commit, nên đây không phải lỗi.
@@ -838,9 +841,9 @@ Audit UI (08/10) xác nhận 3 lỗi: (1) nút lập kế hoạch gọi Edit Pla
 
 ---
 
-## 9g. Storyboard UI bố cục A + form "Sửa cảnh" (09–10/10, CHƯA COMMIT)
+## 9g. Storyboard UI bố cục A + form "Sửa cảnh" (09–10/10, đã commit `44e110a` ngày 12/10, chưa push)
 
-Làm trên cloud (09/10), đồng bộ sang PC bằng gói `buoc5_sync` (chi tiết đồng bộ và hash từng file: `HANDOFF_CHAT_MOI_BUOC5.md`), rồi sửa tiếp trên PC. Chỉ đổi UI. Không đổi API, schema, guard T3/T4. Luồng legacy giữ nguyên.
+Làm trên cloud (09/10), đồng bộ sang PC bằng gói `buoc5_sync` (chi tiết đồng bộ và hash từng file: `HANDOFF_CHAT_MOI_BUOC5.md`; file này không có trong git, chỉ có trên PC), rồi sửa tiếp trên PC. Chỉ đổi UI. Không đổi API, schema, guard T3/T4. Luồng legacy giữ nguyên.
 
 ### Bố cục (index.html, app.css, project-detail.js)
 
@@ -869,7 +872,7 @@ Dựa trên hợp đồng API có sẵn, không đổi gì: trường không g�
 
 ---
 
-## 9h. P2-4 — Sửa tay trước EditDocument: F1 · F2 · F3 (10–11/10, CHƯA COMMIT)
+## 9h. P2-4 — Sửa tay trước EditDocument: F1 · F2 · F3 (10–11/10, đã commit `44e110a` ngày 12/10, chưa push)
 
 **Vấn đề (giai đoạn 1 = chốt hành vi bằng test, `tests/test_edit_manual_conflicts.py`):** sửa tay một cảnh (PATCH `/api/timeline/{id}`, `/plan`, `/edit-beats`) ghi thẳng timeline. Trước P2-4 có hai lỗi ngược chiều nhau:
 - **(a) Kẹt vô lý:** apply so **cả hàng** với điều EditDocument biết lần cuối. Chỉ sửa `visual_prompt` (cột kế hoạch không bao giờ ghi) cũng làm cảnh thành `conflict` vĩnh viễn.
@@ -975,7 +978,7 @@ Kiểm cuối (11/10): md5 DB thật vẫn `6ece65e24917facb3b46b3ab320796c4`, k
 
 ---
 
-## 9j. Review 9g–9h và sửa lỗi F1 × F2 (11/10, ĐÃ TEST, CHƯA COMMIT)
+## 9j. Review 9g–9h và sửa lỗi F1 × F2 (11/10, đã test; đã commit `44e110a` ngày 12/10, chưa push)
 
 ### Review vòng 1 (chỉ đọc)
 
@@ -1045,7 +1048,7 @@ _sync_storyboard
 - **Mutation test** (plugin pytest đặt ngoài repo, không sửa code):
   - Đột biến "trước khi sửa" (`_held_parts` trả `{}`): 4b, 7a, 7b đỏ, tái hiện đúng xung đột giả.
   - Đột biến "phá F2" (coi phần sửa tay là đã biết): 5 test đỏ (4b, 4c, 7a và 2 test F2 trong `test_edit_integration`).
-- Kiểm cuối: md5 DB thật vẫn `6ece65e2…`; cổng 8787 trống; không còn tiến trình app/pytest. Chưa commit, chưa push, chưa chạy app.
+- Kiểm cuối (11/10, trước commit): md5 DB thật vẫn `6ece65e2…`; cổng 8787 trống; không còn tiến trình app/pytest. Lúc đó chưa commit, chưa push, chưa chạy app. Commit `44e110a` tạo ngày 12/10 (chưa push).
 
 ---
 
@@ -1067,9 +1070,9 @@ _sync_storyboard
 4. ~~T4 — Nối reconcile~~: **xong 08/10** (mục 9d), theo checklist 11a.
 5. ~~T5 — Planner theo storyboard~~: **xong 08/10** (mục 9e). Cần GPT review rủi ro 1 của 9e (T4 tự áp edit đã lập ở lần sync kế tiếp).
 6. ~~UI Bước 5 nối T5~~: **xong 09/10** (mục 9f). Chờ quyết phương án "chỉ áp sau xác nhận" (9f).
-7. **(11/10) Storyboard UI bố cục A (mục 9g) + P2-4 F1/F2/F3 (mục 9h) + sửa F1×F2 (mục 9j)**: ~~review~~ xong 2 vòng; ~~sửa Medium~~ xong; ~~test~~ xong (2397 đạt, 2 đỏ nền). **Còn lại, chờ người dùng quyết:**
-   - a. Lệnh commit riêng. File cần commit: 13 file đã sửa ở mục 2 và 2 test mới (`step5_storyboard_layout.test.cjs`, `test_edit_manual_conflicts.py`). Có đưa `HANDOFF_CHAT_MOI_BUOC5.md` vào git không?
-   - b. Có thử app thật trên PC bằng `CHAY_THU_NGHIEM_DB_TAM.bat` (DB tạm) và kiểm hiển thị Edge ở 125–150% trước khi commit không? Chưa làm.
+7. **(11/10) Storyboard UI bố cục A (mục 9g) + P2-4 F1/F2/F3 (mục 9h) + sửa F1×F2 (mục 9j)**: ~~review~~ xong 2 vòng; ~~sửa Medium~~ xong; ~~test~~ xong (2397 đạt, 2 đỏ nền); ~~commit~~ xong: `44e110a` (12/10), đúng 15 file đã duyệt, **chưa push**. **Còn lại, chờ người dùng quyết:**
+   - a. ~~Lệnh commit~~: xong, `44e110a`. `HANDOFF_CHAT_MOI_BUOC5.md` không commit (đã quyết). **Push** lên `origin/claude/dreamy-gates-4qehd3`: chờ lệnh riêng.
+   - b. Thử app thật trên PC bằng `CHAY_THU_NGHIEM_DB_TAM.bat` (DB tạm) và kiểm hiển thị Edge ở 125–150%: **chưa làm** (commit đã tạo mà chưa thử). Có làm trước khi push không?
    - c. Task riêng cho lỗi Low nhánh agent (mục 9j). Chưa làm, vẫn UNVERIFIED.
    - d. (Tùy chọn) mutation test riêng cho F1 `ScopedCheck` và F3 `preview`.
    - e. L2, L3 (mục 9j) đã chốt là giới hạn đã biết, không làm thêm.
