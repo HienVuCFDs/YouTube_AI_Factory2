@@ -3347,6 +3347,11 @@ def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: se
         return {"status": "error", "detail": str(exc)}
     if done["applied"]:
         database.resync_timeline_segment_states(project_id)
+    return {**_edit_apply_outcome(done), "document_mode": synced["mode"]}
+
+
+def _edit_apply_outcome(done: dict[str, Any]) -> dict[str, Any]:
+    """What an apply_scenes() run comes to: {"status", "counts", ...}. "partial" and "blocked" are never success."""
     skipped: dict[str, int] = {}
     for item in done["skipped"]:
         skipped[item["reason"]] = skipped.get(item["reason"], 0) + 1
@@ -3360,8 +3365,7 @@ def _apply_edit_document(project_id: int, script: dict[str, Any], *, refresh: se
         status = "unchanged"
     else:
         status = "nothing_to_apply"
-    return {"status": status, "document_hash": done["document_hash"], "document_mode": synced["mode"],
-            "artifact_id": done["artifact_id"],
+    return {"status": status, "document_hash": done["document_hash"], "artifact_id": done["artifact_id"],
             "counts": {"applied": len(done["applied"]), "unchanged": len(done["unchanged"]),
                        "conflicts": len(done["conflicts"]), "skipped": skipped},
             "applied": done["applied"], "unchanged": done["unchanged"], "skipped": done["skipped"],
@@ -8152,6 +8156,157 @@ def get_project_edit_document(project_id: int) -> dict[str, Any]:
     counts["stale"] = counts["scenes"] - counts["planned"] - counts["needs_plan"]
     return {**answer, "state": edit_store.CURRENT, "document_hash": document_hash, **freshness, "counts": counts,
             "scenes": scenes}
+
+
+class EditDocumentSceneRequest(BaseModel):
+    """Bước 05 · T6a: a person's own edit of one scene's layers. A field left out keeps what the scene's edit has."""
+
+    overlays: list[dict[str, Any]] | None = Field(default=None, max_length=12)
+    sound_cues: list[dict[str, Any]] | None = Field(default=None, max_length=8)
+    direction: dict[str, Any] | None = None
+    transition: Literal["cut", "fade"] | None = None
+    effect: Literal["zoom_in", "zoom_out", "static"] | None = None
+    note: str | None = Field(default=None, max_length=400)
+    beats: list[EditBeatRequest] | None = Field(default=None, max_length=24)
+
+
+# A scene job not in one of these may still write its picture into the row or a beat (Database._SCENE_JOB_DONE).
+_SCENE_JOBS_FINISHED = frozenset({"completed", "error", "cancelled"})
+
+
+@app.put("/api/projects/{project_id}/edit-document/scenes/{scene_key}")
+def update_project_edit_document_scene(project_id: int, scene_key: str, payload: EditDocumentSceneRequest) -> dict[str, Any]:
+    """Bước 05 · T6a: one scene's layers edited by hand - kept in the EditDocument, then applied to that scene only.
+
+    A hand edit of a planned project goes where the plan's own edits go (the
+    EditDocument), never straight to the timeline: the scene's edit as it
+    plays now (effective_edit), with the parts given replaced and the rest
+    kept, becomes its edit in one new version (edit_store.plan_scene), and
+    apply_scenes() writes that one scene - the other scenes are not applied
+    here, whatever T4 would do at the next sync.
+
+    Refused before anything is kept: a project outside the plan workflow, a
+    storyboard or script that is not the current one, voices made with other
+    settings (409); a scene not in the document (404); a part that cannot be
+    normalised, beats that do not fill the scene, an edit that does not fit
+    it (422); beats with a scene job, or a scene job still running on the row
+    (409). An EditDocument kept by another request since this one read it
+    is never written over: 409, nothing kept. The answer of the apply is
+    that of _apply_edit_document: "applied"
+    and "unchanged" only are success - a conflict (the row holds what the
+    EditDocument never knew) is "blocked", the row left as it is.
+    """
+    if not database.get_production_project(project_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án")
+    if all(getattr(payload, field) is None for field in EditDocumentSceneRequest.model_fields):
+        raise HTTPException(status_code=422, detail="Không có phần nào để sửa cho cảnh này")
+    gate, row = _storyboard_gate(project_id, with_voice=True)
+    if gate.get("mode") != storyboard_engine.PLAN_MODE:
+        raise HTTPException(status_code=409, detail="Dự án không thuộc luồng Kế hoạch: lớp dựng sửa trên timeline như trước")
+    script = script_engine.current_script(database, project_id, _current_project_plan(project_id))
+    latest = database.get_latest_project_storyboard(project_id, script_id=int(script["id"])) if script else None
+    if gate.get("state") != storyboard_engine.CURRENT or not row or not script or not latest \
+            or int(row["id"]) != int(latest["id"]) or int(row["script_id"]) != int(script["id"]):
+        raise HTTPException(status_code=409, detail="Storyboard hoặc kịch bản không phải bản hiện hành: chưa lưu gì")
+    if gate.get("voice_outdated"):
+        raise HTTPException(status_code=409, detail="Có giọng làm với cấu hình cũ: chia cảnh lại trước khi sửa lớp dựng")
+    script_id = int(script["id"])
+    try:
+        # Read only: everything is checked against the document the sync below will keep, before anything is kept.
+        seen = edit_store.preview(database, project_id, script_id, row)
+    except edit_store.EditStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    scene = next((item for item in seen["document"]["scenes"] if item["scene_key"] == scene_key), None)
+    if scene is None:
+        raise HTTPException(status_code=404, detail=f"Không có cảnh {scene_key} trong kế hoạch dựng hiện tại")
+    if scene.get("segment_id") is None:
+        raise HTTPException(status_code=409, detail="Cảnh này chưa có hàng timeline để áp lớp dựng")
+    segment_id = int(scene["segment_id"])
+    value = _scene_edit_with(project_id, scene, payload)
+    seconds = float(scene["voice"]["duration_seconds"])
+    errors = edit_document.timing_errors(value, seconds)
+    if errors:
+        raise HTTPException(status_code=422, detail=f"Lớp dựng không vừa cảnh: {errors[0]}")
+    try:
+        edit_apply.row_writes(value)
+    except edit_apply.InvalidEditError as exc:
+        raise HTTPException(status_code=422, detail=f"Lớp dựng không hợp lệ: {exc}") from exc
+    jobs = [job for job in database.list_scene_generation_jobs(project_id, limit=1_000_000)
+            if int(job.get("timeline_segment_id") or 0) == segment_id]
+    if any(str(job.get("status") or "") not in _SCENE_JOBS_FINISHED for job in jobs):
+        raise HTTPException(status_code=409, detail="Cảnh đang có job tạo hình chạy: chờ job xong rồi sửa lớp dựng")
+    if value["beats"]:
+        # As apply_edit_document_rows (beat_has_jobs): an edit that names beats is never applied over beats a scene
+        # job points at (a job retried later writes into its beat) - refused here, before a version it would skip.
+        beat_ids = {int(beat["id"]) for beat in database.list_timeline_edit_beats(segment_id)}
+        if any(int(job.get("edit_beat_id") or 0) in beat_ids for job in jobs):
+            raise HTTPException(status_code=409, detail="Nhịp dựng của cảnh đã có job tạo hình: chưa sửa được lớp dựng của cảnh này")
+    try:
+        synced = edit_store.sync(database, project_id, script_id, row)
+        if synced["document_hash"] != seen["document_hash"]:
+            raise HTTPException(status_code=409, detail="Kế hoạch dựng vừa thay đổi trong lúc lưu: tải lại rồi thử lại")
+        # Made on the very version checked above and kept only while it is still the latest (save: BEGIN IMMEDIATE,
+        # expected_parent) - never edit_store.plan_scene, which builds on whatever is latest when it runs: an edit
+        # another request kept in between would be written over by this one, made from the version before it.
+        try:
+            planned = edit_document.plan_scene(synced["document"], synced["storyboard"], scene_key, value)
+        except edit_document.EditDocumentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        kept = edit_store.save(database, project_id, script_id, planned, storyboard_row=row,
+                               expected_parent=synced["document_hash"])
+    except edit_store.EditStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    answer = {"scene_key": scene_key, "segment_id": segment_id, "edit": value, "planned_document_hash": kept["document_hash"]}
+    try:
+        done = edit_apply.apply_scenes(database, project_id, script_id, row, scene_keys=[scene_key])
+    except edit_store.EditStoreError as exc:
+        # Kept in the EditDocument, not written: never called saved.
+        return {**answer, "status": "error", "detail": str(exc)}
+    if done["applied"]:
+        database.resync_timeline_segment_states(project_id)
+    return {**answer, **_edit_apply_outcome(done)}
+
+
+def _scene_edit_with(project_id: int, scene: dict[str, Any], payload: EditDocumentSceneRequest) -> dict[str, Any]:
+    """The scene's edit as it plays now (effective_edit) with the parts given replaced - normalised as the timeline
+    routes normalise them (PATCH /api/timeline/{id}/plan, PUT …/edit-beats). HTTP 422 for a part that cannot be."""
+    seconds = float(scene["voice"]["duration_seconds"])
+    value = edit_document.effective_edit(scene)
+    try:
+        if payload.overlays is not None:
+            value["layers"]["overlays"] = normalize_graphic_overlays(payload.overlays, seconds)
+        if payload.sound_cues is not None:
+            value["layers"]["sound_cues"] = _normalise_sound_cues(payload.sound_cues, seconds)
+        if payload.direction is not None:
+            value["layers"]["direction"] = normalize_direction(payload.direction, seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Kế hoạch lớp dựng không hợp lệ: {exc}") from exc
+    for field, column in (("transition", "edit_transition"), ("effect", "edit_effect"), ("note", "edit_note")):
+        if getattr(payload, field) is not None:
+            value["visual"][column] = getattr(payload, field)
+    if payload.beats is not None:
+        if not payload.beats:
+            # An edit without beats leaves the row's beats as they are (edit_apply.row_writes): no way to drop them here.
+            raise HTTPException(status_code=422, detail="Chưa hỗ trợ bỏ hết nhịp dựng của cảnh: cần ít nhất một nhịp")
+        total = sum(float(beat.duration_seconds) for beat in payload.beats)
+        if abs(total - seconds) > 0.35:
+            raise HTTPException(status_code=422,
+                                detail=f"Tổng nhịp dựng ({total:.1f}s) phải khớp lời đọc của cảnh ({seconds:.1f}s)")
+        beats, cursor = [], 0.0
+        for beat in payload.beats:
+            visual_path = beat.visual_path.strip()
+            if beat.asset_id:
+                asset = database.get_project_asset(int(beat.asset_id))
+                if not asset or int(asset["project_id"]) != int(project_id):
+                    raise HTTPException(status_code=422, detail=f"Asset {beat.asset_id} không thuộc dự án của cảnh")
+                visual_path = str(asset.get("file_path") or "")
+            beats.append({"asset_id": int(beat.asset_id) if beat.asset_id else None, "visual_path": visual_path,
+                          "source_kind": beat.source_kind, "start_seconds": round(cursor, 3),
+                          "duration_seconds": float(beat.duration_seconds), "effect": beat.effect,
+                          "transition": beat.transition, "prompt": beat.prompt, "status": beat.status})
+            cursor += float(beat.duration_seconds)
+        value["beats"] = beats
+    return edit_document.normalize_edit(value)
 
 
 def _measured_source_marks(project: dict[str, Any]) -> list[dict[str, Any]]:

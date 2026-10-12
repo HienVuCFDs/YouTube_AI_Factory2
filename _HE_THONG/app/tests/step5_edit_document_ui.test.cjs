@@ -347,3 +347,201 @@ test('a refused rebuild sends nothing', async () => {
   await ui.sandbox.rebuildStoryboardFromScript();
   assert.equal(ui.posts().length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// T6a · a hand edit of one scene's layers goes to the EditDocument in the plan
+// workflow (one PUT …/edit-document/scenes/{scene_key}), never straight to the
+// timeline; the legacy workflow keeps its timeline routes.
+// ---------------------------------------------------------------------------
+
+const SCENE_FUNCTIONS = ['storyboardEditSummary', 'legacyStoryboardEditSummary', 'editBeatsForSegment', 'editBeatSelect',
+  'refreshStudioStoryboard', 'collectStudioSceneEditBeats', 'saveStudioSceneEditPlan', 'applyStudioSceneEdit',
+  'parseSceneJsonField', 'editStudioSceneJsonLayer', 'editStudioSceneOverlays', 'editStudioSceneSoundCues'];
+const sceneCode = block + SCENE_FUNCTIONS.map(fn).join('\n');
+const BEAT = {id: 501, beat_index: 1, source_kind: 'primary', duration_seconds: 2, effect: 'static', transition: 'cut', prompt: 'A'};
+const SCENE_ROWS = [{id: 31, segment_index: 1, overlays: '[]', sound_cues: '[]', visual_path: '/p/a.png', edit_beats: [BEAT]},
+  {id: 32, segment_index: 2, overlays: '[]', sound_cues: '[]', visual_path: '', edit_beats: []}];
+const APPLIED = {status: 'applied', counts: {applied: 1, unchanged: 0, conflicts: 0, skipped: {}}, applied: [{segment_id: 31}],
+  conflicts: [], skipped: []};
+const HAND = '[{"kind":"text","text":"Chữ tay","start_seconds":0,"end_seconds":1}]';
+
+function sceneStudio({doc = DOC(), put = () => APPLIED, prompt = HAND, docFails = false, reloadFails = false} = {}) {
+  const calls = [];
+  const messages = [];
+  // One row of the scene's beat editor, as the page reads it back.
+  const values = {'.beat-source': 'primary', '.beat-duration': '2', '.beat-effect': 'zoom_in', '.beat-transition': 'fade',
+    '.beat-prompt': 'nhịp tay'};
+  const host = {querySelectorAll: () => [{dataset: {assetId: '', visualPath: ''}, querySelector: (selector) => ({value: values[selector]})}]};
+  const sandbox = {
+    state: {studioProjectId: P, timeline: SCENE_ROWS, shots: []},
+    $: () => null,
+    api: async (url, options = {}) => {
+      const method = options.method || 'GET';
+      const body = options.body ? JSON.parse(options.body) : null;
+      calls.push({url, method, body});
+      if (url === `/api/projects/${P}/edit-document`) {
+        if (docFails) { const error = new Error('máy chủ lỗi'); error.status = 500; throw error; }
+        return doc;
+      }
+      if (url === `/api/projects/${P}`) {
+        if (reloadFails) { const error = new Error('mất kết nối'); error.status = 0; throw error; }
+        return {project: {id: P}, latest_shots: [], latest_timeline: SCENE_ROWS};
+      }
+      if (method === 'PUT' && url.startsWith(`/api/projects/${P}/edit-document/scenes/`)) return put(body);
+      if (url.startsWith('/api/timeline/')) return {status: 'saved', beats: [], segment: {}};
+      throw new Error(`unexpected ${method} ${url}`);
+    },
+    esc: (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[c])),
+    setMessage: (text, type = '') => messages.push([text, type]),
+    confirm: () => true,
+    window: {prompt: () => prompt},
+    renderStudioStoryboard: (shots, timeline) => {
+      sandbox.state.timeline = timeline;
+      sandbox.state.studioEditDocumentLoad = sandbox.refreshStudioEditDocument();
+    },
+    document: {querySelectorAll: () => [], querySelector: (selector) => (selector.includes('data-edit-segment') ? host : null)},
+    studioEditBeatGenerationSettings: async () => ({image_provider: 'gemini_web_image', ratio: '1280:720'}),
+    watchStudioSceneGenerationJob() {},
+    Promise, JSON, Math, Number, String, Object, Array, Boolean, Error,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(sceneCode, sandbox);
+  const writes = () => calls.filter((call) => call.method !== 'GET');
+  return {sandbox, calls, writes, messages};
+}
+
+const nothingOnTheTimeline = (calls) => {
+  for (const call of calls) {
+    if (call.method === 'GET') continue;
+    assert.ok(!call.url.startsWith('/api/timeline/'), `a timeline route was written to: ${call.method} ${call.url}`);
+  }
+};
+
+test("T6a: in the plan workflow a scene's chữ động is one PUT to its EditDocument scene, never PATCH /plan", async () => {
+  const ui = sceneStudio();
+  await ui.sandbox.editStudioSceneOverlays(31);
+  assert.deepEqual(ui.writes().map((call) => [call.method, call.url, call.body]),
+    [['PUT', `/api/projects/${P}/edit-document/scenes/sk-31`, {overlays: JSON.parse(HAND)}]]);
+  nothingOnTheTimeline(ui.calls);
+  assert.deepEqual(ui.messages.at(-1), ['Chữ động cảnh 1: đã lưu vào kế hoạch dựng và áp vào timeline.', 'success']);
+});
+
+test('T6a: SFX and the beats of a scene go to the EditDocument too, as the page reads them', async () => {
+  const sfx = sceneStudio({prompt: '[{"type":"whoosh","start_seconds":0.2,"end_seconds":0.7}]'});
+  await sfx.sandbox.editStudioSceneSoundCues(31);
+  assert.deepEqual(sfx.writes().map((call) => [call.url, call.body]),
+    [[`/api/projects/${P}/edit-document/scenes/sk-31`, {sound_cues: [{type: 'whoosh', start_seconds: 0.2, end_seconds: 0.7}]}]]);
+  nothingOnTheTimeline(sfx.calls);
+  const beats = sceneStudio();
+  await beats.sandbox.saveStudioSceneEditPlan(31);
+  assert.deepEqual(beats.writes().map((call) => [call.url, call.body]), [[`/api/projects/${P}/edit-document/scenes/sk-31`, {beats: [
+    {asset_id: null, visual_path: '/p/a.png', source_kind: 'primary', duration_seconds: 2, effect: 'zoom_in', transition: 'fade',
+      prompt: 'nhịp tay', status: 'ready'}]}]]);
+  nothingOnTheTimeline(beats.calls);
+});
+
+test('T6a: a conflict, a skip, an error or an unknown answer is never called saved; "unchanged" is neutral', async () => {
+  const cases = [
+    [{status: 'blocked', counts: {applied: 0, unchanged: 0, conflicts: 1, skipped: {}}, conflicts: [{segment_id: 31}]}, /chưa áp vào timeline.*1 cảnh xung đột/],
+    [{status: 'partial', counts: {applied: 0, unchanged: 1, conflicts: 0, skipped: {beat_has_jobs: 1}}}, /chưa áp vào timeline/],
+    [{status: 'error', detail: 'EditDocument không còn hiện hành'}, /đã lưu vào kế hoạch dựng nhưng chưa áp vào timeline: EditDocument không còn hiện hành/],
+    [{status: 'nothing_to_apply'}, /không coi là đã áp/],
+    [{status: 'lạ'}, /không coi là đã áp/],
+    [{}, /không coi là đã áp/],
+  ];
+  for (const [answer, text] of cases) {
+    const ui = sceneStudio({put: () => answer});
+    await ui.sandbox.editStudioSceneOverlays(31);
+    const [message, type] = ui.messages.at(-1);
+    assert.equal(type, 'error', JSON.stringify(answer));
+    assert.match(message, text);
+  }
+  const unchanged = sceneStudio({put: () => ({status: 'unchanged', counts: {applied: 0, unchanged: 1, conflicts: 0, skipped: {}}})});
+  await unchanged.sandbox.editStudioSceneOverlays(31);
+  assert.deepEqual(unchanged.messages.at(-1), ['Chữ động cảnh 1: kế hoạch dựng và timeline đã đúng như vậy: không cần áp lại.', '']);
+});
+
+test('T6a: a request the server refuses (409/422) is an error in its own words, and the timeline is not written', async () => {
+  const ui = sceneStudio({put: () => { const error = new Error('Nhịp dựng của cảnh đã có job tạo hình'); error.status = 409; throw error; }});
+  await ui.sandbox.saveStudioSceneEditPlan(31);
+  assert.deepEqual(ui.messages.at(-1), ['Không lưu được nhịp dựng cảnh 1: Nhịp dựng của cảnh đã có job tạo hình', 'error']);
+  nothingOnTheTimeline(ui.calls);
+});
+
+test('T6a: saved but not reloaded is never "not saved", and nothing is sent again', async () => {
+  for (const [answer, saved] of [[APPLIED, 'đã lưu vào kế hoạch dựng và áp vào timeline.'],
+    [{status: 'unchanged', counts: {applied: 0, unchanged: 1, conflicts: 0, skipped: {}}}, 'không cần áp lại.']]) {
+    const ui = sceneStudio({put: () => answer, reloadFails: true});
+    await ui.sandbox.editStudioSceneOverlays(31);
+    const [text, type] = ui.messages.at(-1);
+    assert.ok(text.includes(saved), text);
+    assert.match(text, /Chưa tải lại được storyboard \(mất kết nối\)/);
+    assert.doesNotMatch(text, /Không lưu được/);
+    assert.equal(type, '', 'saved but not reloaded: not an error, not a plain success either');
+    assert.equal(ui.writes().length, 1, 'the PUT is not sent again');
+  }
+});
+
+test('T6a: a failed reload changes nothing about a save that failed or a conflict', async () => {
+  const blocked = sceneStudio({reloadFails: true,
+    put: () => ({status: 'blocked', counts: {applied: 0, unchanged: 0, conflicts: 1, skipped: {}}, conflicts: [{segment_id: 31}]})});
+  await blocked.sandbox.editStudioSceneOverlays(31);
+  const [text, type] = blocked.messages.at(-1);
+  assert.equal(type, 'error');
+  assert.match(text, /chưa áp vào timeline.*1 cảnh xung đột/);
+  assert.match(text, /Chưa tải lại được storyboard/);
+  assert.equal(blocked.writes().length, 1);
+
+  const refused = sceneStudio({reloadFails: true,
+    put: () => { const error = new Error('Storyboard hoặc kịch bản không phải bản hiện hành'); error.status = 409; throw error; }});
+  await refused.sandbox.editStudioSceneOverlays(31);
+  assert.deepEqual(refused.messages.at(-1), ['Không lưu được chữ động cảnh 1: Storyboard hoặc kịch bản không phải bản hiện hành', 'error']);
+  assert.equal(refused.writes().length, 1);
+});
+
+test('T6a: a scene the EditDocument does not hold, or a status that cannot be read, sends nothing', async () => {
+  const missing = sceneStudio({doc: DOC({state: 'missing', scenes: []})});
+  await missing.sandbox.editStudioSceneOverlays(31);
+  assert.deepEqual(missing.writes(), []);
+  assert.match(missing.messages.at(-1)[0], /chưa có trong kế hoạch dựng hiện tại/);
+  const absent = sceneStudio({doc: DOC({scenes: [scene(33, 'ready', 'applied')]})});
+  await absent.sandbox.saveStudioSceneEditPlan(31);
+  assert.deepEqual(absent.writes(), []);
+  const unknown = sceneStudio({docFails: true});
+  await unknown.sandbox.editStudioSceneOverlays(31);
+  await unknown.sandbox.saveStudioSceneEditPlan(31);
+  await unknown.sandbox.applyStudioSceneEdit(31);
+  assert.deepEqual(unknown.writes(), [], 'not known which workflow: nothing is written anywhere');
+});
+
+test('T6a: a second click while a scene is being saved sends nothing', async () => {
+  const pending = [];
+  const ui = sceneStudio({put: () => new Promise((resolve) => { pending.push(() => resolve(APPLIED)); })});
+  const first = ui.sandbox.editStudioSceneOverlays(31);
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = ui.sandbox.editStudioSceneOverlays(31);
+  await new Promise((resolve) => setImmediate(resolve));
+  pending.forEach((release) => release());   // every request answers, so a missing guard fails instead of hanging
+  await Promise.all([first, second]);
+  assert.equal(ui.writes().length, 1);
+});
+
+test('T6a: "Áp dụng cảnh này" is not drawn and is refused in the plan workflow; the legacy workflow keeps it', async () => {
+  const plan = sceneStudio();
+  await plan.sandbox.refreshStudioEditDocument();
+  assert.ok(!plan.sandbox.legacyStoryboardEditSummary(SCENE_ROWS[0], 'Nhịp dựng trên timeline').includes('applyStudioSceneEdit('));
+  await plan.sandbox.applyStudioSceneEdit(31);
+  assert.deepEqual(plan.writes(), [], 'no AI picture made, no beats written');
+  assert.match(plan.messages.at(-1)[0], /Ở luồng Kế hoạch/);
+
+  const legacy = sceneStudio({doc: LEGACY});
+  await legacy.sandbox.refreshStudioEditDocument();
+  assert.ok(legacy.sandbox.legacyStoryboardEditSummary(SCENE_ROWS[0]).includes('applyStudioSceneEdit(31)'));
+  await legacy.sandbox.editStudioSceneOverlays(31);
+  await legacy.sandbox.saveStudioSceneEditPlan(31);
+  await legacy.sandbox.applyStudioSceneEdit(31);
+  assert.deepEqual(legacy.writes().map((call) => [call.method, call.url]), [
+    ['PATCH', '/api/timeline/31/plan'], ['PUT', '/api/timeline/31/edit-beats'],
+    ['PUT', '/api/timeline/31/edit-beats'], ['POST', '/api/timeline/31/edit-beats/apply']]);
+  assert.ok(!legacy.calls.some((call) => call.url.includes('/edit-document/scenes/')), 'the legacy workflow has no EditDocument');
+});

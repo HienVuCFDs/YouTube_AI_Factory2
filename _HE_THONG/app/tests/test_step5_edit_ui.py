@@ -44,7 +44,9 @@ def test_the_page_runs_its_step5_contract_for_real(script: str) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("node không có trên máy chạy test")
-    result = subprocess.run([node, "--test", str(Path(__file__).with_name(script))], capture_output=True, text=True, timeout=120)
+    # node writes UTF-8 (the test names are Vietnamese); the platform's default codec would lose the report.
+    result = subprocess.run([node, "--test", str(Path(__file__).with_name(script))], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=120)
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
 
 

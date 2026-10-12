@@ -1430,6 +1430,62 @@
     }
   }
 
+  // Bước 05 · T6a: what a hand edit of one scene came to. Only "applied" and "unchanged" are fine; anything
+  // else was kept in the EditDocument but did not reach the timeline (a conflict, a skip, an error).
+  function editDocumentSceneOutcome(result) {
+    if (result?.status === 'applied') return {ok: true, type: 'success', text: 'đã lưu vào kế hoạch dựng và áp vào timeline.'};
+    if (result?.status === 'unchanged') return {ok: true, type: '', text: 'kế hoạch dựng và timeline đã đúng như vậy: không cần áp lại.'};
+    if (result?.status === 'error') {
+      return {ok: false, type: 'error', text: `đã lưu vào kế hoạch dựng nhưng chưa áp vào timeline: ${result.detail || 'không rõ lỗi'}.`};
+    }
+    const applied = ['partial', 'blocked'].includes(result?.status) ? editApplyOutcome(result) : null;
+    return {ok: false, type: 'error', text: applied
+      ? `đã lưu vào kế hoạch dựng nhưng chưa áp vào timeline. ${applied.text}`
+      : `máy chủ trả trạng thái không rõ (${result?.status ?? 'trống'}): không coi là đã áp.`};
+  }
+
+  // One PUT to the EditDocument for one scene (never /api/timeline/... in the plan workflow). A second click while
+  // it runs sends nothing.
+  let studioSceneLayerSaving = false;
+  async function saveStudioEditDocumentScene(segmentId, changes, label) {
+    const projectId = Number(state.studioProjectId || 0);
+    if (!projectId) { setMessage('Chưa có project.', 'error'); return null; }
+    const doc = state.studioEditDocument;
+    const scene = doc?.state === 'current' ? studioEditDocumentScene({id: segmentId}, doc) : null;
+    if (!scene) {
+      setMessage('Cảnh này chưa có trong kế hoạch dựng hiện tại. Bấm “Lập kế hoạch dựng” trước.', 'error');
+      return null;
+    }
+    if (studioSceneLayerSaving) return null;
+    studioSceneLayerSaving = true;
+    const number = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId))?.segment_index || '';
+    try {
+      let result;
+      try {
+        result = await api(`/api/projects/${projectId}/edit-document/scenes/${encodeURIComponent(scene.scene_key)}`, {
+          method: 'PUT', body: JSON.stringify(changes),
+        });
+      } catch (error) {
+        setMessage(`Không lưu được ${label} cảnh ${number}: ${error.message}`, 'error');
+        return null;
+      }
+      // The server's answer is what was saved; a reload that fails afterwards never turns it into "not saved",
+      // and nothing is sent again.
+      const outcome = editDocumentSceneOutcome(result);
+      let reload = '';
+      try {
+        await refreshStudioStoryboard();
+      } catch (error) {
+        reload = ` Chưa tải lại được storyboard (${error.message}): danh sách có thể còn nội dung cũ, hãy mở lại dự án để xem bản mới nhất.`;
+      }
+      setMessage(`${label[0].toUpperCase()}${label.slice(1)} cảnh ${number}: ${outcome.text}${reload}`,
+        outcome.ok && reload ? '' : outcome.type);
+      return result;
+    } finally {
+      studioSceneLayerSaving = false;
+    }
+  }
+
   // One POST to the step. `apply` asks for confirmed_apply - only ever from a click the user confirmed.
   async function runStudioEditDocumentPlan(options = {}, {apply = false} = {}) {
     const projectId = Number(state.studioProjectId || 0);
@@ -1627,7 +1683,7 @@
         <input class="beat-prompt" value="${esc(beat.prompt || '')}" placeholder="Prompt ảnh phụ nếu chọn Ảnh AI">
         <em>${esc(labels[beat.status] || beat.status || 'sẵn sàng')}</em>
       </div>`).join('');
-    return `<div class="storyboard-edit-summary" data-edit-segment="${segment.id}"><b>${esc(heading)}:</b> ${beats.length} nhịp · ${inserts} frame/ảnh phụ · ${esc(statusText)} · hiệu ứng ${esc(effect)} · chuyển ${esc(transition)}<div class="secondary-text">${esc(detail)}</div><details><summary>Sửa kế hoạch cảnh</summary><div class="storyboard-edit-beats">${rows}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập lại kế hoạch cảnh</button><button class="btn small ghost" type="button" onclick="saveStudioSceneEditPlan(${segment.id})">Lưu kế hoạch cảnh</button><button class="btn small primary" type="button" onclick="applyStudioSceneEdit(${segment.id})">Áp dụng cảnh này</button></div></details></div>`;
+    return `<div class="storyboard-edit-summary" data-edit-segment="${segment.id}"><b>${esc(heading)}:</b> ${beats.length} nhịp · ${inserts} frame/ảnh phụ · ${esc(statusText)} · hiệu ứng ${esc(effect)} · chuyển ${esc(transition)}<div class="secondary-text">${esc(detail)}</div><details><summary>Sửa kế hoạch cảnh</summary><div class="storyboard-edit-beats">${rows}</div><div class="queue-controls" style="justify-content:flex-start;margin-top:7px;gap:6px;flex-wrap:wrap"><button class="btn small ghost" type="button" onclick="planStudioSceneEdit(${segment.id})">Lập lại kế hoạch cảnh</button><button class="btn small ghost" type="button" onclick="saveStudioSceneEditPlan(${segment.id})">Lưu kế hoạch cảnh</button>${studioEditFlow() === 'plan' ? '' : `<button class="btn small primary" type="button" onclick="applyStudioSceneEdit(${segment.id})">Áp dụng cảnh này</button>`}</div></details></div>`;
   }
 
   async function studioEditBeatGenerationSettings(resolveProvider = true, forcedProvider = '') {
@@ -1668,9 +1724,13 @@
     return beats;
   }
 
-  async function saveStudioSceneEditPlan(segmentId, quiet = false) {
+  async function saveStudioSceneEditPlan(segmentId, quiet = false, options = {}) {
+    const flow = options.flow || await studioEditFlowNow();
+    if (!flow) { studioEditFlowUnknown(); return null; }
     const beats = collectStudioSceneEditBeats(segmentId);
     if (!beats) return null;
+    // In the plan workflow the beats go to the EditDocument and that scene only is applied (T6a), never the timeline.
+    if (flow === 'plan') return saveStudioEditDocumentScene(segmentId, {beats}, 'nhịp dựng');
     try {
       const result = await api(`/api/timeline/${segmentId}/edit-beats`, {
         method: 'PUT', body: JSON.stringify({beats}),
@@ -1715,12 +1775,18 @@
 
   async function applyStudioSceneEdit(segmentId, options = {}) {
     if (!state.studioProjectId) return setMessage('Chưa có project.', 'error');
+    // It makes AI pictures and writes beats straight to the timeline: never in the plan workflow (T6a).
+    const flow = options.flow || await studioEditFlowNow();
+    if (flow === 'plan') {
+      return setMessage('Ở luồng Kế hoạch, cảnh được áp qua kế hoạch dựng: lưu nhịp dựng của cảnh, hoặc dùng “Áp dụng vào timeline…”.', 'error');
+    }
+    if (!flow) return studioEditFlowUnknown();
     const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
     if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
     const currentBeats = editBeatsForSegment(segment);
     if (!currentBeats.length) return setMessage('Cảnh này chưa có kế hoạch dựng. Hãy lập kế hoạch trước.', 'error');
     const saved = document.querySelector(`[data-edit-segment="${segmentId}"]`)
-      ? await saveStudioSceneEditPlan(segmentId, true)
+      ? await saveStudioSceneEditPlan(segmentId, true, {flow: 'legacy'})
       : {beats: currentBeats};
     const beats = saved?.beats || currentBeats;
     const needsAi = beats.some((beat) =>
@@ -1820,7 +1886,7 @@
         setStudioProgress(percent, `Đang áp dụng kế hoạch cảnh ${labelIndex} · ${index}/${segments.length} đã xong...`);
         if (stateBox) stateBox.innerHTML = `<b>Đang áp dụng:</b> cảnh ${esc(labelIndex)} · ${index}/${segments.length} đã xong.`;
         try {
-          const result = await applyStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true, confirmed: true, imageProvider: provider});
+          const result = await applyStudioSceneEdit(Number(segment.id), {quiet: true, skipRefresh: true, confirmed: true, imageProvider: provider, flow: 'legacy'});
           applied += 1;
           queued += (result?.jobs || []).length;
         } catch (error) {
@@ -1948,6 +2014,8 @@
   async function editStudioSceneJsonLayer(segmentId, key, label, emptyTemplate) {
     const segment = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId));
     if (!segment) return setMessage('Không tìm thấy cảnh trong storyboard hiện tại.', 'error');
+    const flow = await studioEditFlowNow();
+    if (!flow) return studioEditFlowUnknown();
     const current = parseSceneJsonField(segment, key);
     const initial = JSON.stringify(current.length ? current : emptyTemplate, null, 2);
     const raw = window.prompt(`Sửa ${label} bằng JSON array. Để [] nếu không dùng.`, initial);
@@ -1959,6 +2027,8 @@
       return setMessage(`${label} không phải JSON hợp lệ: ${error.message}`, 'error');
     }
     if (!Array.isArray(parsed)) return setMessage(`${label} phải là JSON array.`, 'error');
+    // In the plan workflow the layer goes to the EditDocument and that scene only is applied (T6a), never the timeline.
+    if (flow === 'plan') return saveStudioEditDocumentScene(segmentId, {[key]: parsed}, label);
     try {
       await api(`/api/timeline/${segmentId}/plan`, {
         method: 'PATCH',
