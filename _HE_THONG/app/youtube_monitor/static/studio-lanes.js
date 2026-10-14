@@ -296,12 +296,18 @@
         method: 'POST',
         body: JSON.stringify({detect: true}),
       });
-      renderCleanupState(result.cleanups, result.segments);
+      renderCleanupState(result.cleanups, result.segments, result.status);
+      if (result.status === 'needs_confirmation') {
+        const stale = cleanupStaleText(result);
+        setMessage(`Đã dò ra ${result.cleanups.length} vùng và ghi vào kế hoạch dựng (chưa xác nhận): chưa che cảnh nào trên timeline. Bấm “Áp dụng vào timeline…” ở Bước 5 để áp.${stale}`, stale ? 'error' : '');
+        return;
+      }
+      const missed = cleanupNotAppliedText(result);
       setMessage(
         result.status === 'nothing_found'
           ? 'Không tìm thấy phụ đề hay logo cháy sẵn trên video gốc.'
-          : `Đã dò ra ${result.cleanups.length} vùng và che trên ${result.segments} cảnh.`,
-        result.status === 'nothing_found' ? '' : 'success');
+          : `Đã dò ra ${result.cleanups.length} vùng và che trên ${result.segments} cảnh.${missed}`,
+        result.status === 'nothing_found' ? '' : (missed ? 'error' : 'success'));
     } catch (error) { setMessage(error.message, 'error'); }
   }
 
@@ -311,9 +317,32 @@
     top_left: 'trên trái', bottom_right: 'dưới phải', bottom_left: 'dưới trái', center: 'giữa khung',
   };
 
-  function renderCleanupState(cleanups, segments) {
+  // In the plan workflow the cleanups go through the EditDocument: a scene it could not take them for (a hand
+  // edit, a job still running) is named, never called covered.
+  function cleanupNotAppliedText(result, clear = false) {
+    const missed = Array.isArray(result?.not_applied) ? result.not_applied : [];
+    if (!missed.length) return '';
+    return ` ${missed.length} cảnh chưa ${clear ? 'bỏ che' : 'che'} được (${missed[0].reason || 'chưa áp được'}${missed.length > 1 ? '…' : ''}) - xem Bước 5.`;
+  }
+
+  // Bước 05 · T9: kept in a plan nobody confirmed, the cleanups skip a scene whose layers were made for other words or
+  // timing - confirming will not cover it either, so the message names it and what to do first.
+  function cleanupStaleText(result) {
+    const stale = (Array.isArray(result?.not_applied) ? result.not_applied : []).filter((item) => item?.code === 'stale_layers');
+    if (!stale.length) return '';
+    const scenes = stale.map((item) => item.scene_index).filter((index) => Number.isFinite(Number(index)) && index !== null);
+    const named = scenes.length ? ` (Cảnh ${scenes.join(', ')})` : '';
+    return ` Bỏ qua ${stale.length} cảnh có lớp dựng cũ${named}: lập lại kế hoạch ${stale.length > 1 ? 'các cảnh này' : 'cảnh này'} trước.`;
+  }
+
+  function renderCleanupState(cleanups, segments, status = '') {
     const box = $('studioCleanupState');
     if (!box) return;
+    // Bước 05 · T9: kept in an edit plan nobody confirmed yet - nothing is covered on the timeline, and it says so.
+    if (status === 'needs_confirmation') {
+      box.innerHTML = '<b>Chờ xác nhận.</b> Vùng che đã ghi vào kế hoạch dựng; timeline chưa đổi cho tới khi bạn bấm “Áp dụng vào timeline…” ở Bước 5.';
+      return;
+    }
     const list = (cleanups || []).filter((item) => item && item.kind !== 'none');
     const turnedOff = (cleanups || []).some((item) => item && item.kind === 'none');
     if (turnedOff) {
@@ -2470,8 +2499,21 @@
     void renameStudioVoiceSample(assetId);
   }
 
-  async function selectStudioVideo(preferredProjectId = null) {
-    state.studioVideoId = $('studioVideoSelect')?.value || '';
+  // Bước 05 · T9: one project is loaded at a time. Two loads at once - the page restoring the last session while the
+  // user opens another project - wrote the same state field by field, whichever answered last: one project's scenes
+  // and timeline under another project's id and plan, so "Áp dụng" would act on a project not on screen. Each load
+  // now waits for the one before it, with the video chosen when it was asked for; the last one asked for stays.
+  let studioLoadChain = Promise.resolve();
+  function selectStudioVideo(preferredProjectId = null) {
+    const videoId = $('studioVideoSelect')?.value || '';
+    const run = studioLoadChain.then(() => selectStudioVideoNow(videoId, preferredProjectId));
+    studioLoadChain = run.catch(() => {});
+    return run;
+  }
+
+  async function selectStudioVideoNow(videoId, preferredProjectId = null) {
+    if ($('studioVideoSelect') && $('studioVideoSelect').value !== videoId) $('studioVideoSelect').value = videoId;
+    state.studioVideoId = videoId;
     state.scriptId = null;
     state.studioAnalysis = null;
     state.studioReference = null;

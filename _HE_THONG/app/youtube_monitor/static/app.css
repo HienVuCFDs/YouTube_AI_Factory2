@@ -59,6 +59,8 @@
     .btn.small { padding: 6px 9px; font-size: 11px; }
     .btn.danger { color: #fca5a5; border-color: rgba(240,82,82,.28); background: rgba(240,82,82,.08); }
     .btn:disabled { opacity: .5; cursor: wait; }
+    /* Bước 05 · T9: a render held by its gate is not busy: it is refused (the reason is in its title). */
+    #studioQueueRenderButton:disabled[data-blocked="1"] { cursor: not-allowed; }
     .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
     .metric { border: 1px solid var(--line); border-radius: 9px; background: linear-gradient(145deg, rgba(21,26,34,.95), rgba(16,20,27,.95)); padding: 15px; position: relative; overflow: hidden; }
     .metric::after { content: ""; position: absolute; width: 80px; height: 80px; right: -35px; bottom: -45px; border-radius: 50%; background: var(--accent-soft); }

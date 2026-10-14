@@ -787,12 +787,19 @@
         method: 'POST',
         body: JSON.stringify({position, method, clear: Boolean(clear)}),
       });
-      renderCleanupState(result.cleanups, result.segments);
+      renderCleanupState(result.cleanups, result.segments, result.status);
+      // Bước 05 · T9: an edit plan nobody confirmed holds them: nothing is covered yet, and the message says so.
+      if (result.status === 'needs_confirmation') {
+        const stale = cleanupStaleText(result);
+        setMessage(`${clear ? 'Đã ghi bỏ che' : 'Đã ghi vùng che'} vào kế hoạch dựng (chưa xác nhận): chưa đổi cảnh nào trên timeline. Bấm “Áp dụng vào timeline…” ở Bước 5 để áp.${stale}`, stale ? 'error' : '');
+        return;
+      }
+      const missed = cleanupNotAppliedText(result, clear);
       setMessage(
-        clear
+        (clear
           ? `Đã bỏ che trên ${result.segments} cảnh.`
-          : `Đã đánh dấu che ${result.segments} cảnh. Render lại để áp dụng.`,
-        'success');
+          : `Đã đánh dấu che ${result.segments} cảnh. Render lại để áp dụng.`) + missed,
+        missed ? 'error' : 'success');
     } catch (error) { setMessage(error.message, 'error'); }
   }
 

@@ -73,15 +73,41 @@ class _ManualCase(_PlannerCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["segment"]
 
+    def _outside(self):
+        """Một lần ghi thẳng vào hàng timeline, ngoài EditDocument (trước T7a, công cụ khác, chính DB).
+
+        Từ T7a, các đường timeline cũ từ chối (409) cảnh của dự án luồng Kế hoạch; ở đây chúng chỉ là
+        cách đặt hàng vào trạng thái "đã bị sửa từ ngoài" mà lệnh áp phải nhận ra.
+        """
+        return mock.patch.object(main, "_edit_document_owns_timeline", return_value=False)
+
     def _patch_plan(self, segment_id: int, **body) -> dict:
-        """Sửa tay lớp dựng của một cảnh: PATCH /api/timeline/{id}/plan."""
-        response = self.client.patch(f"/api/timeline/{segment_id}/plan", json=body)
+        """Sửa tay lớp dựng của một cảnh, ngoài EditDocument: PATCH /api/timeline/{id}/plan (self._outside)."""
+        with self._outside():
+            response = self.client.patch(f"/api/timeline/{segment_id}/plan", json=body)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["segment"]
 
     def _step(self, **options) -> dict:
-        """Nút "Lập kế hoạch dựng" (không options) và "Áp dụng vào timeline…" (confirmed_apply)."""
+        """Nút "Lập kế hoạch dựng" (không options) và "Áp dụng vào timeline…" (confirmed_apply).
+
+        T4 phương án B: "Áp dụng" xác nhận đúng phiên bản đang xem và không lập thêm gì. Ở đây confirmed_apply là
+        cả hai việc người dùng làm: lập kế hoạch (các options còn lại), xem phiên bản (GET …/edit-document), rồi xác
+        nhận đúng phiên bản đó. Kết quả là của lần lập, với "applied" của lần xác nhận.
+        """
+        confirm = bool(options.pop("confirmed_apply", False))
         response = self.client.post(f"/api/projects/{self.project_id}/steps/edit_plan", json={"options": options})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["result"]
+        if confirm:
+            result = {**result, "applied": self._confirm()["applied"]}
+        return result
+
+    def _confirm(self, document_hash: str | None = None) -> dict:
+        """"Áp dụng vào timeline…": the version on screen (GET …/edit-document), or the one given, confirmed."""
+        shown = document_hash or self.client.get(f"/api/projects/{self.project_id}/edit-document").json().get("document_hash")
+        response = self.client.post(f"/api/projects/{self.project_id}/steps/edit_plan",
+                                    json={"options": {"confirmed_apply": True, "document_hash": shown}})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["result"]
 
@@ -254,9 +280,10 @@ class LayerScopeTests(_ManualCase):
         self._step()
         target = int(self._segments()[0]["id"])
         seconds = float(self._seg(target)["duration_seconds"])
-        response = self.client.put(f"/api/timeline/{target}/edit-beats", json={"beats": [
-            {"visual_path": "tay-a.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay A"},
-            {"visual_path": "tay-b.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay B"}]})
+        with self._outside():
+            response = self.client.put(f"/api/timeline/{target}/edit-beats", json={"beats": [
+                {"visual_path": "tay-a.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay A"},
+                {"visual_path": "tay-b.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay B"}]})
         self.assertEqual(response.status_code, 200, response.text)
         hand_beats = [(beat["visual_path"], beat["prompt"]) for beat in self._beats(target)]
         self.assertIsNone(next(row for row in ea.plan(self._doc())[0] if row["segment_id"] == target)["beats"],
@@ -373,9 +400,10 @@ class ManualLayersThenReconcileTests(_ManualCase):
         self._patch_plan(segment_id, transition="fade", effect="static", note="P24 tay", overlays=MANUAL_OVERLAYS,
                          sound_cues=[{"cue": "whoosh", "start_seconds": 0.0, "end_seconds": 0.5}],
                          direction={"camera": "slow_push"})
-        response = self.client.put(f"/api/timeline/{segment_id}/edit-beats", json={"beats": [
-            {"visual_path": "tay-a.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay A"},
-            {"visual_path": "tay-b.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay B"}]})
+        with self._outside():
+            response = self.client.put(f"/api/timeline/{segment_id}/edit-beats", json={"beats": [
+                {"visual_path": "tay-a.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay A"},
+                {"visual_path": "tay-b.png", "duration_seconds": round(seconds / 2, 3), "prompt": "nhịp tay B"}]})
         self.assertEqual(response.status_code, 200, response.text)
         return self._hand(segment_id)
 
@@ -412,7 +440,8 @@ class ManualLayersThenReconcileTests(_ManualCase):
         target = int(old_rows[0]["id"])
         manual = self._manual_layers(target)
 
-        # Tạo lại storyboard cho kịch bản mới: reconcile chép hàng sang, rồi TỰ ÁP kế hoạch (người dùng chưa bấm "Áp dụng").
+        # Tạo lại storyboard cho kịch bản mới: reconcile chép hàng sang. T4 phương án B: không tự áp - phiên bản mới
+        # chưa được người dùng xác nhận.
         self._revise(line_of_section=2)
         answer = self.client.post(f"/api/projects/{self.project_id}/shots/generate", json={}).json()
         self.script_id = int(self.database.get_latest_project_script(self.project_id)["id"])
@@ -427,16 +456,16 @@ class ManualLayersThenReconcileTests(_ManualCase):
         after_apply = self._hand(new_target)
         self._note("4b", old_row=target, new_row=new_target, manual=manual, after_rebuild=after_rebuild,
                    after_apply=after_apply, old_row_now=self._hand(target), reconcile_mode=answer["reconcile"]["mode"],
-                   edit_refresh=answer["edit_refresh"], rebuild_status=rebuilt["status"], rebuild_counts=rebuilt["counts"],
-                   rebuild_conflicts=rebuilt["conflicts"], apply_status=applied["status"], apply_conflicts=applied["conflicts"])
+                   edit_refresh=answer["edit_refresh"], rebuild_status=rebuilt["status"], rebuild_counts=rebuilt.get("counts"),
+                   rebuild_conflicts=rebuilt.get("conflicts"), apply_status=applied["status"], apply_conflicts=applied["conflicts"])
 
         self.assertEqual(answer["reconcile"]["mode"], "carried_over")
         self.assertNotIn(new_target, answer["edit_refresh"], "a row holding hand edits is never taken as legacy")
-        # The new row is known part by part (its carried picture), its hand-edited layers as the document knew them.
-        self.assertEqual(self._conflicts(rebuilt), [(new_target, "timeline_changed", "legacy")])
-        self.assertEqual(rebuilt["status"], "partial", "the other scenes were still applied")
+        self.assertEqual(rebuilt["status"], main.NEEDS_CONFIRMATION, "the rebuild applies nothing nobody confirmed")
         self.assertEqual(after_rebuild, manual, "the rebuild kept every hand edit")
+        # Confirmed: the new row is known part by part (its carried picture), its hand-edited layers as the document knew them.
         self.assertEqual(self._conflicts(applied), [(new_target, "timeline_changed", "legacy")])
+        self.assertEqual(applied["status"], "partial", "the other scenes were still applied")
         self.assertEqual(after_apply, manual, "and so did the apply")
         self.assertEqual(self._hand(target), manual, "the old script's row still holds them")
 
@@ -453,7 +482,8 @@ class ManualLayersThenReconcileTests(_ManualCase):
         ratio = float(self._seg(target)["duration_seconds"]) / doubled
         self.assertEqual(answer["reconcile"]["mode"], "in_place")
         self.assertNotIn(target, answer["edit_refresh"], "a row holding hand edits is never taken as legacy")
-        self.assertEqual(answer["edit_document"]["counts"]["skipped"].get(ea.STALE), 1, "its words changed: stale, skipped")
+        self.assertEqual(answer["edit_document"]["status"], main.NEEDS_CONFIRMATION, "a new version: nothing applied")
+        self.assertIn(ed.STALE_CONTENT, self._scene_of(target)["statuses"], "its words changed: stale")
         self.assertEqual(after_reconcile, self._scaled(manual, ratio),
                          "the reconcile only retimed the hand's layers to the new length, as it does any legacy layer")
 
@@ -474,7 +504,8 @@ class ManualLayersThenReconcileTests(_ManualCase):
         segments = [{"voice_text": row["voice_text"], "subtitle_text": row["voice_text"], "visual_prompt": f"agent {n}"}
                     for n, row in enumerate(rows)]
         result = main.run_project_step(self.project_id, "timeline", {"segments": segments})["result"]
-        applied = result["edit_document"]
+        self.assertEqual(result["edit_document"]["status"], main.NEEDS_CONFIRMATION, "the agent's timeline applies nothing")
+        applied = self._confirm()["applied"]                          # until a person confirms the version
         self._note("4d", target=target, manual=manual, after=self._hand(target), status=applied["status"],
                    conflicts=applied["conflicts"], applied=[item["segment_id"] for item in applied["applied"]])
         self.assertEqual(self._seg(target)["visual_prompt"], "agent 0", "the agent's own field is written, as before")
@@ -506,7 +537,8 @@ class HandPromptThenReconcileTests(_ManualCase):
         self.script_id = int(self.database.get_latest_project_script(self.project_id)["id"])
         rows = self._segments()
         new_target = int(rows[0]["id"])
-        rebuilt = answer["edit_document"]
+        self.assertEqual(answer["edit_document"]["status"], main.NEEDS_CONFIRMATION, "the rebuild applies nothing")
+        rebuilt = self._confirm()["applied"]                          # a person confirms the new script's version
         self._note("7a", target=target, new_target=new_target, edit_refresh=answer["edit_refresh"],
                    rebuild_status=rebuilt["status"], rebuild_conflicts=rebuilt["conflicts"], row=self._seg(new_target))
 

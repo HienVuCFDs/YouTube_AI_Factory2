@@ -137,17 +137,27 @@ class ApplyOnlyWhenAskedTests(_EditUiCase):
         return [(row["id"], row["edit_transition"], row["edit_note"], row["overlays"])
                 for row in self._timeline(self.project_id, self.script_id)]
 
-    def test_planning_without_confirmation_leaves_the_timeline_and_t4_applies_at_the_next_sync(self) -> None:
+    def test_planning_without_confirmation_leaves_the_timeline_and_the_next_sync_does_not_apply_it(self) -> None:
         before = self._edit_columns()
         result = self._plan_step()
         self.assertNotIn("applied", result)
         self.assertEqual(self._edit_columns(), before, "nothing is applied by planning")
         self.assertEqual(self._count(EDIT_APPLY_KIND), 0)
-        # The next sync of the storyboard is T4's door: it applies the planned scenes (the page says so).
+        # T4 phương án B: the next sync of the storyboard keeps the plan, never applies a version nobody confirmed.
         done = self.client.post(f"/api/projects/{self.project_id}/timeline/generate", json={}).json()
-        self.assertEqual(done["edit_document"]["status"], "applied")
+        self.assertEqual(done["edit_document"]["status"], main.NEEDS_CONFIRMATION)
+        self.assertEqual(self._edit_columns(), before)
+        self.assertEqual(self._count(EDIT_APPLY_KIND), 0)
+        self.assertFalse(self._read()["confirmed"])
+        # Confirmed - the very version shown - it is applied; and a sync of that same version applies it again.
+        shown = self._read()["document_hash"]
+        applied = self.client.post(f"/api/projects/{self.project_id}/steps/edit_plan",
+                                   json={"options": {"confirmed_apply": True, "document_hash": shown}}).json()["result"]["applied"]
+        self.assertEqual(applied["status"], "applied")
         self.assertTrue(all(row[2] == f"note-{row[0]}" for row in self._edit_columns()), "each row its own scene's edit")
-        self.assertTrue(all(item["applied"] == "applied" for item in self._read()["scenes"]))
+        self.assertTrue(self._read()["confirmed"])
+        again = self.client.post(f"/api/projects/{self.project_id}/timeline/generate", json={}).json()
+        self.assertEqual(again["edit_document"]["status"], "unchanged", "the confirmed version, already on the rows")
 
 
 class ForceIsReadFromTheBodyTests(_EditUiCase):
@@ -167,8 +177,9 @@ class PageContractTests(_EditUiCase):
         self.assertEqual(response.status_code, 200)
         result = response.json()["result"]
         self.assertTrue({"status", "planned", "wanted", "problems"} <= set(result), sorted(result))
+        shown = self.client.get(f"/api/projects/{self.project_id}/edit-document").json()["document_hash"]
         applied = self.client.post(f"/api/projects/{self.project_id}/steps/edit_plan",
-                                   json={"options": {"confirmed_apply": True}}).json()["result"]["applied"]
+                                   json={"options": {"confirmed_apply": True, "document_hash": shown}}).json()["result"]["applied"]
         self.assertTrue({"status", "counts"} <= set(applied))
         self.assertTrue({"applied", "conflicts", "skipped"} <= set(applied["counts"]))
         self.assertIsInstance(applied["counts"]["skipped"], dict)

@@ -1212,7 +1212,8 @@
     not_applied: 'chưa áp vào timeline',
     older: 'timeline còn bản cũ, chưa áp bản mới',
   };
-  const EDIT_DOC_AUTO_APPLY_NOTE = 'Lưu ý: lần dựng lại storyboard/timeline kế tiếp cũng sẽ tự áp các cảnh đã lập.';
+  // Bước 05 · T4 phương án B: nothing reaches the timeline until the user confirms the very version shown.
+  const EDIT_DOC_AUTO_APPLY_NOTE = 'Kế hoạch chỉ được áp sau khi bạn xác nhận đúng phiên bản đang xem; dựng lại storyboard/timeline không tự áp kế hoạch chưa xác nhận.';
   let studioEditDocumentTicket = 0;
   let studioEditPlanRunning = false;
 
@@ -1261,6 +1262,15 @@
     if (doc?.state !== 'current') return line(`không đọc được EditDocument${doc?.detail ? `: ${esc(doc.detail)}` : ''}.`, ' data-edit-doc-status="error"');
     const scene = studioEditDocumentScene(segment, doc);
     if (!scene) return line('cảnh này không có trong EditDocument hiện tại.', ' data-edit-doc-status="absent"');
+    // Bước 05 · T6b: a conflict is shown with the three choices it leaves, and only then.
+    if (scene.conflict) {
+      const parts = esc(editDocumentPartsText(scene.conflict.columns));
+      return line(`<b>xung đột</b> với bản sửa trên timeline ở: ${parts}. Kế hoạch dựng chưa áp được vào cảnh này. `
+        + `<button class="btn small ghost" type="button" onclick="resolveStudioSceneConflict(${id}, 'keep_timeline')" title="Kế hoạch dựng nhận đúng phần này như trên timeline. Timeline không đổi.">Giữ bản trên timeline</button>`
+        + `<button class="btn small ghost" type="button" onclick="resolveStudioSceneConflict(${id}, 'use_plan')" title="Ghi kế hoạch dựng lên phần này. Bản sửa trên timeline ở phần này sẽ mất.">Dùng kế hoạch…</button>`
+        + `<button class="btn small ghost" type="button" onclick="deferStudioSceneConflict(${id})" title="Không đổi gì. Cảnh vẫn chưa áp kế hoạch dựng.">Để sau</button>`,
+        ` data-edit-doc-status="conflict" data-edit-doc-conflict="${esc((scene.conflict.columns || []).join(','))}"`, false);
+    }
     const planned = scene.status === 'ready' || scene.status === 'visual_review';
     const text = esc(EDIT_DOC_SCENE_LABELS[scene.status] || scene.status || 'không rõ')
       + (scene.applied ? ` · ${esc(EDIT_DOC_APPLIED_LABELS[scene.applied] || scene.applied)}` : '');
@@ -1284,8 +1294,10 @@
     if (doc.state !== 'current') return `<b>Không đọc được kế hoạch dựng.</b> ${esc(doc.detail || '')}`;
     const counts = doc.counts || {};
     const waiting = Number(counts.planned || 0) - Number(counts.applied || 0);
+    const confirmed = doc.confirmed ? ' · <span data-edit-doc-confirmed="true">đã xác nhận</span>'
+      : (Number(counts.planned || 0) ? ' · <span data-edit-doc-confirmed="false">chưa xác nhận</span>' : '');
     return `<b>EditDocument:</b> ${Number(counts.planned || 0)}/${Number(counts.scenes || 0)} cảnh đã lập · ${Number(counts.applied || 0)} đã áp`
-      + ` · ${Number(counts.needs_plan || 0)} chưa lập · ${Number(counts.stale || 0)} cũ.`
+      + ` · ${Number(counts.needs_plan || 0)} chưa lập · ${Number(counts.stale || 0)} cũ${confirmed}.`
       + (waiting > 0 ? ` ${waiting} cảnh đã lập chưa áp: bấm “Áp dụng vào timeline…”. ${EDIT_DOC_AUTO_APPLY_NOTE}` : '')
       + editDocumentFreshNote(doc) + gate;
   }
@@ -1327,8 +1339,9 @@
     outdated: ['Kế hoạch thuộc storyboard trước', 'warn'],
     absent: ['Không có trong EditDocument', 'idle'],
     unknown: ['Chưa đọc được kế hoạch', 'bad'],
+    conflict: ['Xung đột · cần quyết định', 'bad'],
   };
-  const STUDIO_SCENE_PLAN_FILTERS = ['needs_plan', 'planned', 'applied', 'older', 'stale', 'review', 'outdated'];
+  const STUDIO_SCENE_PLAN_FILTERS = ['conflict', 'needs_plan', 'planned', 'applied', 'older', 'stale', 'review', 'outdated'];
 
   function studioScenePlanState(segment, doc = state.studioEditDocument) {
     if (studioEditFlow(doc) !== 'plan') return {key: '', label: '', tone: ''};
@@ -1339,6 +1352,7 @@
     else {
       const scene = studioEditDocumentScene(segment, doc);
       if (!scene) key = 'absent';
+      else if (scene.conflict) key = 'conflict';
       else if (scene.status === 'needs_plan') key = 'needs_plan';
       else if (scene.status === 'visual_review') key = 'review';
       else if (String(scene.status || '').startsWith('stale_')) key = 'stale';
@@ -1365,7 +1379,15 @@
       const chip = row.querySelector('[data-edit-doc-chip]');
       if (chip) chip.innerHTML = studioScenePlanChip(plan);
       const block = document.querySelector(`#studioStoryboardResult [data-strip-shot="${row.dataset.shotId}"]`);
-      if (block) block.dataset.planState = plan.key;
+      if (block) {
+        block.dataset.planState = plan.key;
+        // Bước 05 · T9: the label read on hover and by a screen reader says the plan state now, not the one drawn.
+        if (block.dataset.stripLabel) {
+          const label = `${block.dataset.stripLabel}${plan.label ? ` · ${plan.label}` : ''}`;
+          block.title = label;
+          block.setAttribute('aria-label', label);
+        }
+      }
     });
     const plan = studioEditFlow() === 'plan';
     const filterBox = $('studioScenePlanFilterBox');
@@ -1426,6 +1448,8 @@
       case 'not_current': return {ok: false, type: 'error', text: `Chưa áp: ${applied.detail || 'storyboard của kịch bản này không phải bản hiện hành'}.`};
       case 'no_document': return {ok: false, type: 'error', text: 'Chưa áp: dự án chưa có EditDocument.'};
       case 'error': return {ok: false, type: 'error', text: `Áp kế hoạch dựng lỗi: ${applied.detail || 'không rõ lỗi'}.`};
+      case 'needs_confirmation': return {ok: false, type: 'error',
+        text: `${applied.detail || 'Chưa áp: kế hoạch dựng chưa được xác nhận'}. Xem lại kế hoạch rồi bấm “Áp dụng vào timeline…”.`};
       default: return {ok: false, type: 'error', text: `Máy chủ trả trạng thái áp không rõ (${applied.status ?? 'trống'}): không coi là đã áp.`};
     }
   }
@@ -1486,8 +1510,88 @@
     }
   }
 
+  // ---- Bước 05 · T6b: a scene's conflict (its row holds what the EditDocument never knew), decided by the user ----
+  const EDIT_DOC_PART_LABELS = {overlays: 'chữ động', sound_cues: 'SFX', edit_direction: 'hướng dựng',
+    edit_transition: 'chuyển cảnh', edit_effect: 'hiệu ứng', edit_note: 'ghi chú', beats: 'nhịp dựng',
+    visual_prompt: 'mô tả hình', '*': 'cả cảnh'};
+
+  function editDocumentPartsText(columns) {
+    const names = (columns || []).map((column) => EDIT_DOC_PART_LABELS[column]
+      || (String(column).startsWith('visual_') || String(column).startsWith('edit_') ? 'hình' : String(column)));
+    return [...new Set(names)].join(', ') || 'không rõ';
+  }
+
+  // What a decision came to. Only "applied" and "unchanged" are done; anything else is not, whatever the HTTP code.
+  function editDocumentConflictOutcome(result, choice) {
+    const kept = 'đã giữ bản trên timeline: kế hoạch dựng nhận đúng phần này, timeline không đổi.';
+    if (result?.status === 'applied') return {ok: true, type: 'success', text: 'đã ghi kế hoạch dựng lên cảnh này.'};
+    if (result?.status === 'unchanged') {
+      return choice === 'keep_timeline' ? {ok: true, type: 'success', text: kept}
+        : {ok: true, type: '', text: 'cảnh đã đúng kế hoạch dựng: không cần ghi lại.'};
+    }
+    if (result?.status === 'blocked' || result?.status === 'partial') {
+      const left = result.conflict ? ` Còn xung đột ở: ${editDocumentPartsText(result.conflict.columns)}.` : '';
+      return {ok: false, type: 'error', text: `chưa giải quyết xong${result.detail ? `: ${result.detail}` : ''}.${left}`};
+    }
+    return {ok: false, type: 'error', text: `máy chủ trả trạng thái không rõ (${result?.status ?? 'trống'}): không coi là đã giải quyết.`};
+  }
+
+  // One POST per decision, bound to the conflict as this page shows it (columns, state_hash, layer_hash): the server
+  // refuses it (409) when the row or the plan moved on since. Never sent again on its own: after any error the page
+  // only reads the state again, for the user to decide again.
+  let studioConflictResolving = false;
+  async function resolveStudioSceneConflict(segmentId, choice) {
+    const projectId = Number(state.studioProjectId || 0);
+    if (!projectId) { setMessage('Chưa có project.', 'error'); return null; }
+    const doc = state.studioEditDocument;
+    const scene = doc?.state === 'current' ? studioEditDocumentScene({id: segmentId}, doc) : null;
+    const conflict = scene?.conflict;
+    const number = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId))?.segment_index || '';
+    if (!conflict) {
+      setMessage(`Cảnh ${number} không còn xung đột trong kế hoạch dựng đang hiện. Hãy tải lại để xem trạng thái mới.`, 'error');
+      return null;
+    }
+    const parts = editDocumentPartsText(conflict.columns);
+    if (choice === 'use_plan' && !confirm(`Dùng kế hoạch dựng cho cảnh ${number}?\n\nBản sửa trên timeline ở: ${parts} sẽ bị ghi đè bằng kế hoạch dựng. Không hoàn tác được.\n\nTiếp tục?`)) {
+      return null;
+    }
+    if (studioConflictResolving) return null;
+    studioConflictResolving = true;
+    try {
+      let result;
+      try {
+        result = await api(`/api/projects/${projectId}/edit-document/scenes/${encodeURIComponent(scene.scene_key)}/resolve`, {
+          method: 'POST',
+          body: JSON.stringify({choice, columns: conflict.columns, state_hash: conflict.state_hash, layer_hash: conflict.layer_hash}),
+        });
+      } catch (error) {
+        const stale = Number(error?.status) === 409;
+        let reload = '';
+        try { await refreshStudioStoryboard(); } catch (reloadError) { reload = ` Chưa tải lại được (${reloadError.message}).`; }
+        setMessage(stale
+          ? `Chưa quyết định được cảnh ${number}: ${error.message}. Dữ liệu đã đổi từ lúc bạn xem${reload ? '.' : ', trạng thái mới đã được tải lại'}: hãy xem lại rồi quyết định lại.${reload}`
+          : `Không rõ quyết định cảnh ${number} đã được lưu hay chưa (${error.message}). Không gửi lại; hãy xem trạng thái đã tải lại trước khi bấm lần nữa.${reload}`, 'error');
+        return null;
+      }
+      const outcome = editDocumentConflictOutcome(result, choice);
+      let reload = '';
+      try { await refreshStudioStoryboard(); } catch (error) { reload = ` Chưa tải lại được storyboard (${error.message}).`; }
+      setMessage(`Cảnh ${number}: ${outcome.text}${reload}`, outcome.ok && reload ? '' : outcome.type);
+      return result;
+    } finally {
+      studioConflictResolving = false;
+    }
+  }
+
+  // "Để sau": nothing is sent and nothing changes; the conflict stays until the user decides.
+  function deferStudioSceneConflict(segmentId) {
+    const number = (state.timeline || []).find((item) => Number(item.id) === Number(segmentId))?.segment_index || '';
+    setMessage(`Đã để sau cảnh ${number}: chưa đổi gì, xung đột vẫn còn. Kế hoạch dựng chưa áp vào cảnh này cho tới khi bạn quyết định.`, '');
+    return null;
+  }
+
   // One POST to the step. `apply` asks for confirmed_apply - only ever from a click the user confirmed.
-  async function runStudioEditDocumentPlan(options = {}, {apply = false} = {}) {
+  async function runStudioEditDocumentPlan(options = {}, {apply = false, documentHash = ''} = {}) {
     const projectId = Number(state.studioProjectId || 0);
     if (!projectId) return setMessage('Chưa có project.', 'error');
     if (studioEditPlanRunning) return null;
@@ -1497,7 +1601,8 @@
     if (box) box.innerHTML = apply ? '<b>Đang lập và áp kế hoạch dựng…</b>' : '<b>AI đang lập kế hoạch dựng…</b>';
     try {
       const body = {options: {...options}};
-      if (apply) body.options.confirmed_apply = true;
+      // The version confirmed is the one shown (document_hash of GET …/edit-document): the server applies only that one.
+      if (apply) Object.assign(body.options, {confirmed_apply: true, document_hash: documentHash});
       const response = await api(`/api/projects/${projectId}/steps/edit_plan`, {method: 'POST', body: JSON.stringify(body)});
       const result = response?.result || {};
       const plan = editPlanOutcome(result);
@@ -1529,8 +1634,16 @@
   }
 
   async function applyStudioEditDocument() {
-    if (!confirm('Áp kế hoạch dựng vào timeline?\n\nCác cảnh đã lập trong EditDocument được ghi vào timeline; hình hiện có của cảnh được giữ. Cảnh chưa lập hoặc đã cũ sẽ được AI lập trước rồi áp luôn. Cảnh đã bị sửa ngoài EditDocument sẽ báo xung đột, không bị ghi đè.\n\nTiếp tục?')) return null;
-    return runStudioEditDocumentPlan({}, {apply: true});
+    // Bước 05 · T4 phương án B: the user confirms the version on screen - reloaded first, so it is the server's now.
+    await refreshStudioEditDocument();
+    const doc = state.studioEditDocument;
+    if (doc?.state !== 'current' || !doc.document_hash) {
+      return setMessage('Chưa có kế hoạch dựng hiện hành để xác nhận. Bấm “Lập kế hoạch dựng” trước.', 'error');
+    }
+    const counts = doc.counts || {};
+    const conflicts = (doc.scenes || []).filter((scene) => scene.conflict).length;
+    if (!confirm(`Xác nhận và áp kế hoạch dựng đang xem vào timeline?\n\n${Number(counts.planned || 0)} cảnh đã lập sẽ được ghi vào timeline; hình hiện có của cảnh được giữ. ${Number(counts.needs_plan || 0)} cảnh chưa lập và ${Number(counts.stale || 0)} cảnh cũ không được AI lập thêm ở bước này.${conflicts ? `\n${conflicts} cảnh đang xung đột sẽ không bị ghi đè.` : ''}\nNếu kế hoạch đổi trong lúc này, sẽ không áp gì.\n\nTiếp tục?`)) return null;
+    return runStudioEditDocumentPlan({}, {apply: true, documentHash: doc.document_hash});
   }
 
   // A scene's own button: that scene alone, planned again even when its edit still holds.
@@ -1574,7 +1687,7 @@
   ];
   const STORYBOARD_SORTS = [['order', 'Thứ tự cảnh'], ['attention', 'Cần xử lý trước'], ['duration', 'Thời lượng dài nhất']];
   const STORYBOARD_ATTENTION = {missing_both: 0, missing_visual: 1, missing_audio: 2, draft: 3, fallback: 4, ready: 5};
-  const STORYBOARD_PLAN_ATTENTION = {unknown: 0, stale: 1, review: 1, outdated: 1, needs_plan: 2, absent: 2, older: 3, planned: 3, applied: 4, '': 5};
+  const STORYBOARD_PLAN_ATTENTION = {unknown: 0, conflict: 0, stale: 1, review: 1, outdated: 1, needs_plan: 2, absent: 2, older: 3, planned: 3, applied: 4, '': 5};
 
   function studioStoryboardView() {
     if (!state.storyboardView) state.storyboardView = {query: '', prod: 'all', plan: 'all', sort: 'order', selected: null, stripOpen: true};
@@ -2236,8 +2349,9 @@
     const number = shot.shot_index || index + 1;
     const duration = Number(shot.duration_seconds || 0);
     const selected = Number(shot.id) === Number(view.selected);
-    const label = `Cảnh ${number} · ${duration.toFixed(1)} giây · ${item.facts.label}${item.plan.label ? ` · ${item.plan.label}` : ''}`;
-    return `<button type="button" role="listitem" class="sb-strip-block sb-strip-${item.facts.state}${selected ? ' is-selected' : ''}" style="flex:${Math.max(duration, 0.5)}" data-strip-shot="${shot.id}" data-plan-state="${esc(item.plan.key)}" title="${esc(label)}" aria-label="${esc(label)}" onclick="selectStudioScene(${shot.id})">${number}</button>`;
+    const base = `Cảnh ${number} · ${duration.toFixed(1)} giây · ${item.facts.label}`;
+    const label = `${base}${item.plan.label ? ` · ${item.plan.label}` : ''}`;
+    return `<button type="button" role="listitem" class="sb-strip-block sb-strip-${item.facts.state}${selected ? ' is-selected' : ''}" style="flex:${Math.max(duration, 0.5)}" data-strip-shot="${shot.id}" data-strip-label="${esc(base)}" data-plan-state="${esc(item.plan.key)}" title="${esc(label)}" aria-label="${esc(label)}" onclick="selectStudioScene(${shot.id})">${number}</button>`;
   }
 
   function studioSelectedScene() {
@@ -2639,7 +2753,12 @@
           : '<b>Chưa có timeline.</b> Hãy tạo storyboard trước.';
     }
     const renderButton = $('studioQueueRenderButton');
-    if (renderButton) renderButton.disabled = !check.can_render;
+    if (renderButton) {
+      renderButton.disabled = !check.can_render;
+      // Bước 05 · T9: a button that cannot be pressed says why, on the button itself - not only in the note above it.
+      renderButton.title = check.can_render ? '' : `Chưa thể dựng: ${issues.join(' · ') || 'cảnh chưa hoàn chỉnh'}`;
+      if (renderButton.dataset) renderButton.dataset.blocked = check.can_render ? '0' : '1';
+    }
   }
 
   async function refreshStudioRenderReadiness() {
@@ -3117,7 +3236,21 @@
     setStudioProgress(10, 'AI đang chia kịch bản thành các cảnh...');
     setMessage('AI đang chia kịch bản thành storyboard...');
     try {
-      const response = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      let response = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: false})});
+      // Bước 05 · T9: "stale" is an answer, not a storyboard. Rebuilding would lose voices or rows, so the server
+      // made nothing and said what it would do; it is done only when the user agrees (force), never called done.
+      if (response?.status === 'stale') {
+        const counts = response.reconcile?.counts || {};
+        const lost = Number(response.reconcile?.voice_invalidated || 0);
+        const changed = Number(counts.modified || 0) + Number(counts.added || 0) + Number(counts.removed || 0);
+        if (!confirm(`Kịch bản đã đổi: ${changed} cảnh khác storyboard hiện tại (${Number(counts.modified || 0)} đổi lời, ${Number(counts.added || 0)} thêm, ${Number(counts.removed || 0)} bỏ).${lost ? `\n${lost} cảnh sẽ mất giọng đã tạo và phải tạo lại.` : ''}\n\nDựng lại storyboard theo kịch bản hiện tại?`)) {
+          setStudioProgress(0, 'Chưa dựng lại storyboard.');
+          setMessage('Chưa dựng lại: storyboard vẫn là bản cũ, các bước sau vẫn bị chặn cho tới khi dựng lại.', '');
+          return;
+        }
+        response = await api(`/api/projects/${state.studioProjectId}/shots/generate`, {method: 'POST', body: JSON.stringify({force: true})});
+        if (response?.status === 'stale') throw new Error('Máy chủ vẫn chưa dựng lại storyboard');
+      }
       const shots = response.shots || [];
       if ($('studioShotSummary')) $('studioShotSummary').textContent = `${shots.length} cảnh`;
       // Drawing with an empty timeline hid every player: scenes that already
@@ -3129,7 +3262,11 @@
       if ($('studioOpenProjectButton')) $('studioOpenProjectButton').disabled = false;
       updateStudioSceneGenerationAvailability();
       setStudioProgress(100, `Storyboard ${shots.length} cảnh đã hoàn tất.`);
-      setMessage(`Đã tạo storyboard gồm ${shots.length} cảnh. Giọng đọc đã có sẵn nên bạn có thể gắn hình cho từng cảnh rồi sang Xưởng dựng.`, 'success');
+      // T4 phương án B: a storyboard that changed makes a new plan version - said, and the plan state read again.
+      if (typeof refreshStudioEditDocument === 'function') await refreshStudioEditDocument();
+      const waits = response.edit_document?.status === 'needs_confirmation'
+        ? ' Kế hoạch dựng đã đổi theo storyboard mới: xem lại rồi bấm “Áp dụng vào timeline…” để áp.' : '';
+      setMessage(`Đã tạo storyboard gồm ${shots.length} cảnh. Giọng đọc đã có sẵn nên bạn có thể gắn hình cho từng cảnh rồi sang Xưởng dựng.${waits}`, 'success');
     } catch (error) { setStudioProgress(0, `Tạo storyboard thất bại: ${error.message}`, 'error'); setMessage(error.message, 'error'); }
     finally { button.disabled = false; }
   }
@@ -3339,6 +3476,13 @@
       if (check.missing_audio) {
         setStudioStep(4);
         throw new Error(`Còn ${check.missing_audio}/${check.total} cảnh chưa có giọng đọc. Hãy tạo giọng đọc trước khi dựng video.`);
+      }
+      // Bước 05 · T9: the render gate (storyboard, edit plan, voices) says no - before anything is saved or sent.
+      if (!check.can_render) {
+        const reasons = (Array.isArray(check.render_gate) && check.render_gate.length)
+          ? check.render_gate.map((item) => `${item.detail} → ${item.next_step}`)
+          : (Array.isArray(check.issues) ? check.issues : []);
+        throw new Error(`Chưa thể dựng: ${reasons.join(' · ') || 'cảnh chưa hoàn chỉnh'}`);
       }
       await saveRenderSettings(state.studioProjectId);
       setStudioProgress(20, 'Đã kiểm tra xong, đang đưa video vào hàng đợi dựng...');

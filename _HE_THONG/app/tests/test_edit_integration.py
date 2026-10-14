@@ -31,6 +31,24 @@ from youtube_monitor.database import EDIT_APPLY_KIND, EDIT_DOCUMENT_KIND
 
 
 class _FlowCase(_ApplyCase):
+    def _plan(self, n: int, edit: dict) -> dict:
+        """A scene planned - and, as a person does before anything is applied (T4 phương án B), that version confirmed."""
+        planned = super()._plan(n, edit)
+        self._confirm_now()
+        return planned
+
+    def _confirm_now(self) -> str:
+        """A person confirming the EditDocument version stored now: the one the production caller may apply."""
+        script_id = int(self.database.get_latest_project_script(self.project_id)["id"])
+        stored = es.load(self.database, self.project_id, script_id)
+        main._record_confirmation(self.project_id, script_id, stored["document_hash"])
+        return stored["document_hash"]
+
+    def _confirm_and_apply(self) -> dict:
+        """After a reconcile made a new version: a person confirms it, and only then is it applied."""
+        self._confirm_now()
+        return main._apply_edit_document(self.project_id, self.database.get_latest_project_script(self.project_id))
+
     def _timeline_generate(self) -> dict:
         response = self.client.post(f"/api/projects/{self.project_id}/timeline/generate", json={})
         self.assertEqual(response.status_code, 200, response.text)
@@ -169,8 +187,12 @@ class ReconcileTests(_FlowCase):
         self.assertIsNone(owned[0]["retimed"], "never retimed by the reconcile")
         segment_id = owned[0]["new_segment_id"]
         self.assertEqual(json.loads(self._row(segment_id)["overlays"]), applied[segment_id], "its layers as the apply left them")
-        self.assertEqual(answer["edit_document"]["counts"]["skipped"].get(ea.STALE), 1)
-        self.assertEqual(answer["edit_document"]["counts"]["conflicts"], 0)
+        # T4 phương án B: the reconcile made a new version - not applied until a person confirms it.
+        self.assertEqual(answer["edit_document"]["status"], main.NEEDS_CONFIRMATION)
+        again = self._confirm_and_apply()
+        self.assertEqual(json.loads(self._row(segment_id)["overlays"]), applied[segment_id], "still as the apply left them")
+        self.assertEqual(again["counts"]["skipped"].get(ea.STALE), 1)
+        self.assertEqual(again["counts"]["conflicts"], 0)
 
     def test_a_reworded_scene_with_layers_the_document_never_knew_is_retimed_but_never_made_known(self) -> None:
         legacy_overlay = [{"kind": "text", "text": "old", "start_seconds": 0.0, "end_seconds": 1.0}]
@@ -257,6 +279,11 @@ class CarriedOverTests(_FlowCase):
         new_rows = self._timeline(self.project_id, self.script_id)
         self.assertEqual(answer["reconcile"]["mode"], "carried_over")
         self.assertEqual(answer["edit_document"]["document_mode"], "carried_over")
+        # T4 phương án B: the new script's version is not applied by the reconcile; nor is the owned picture copied.
+        self.assertEqual(answer["edit_document"]["status"], main.NEEDS_CONFIRMATION)
+        self.assertNotEqual(new_rows[0]["visual_path"], str(self.tmp / "owned.png"), "not copied, not applied yet")
+        answer = {"edit_document": self._confirm_and_apply()}
+        new_rows = self._timeline(self.project_id, self.script_id)
         self.assertEqual(answer["edit_document"]["counts"]["conflicts"], 0, answer["edit_document"]["conflicts"])
         self.assertEqual(new_rows[0]["visual_path"], str(self.tmp / "owned.png"), "written by the apply, not copied")
         self.assertEqual((new_rows[1]["visual_path"], new_rows[1]["edit_transition"]), (old_rows[1]["visual_path"], "cut"))
@@ -346,7 +373,8 @@ class SingleWriterTests(_FlowCase):
         self.assertEqual(result["edit_owned_rows_kept"], [rows[0]["id"]])
         self.assertEqual(self._row(rows[0]["id"])["visual_prompt"], owned_prompt, "the owned row keeps the document's")
         self.assertEqual(self._row(rows[1]["id"])["visual_prompt"], "agent 1", "the others take the agent's, as before")
-        self.assertEqual(result["edit_document"]["counts"]["conflicts"], 0, "and the document knows what they now hold")
+        self.assertEqual(result["edit_document"]["status"], main.NEEDS_CONFIRMATION, "a new version waits for a person")
+        self.assertEqual(self._confirm_and_apply()["counts"]["conflicts"], 0, "and the document knows what they now hold")
         self.assertEqual(self._orphan_hash(rows[1]["id"]), ea.state_hash(self._row(rows[1]["id"]), self._beats(rows[1]["id"])))
 
     def test_a_flow_writes_an_owned_row_once(self) -> None:

@@ -152,7 +152,7 @@ def test_a_running_analysis_is_read_from_the_server_after_a_reload() -> None:
     assert "document.addEventListener('visibilitychange'" in ui
     # Opening a project asks the server, not the page's memory.
     assert "void followStudioAnalyze(existingProject.id);" in ui
-    select = ui[ui.index("async function selectStudioVideo("):ui.index("async function restoreStudioProgress(")]
+    select = ui[ui.index("async function selectStudioVideoNow("):ui.index("async function restoreStudioProgress(")]
     assert "stopStudioAnalyzeWatch();" in select and "state.studioAnalyzing = false;" in select
 
 

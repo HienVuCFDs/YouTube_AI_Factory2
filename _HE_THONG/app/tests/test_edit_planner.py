@@ -80,7 +80,16 @@ class _PlannerCase(_StoreCase):
         return project_id, int(self.database.get_latest_project_script(project_id)["id"])
 
     def _plan_step(self, **options) -> dict:
-        return main.run_project_step(self.project_id, "edit_plan", options)["result"]
+        """run_step("edit_plan"). T4 phương án B: confirmed_apply is what a person does after the plan - look at the
+        version (GET …/edit-document) and confirm that very one; never after a plan that failed."""
+        confirm = bool(options.pop("confirmed_apply", False))
+        result = main.run_project_step(self.project_id, "edit_plan", options)["result"]
+        if confirm and result["status"] not in (ep.BLOCKED, ep.ERROR):
+            shown = self.client.get(f"/api/projects/{self.project_id}/edit-document").json()["document_hash"]
+            confirmed = main.run_project_step(self.project_id, "edit_plan",
+                                              {"confirmed_apply": True, "document_hash": shown})["result"]
+            result = {**result, "applied": confirmed["applied"]}
+        return result
 
     def _doc(self) -> dict | None:
         script_id = int(self.database.get_latest_project_script(self.project_id)["id"])

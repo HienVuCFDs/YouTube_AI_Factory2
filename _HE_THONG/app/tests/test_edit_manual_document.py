@@ -161,8 +161,8 @@ class RefusalTests(_SceneEditCase):
     def test_a_project_outside_the_plan_workflow_writes_nothing_and_keeps_its_timeline_routes(self) -> None:
         with mock.patch.object(main, "_storyboard_gate", return_value=({"mode": "legacy", "state": "not_applicable"}, None)):
             answer = self._refused({"overlays": HAND_OVERLAYS}, 409)
+            row = self._patch_plan(self.target, overlays=MANUAL_OVERLAYS)   # the legacy route still writes the row, as before
         self.assertIn("luồng Kế hoạch", answer["detail"])
-        row = self._patch_plan(self.target, overlays=MANUAL_OVERLAYS)   # the legacy route still writes the row, as before
         self.assertEqual(json.loads(row["overlays"])[0]["text"], MANUAL_OVERLAYS[0]["text"])
 
     def test_beats_a_scene_job_points_at_are_never_replaced(self) -> None:

@@ -125,6 +125,26 @@ def _written(row: dict[str, Any]) -> set[str]:
     return set(row["updates"]) | ({BEATS} if row.get("beats") is not None else set())
 
 
+def _target(row: dict[str, Any], segment: dict[str, Any], beats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bước 05 · T6b · 5A: what the row reads as once this apply has written it (state_edit's shape).
+
+    The owned columns as the apply writes them (`updates`, the values the
+    columns keep) and its beats as they are inserted - numbered from 1, only
+    the columns the plan names. A beat the plan leaves a column out of reads
+    without it, so it never equals a stored beat (that has every column): the
+    part stays a conflict - never a guess at a default.
+    """
+    new_beats = row.get("beats")
+    after = beats if new_beats is None else [
+        {"beat_index": number, **{column: beat[column] for column in EDIT_BEAT_COLUMNS if column in beat}}
+        for number, beat in enumerate(new_beats, start=1)]
+    return state_edit({**segment, **row["updates"]}, after)
+
+
+# Bước 05 · T6b: the `expected_from` of a conflict whose decision (ScopedCheck.accept) no longer matches the row or the plan.
+DECISION_OUTDATED = "decision_outdated"
+
+
 class ScopedCheck:
     """P2-4 · F1: whether a planned row may be written - asked by apply_edit_document_rows inside its transaction.
 
@@ -136,28 +156,78 @@ class ScopedCheck:
     before F1; else the legacy layers kept as an orphan of that row; else
     nothing ever written. settle(): what the record keeps as known after a
     write - `base` with only the written columns replaced.
+
+    Bước 05 · T6b:
+    * 5A - a column that already holds exactly what this apply writes is no
+      conflict: writing it changes nothing. It is known as it is (`base`).
+    * `accept` - segment_id → {"columns", "state_hash", "layer_hash"}: a
+      person's decision to write the plan over those columns ("*": the row
+      as a whole). It holds only while the row is still the very one they
+      saw (state_hash, read here, inside the apply's transaction) and the
+      plan the one they saw (layer_hash); else the row is a conflict
+      (DECISION_OUTDATED) and nothing of it is written. `rewrite` in the
+      verdict: the row the last apply wrote this very plan to is written
+      again (Database.apply_edit_document_rows would take it as unchanged) -
+      only when the decided parts do not hold the plan and every other part
+      it writes already does (_rewrite).
     """
 
-    def __init__(self, known: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(self, known: dict[str, dict[str, Any]] | None = None,
+                 accept: dict[int, dict[str, Any]] | None = None) -> None:
         self.known = known or {}
+        self.accept = {int(key): value for key, value in (accept or {}).items()}
 
     def verdict(self, row: dict[str, Any], segment: dict[str, Any], beats: list[dict[str, Any]],
                 applied: dict[str, Any] | None) -> dict[str, Any]:
         current = state_edit(segment, beats)
+        written = _written(row)
+        decision = self.accept.get(int(row["segment_id"]))
+        if decision is not None and (state_hash(segment, beats) != decision["state_hash"]
+                                     or row["layer_hash"] != decision["layer_hash"]):
+            return {"conflict": True, "source": DECISION_OUTDATED, "columns": sorted(decision["columns"]), "base": None}
+        whole = decision is not None and "*" in decision["columns"]
+        accepted = set(written) if whole else (set(decision["columns"]) & written if decision is not None else set())
         if applied is not None:
             base, source = applied.get("state_edit"), "applied"
             if base is None:
                 base = self._rebuilt(row, current, applied)
             if base is None:
+                # Only the whole row can be said to differ. It is known as it stands when nothing in it is unknown to
+                # the plan: it is the row the record proves, the plan's own edit is the very row (a decision to keep
+                # the timeline, T6b), or a person decided to write the plan over the row as a whole.
                 same = edit_document.edit_hash(current) == applied["state_hash"]
-                return {"conflict": not same, "source": source, "columns": [] if same else ["*"],
-                        "base": current if same else None}
+                if same or whole or row["layer_hash"] == edit_document.edit_hash(current):
+                    return {"conflict": False, "source": source, "columns": [], "base": current,
+                            "rewrite": whole and self._rewrite(row, segment, beats, current, written)}
+                return {"conflict": True, "source": source, "columns": ["*"], "base": None}
         elif row.get("legacy_edit") is not None:
             base, source = row["legacy_edit"], "legacy"
         else:
             base, source = edit_document.normalize_edit(None), "default"
-        found = changed_columns(current, base, _written(row))
-        return {"conflict": bool(found), "source": source, "columns": found, "base": edit_document.normalize_edit(base)}
+        base = edit_document.normalize_edit(base)
+        if accepted:
+            base = with_parts(base, current, accepted)
+        found = changed_columns(current, base, written)
+        if found:
+            # 5A: of the parts that moved, those already holding exactly what this apply writes are no conflict.
+            there = set(found) - set(changed_columns(current, _target(row, segment, beats), found))
+            if there:
+                base = with_parts(base, current, there)
+                found = [column for column in found if column not in there]
+        return {"conflict": bool(found), "source": source, "columns": found, "base": base,
+                "rewrite": bool(accepted) and not found and self._rewrite(row, segment, beats, current, accepted)}
+
+    @staticmethod
+    def _rewrite(row: dict[str, Any], segment: dict[str, Any], beats: list[dict[str, Any]], current: dict[str, Any],
+                 accepted: set[str]) -> bool:
+        """Whether a decision makes this apply write a row it would take as unchanged (it last wrote this very plan).
+
+        Only when the decided parts do not hold the plan yet and every other
+        part the apply writes holds it exactly already: the write then changes
+        those parts only - never one outside the decision.
+        """
+        target = _target(row, segment, beats)
+        return bool(changed_columns(current, target, accepted)) and not changed_columns(current, target, _written(row) - accepted)
 
     @staticmethod
     def settle(base: dict[str, Any], segment: dict[str, Any], beats: list[dict[str, Any]], row: dict[str, Any]) -> dict[str, Any]:
@@ -412,13 +482,14 @@ def plan(document: dict[str, Any], *, scene_keys: list[str] | None = None) -> tu
 
 
 def apply_scenes(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any], *,
-                 scene_keys: list[str] | None = None) -> dict[str, Any]:
+                 scene_keys: list[str] | None = None, accept: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Apply the script's current EditDocument to its timeline: {"applied", "unchanged", "skipped", "conflicts", ...}.
 
     The document must be the current storyboard's (edit_store.current) and
     built against the timeline rows and voices as they are now - otherwise
     nothing is written (EditStoreError: sync it first). `scene_keys` limits
-    the apply to those scenes.
+    the apply to those scenes. `accept`: a person's decisions to write the
+    plan over a row's conflicting parts (ScopedCheck.accept, Bước 05 · T6b).
     """
     found = edit_store.current(database, project_id, script_id, storyboard_row)
     if found["state"] != edit_store.CURRENT:
@@ -434,16 +505,126 @@ def apply_scenes(database: Any, project_id: int, script_id: int, storyboard_row:
     record = {"document_hash": found["document_hash"], "document_artifact_id": found["artifact_id"],
               "storyboard_hash": document["provenance"]["storyboard_hash"], "skipped_scenes": skipped}
     try:
-        # A record from before F1 is read column by column through the edit it wrote, found by its layer_hash.
-        old = {int(item["segment_id"]) for entry in database.list_edit_applies(project_id) for item in entry["payload"]["rows"]
-               if "state_edit" not in item}
-        known = known_writes(database, project_id, script_id, document) if old & {row["segment_id"] for row in rows} else {}
+        known = _known_for(database, project_id, script_id, document, {row["segment_id"] for row in rows})
         done = database.apply_edit_document_rows(project_id, script_id, rows, state_hash=state_hash, record=record,
-                                                 rule=ScopedCheck(known))
+                                                 rule=ScopedCheck(known, accept))
     except StoredEditApplyError as exc:
         raise edit_store.EditStoreError(str(exc)) from exc
     return {"document_hash": found["document_hash"], "artifact_id": done["artifact_id"], "applied": done["written"],
             "unchanged": done["unchanged"], "skipped": skipped + done["skipped"], "conflicts": done["conflicts"]}
+
+
+def _known_for(database: Any, project_id: int, script_id: int, document: dict[str, Any],
+               segment_ids: set[int]) -> dict[str, dict[str, Any]]:
+    """known_writes() when one of these rows has a record from before F1 (read column by column through it), else {}."""
+    old = {int(item["segment_id"]) for entry in database.list_edit_applies(project_id) for item in entry["payload"]["rows"]
+           if "state_edit" not in item}
+    return known_writes(database, project_id, script_id, document) if old & set(segment_ids) else {}
+
+
+def planned_row(document: dict[str, Any], scene_key: str) -> dict[str, Any] | None:
+    """The row an apply of this scene would write (plan()), or None when the scene has no edit to apply."""
+    rows, _ = plan(document, scene_keys=[scene_key])
+    return rows[0] if rows else None
+
+
+def parts_hold(row: dict[str, Any], segment: dict[str, Any], beats: list[dict[str, Any]], columns: list[str]) -> bool:
+    """Whether the row already holds, in these parts ("*": all it writes), exactly what this planned row writes."""
+    parts = _written(row) if "*" in columns else set(columns)
+    return not changed_columns(state_edit(segment, beats), _target(row, segment, beats), parts)
+
+
+def preview_conflicts(database: Any, project_id: int, script_id: int, document: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Bước 05 · T6b: segment_id → the conflict an apply of this document would meet on that row - read only.
+
+    {"columns", "expected_from", "state_hash", "layer_hash"}: the parts of the
+    row that hold what the EditDocument never knew (and that the apply would
+    write), where its expected state comes from, the row as it is now (what a
+    decision about it binds to) and the edit the apply would write. The same
+    check the apply runs (ScopedCheck), on the rows as they are read now; a
+    planned scene without a row, or without a conflict, is not named.
+    """
+    rows, _ = plan(document)
+    if not rows:
+        return {}
+    timeline = {int(item["id"]): item for item in database.list_project_timeline(project_id, script_id=script_id)}
+    beats = database.list_project_edit_beats(project_id, script_id=script_id)
+    latest: dict[int, dict[str, Any]] = {}
+    for entry in database.list_edit_applies(project_id):   # newest first, as the apply reads them
+        for item in entry["payload"]["rows"]:
+            latest.setdefault(int(item["segment_id"]), item)
+    rule = ScopedCheck(_known_for(database, project_id, script_id, document, {row["segment_id"] for row in rows}))
+    found: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        segment = timeline.get(int(row["segment_id"]))
+        if segment is None:
+            continue
+        held = beats.get(int(row["segment_id"]), [])
+        verdict = rule.verdict(row, segment, held, latest.get(int(row["segment_id"])))
+        if verdict["conflict"]:
+            found[int(row["segment_id"])] = {"columns": list(verdict["columns"]), "expected_from": verdict["source"],
+                                             "state_hash": state_hash(segment, held), "layer_hash": row["layer_hash"]}
+    return found
+
+
+# Bước 05 · T7 render gate: why a planned script's timeline rows, as a render is about to read them, are not what its
+# EditDocument says they hold.
+NOT_APPLIED = "edit_not_applied"
+HAND_EDIT = "conflict"
+STALE_LAYERS = "stale_layers"
+OUTDATED_DOCUMENT = "edit_document_outdated"
+
+
+def render_blockers(database: Any, project_id: int, script_id: int, storyboard_row: dict[str, Any] | None,
+                    timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """[{"code", "segment_id", "scene_key", ...}] - empty when `timeline` renders exactly what the EditDocument says.
+
+    `timeline` is the rows a render reads (each with its "edit_beats"), so what
+    is checked is what is rendered. No EditDocument yet: nothing to hold
+    against (plain scenes and legacy layers render as before). An
+    EditDocument of another storyboard: refused. Otherwise it is read as the
+    next sync would make it (edit_store.preview: retimed to new voices, or
+    marked) - read only - and:
+      a scene with an edit made for other words, text or timing (STALE) is refused;
+      each planned scene's row must hold, in every column its apply writes,
+      exactly what that apply would write (_target): else the plan was never
+      applied, or was applied before the scene changed (edit_not_applied), or
+      the row was edited since by another path (conflict) - never written
+      over here.
+    A scene that needs a plan (needs_plan) is not held: a scene without an edit renders.
+    """
+    found = edit_store.current(database, project_id, script_id, storyboard_row)
+    if found["state"] == edit_store.MISSING:
+        return []
+    if found["state"] != edit_store.CURRENT or not storyboard_row:
+        return [{"code": OUTDATED_DOCUMENT, "segment_id": None, "scene_key": None}]
+    document = edit_store.preview(database, project_id, script_id, storyboard_row)["document"]
+    found_rows = {int(item["id"]): item for item in timeline}
+    blockers: list[dict[str, Any]] = []
+    for scene in document["scenes"]:
+        stale = [status for status in edit_document.STATUSES
+                 if status in edit_document.STALE and status in (scene.get("statuses") or [])]
+        if stale and not edit_document._is_empty(edit_document.normalize_edit(scene.get("edit"))):
+            blockers.append({"code": STALE_LAYERS, "segment_id": scene.get("segment_id"), "scene_key": scene["scene_key"],
+                             "statuses": stale})
+    rows, _ = plan(document)
+    latest: dict[int, dict[str, Any]] = {}
+    for entry in database.list_edit_applies(project_id):   # newest first
+        for item in entry["payload"]["rows"]:
+            latest.setdefault(int(item["segment_id"]), item)
+    for row in rows:
+        segment = found_rows.get(int(row["segment_id"]))
+        if segment is None:
+            continue   # a scene without its row: the storyboard check of the timeline says so
+        beats = list(segment.get("edit_beats") or [])
+        columns = changed_columns(state_edit(segment, beats), _target(row, segment, beats), _written(row))
+        if not columns:
+            continue
+        applied = latest.get(int(row["segment_id"]))
+        code = HAND_EDIT if applied is not None and applied.get("layer_hash") == row["layer_hash"] else NOT_APPLIED
+        blockers.append({"code": code, "segment_id": int(row["segment_id"]), "scene_key": row.get("scene_key"),
+                         "columns": columns})
+    return blockers
 
 
 assert set(edit_store._VISUAL_COLUMNS) | {"asset_type", "overlays", "sound_cues", "edit_direction"} == EDIT_OWNED_COLUMNS, \

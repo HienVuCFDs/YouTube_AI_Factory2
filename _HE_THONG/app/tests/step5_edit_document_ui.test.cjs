@@ -110,7 +110,7 @@ test('"1. Lập kế hoạch dựng" on a planned project is one POST to steps/e
   assert.equal(type, 'success');
   assert.match(text, /Đã lập kế hoạch dựng cho 1 cảnh\./);
   assert.match(text, /Chưa áp vào timeline/, 'planning is not applying');
-  assert.match(text, /lần dựng lại storyboard\/timeline kế tiếp cũng sẽ tự áp/, 'T4 applying on the next sync is said, not hidden');
+  assert.match(text, /không tự áp kế hoạch chưa xác nhận/, 'T4 phương án B: only a confirmed version is applied, and the page says so');
 });
 
 test('"Lập kế hoạch" (overall plan) on a planned project never calls the legacy Edit Plan', async () => {
@@ -121,13 +121,13 @@ test('"Lập kế hoạch" (overall plan) on a planned project never calls the l
   nothingLegacy(ui.calls);
 });
 
-test('both apply buttons send confirmed_apply only after the user confirms', async () => {
+test('both apply buttons confirm the version shown (its document_hash), only after the user confirms', async () => {
   for (const button of ['applyAllStudioSceneEdits', 'applyStudioGraphics']) {
     const ui = studio({plan: () => ({status: 'unchanged', planned: [], wanted: [], problems: {},
       applied: {status: 'applied', counts: {applied: 2, unchanged: 0, conflicts: 0, skipped: {}}}})});
     await ui.sandbox[button]();
     assert.deepEqual(ui.posts().map((call) => [call.url, call.body]),
-      [[`/api/projects/${P}/steps/edit_plan`, {options: {confirmed_apply: true}}]], button);
+      [[`/api/projects/${P}/steps/edit_plan`, {options: {confirmed_apply: true, document_hash: 'h1'}}]], button);
     assert.equal(ui.asked.length, 1, 'asked first');
     assert.deepEqual(ui.messages.at(-1), ['Không có cảnh nào cần lập: các cảnh đều đã có kế hoạch dựng hiện hành. Đã áp 2 cảnh vào timeline.', 'success']);
     nothingLegacy(ui.calls);
@@ -253,7 +253,7 @@ test('each card says what the EditDocument holds: planned and applied, planned n
   assert.match(ui.cell(33), /Kế hoạch dựng:<\/b> chưa lập\./);
   assert.match(ui.cell(31), /onclick="planStudioSceneEdit\(31\)">Lập lại cảnh này</);
   assert.match(ui.cell(33), /onclick="planStudioSceneEdit\(33\)">Lập kế hoạch cảnh này</);
-  assert.match(ui.elements.studioEditPlanState.innerHTML, /2\/3 cảnh đã lập · 1 đã áp · 1 chưa lập · 0 cũ\./);
+  assert.match(ui.elements.studioEditPlanState.innerHTML, /2\/3 cảnh đã lập · 1 đã áp · 1 chưa lập · 0 cũ · .*chưa xác nhận.*\./);
   assert.match(ui.elements.studioEditPlanState.innerHTML, /1 cảnh đã lập chưa áp/);
 });
 
@@ -365,9 +365,11 @@ const APPLIED = {status: 'applied', counts: {applied: 1, unchanged: 0, conflicts
   conflicts: [], skipped: []};
 const HAND = '[{"kind":"text","text":"Chữ tay","start_seconds":0,"end_seconds":1}]';
 
-function sceneStudio({doc = DOC(), put = () => APPLIED, prompt = HAND, docFails = false, reloadFails = false} = {}) {
+function sceneStudio({doc = DOC(), put = () => APPLIED, prompt = HAND, docFails = false, reloadFails = false,
+  resolve = () => ({status: 'applied'}), confirms = true} = {}) {
   const calls = [];
   const messages = [];
+  const asked = [];
   // One row of the scene's beat editor, as the page reads it back.
   const values = {'.beat-source': 'primary', '.beat-duration': '2', '.beat-effect': 'zoom_in', '.beat-transition': 'fade',
     '.beat-prompt': 'nhịp tay'};
@@ -388,12 +390,13 @@ function sceneStudio({doc = DOC(), put = () => APPLIED, prompt = HAND, docFails 
         return {project: {id: P}, latest_shots: [], latest_timeline: SCENE_ROWS};
       }
       if (method === 'PUT' && url.startsWith(`/api/projects/${P}/edit-document/scenes/`)) return put(body);
+      if (method === 'POST' && url.startsWith(`/api/projects/${P}/edit-document/scenes/`) && url.endsWith('/resolve')) return resolve(body);
       if (url.startsWith('/api/timeline/')) return {status: 'saved', beats: [], segment: {}};
       throw new Error(`unexpected ${method} ${url}`);
     },
     esc: (value) => String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[c])),
     setMessage: (text, type = '') => messages.push([text, type]),
-    confirm: () => true,
+    confirm: (text) => { asked.push(text); return confirms; },
     window: {prompt: () => prompt},
     renderStudioStoryboard: (shots, timeline) => {
       sandbox.state.timeline = timeline;
@@ -407,7 +410,7 @@ function sceneStudio({doc = DOC(), put = () => APPLIED, prompt = HAND, docFails 
   vm.createContext(sandbox);
   vm.runInContext(sceneCode, sandbox);
   const writes = () => calls.filter((call) => call.method !== 'GET');
-  return {sandbox, calls, writes, messages};
+  return {sandbox, calls, writes, messages, asked};
 }
 
 const nothingOnTheTimeline = (calls) => {
@@ -544,4 +547,152 @@ test('T6a: "Áp dụng cảnh này" is not drawn and is refused in the plan work
     ['PATCH', '/api/timeline/31/plan'], ['PUT', '/api/timeline/31/edit-beats'],
     ['PUT', '/api/timeline/31/edit-beats'], ['POST', '/api/timeline/31/edit-beats/apply']]);
   assert.ok(!legacy.calls.some((call) => call.url.includes('/edit-document/scenes/')), 'the legacy workflow has no EditDocument');
+});
+
+// ---------------------------------------------------------------------------
+// T6b · a scene's conflict is shown with three choices: keep the timeline, use
+// the plan (asked first: the hand edit is written over), or leave it for later.
+// Only "applied"/"unchanged" are done; a 409 says the data moved on and reloads.
+// ---------------------------------------------------------------------------
+
+const CONFLICT = {columns: ['overlays', 'edit_transition'], expected_from: 'applied', state_hash: 's-31', layer_hash: 'l-31'};
+const CONFLICT_DOC = () => DOC({scenes: [{...scene(31, 'ready', 'older'), conflict: CONFLICT}, scene(32, 'ready', 'applied'),
+  scene(33, 'needs_plan')]});
+
+test('T6b: a scene in conflict says so and offers its three choices; a scene without one offers none', async () => {
+  const ui = sceneStudio({doc: CONFLICT_DOC()});
+  await ui.sandbox.refreshStudioEditDocument();
+  const line = ui.sandbox.editDocumentSceneLine({id: 31});
+  assert.match(line, /xung đột/);
+  assert.match(line, /chữ động, chuyển cảnh/);
+  for (const call of ["resolveStudioSceneConflict(31, 'keep_timeline')", "resolveStudioSceneConflict(31, 'use_plan')",
+    'deferStudioSceneConflict(31)']) assert.ok(line.includes(call), call);
+  assert.equal(ui.sandbox.studioScenePlanState({id: 31}).key, 'conflict');
+  const clean = ui.sandbox.editDocumentSceneLine({id: 32});
+  assert.ok(!clean.includes('resolveStudioSceneConflict') && !clean.includes('deferStudioSceneConflict'));
+  assert.notEqual(ui.sandbox.studioScenePlanState({id: 32}).key, 'conflict');
+});
+
+test('T6b: "Giữ bản trên timeline" is one POST with the conflict as shown, and done only when the server says so', async () => {
+  const ui = sceneStudio({doc: CONFLICT_DOC(), resolve: () => ({status: 'unchanged', resolved: 'keep_timeline', conflict: null})});
+  await ui.sandbox.refreshStudioEditDocument();
+  await ui.sandbox.resolveStudioSceneConflict(31, 'keep_timeline');
+  assert.deepEqual(ui.writes().map((call) => [call.method, call.url, call.body]), [['POST',
+    `/api/projects/${P}/edit-document/scenes/sk-31/resolve`,
+    {choice: 'keep_timeline', columns: ['overlays', 'edit_transition'], state_hash: 's-31', layer_hash: 'l-31'}]]);
+  assert.deepEqual(ui.asked, [], 'keeping the timeline writes nothing over it: nothing to ask');
+  const [text, type] = ui.messages.at(-1);
+  assert.equal(type, 'success');
+  assert.match(text, /đã giữ bản trên timeline/);
+});
+
+test('T6b: "Dùng kế hoạch…" asks first, naming the parts written over; a refusal sends nothing', async () => {
+  const refused = sceneStudio({doc: CONFLICT_DOC(), confirms: false});
+  await refused.sandbox.refreshStudioEditDocument();
+  await refused.sandbox.resolveStudioSceneConflict(31, 'use_plan');
+  assert.deepEqual(refused.writes(), []);
+  assert.equal(refused.asked.length, 1);
+  assert.match(refused.asked[0], /chữ động, chuyển cảnh sẽ bị ghi đè/);
+
+  const agreed = sceneStudio({doc: CONFLICT_DOC(), resolve: () => ({status: 'applied', resolved: 'use_plan'})});
+  await agreed.sandbox.refreshStudioEditDocument();
+  await agreed.sandbox.resolveStudioSceneConflict(31, 'use_plan');
+  assert.deepEqual(agreed.writes().map((call) => call.body), [
+    {choice: 'use_plan', columns: ['overlays', 'edit_transition'], state_hash: 's-31', layer_hash: 'l-31'}]);
+  assert.deepEqual(agreed.messages.at(-1), ['Cảnh 1: đã ghi kế hoạch dựng lên cảnh này.', 'success']);
+});
+
+test('T6b: "Để sau" sends nothing and changes nothing', async () => {
+  const ui = sceneStudio({doc: CONFLICT_DOC()});
+  await ui.sandbox.refreshStudioEditDocument();
+  ui.sandbox.deferStudioSceneConflict(31);
+  assert.deepEqual(ui.writes(), []);
+  const [text, type] = ui.messages.at(-1);
+  assert.equal(type, '');
+  assert.match(text, /chưa đổi gì, xung đột vẫn còn/);
+});
+
+test('T6b: a 409 says the data moved on and reloads the state; nothing is sent again', async () => {
+  const ui = sceneStudio({doc: CONFLICT_DOC(), resolve: () => {
+    const error = new Error('Timeline hoặc kế hoạch dựng của cảnh đã đổi từ lúc bạn xem'); error.status = 409; throw error; }});
+  await ui.sandbox.refreshStudioEditDocument();
+  const before = ui.calls.length;
+  await ui.sandbox.resolveStudioSceneConflict(31, 'keep_timeline');
+  const [text, type] = ui.messages.at(-1);
+  assert.equal(type, 'error');
+  assert.match(text, /Dữ liệu đã đổi từ lúc bạn xem, trạng thái mới đã được tải lại: hãy xem lại rồi quyết định lại/);
+  assert.equal(ui.writes().length, 1, 'never sent again');
+  assert.ok(ui.calls.slice(before).some((call) => call.method === 'GET' && call.url === `/api/projects/${P}/edit-document`),
+    'the state is read again');
+});
+
+test('T6b: an answer that is lost is never taken as done, and never sent again on its own', async () => {
+  const ui = sceneStudio({doc: CONFLICT_DOC(), resolve: () => { const error = new Error('mất kết nối'); error.status = 0; throw error; }});
+  await ui.sandbox.refreshStudioEditDocument();
+  await ui.sandbox.resolveStudioSceneConflict(31, 'use_plan');
+  const [text, type] = ui.messages.at(-1);
+  assert.equal(type, 'error');
+  assert.match(text, /Không rõ quyết định cảnh 1 đã được lưu hay chưa \(mất kết nối\)\. Không gửi lại/);
+  assert.equal(ui.writes().length, 1);
+});
+
+test('T6b: blocked, partial or an unknown status is never called resolved', async () => {
+  for (const answer of [{status: 'blocked', detail: 'Chưa ghi được kế hoạch lên cảnh này', conflict: CONFLICT},
+    {status: 'partial'}, {status: 'lạ'}, {}]) {
+    const ui = sceneStudio({doc: CONFLICT_DOC(), resolve: () => answer});
+    await ui.sandbox.refreshStudioEditDocument();
+    await ui.sandbox.resolveStudioSceneConflict(31, 'use_plan');
+    const [text, type] = ui.messages.at(-1);
+    assert.equal(type, 'error', JSON.stringify(answer));
+    assert.doesNotMatch(text, /đã ghi kế hoạch|đã giữ bản/);
+  }
+});
+
+test('T6b: a scene without a conflict, or a second click while deciding, sends nothing', async () => {
+  const clean = sceneStudio({doc: CONFLICT_DOC()});
+  await clean.sandbox.refreshStudioEditDocument();
+  await clean.sandbox.resolveStudioSceneConflict(32, 'use_plan');
+  assert.deepEqual(clean.writes(), []);
+  assert.match(clean.messages.at(-1)[0], /không còn xung đột/);
+
+  const pending = [];
+  const busy = sceneStudio({doc: CONFLICT_DOC(), resolve: () => new Promise((resolve) => { pending.push(() => resolve({status: 'unchanged'})); })});
+  await busy.sandbox.refreshStudioEditDocument();
+  const first = busy.sandbox.resolveStudioSceneConflict(31, 'keep_timeline');
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = busy.sandbox.resolveStudioSceneConflict(31, 'keep_timeline');
+  await new Promise((resolve) => setImmediate(resolve));
+  pending.forEach((release) => release());
+  await Promise.all([first, second]);
+  assert.equal(busy.writes().length, 1);
+});
+
+
+// ---------------------------------------------------------------------------
+// T4 phương án B: "Áp dụng vào timeline…" confirms the version shown, nothing else.
+// ---------------------------------------------------------------------------
+
+test('T4 B: with no current version to confirm, nothing is sent', async () => {
+  const ui = studio({doc: DOC({document_hash: ''})});
+  await ui.sandbox.applyAllStudioSceneEdits();
+  assert.deepEqual(ui.posts(), []);
+  assert.match(ui.messages.at(-1)[0], /Chưa có kế hoạch dựng hiện hành để xác nhận/);
+});
+
+test('T4 B: a version that changed since it was shown is not applied, and the page says so', async () => {
+  const ui = studio({plan: () => ({status: 'unchanged', planned: [], wanted: [], problems: {},
+    applied: {status: 'needs_confirmation', detail: 'Chưa áp: kế hoạch dựng đã đổi từ lúc bạn xem - xem lại rồi xác nhận lại'}})});
+  await ui.sandbox.applyAllStudioSceneEdits();
+  const [text, type] = ui.messages.at(-1);
+  assert.equal(type, 'error');
+  assert.match(text, /đã đổi từ lúc bạn xem/);
+  assert.doesNotMatch(text, /Đã áp/);
+});
+
+test('T4 B: the headline says whether the version shown is confirmed', async () => {
+  for (const [confirmed, words] of [[true, /đã xác nhận/], [false, /chưa xác nhận/]]) {
+    const ui = studio({doc: DOC({confirmed})});
+    await ui.sandbox.refreshStudioEditDocument();
+    assert.match(ui.sandbox.editDocumentHeadline(), words);
+  }
 });

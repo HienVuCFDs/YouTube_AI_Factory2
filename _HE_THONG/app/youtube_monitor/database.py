@@ -35,6 +35,9 @@ EDIT_BEAT_COLUMNS = ("asset_id", "visual_path", "source_kind", "start_seconds", 
                       "transition", "prompt", "status")
 # A scene job that has not finished may still write its picture into the row or one of its beats.
 _SCENE_JOB_DONE = ("completed", "error", "cancelled")
+# The columns Database.segment_plan_updates makes: a scene's kind, its cut (not its trims or cleanups) and its layers.
+_SEGMENT_PLAN_COLUMNS = frozenset({"visual_kind", "visual_fps", "visual_kind_reason", "edit_transition", "edit_effect",
+                                   "edit_note", "overlays", "sound_cues", "edit_direction"})
 # What a value of a column of each declared type has to be, before it is written.
 _COLUMN_TYPES: dict[str, tuple[type, ...]] = {"TEXT": (str,), "INTEGER": (int,), "REAL": (int, float)}
 
@@ -73,6 +76,45 @@ class EditDocumentConflict(RuntimeError):
 
 class StoredEditApplyError(ValueError):
     """A stored edit_apply artifact that cannot be read as one (broken JSON, missing fields)."""
+
+
+class SceneJobConflict(RuntimeError):
+    """A scene job and a change of that scene's edit beats met: the one that came second wrote nothing.
+
+    `reason`: "scene_job_running" - a job of the scene not finished writes its
+    picture when it finishes; "beat_has_jobs" - a job points at a beat the
+    change would rewrite or delete, whatever its status (an error or a
+    cancelled job can be retried, a completed one marked failed in review and
+    retried); "beat_gone" / "beat_changed" - the beat a new job is for was
+    deleted or rewritten after the caller read it.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# What a job for an edit beat is made from: it is made only while its beat still holds what its caller read.
+_JOB_BEAT_COLUMNS = ("beat_index", "asset_id", "visual_path", "source_kind", "start_seconds", "duration_seconds", "prompt")
+
+
+def _scene_jobs_holding(connection: sqlite3.Connection, segment_id: int, *, beats: bool, running: bool) -> str:
+    """Why a scene's edit beats may not be replaced now ("" when they may), read on the caller's connection.
+
+    Bước 05 · T7: read inside the transaction that replaces the beats, after
+    its BEGIN IMMEDIATE - so what it reads is what the write is made over
+    (see Database.replace_timeline_edit_beats).
+    """
+    if running and connection.execute(
+            f"SELECT 1 FROM scene_generation_jobs WHERE timeline_segment_id = ? "
+            f"AND status NOT IN ({', '.join('?' for _ in _SCENE_JOB_DONE)}) LIMIT 1",
+            (segment_id, *_SCENE_JOB_DONE)).fetchone():
+        return "scene_job_running"
+    if beats and connection.execute(
+            "SELECT 1 FROM scene_generation_jobs j JOIN project_timeline_edit_beats b ON b.id = j.edit_beat_id "
+            "WHERE b.timeline_segment_id = ? LIMIT 1", (segment_id,)).fetchone():
+        return "beat_has_jobs"
+    return ""
 
 
 class Database:
@@ -2845,6 +2887,9 @@ class Database:
                 current = state_hash(segment, beats)
                 applied = latest.get(segment_id)
                 known: dict[str, Any] | None = None
+                # Bước 05 · T6b: only a person's decision (ScopedCheck.accept) makes a row the last apply wrote this very
+                # plan to be written again - when they chose the plan over the hand edit of some of its parts.
+                rewrite = False
                 if rule is not None:
                     verdict = rule.verdict(row, segment, beats, applied)
                     if verdict["conflict"]:
@@ -2852,6 +2897,7 @@ class Database:
                                           "expected_from": verdict["source"], "columns": verdict["columns"]})
                         continue
                     known = verdict["base"]
+                    rewrite = bool(verdict.get("rewrite"))
                 else:
                     if applied is not None:
                         expected, source = applied["state_hash"], "applied"
@@ -2863,7 +2909,7 @@ class Database:
                         conflicts.append({"segment_id": segment_id, "scene_key": key, "reason": "timeline_changed",
                                           "expected_from": source})
                         continue
-                if applied is not None and applied["layer_hash"] == row["layer_hash"]:
+                if applied is not None and applied["layer_hash"] == row["layer_hash"] and not rewrite:
                     unchanged.append({"segment_id": segment_id, "scene_key": key, "layer_hash": row["layer_hash"],
                                       "state_hash": current, "visual_owned": bool(applied.get("visual_owned")),
                                       "columns_written": list(applied.get("columns_written") or []),
@@ -3291,6 +3337,12 @@ class Database:
                     shot_id,
                 ),
             )
+            if visual_prompt is not None:
+                # Bước 05 · T8 · F8: the timeline row is where a scene's description is read (its picture is made
+                # from it); the shot keeps a copy. Written together, so the two never say different things.
+                connection.execute(
+                    "UPDATE project_timeline_segments SET visual_prompt = ?, updated_at = ? WHERE shot_id = ? AND script_id = ?",
+                    (values["visual_prompt"], utc_now(), shot_id, int(existing["script_id"])))
         return self.get_project_shot(shot_id)
 
     def create_project_shot(
@@ -3630,6 +3682,10 @@ class Database:
                 f"UPDATE project_timeline_segments SET {assignments}, updated_at = ? WHERE id = ?",
                 [*(value for _, value in updates), utc_now(), segment_id],
             )
+            if visual_prompt is not None and existing.get("shot_id"):
+                # Bước 05 · T8 · F8: the row is where a scene's description is read; its shot keeps the same copy.
+                connection.execute("UPDATE project_shots SET visual_prompt = ?, updated_at = ? WHERE id = ?",
+                                   (visual_prompt.strip(), utc_now(), int(existing["shot_id"])))
             self._reflow_project_timeline(
                 connection,
                 int(existing["project_id"]),
@@ -4668,12 +4724,38 @@ class Database:
             attached.append(item)
         return attached
 
-    def replace_timeline_edit_beats(self, segment_id: int, beats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def replace_timeline_edit_beats(
+        self,
+        segment_id: int,
+        beats: list[dict[str, Any]],
+        *,
+        refuse_if_held: bool = False,
+        segment_updates: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Replace a scene's edit beats (kept by beat_index, the rest deleted) - in one transaction.
+
+        Bước 05 · T7: the write lock is taken before the first read (BEGIN
+        IMMEDIATE), as create_scene_generation_job takes it, so a replace and
+        a new job of the scene never interleave: whichever takes the lock
+        second waits for the first to commit, then reads what it wrote. With
+        `refuse_if_held` a scene with a job not finished, or with a job
+        pointing at one of its beats, is refused (SceneJobConflict) and
+        nothing is written - read inside this transaction. `segment_updates`
+        (segment_plan_updates) are written to the row in the same transaction.
+        """
         segment = self.get_project_timeline_segment(segment_id)
         if not segment:
             return []
+        bad = set(segment_updates or {}) - _SEGMENT_PLAN_COLUMNS
+        if bad:
+            raise ValueError(f"Cột không thuộc kế hoạch cảnh: {sorted(bad)}")
         now = utc_now()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if refuse_if_held:
+                reason = _scene_jobs_holding(connection, segment_id, beats=True, running=True)
+                if reason:
+                    raise SceneJobConflict(reason)
             existing = {
                 int(row["beat_index"]): int(row["id"])
                 for row in connection.execute(
@@ -4733,10 +4815,63 @@ class Database:
                 )
             else:
                 connection.execute("DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (segment_id,))
+            updates = dict(segment_updates or {})
             connection.execute(
-                "UPDATE project_timeline_segments SET updated_at = ? WHERE id = ?", (now, segment_id)
+                f"UPDATE project_timeline_segments SET {''.join(f'{column} = ?, ' for column in updates)}updated_at = ? "
+                "WHERE id = ?", (*updates.values(), now, segment_id),
             )
         return self.list_timeline_edit_beats(segment_id)
+
+    def scene_beats_held(self, segment_id: int, *, beats: bool = True, running: bool = True) -> str:
+        """_scene_jobs_holding on a connection of its own: an early answer, before any work is done for a write.
+
+        Only the check made inside the writing transaction decides (replace_timeline_edit_beats).
+        """
+        with self._connect() as connection:
+            return _scene_jobs_holding(connection, segment_id, beats=beats, running=running)
+
+    @staticmethod
+    def segment_plan_updates(
+        *,
+        visual: tuple[str, int, str] | None = None,
+        edit: tuple[str, str, str] | None = None,
+        overlays: list[dict[str, Any]] | None = None,
+        sound_cues: list[dict[str, Any]] | None = None,
+        direction: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The columns of a scene's plan as set_segment_visual_kind, save_segment_edit and save_segment_edit_layers
+        store them: `visual` (kind, fps, reason), `edit` (transition, effect, note) and the layers given.
+
+        Never the trims or the cleanups: a change of the plan that does not name them leaves them as they are.
+        """
+        updates: dict[str, Any] = {}
+        if visual is not None:
+            kind, fps, reason = visual
+            updates.update(visual_kind=kind.strip()[:20], visual_fps=max(0, min(int(fps), 60)),
+                           visual_kind_reason=reason.strip()[:500])
+        if edit is not None:
+            transition, effect, note = edit
+            updates.update(edit_transition=transition.strip()[:20], edit_effect=effect.strip()[:20],
+                           edit_note=note.strip()[:400])
+        if overlays is not None:
+            updates["overlays"] = json.dumps([item for item in overlays if isinstance(item, dict)], ensure_ascii=False)
+        if sound_cues is not None:
+            updates["sound_cues"] = json.dumps([item for item in sound_cues if isinstance(item, dict)], ensure_ascii=False)
+        if direction is not None:
+            updates["edit_direction"] = json.dumps(direction or {}, ensure_ascii=False)
+        return updates
+
+    def save_segment_plan(self, segment_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Write a scene's plan (segment_plan_updates) in one statement: all of it, or on any error none of it."""
+        bad = set(updates) - _SEGMENT_PLAN_COLUMNS
+        if bad:
+            raise ValueError(f"Cột không thuộc kế hoạch cảnh: {sorted(bad)}")
+        if updates:
+            with self._connect() as connection:
+                connection.execute(
+                    f"UPDATE project_timeline_segments SET {''.join(f'{column} = ?, ' for column in updates)}updated_at = ? "
+                    "WHERE id = ?", (*updates.values(), utc_now(), segment_id))
+        return self.get_project_timeline_segment(segment_id)
 
     def save_transcript(
         self,
@@ -5166,9 +5301,20 @@ class Database:
         max_attempts: int = 2,
         prompt_pending: bool = False,
         edit_beat_id: int | None = None,
+        edit_beat_seen: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        """Queue one scene job - checked and inserted in one write transaction.
+
+        Bước 05 · T7: the write lock is taken before the first read (BEGIN
+        IMMEDIATE), as replace_timeline_edit_beats takes it: a job and a
+        change of the scene's beats never interleave. `edit_beat_seen` is the
+        beat as the caller read it: deleted or rewritten since
+        (_JOB_BEAT_COLUMNS), SceneJobConflict - no job is made for a beat
+        that no longer holds what its prompt was made from.
+        """
         now = utc_now()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             segment = connection.execute(
                 "SELECT id FROM project_timeline_segments WHERE id = ? AND project_id = ?",
                 (timeline_segment_id, project_id),
@@ -5178,13 +5324,18 @@ class Database:
             if edit_beat_id is not None:
                 beat = connection.execute(
                     """
-                    SELECT id FROM project_timeline_edit_beats
+                    SELECT * FROM project_timeline_edit_beats
                     WHERE id = ? AND timeline_segment_id = ?
                     """,
                     (edit_beat_id, timeline_segment_id),
                 ).fetchone()
                 if not beat:
+                    if edit_beat_seen is not None:
+                        raise SceneJobConflict("beat_gone")
                     return None
+                if edit_beat_seen is not None and any(
+                        beat[column] != edit_beat_seen.get(column) for column in _JOB_BEAT_COLUMNS):
+                    raise SceneJobConflict("beat_changed")
             if reference_asset_id is not None:
                 asset = connection.execute(
                     "SELECT id FROM project_assets WHERE id = ? AND project_id = ?",
@@ -5676,6 +5827,9 @@ class Database:
         now = utc_now()
         applied = 0
         with self._connect() as connection:
+            # Bước 05 · T7: as replace_timeline_edit_beats - the lock before the first read; beats a scene job points
+            # at are never deleted (SceneJobConflict: the whole apply is rolled back).
+            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
                 SELECT id, shot_id FROM project_timeline_segments
@@ -5743,6 +5897,9 @@ class Database:
                     ),
                 )
                 if "compiled_beats" in entry:
+                    reason = _scene_jobs_holding(connection, segment_id, beats=True, running=False)
+                    if reason:
+                        raise SceneJobConflict(reason)
                     connection.execute("DELETE FROM project_timeline_edit_beats WHERE timeline_segment_id = ?", (segment_id,))
                     for beat_index, beat in enumerate(entry["compiled_beats"], 1):
                         connection.execute(
@@ -5764,6 +5921,12 @@ class Database:
                             connection.execute(
                                 "UPDATE project_shots SET visual_prompt = ?, status = 'needs_visual', updated_at = ? WHERE id = ?",
                                 (extra_note, now, shot_id),
+                            )
+                            # Bước 05 · T8 · F8: written to the shot only, it never reached the scene's picture (the
+                            # jobs read the row): the row takes it in the same transaction.
+                            connection.execute(
+                                "UPDATE project_timeline_segments SET visual_prompt = ?, updated_at = ? WHERE id = ?",
+                                (extra_note, now, segment_id),
                             )
                         else:
                             connection.execute(

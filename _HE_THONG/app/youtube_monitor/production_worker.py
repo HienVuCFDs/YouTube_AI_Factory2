@@ -831,6 +831,28 @@ def run_source_visuals_job(
     return str(layout["assets"] / "source_clips")
 
 
+# Bước 05 · T7: whether a script's timeline rows are an EditDocument's to write - main sets it to the Storyboard
+# Gate's plan mode (set_edit_document_owner). None, the default, asks nothing: the rows are written as before.
+_edit_document_owns: Callable[[int, int], bool] | None = None
+
+
+def set_edit_document_owner(callback: Callable[[int, int], bool] | None) -> None:
+    """Ask `callback(project_id, script_id)` before a render writes a column an EditDocument writes."""
+    global _edit_document_owns
+    _edit_document_owns = callback
+
+
+# Bước 05 · T7: the render gate, asked on the very rows a render is about to read - main sets it. A non-empty
+# answer refuses the render before anything is measured, drawn or written. None, the default, asks nothing.
+_render_gate: Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]]], str] | None = None
+
+
+def set_render_gate(callback: Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]]], str] | None) -> None:
+    """Ask `callback(project, script, timeline)` with the rows a render reads; a non-empty answer refuses it."""
+    global _render_gate
+    _render_gate = callback
+
+
 def _autocover_source_marks(
     database: Database,
     project: dict[str, Any],
@@ -873,6 +895,11 @@ def _autocover_source_marks(
         return timeline
     if not marks:
         return timeline
+    if script and _edit_document_owns is not None and _edit_document_owns(int(project["id"]), int(script["id"])):
+        # The cleanups of a planned project are its EditDocument's (the plan writes them): this render covers what
+        # it measured, and the rows are left as they are - measured again at the next render, as cheap as here.
+        covered = json.dumps(marks, ensure_ascii=False)
+        return [{**item, "edit_cleanups": covered} for item in timeline]
     database.set_timeline_cleanups(
         int(project["id"]), marks, script_id=int(script["id"]) if script else None
     )
@@ -890,6 +917,10 @@ def run_render_job(
     openmontage_adapter: OpenMontageAdapter | None = None,
 ) -> str:
     project, script, timeline = _context(database, job)
+    # What the gate checks is what is rendered: the rows read just above, before any of them is touched.
+    refusal = _render_gate(project, script, timeline) if _render_gate is not None else ""
+    if refusal:
+        raise ProductionJobError(refusal)
     provider = str(job["provider"]).strip().lower()
     if provider not in {"dry_run", "preview", "mock"}:
         timeline = _autocover_source_marks(
